@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { useWorkspace } from '@/providers/workspace-provider';
 import { Icon } from '@/components/ui/icon';
@@ -54,11 +54,27 @@ const EMPTY_DASHBOARD_STATS: DashboardStats = {
   lastSyncAt: null,
 };
 
+const STATS_REFRESH_TASK_IDS = new Set([
+  'sync-stars',
+  'fetch-readmes',
+  'fetch-repository-readme',
+  'generate-ai-document',
+  'batch-generate-ai-documents',
+  'generate-ai-tag-network',
+]);
+
 export function DashboardPage(props: DashboardPageProps) {
   const workspace = useWorkspace();
   const [stats, setStats] = useState<DashboardStats | null>(null);
   const [isLoadingStats, setIsLoadingStats] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const statsProgressRefreshKey = useMemo(() => {
+    const progress = workspace.taskProgress;
+    if (!progress || !STATS_REFRESH_TASK_IDS.has(progress.taskId)) {
+      return null;
+    }
+    return `${progress.taskId}:${progress.status}:${progress.current}:${progress.total}`;
+  }, [workspace.taskProgress]);
 
   // 从后端拉取聚合统计
   useEffect(() => {
@@ -88,7 +104,15 @@ export function DashboardPage(props: DashboardPageProps) {
     return () => {
       cancelled = true;
     };
-  }, [workspace.authState.user?.id, workspace.repositoryPage, workspace.tags, workspace.syncSummary]);
+  }, [
+    workspace.authState.user?.id,
+    workspace.repositoryPage,
+    workspace.tags,
+    workspace.syncSummary,
+    workspace.readmeSummary,
+    workspace.batchAiSummary,
+    statsProgressRefreshKey,
+  ]);
 
   const displayStats = stats;
 
