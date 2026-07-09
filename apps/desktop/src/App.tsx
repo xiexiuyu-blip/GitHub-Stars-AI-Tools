@@ -34,6 +34,7 @@ function AppContent() {
   const [showWelcome, setShowWelcome] = useState(false);
   const [hasDismissedWelcome, setHasDismissedWelcome] = useState(false);
   const [hasDismissedUpdateNotice, setHasDismissedUpdateNotice] = useState(false);
+  const [notificationOpenSignal, setNotificationOpenSignal] = useState(0);
   const [repositoryNavigation, setRepositoryNavigation] = useState<RepositoryNavigationState>({
     query: '',
     language: '',
@@ -284,6 +285,8 @@ function AppContent() {
             onOpenRepository={(query) => handleGlobalSearch(query)}
             onSelectLanguage={handleRepositoryLanguageSelect}
             onOpenSettings={() => setCurrentPage('settings')}
+            onOpenProfile={() => setCurrentPage('profile')}
+            onOpenNotifications={() => setNotificationOpenSignal((current) => current + 1)}
           />
         );
       case 'repositories':
@@ -310,6 +313,8 @@ function AppContent() {
             onOpenRepository={handleGlobalSearch}
             onSelectLanguage={handleRepositoryLanguageSelect}
             onOpenSettings={() => setCurrentPage('settings')}
+            onOpenProfile={() => setCurrentPage('profile')}
+            onOpenNotifications={() => setNotificationOpenSignal((current) => current + 1)}
           />
         );
     }
@@ -339,6 +344,7 @@ function AppContent() {
         isRetryingTask={failedTaskRetry?.isRetrying ?? false}
         statusMessage={workspace.authMessage}
         errorMessage={workspace.error ?? settingsHook.settingsError}
+        notificationOpenSignal={notificationOpenSignal}
       >
         <Suspense fallback={<PageLoadingFallback />}>
           {renderPage()}
@@ -587,6 +593,18 @@ function getFailedTaskRetry(options: {
         label: '重试导入 Gist',
         isRetrying: options.workspace.isImportingAnnotations,
         onRetry: () => void options.workspace.runImportAnnotations(),
+      };
+    case 'export-repository-library-gist':
+      return {
+        label: '重试导出仓库清单',
+        isRetrying: options.workspace.isExportingRepositoryLibrary,
+        onRetry: () => void options.workspace.handleExportRepositoryLibrary(),
+      };
+    case 'import-repository-library-gist':
+      return {
+        label: '重试导入仓库清单',
+        isRetrying: options.workspace.isImportingRepositoryLibrary,
+        onRetry: () => void options.workspace.handleImportRepositoryLibrary(),
       };
     default:
       return null;

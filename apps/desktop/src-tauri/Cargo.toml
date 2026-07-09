@@ -1,6 +1,6 @@
 [package]
 name = "gsat-desktop"
-version = "1.0.1"
+version = "1.1.2"
 description = "本地优先的 Fox Stars Lab 桌面应用"
 authors = ["xingranya"]
 edition = "2021"
