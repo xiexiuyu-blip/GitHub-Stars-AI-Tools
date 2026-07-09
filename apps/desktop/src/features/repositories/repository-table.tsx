@@ -5,6 +5,7 @@ import { ScrollArea } from '@/components/ui/scroll-area';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { buildRepositoryPanelSubtitle, buildRepositorySearchExplanation } from '@/lib/repository';
 import { compactNumber, formatDate } from '@/lib/format';
+import { getReadingStatusShortLabel, getReadingStatusToneClass } from '@/lib/reading-status';
 import type { RepositoryFilters, RepositoryListItem, RepositoryListPage, TagItem } from '@/types';
 
 type RepositoryTableProps = {
@@ -18,7 +19,7 @@ type RepositoryTableProps = {
 };
 
 export function RepositoryTable(props: RepositoryTableProps) {
-  const hasActiveFilters = Boolean(props.filters.keyword || props.filters.language || props.filters.tagId);
+  const hasActiveFilters = Boolean(props.filters.keyword || props.filters.language || props.filters.tagId || props.filters.readingStatus);
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -38,7 +39,7 @@ export function RepositoryTable(props: RepositoryTableProps) {
       {props.page?.items.length === 0 ? (
         <EmptyState
           title={hasActiveFilters ? '没有匹配结果' : '还没有同步仓库'}
-          body={hasActiveFilters ? '调整关键词、语言或标签后重新搜索。' : '先在左侧连接 GitHub，然后执行同步。'}
+          body={hasActiveFilters ? '调整关键词、语言、标签或选型状态后重新搜索。' : '先在左侧连接 GitHub，然后执行同步。'}
         />
       ) : null}
       {props.page && props.page.items.length > 0 ? (
@@ -52,6 +53,7 @@ export function RepositoryTable(props: RepositoryTableProps) {
                 <TableHead className="font-semibold">Stars</TableHead>
                 <TableHead className="font-semibold">更新</TableHead>
                 <TableHead className="font-semibold">Topics</TableHead>
+                <TableHead className="font-semibold">选型</TableHead>
                 <TableHead className="pr-6 font-semibold">README</TableHead>
               </TableRow>
             </TableHeader>
@@ -123,6 +125,11 @@ function RepositoryRow(props: {
           {shownTopics.length > 0 ? shownTopics.map((topic) => <Badge key={topic} variant="secondary" className="rounded-lg font-normal shadow-sm">{topic}</Badge>) : <span className="text-sm text-muted-foreground">—</span>}
           {hiddenTopicCount > 0 ? <Badge variant="outline" className="rounded-lg font-normal shadow-sm">+{hiddenTopicCount}</Badge> : null}
         </div>
+      </TableCell>
+      <TableCell>
+        <span className={`inline-flex rounded-lg border px-2 py-1 text-xs font-medium ${getReadingStatusToneClass(props.repository.readingStatus)}`}>
+          {getReadingStatusShortLabel(props.repository.readingStatus)}
+        </span>
       </TableCell>
       <TableCell className="pr-6">
         <Badge variant={props.repository.hasReadme ? 'default' : 'outline'} className="rounded-lg font-medium shadow-sm">

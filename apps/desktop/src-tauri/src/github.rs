@@ -10,7 +10,7 @@ const STARRED_ACCEPT: &str = "application/vnd.github.star+json";
 const README_ACCEPT: &str = "application/vnd.github+json";
 const GIST_API: &str = "https://api.github.com/gists";
 const SEARCH_REPOSITORIES_API: &str = "https://api.github.com/search/repositories";
-const ANNOTATION_GIST_FILE: &str = "github-stars-ai-tools-annotations.json";
+pub(crate) const ANNOTATION_GIST_FILE: &str = "fox-stars-lab-annotations.json";
 const PAGE_SIZE: u16 = 100;
 
 pub fn starred_page_size() -> usize {
@@ -174,7 +174,7 @@ pub fn create_annotation_gist(
         serde_json::json!({ "content": snapshot_json }),
     );
     let body = serde_json::json!({
-        "description": "GitHub-Stars-AI-Tools annotation snapshot",
+        "description": "Fox Stars Lab annotation snapshot",
         "public": false,
         "files": files,
     })
@@ -197,7 +197,7 @@ pub fn fetch_annotation_gist(token: &str, gist_id: &str) -> Result<String, Strin
     let file = response
         .files
         .get(ANNOTATION_GIST_FILE)
-        .ok_or_else(|| "Gist 中没有 GitHub-Stars-AI-Tools 注解快照文件".to_owned())?;
+        .ok_or_else(|| "Gist 中没有 Fox Stars Lab 注解快照文件".to_owned())?;
 
     if let Some(content) = file.content.clone() {
         return Ok(content);

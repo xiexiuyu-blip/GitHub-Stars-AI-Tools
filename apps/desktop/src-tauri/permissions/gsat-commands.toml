@@ -3,6 +3,7 @@ identifier = "allow-gsat-commands"
 description = "允许主窗口调用 GSAT 本地业务命令。"
 commands.allow = [
   "get_backend_status",
+  "get_app_identity",
   "get_github_auth_state",
   "save_github_token",
   "clear_github_token",
@@ -15,6 +16,7 @@ commands.allow = [
   "clear_local_database",
   "open_external_url",
   "test_ai_connection",
+  "diagnose_ai_request",
   "list_ai_models",
   "check_runtime_readiness",
   "sync_github_stars",

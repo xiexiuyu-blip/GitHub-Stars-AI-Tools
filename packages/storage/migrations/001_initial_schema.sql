@@ -119,7 +119,7 @@ CREATE TABLE IF NOT EXISTS annotations (
   account_id TEXT NOT NULL,
   note_md TEXT NOT NULL DEFAULT '',
   rating INTEGER,
-  read_status TEXT NOT NULL DEFAULT 'unread' CHECK (read_status IN ('unread', 'read', 'later')),
+  read_status TEXT NOT NULL DEFAULT 'unread' CHECK (read_status IN ('unread', 'read', 'later', 'want_to_try', 'tried', 'in_use', 'watching', 'deprecated')),
   updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
   FOREIGN KEY (repo_id) REFERENCES repositories(id) ON DELETE CASCADE,
   FOREIGN KEY (account_id) REFERENCES github_accounts(id) ON DELETE CASCADE

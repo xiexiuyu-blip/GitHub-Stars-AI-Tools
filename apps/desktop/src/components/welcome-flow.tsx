@@ -158,10 +158,10 @@ export function WelcomeFlow(props: WelcomeFlowProps) {
       <main className="mx-auto flex min-h-full w-full max-w-5xl flex-col">
         <header className="flex flex-col gap-4 border-b border-card-border pb-4 sm:flex-row sm:items-center sm:justify-between">
           <div className="flex min-w-0 items-center gap-3">
-            <BrandIcon title="GitHub-Stars-AI-Tools 应用图标" className="size-12 rounded-xl shadow-sm" />
+            <BrandIcon title="Fox Stars Lab 应用图标" className="size-12 rounded-xl shadow-sm" />
             <div className="min-w-0">
-              <p className="truncate font-headline-md text-lg font-bold text-on-surface">GitHub-Stars-AI-Tools</p>
-              <p className="text-sm text-on-surface-variant">GSAT 本地 Stars 知识库</p>
+              <p className="truncate font-headline-md text-lg font-bold text-on-surface">Fox Stars Lab</p>
+              <p className="text-sm text-on-surface-variant">FSL 本地 Stars 知识库</p>
             </div>
           </div>
           <Button
@@ -198,9 +198,9 @@ export function WelcomeFlow(props: WelcomeFlowProps) {
               <div className="welcome-icon-tile mb-6 grid size-12 place-items-center border border-primary/25 bg-primary/10 text-primary">
                 <BookMarked className="size-6" />
               </div>
-              <h1 className="text-balance font-headline-lg text-2xl font-bold tracking-normal text-on-surface sm:text-3xl">欢迎使用 GitHub-Stars-AI-Tools</h1>
+              <h1 className="text-balance font-headline-lg text-2xl font-bold tracking-normal text-on-surface sm:text-3xl">欢迎使用 Fox Stars Lab</h1>
               <p className="mt-4 max-w-2xl text-base leading-7 text-muted-foreground sm:text-lg">
-                GSAT 将你的 GitHub Stars 转化为可搜索、可管理的个人知识库
+                FSL 将你的 GitHub Stars 转化为可搜索、可管理的个人知识库
               </p>
               <div className="mt-8 grid gap-3 md:grid-cols-3">
                 <FeatureItem icon={<Database className="size-5" />} title="本地优先" description="所有数据存储在本地数据库，完全掌控" />

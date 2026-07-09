@@ -4,6 +4,7 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { emptyRepositoryFilters } from '@/lib/repository';
+import { readingStatusOptions } from '@/lib/reading-status';
 import type { RepositoryFilters, TagItem } from '@/types';
 
 type RepositoryFilterBarProps = {
@@ -17,7 +18,7 @@ type RepositoryFilterBarProps = {
 
 export function RepositoryFilterBar(props: RepositoryFilterBarProps) {
   const [draftFilters, setDraftFilters] = useState<RepositoryFilters>(props.filters);
-  const hasActiveFilters = Boolean(props.filters.keyword || props.filters.language || props.filters.tagId);
+  const hasActiveFilters = Boolean(props.filters.keyword || props.filters.language || props.filters.tagId || props.filters.readingStatus);
 
   useEffect(() => {
     setDraftFilters(props.filters);
@@ -68,6 +69,18 @@ export function RepositoryFilterBar(props: RepositoryFilterBarProps) {
           <SelectItem value="all">全部标签</SelectItem>
           {props.tags.map((tag) => (
             <SelectItem key={tag.id} value={tag.id}>{tag.name}</SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+
+      <Select value={draftFilters.readingStatus || 'all'} onValueChange={(value) => setDraftFilters((current) => ({ ...current, readingStatus: value === 'all' ? '' : value as RepositoryFilters['readingStatus'] }))}>
+        <SelectTrigger className="h-10 w-full min-w-[140px] sm:w-40 rounded-lg shadow-sm">
+          <SelectValue placeholder="全部状态" />
+        </SelectTrigger>
+        <SelectContent>
+          <SelectItem value="all">全部状态</SelectItem>
+          {readingStatusOptions.map((option) => (
+            <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>
           ))}
         </SelectContent>
       </Select>

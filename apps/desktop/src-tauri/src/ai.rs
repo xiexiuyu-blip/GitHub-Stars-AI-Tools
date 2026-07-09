@@ -9,10 +9,10 @@ const PROMPT_VERSION: &str = "readme-summary-v1";
 const TAG_NETWORK_PROMPT_VERSION: &str = "tag-network-v1";
 const MAX_README_CHARS: usize = 18_000;
 pub(crate) const MAX_TAG_NETWORK_REPOSITORIES: usize = 80;
-const AI_CONNECT_TIMEOUT_SECONDS: u16 = 15;
-const AI_REQUEST_TIMEOUT_SECONDS: u16 = 120;
-const AI_API_MAX_ATTEMPTS: usize = 3;
-const AI_API_RETRY_BASE_DELAY_MS: u64 = 350;
+pub(crate) const AI_CONNECT_TIMEOUT_SECONDS: u16 = 15;
+pub(crate) const AI_REQUEST_TIMEOUT_SECONDS: u16 = 120;
+pub(crate) const AI_API_MAX_ATTEMPTS: usize = 3;
+pub(crate) const AI_API_RETRY_BASE_DELAY_MS: u64 = 350;
 const ANTHROPIC_SUMMARY_MAX_TOKENS: u16 = 1600;
 const ANTHROPIC_TAG_NETWORK_MAX_TOKENS: u16 = 2400;
 const ANTHROPIC_RECOMMENDATION_MAX_TOKENS: u16 = 1000;
@@ -28,6 +28,28 @@ pub struct AiRequestConfig {
     pub api_key: String,
     pub base_url: Option<String>,
     pub model: String,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiRequestDiagnostics {
+    pub provider: String,
+    pub wire_protocol: String,
+    pub base_url: Option<String>,
+    pub endpoint: Option<String>,
+    pub model: String,
+    pub api_key_state: String,
+    pub connect_timeout_seconds: u16,
+    pub request_timeout_seconds: u16,
+    pub model_list_timeout_seconds: u16,
+    pub retry_attempts: usize,
+    pub retry_base_delay_ms: u64,
+    pub readme_prompt_char_limit: usize,
+    pub tag_network_batch_size: usize,
+    pub summary_prompt_version: String,
+    pub tag_network_prompt_version: String,
+    pub status: String,
+    pub failure_reason: Option<String>,
 }
 
 #[derive(Clone, Serialize)]
@@ -381,6 +403,85 @@ pub fn list_models(config: &AiRequestConfig) -> Result<Vec<AiModelOption>, Strin
         "anthropic" => list_anthropic_models(config),
         _ => Err("当前仅支持 OpenAI、OpenAI 兼容接口或 Anthropic AI 服务".to_owned()),
     }
+}
+
+pub fn diagnose_request_config(config: &AiRequestConfig) -> AiRequestDiagnostics {
+    let provider = config.provider.trim().to_ascii_lowercase();
+    let model = config.model.trim().to_owned();
+    let base_url = config
+        .base_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
+    let validation = validate_request_config(config);
+    let wire_protocol = match validation.as_deref() {
+        Ok(protocol) => protocol.to_owned(),
+        Err(_) if provider == "anthropic" => "anthropic".to_owned(),
+        Err(_) if provider == "openai" || provider == "openai-compatible" => "openai".to_owned(),
+        Err(_) => "unknown".to_owned(),
+    };
+    let endpoint = build_diagnostic_endpoint(&provider, base_url.as_deref());
+    let api_key_state = build_api_key_state(&provider, base_url.as_deref(), config.api_key.trim());
+    let (status, failure_reason) = match validation {
+        Ok(_) => ("ready".to_owned(), None),
+        Err(error) => ("invalid".to_owned(), Some(error)),
+    };
+
+    AiRequestDiagnostics {
+        provider: if provider.is_empty() {
+            "none".to_owned()
+        } else {
+            provider
+        },
+        wire_protocol,
+        base_url,
+        endpoint,
+        model,
+        api_key_state,
+        connect_timeout_seconds: AI_CONNECT_TIMEOUT_SECONDS,
+        request_timeout_seconds: AI_REQUEST_TIMEOUT_SECONDS,
+        model_list_timeout_seconds: AI_CONNECT_TIMEOUT_SECONDS,
+        retry_attempts: AI_API_MAX_ATTEMPTS,
+        retry_base_delay_ms: AI_API_RETRY_BASE_DELAY_MS,
+        readme_prompt_char_limit: MAX_README_CHARS,
+        tag_network_batch_size: MAX_TAG_NETWORK_REPOSITORIES,
+        summary_prompt_version: PROMPT_VERSION.to_owned(),
+        tag_network_prompt_version: TAG_NETWORK_PROMPT_VERSION.to_owned(),
+        status,
+        failure_reason,
+    }
+}
+
+fn build_diagnostic_endpoint(provider: &str, base_url: Option<&str>) -> Option<String> {
+    match provider {
+        "openai" => Some(build_endpoint(
+            base_url,
+            DEFAULT_OPENAI_BASE_URL,
+            "chat/completions",
+        )),
+        "openai-compatible" => base_url.map(|url| build_endpoint(Some(url), url, "chat/completions")),
+        "anthropic" => Some(build_endpoint(
+            base_url,
+            DEFAULT_ANTHROPIC_BASE_URL,
+            "messages",
+        )),
+        _ => None,
+    }
+}
+
+fn build_api_key_state(provider: &str, base_url: Option<&str>, api_key: &str) -> String {
+    if provider == "none" || provider.is_empty() {
+        return "not_required".to_owned();
+    }
+    if !api_key.is_empty() {
+        return "present".to_owned();
+    }
+    if provider == "openai-compatible" && base_url.is_some_and(is_local_ai_base_url) {
+        return "optional_for_local".to_owned();
+    }
+
+    "missing".to_owned()
 }
 
 fn validate_request_config(config: &AiRequestConfig) -> Result<String, String> {
@@ -1137,7 +1238,7 @@ fn normalize_repository_full_name_lookup_key(value: &str) -> String {
 
 fn build_search_explanation_prompt(topic: &str) -> String {
     format!(
-        r#"你是 GitHub Stars AI Tools 的产品向导，请用简体中文直接回答用户点击的帮助问题。
+        r#"你是 Fox Stars Lab 的产品向导，请用简体中文直接回答用户点击的帮助问题。
 
 用户问题：{topic}
 

@@ -1,4 +1,4 @@
-# 架构规格：GitHub-Stars-AI-Tools
+# 架构规格：Fox Stars Lab
 
 ## 架构原则
 
@@ -118,7 +118,7 @@ flowchart TD
 | `account_id` | 账号 ID |
 | `note_md` | 用户笔记 |
 | `rating` | 用户评分 |
-| `read_status` | unread/read/later |
+| `read_status` | 兼容旧值 unread/read/later，并扩展 Fox 选型状态 want_to_try/tried/in_use/watching/deprecated |
 | `updated_at` | 更新时间 |
 
 ### `tags` 与 `repo_tags`
@@ -188,7 +188,7 @@ export type RepoQuery = {
   languages?: string[];
   tags?: string[];
   topics?: string[];
-  readStatus?: 'unread' | 'read' | 'later';
+  readStatus?: 'unread' | 'read' | 'later' | 'want_to_try' | 'tried' | 'in_use' | 'watching' | 'deprecated';
   sort?: 'relevance' | 'starred_at' | 'updated_at' | 'name';
   limit: number;
   offset: number;

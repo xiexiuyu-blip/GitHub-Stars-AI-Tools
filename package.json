@@ -1,13 +1,13 @@
 {
-  "name": "github-stars-ai-tools",
+  "name": "fox-stars-lab",
   "version": "1.0.1",
   "license": "SEE LICENSE IN LICENSE",
   "private": true,
   "type": "module",
-  "homepage": "https://github.com/xingranya/GitHub-Stars-AI-Tools",
+  "homepage": "https://github.com/xiexiuyu-blip/GitHub-Stars-AI-Tools/tree/fox-product-lab",
   "repository": {
     "type": "git",
-    "url": "https://github.com/xingranya/GitHub-Stars-AI-Tools.git"
+    "url": "https://github.com/xiexiuyu-blip/GitHub-Stars-AI-Tools.git"
   },
   "packageManager": "pnpm@11.8.0",
   "scripts": {

@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
     fs,
+    path::Path,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc, Condvar, Mutex, OnceLock,
@@ -19,15 +20,23 @@ use tauri::{Emitter, Manager};
 
 const TASK_PROGRESS_EVENT: &str = "task-progress";
 const AI_STREAM_EVENT: &str = "ai-stream";
+const APP_DISPLAY_NAME: &str = "Fox Stars Lab";
+const APP_BUNDLE_IDENTIFIER: &str = "com.foxwork.fox-stars-lab";
+const APP_BUNDLE_NAME: &str = "Fox Stars Lab.app";
+const APP_DMG_FILE_PATTERN: &str = "Fox-Stars-Lab_<version>.dmg";
+const APP_REPOSITORY_URL: &str =
+    "https://github.com/xiexiuyu-blip/GitHub-Stars-AI-Tools/tree/fox-product-lab";
+const APP_UPDATE_ENDPOINT: &str =
+    "https://github.com/xiexiuyu-blip/GitHub-Stars-AI-Tools/releases/latest/download/latest.json";
 const README_FETCH_CONCURRENCY: usize = 6;
 const GITHUB_RECOMMENDATION_REFERENCE_LIMIT: usize = 8;
-const AI_API_KEY_SERVICE: &str = "github-stars-ai-tools";
+const AI_API_KEY_SERVICE: &str = "fox-stars-lab";
 const AI_API_KEY_PROVIDER_ACCOUNTS: &[&str] = &[
     "ai-api-key:openai",
     "ai-api-key:openai-compatible",
     "ai-api-key:anthropic",
 ];
-const APP_SETTINGS_FILE: &str = "settings.json";
+const APP_SETTINGS_FILE: &str = "fox-stars-lab.settings.json";
 const GITHUB_AUTH_STATE_TOTAL_TIMEOUT_SECONDS: u64 = 25;
 const GITHUB_CONNECT_TOTAL_TIMEOUT_SECONDS: u64 = 25;
 static BACKGROUND_TASK_QUEUE: OnceLock<(Mutex<BackgroundTaskQueueState>, Condvar)> =
@@ -40,6 +49,25 @@ struct BackendStatus {
     storage: &'static str,
     worker: &'static str,
     provider: &'static str,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AppIdentity {
+    display_name: &'static str,
+    bundle_identifier: &'static str,
+    app_bundle_name: &'static str,
+    dmg_file_pattern: &'static str,
+    data_dir: String,
+    config_dir: String,
+    database_file: &'static str,
+    database_path: String,
+    settings_file: &'static str,
+    settings_path: String,
+    credential_service: &'static str,
+    annotation_gist_file: &'static str,
+    update_endpoint: &'static str,
+    repository_url: &'static str,
 }
 
 #[derive(Serialize)]
@@ -410,6 +438,7 @@ struct RepositoryListRequest {
     keyword: Option<String>,
     language: Option<String>,
     tag_id: Option<String>,
+    reading_status: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -502,6 +531,12 @@ struct GenerateAiTagNetworkRequest {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct TestAiConnectionRequest {
+    ai_config: Option<ai::AiRequestConfig>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DiagnoseAiRequest {
     ai_config: Option<ai::AiRequestConfig>,
 }
 
@@ -641,6 +676,37 @@ fn get_backend_status() -> BackendStatus {
         worker: "后台任务队列已就绪",
         provider: "AI 接口已支持 OpenAI 与 Anthropic 协议",
     }
+}
+
+#[tauri::command]
+fn get_app_identity(app_handle: tauri::AppHandle) -> Result<AppIdentity, String> {
+    let data_dir = app_handle
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("应用数据目录解析失败：{error}"))?;
+    let config_dir = app_handle
+        .path()
+        .app_config_dir()
+        .map_err(|error| format!("应用配置目录解析失败：{error}"))?;
+    let database_path = data_dir.join(storage::SQLITE_DATABASE_FILE_NAME);
+    let settings_path = app_settings_path(&app_handle)?;
+
+    Ok(AppIdentity {
+        display_name: APP_DISPLAY_NAME,
+        bundle_identifier: APP_BUNDLE_IDENTIFIER,
+        app_bundle_name: APP_BUNDLE_NAME,
+        dmg_file_pattern: APP_DMG_FILE_PATTERN,
+        data_dir: display_path(&data_dir),
+        config_dir: display_path(&config_dir),
+        database_file: storage::SQLITE_DATABASE_FILE_NAME,
+        database_path: display_path(&database_path),
+        settings_file: APP_SETTINGS_FILE,
+        settings_path: display_path(&settings_path),
+        credential_service: AI_API_KEY_SERVICE,
+        annotation_gist_file: github::ANNOTATION_GIST_FILE,
+        update_endpoint: APP_UPDATE_ENDPOINT,
+        repository_url: APP_REPOSITORY_URL,
+    })
 }
 
 #[tauri::command]
@@ -1071,6 +1137,10 @@ fn app_settings_path(app_handle: &tauri::AppHandle) -> Result<std::path::PathBuf
     Ok(config_dir.join(APP_SETTINGS_FILE))
 }
 
+fn display_path(path: &Path) -> String {
+    path.to_string_lossy().into_owned()
+}
+
 fn sanitize_app_settings_value(mut settings: serde_json::Value) -> serde_json::Value {
     if let Some(ai_settings) = settings
         .get_mut("ai")
@@ -1159,13 +1229,22 @@ fn run_ai_connection_probe(
 ) -> Result<ai::AiSummaryDocument, String> {
     ai::summarize_readme(
         ai_config,
-        "xingranya/GitHub-Stars-AI-Tools",
+        "xiexiuyu-blip/GitHub-Stars-AI-Tools",
         Some("用于验证 AI 服务配置是否可以正常请求的测试仓库。"),
-        r#"# GitHub-Stars-AI-Tools
+        r#"# Fox Stars Lab
 
-GitHub-Stars-AI-Tools 是一个本地优先的桌面客户端，用于同步 GitHub Stars、缓存 README、生成中文摘要、维护标签网络，并通过自然语言检索个人开源知识库。
+Fox Stars Lab 是一个本地优先的桌面客户端，用于同步 GitHub Stars、缓存 README、生成中文摘要、维护标签网络，并通过自然语言检索个人开源知识库。
 "#,
     )
+}
+
+#[tauri::command]
+fn diagnose_ai_request(
+    app_handle: tauri::AppHandle,
+    request: DiagnoseAiRequest,
+) -> Result<ai::AiRequestDiagnostics, String> {
+    let ai_config = hydrate_ai_request_config(&app_handle, request.ai_config)?;
+    Ok(ai::diagnose_request_config(&ai_config))
 }
 
 #[tauri::command]
@@ -1392,6 +1471,7 @@ fn check_runtime_storage(storage: &AppStorage) -> RuntimeReadinessCheckItem {
             keyword: None,
             language: None,
             tag_id: None,
+            reading_status: None,
         },
     ) {
         Ok(page) => runtime_check_passed(
@@ -1435,7 +1515,7 @@ fn check_runtime_settings_storage(app_handle: &tauri::AppHandle) -> RuntimeReadi
         );
     }
 
-    let probe_path = settings_dir.join(".gsat-settings-write-check.tmp");
+    let probe_path = settings_dir.join(".fox-stars-lab-settings-write-check.tmp");
     if let Err(error) = fs::write(&probe_path, b"ok") {
         return runtime_check_failed_with_action(
             "应用设置写入失败".to_owned(),
@@ -1473,6 +1553,7 @@ fn check_runtime_readme(
             keyword: None,
             language: None,
             tag_id: None,
+            reading_status: None,
         },
     ) {
         Ok(page) => page,
@@ -2263,6 +2344,7 @@ fn list_repositories(
             keyword: request.keyword.as_deref(),
             language: request.language.as_deref(),
             tag_id: request.tag_id.as_deref(),
+            reading_status: request.reading_status.as_deref(),
         },
     )
 }
@@ -3933,6 +4015,7 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         .invoke_handler(tauri::generate_handler![
             get_backend_status,
+            get_app_identity,
             get_github_auth_state,
             save_github_token,
             clear_github_token,
@@ -3945,6 +4028,7 @@ pub fn run() {
             clear_local_database,
             open_external_url,
             test_ai_connection,
+            diagnose_ai_request,
             list_ai_models,
             check_runtime_readiness,
             sync_github_stars,
@@ -4059,9 +4143,9 @@ mod tests {
     #[test]
     fn external_url_validation_allows_only_http_and_https() {
         assert_eq!(
-            normalize_external_url(" https://github.com/xingranya/GitHub-Stars-AI-Tools ")
+            normalize_external_url(" https://github.com/xiexiuyu-blip/GitHub-Stars-AI-Tools ")
                 .expect("https 链接应允许"),
-            "https://github.com/xingranya/GitHub-Stars-AI-Tools"
+            "https://github.com/xiexiuyu-blip/GitHub-Stars-AI-Tools"
         );
         assert_eq!(
             normalize_external_url("http://example.com/readme").expect("http 链接应允许"),

@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
-const GITHUB_TOKEN_SERVICE: &str = "github-stars-ai-tools";
+const GITHUB_TOKEN_SERVICE: &str = "fox-stars-lab";
 const GITHUB_TOKEN_ACCOUNT: &str = "github-pat";
 const GITHUB_USER_API: &str = "https://api.github.com/user";
 const GITHUB_API_VERSION: &str = "2022-11-28";
@@ -273,7 +273,7 @@ fn github_api_request_with_optional_body_options(
     let client = reqwest::blocking::Client::builder()
         .connect_timeout(Duration::from_secs(GITHUB_CONNECT_TIMEOUT_SECONDS.into()))
         .timeout(Duration::from_secs(options.request_timeout_seconds))
-        .user_agent("GitHub-Stars-AI-Tools")
+        .user_agent("Fox-Stars-Lab")
         .build()
         .map_err(|error| format!("GitHub API 请求初始化失败：{error}"))?;
     let method = method
@@ -528,7 +528,7 @@ mod tests {
         assert!(lower_request.contains("authorization: bearer test-token"));
         assert!(lower_request.contains("accept: application/test+json"));
         assert!(lower_request.contains("x-github-api-version: 2022-11-28"));
-        assert!(lower_request.contains("user-agent: github-stars-ai-tools"));
+        assert!(lower_request.contains("user-agent: fox-stars-lab"));
     }
 
     #[test]
@@ -538,7 +538,7 @@ mod tests {
             "test-token",
             &url,
             "application/vnd.github+json",
-            r#"{"description":"GSAT"}"#,
+            r#"{"description":"FSL"}"#,
         )
         .expect("GitHub POST 请求应读取成功响应体");
         let request = request_handle.join().expect("本地 HTTP 服务应返回请求内容");
@@ -547,7 +547,7 @@ mod tests {
         assert_eq!(body, r#"{"id":"gist-1"}"#);
         assert!(request.starts_with("POST /test HTTP/1.1"));
         assert!(lower_request.contains("content-type: application/json"));
-        assert!(request.contains(r#"{"description":"GSAT"}"#));
+        assert!(request.contains(r#"{"description":"FSL"}"#));
     }
 
     #[test]
@@ -702,7 +702,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn macos_secure_store_initializes_keychain_before_entry_creation() {
-        let service = "github-stars-ai-tools-test";
+        let service = "fox-stars-lab-test";
         let account = format!("default-store-check-{}", std::process::id());
 
         initialize_native_secure_store().expect("macOS 必须能注册系统 Keychain 凭据后端");

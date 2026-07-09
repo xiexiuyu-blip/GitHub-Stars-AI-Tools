@@ -1,6 +1,6 @@
 use crate::auth::GitHubUser;
 use crate::github::{GitHubRepositoryRecommendation, ReadmeDocument, StarredRepository};
-use rusqlite::{types::ValueRef, Connection};
+use rusqlite::{types::ValueRef, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -10,6 +10,7 @@ use tauri::Manager;
 
 const INITIAL_SCHEMA_SQL: &str =
     include_str!("../../../../packages/storage/migrations/001_initial_schema.sql");
+pub(crate) const SQLITE_DATABASE_FILE_NAME: &str = "fox-stars-lab.sqlite3";
 const LEGACY_SQLITE_DATABASE_FILE_NAMES: &[&str] = &["stars-ai-tools.sqlite3"];
 const REQUIRED_SCHEMA_COLUMNS: &[(&str, &[&str])] = &[
     ("schema_migrations", &["version", "name", "applied_at"]),
@@ -285,6 +286,7 @@ pub struct RepositoryListFilters<'a> {
     pub keyword: Option<&'a str>,
     pub language: Option<&'a str>,
     pub tag_id: Option<&'a str>,
+    pub reading_status: Option<&'a str>,
 }
 
 #[derive(Serialize)]
@@ -303,6 +305,7 @@ pub struct RepositoryListItem {
     pub forks_count: u64,
     pub starred_at: String,
     pub pushed_at: Option<String>,
+    pub reading_status: String,
     pub has_readme: bool,
     pub ai_summary: Option<String>,
     pub ai_keywords: Vec<String>,
@@ -389,6 +392,7 @@ struct RepositoryListRow {
     forks_count: u64,
     starred_at: String,
     pushed_at: Option<String>,
+    reading_status: String,
     has_readme: u8,
     ai_summary: Option<String>,
     ai_keywords_json: Option<String>,
@@ -479,6 +483,7 @@ struct SearchRepositoryRow {
     pushed_at: Option<String>,
     has_readme: u8,
     note_markdown: Option<String>,
+    reading_status: String,
     summary_zh: Option<String>,
     keywords_json: Option<String>,
     suggested_tags_json: Option<String>,
@@ -510,7 +515,7 @@ impl AppStorage {
             .map_err(|error| format!("本地数据目录创建失败：{error}"))?;
         remove_legacy_sqlite_database_files(&data_dir)?;
 
-        Ok(data_dir.join("gsat.sqlite3"))
+        Ok(data_dir.join(SQLITE_DATABASE_FILE_NAME))
     }
 
     pub fn upsert_github_account(&self, user: &GitHubUser) -> Result<(), String> {
@@ -745,6 +750,7 @@ SELECT
 	  r.forks_count,
 	  r.starred_at,
 	  r.pushed_at,
+	  COALESCE(a.read_status, 'unread') AS reading_status,
 	  CASE WHEN rr.repo_id IS NULL THEN 0 ELSE 1 END AS has_readme,
 	  ai.summary_zh AS ai_summary,
 	  ai.keywords_json AS ai_keywords_json,
@@ -2125,6 +2131,7 @@ LIMIT 10;
                 keyword: None,
                 language: None,
                 tag_id: None,
+                reading_status: None,
             },
         )?;
         let recent_repos = recent.items;
@@ -2332,6 +2339,7 @@ ORDER BY month;
                 keyword: None,
                 language: None,
                 tag_id: None,
+                reading_status: None,
             },
         )?;
 
@@ -2481,6 +2489,7 @@ SELECT
   r.pushed_at,
   CASE WHEN rr.repo_id IS NULL THEN 0 ELSE 1 END AS has_readme,
   a.note_md AS note_markdown,
+  COALESCE(a.read_status, 'unread') AS reading_status,
   ai.summary_zh,
   ai.keywords_json,
   ai.suggested_tags_json,
@@ -2576,12 +2585,80 @@ ORDER BY r.starred_at DESC;
     fn migrate(&self) -> Result<(), String> {
         self.reset_incompatible_database()?;
         self.execute_sql(INITIAL_SCHEMA_SQL)?;
+        self.migrate_annotation_read_status_constraint()?;
 
         if !self.database_uses_current_schema()? {
             return Err("本地数据库初始化后仍缺少当前版本所需表结构".to_owned());
         }
 
         Ok(())
+    }
+
+    fn migrate_annotation_read_status_constraint(&self) -> Result<(), String> {
+        let connection = Connection::open(&self.database_path)
+            .map_err(|error| format!("SQLite 选型状态约束检查失败：{error}"))?;
+        let create_sql = connection
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'annotations';",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|error| format!("SQLite annotations 表结构读取失败：{error}"))?;
+        let Some(create_sql) = create_sql else {
+            return Ok(());
+        };
+
+        if create_sql.contains("want_to_try")
+            && create_sql.contains("deprecated")
+            && create_sql.contains("watching")
+        {
+            return Ok(());
+        }
+
+        self.execute_sql(
+            r#"
+PRAGMA foreign_keys = OFF;
+BEGIN;
+DROP TABLE IF EXISTS annotations_migrated;
+CREATE TABLE annotations_migrated (
+  repo_id TEXT PRIMARY KEY,
+  account_id TEXT NOT NULL,
+  note_md TEXT NOT NULL DEFAULT '',
+  rating INTEGER,
+  read_status TEXT NOT NULL DEFAULT 'unread' CHECK (read_status IN ('unread', 'read', 'later', 'want_to_try', 'tried', 'in_use', 'watching', 'deprecated')),
+  updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  FOREIGN KEY (repo_id) REFERENCES repositories(id) ON DELETE CASCADE,
+  FOREIGN KEY (account_id) REFERENCES github_accounts(id) ON DELETE CASCADE
+);
+INSERT INTO annotations_migrated (repo_id, account_id, note_md, rating, read_status, updated_at)
+SELECT
+  repo_id,
+  account_id,
+  note_md,
+  rating,
+  CASE read_status
+    WHEN 'unread' THEN 'unread'
+    WHEN 'read' THEN 'read'
+    WHEN 'later' THEN 'later'
+    WHEN 'want_to_try' THEN 'want_to_try'
+    WHEN 'tried' THEN 'tried'
+    WHEN 'in_use' THEN 'in_use'
+    WHEN 'watching' THEN 'watching'
+    WHEN 'deprecated' THEN 'deprecated'
+    ELSE 'unread'
+  END,
+  updated_at
+FROM annotations;
+DROP TABLE annotations;
+ALTER TABLE annotations_migrated RENAME TO annotations;
+CREATE INDEX IF NOT EXISTS idx_annotations_account ON annotations(account_id);
+CREATE INDEX IF NOT EXISTS idx_annotations_account_repo ON annotations(account_id, repo_id);
+CREATE INDEX IF NOT EXISTS idx_annotations_read_status ON annotations(read_status);
+COMMIT;
+PRAGMA foreign_keys = ON;
+"#,
+        )
     }
 
     fn execute_sql(&self, sql: &str) -> Result<(), String> {
@@ -2916,6 +2993,7 @@ impl TryFrom<RepositoryListRow> for RepositoryListItem {
             forks_count: row.forks_count,
             starred_at: row.starred_at,
             pushed_at: row.pushed_at,
+            reading_status: row.reading_status,
             has_readme: row.has_readme == 1,
             ai_summary: row.ai_summary,
             ai_keywords,
@@ -2950,6 +3028,15 @@ fn build_repository_filter_clause(filters: &RepositoryListFilters<'_>) -> String
             "EXISTS (SELECT 1 FROM repo_tags rt JOIN tags t ON t.id = rt.tag_id WHERE rt.repo_id = r.id AND t.account_id = r.account_id AND rt.tag_id = {})",
             sql_text(tag_id),
         ));
+    }
+
+    if let Some(reading_status) = normalize_optional_text(filters.reading_status) {
+        if let Ok(normalized_status) = normalize_reading_status(reading_status) {
+            clauses.push(format!(
+                "COALESCE(a.read_status, 'unread') = {}",
+                sql_text(normalized_status),
+            ));
+        }
     }
 
     clauses.join(" AND ")
@@ -3105,6 +3192,7 @@ fn score_search_row(
         forks_count: row.forks_count,
         starred_at: row.starred_at,
         pushed_at: row.pushed_at,
+        reading_status: row.reading_status,
         has_readme: row.has_readme == 1,
         ai_summary: row.summary_zh.clone(),
         ai_keywords: ai_keywords.clone(),
@@ -3460,7 +3548,12 @@ fn normalize_reading_status(value: &str) -> Result<&'static str, String> {
         "unread" => Ok("unread"),
         "read" => Ok("read"),
         "later" => Ok("later"),
-        _ => Err("阅读状态只能是 unread、read 或 later".to_owned()),
+        "want_to_try" => Ok("want_to_try"),
+        "tried" => Ok("tried"),
+        "in_use" => Ok("in_use"),
+        "watching" => Ok("watching"),
+        "deprecated" => Ok("deprecated"),
+        _ => Err("选型状态只能是 unread、read、later、want_to_try、tried、in_use、watching 或 deprecated".to_owned()),
     }
 }
 
@@ -3700,8 +3793,8 @@ INSERT INTO legacy_items (name) VALUES ('old-local-data');
             );
         }
         assert!(
-            !data_dir.join("gsat.sqlite3").exists(),
-            "旧测试库清理不应生成新的 GSAT 数据库"
+            !data_dir.join(SQLITE_DATABASE_FILE_NAME).exists(),
+            "旧测试库清理不应生成新的 Fox Stars Lab 数据库"
         );
 
         let _ = std::fs::remove_dir_all(data_dir);
@@ -3785,6 +3878,7 @@ INSERT INTO github_accounts (id, login, token_ref) VALUES ('1001', 'alice', 'tes
             keyword: Some("react"),
             language: Some("TypeScript"),
             tag_id: Some("tag_1"),
+            reading_status: Some("in_use"),
         });
 
         assert!(clause.contains("r.sync_status = 'active'"));
@@ -3792,6 +3886,7 @@ INSERT INTO github_accounts (id, login, token_ref) VALUES ('1001', 'alice', 'tes
         assert!(clause.contains("LIKE '%react%' ESCAPE '\\'"));
         assert!(clause.contains("r.language = 'TypeScript'"));
         assert!(clause.contains("rt.tag_id = 'tag_1'"));
+        assert!(clause.contains("COALESCE(a.read_status, 'unread') = 'in_use'"));
         assert!(clause.matches(" AND ").count() >= 2);
     }
 
@@ -4455,6 +4550,10 @@ VALUES
 INSERT INTO tags (id, account_id, name) VALUES ('tag-ui', '1001', 'UI');
 INSERT INTO repo_tags (repo_id, tag_id) VALUES ('1001:1', 'tag-ui');
 INSERT INTO repo_tags (repo_id, tag_id) VALUES ('1001:2', 'tag-ui');
+INSERT INTO annotations (repo_id, account_id, note_md, read_status)
+VALUES
+  ('1001:1', '1001', '已纳入 Fox 日常工具链', 'in_use'),
+  ('1001:2', '1001', '待评估 Python 辅助能力', 'want_to_try');
 "#,
             )
             .expect("写入筛选测试数据");
@@ -4468,6 +4567,7 @@ INSERT INTO repo_tags (repo_id, tag_id) VALUES ('1001:2', 'tag-ui');
                     keyword: Some("react"),
                     language: Some("TypeScript"),
                     tag_id: Some("tag-ui"),
+                    reading_status: None,
                 },
             )
             .expect("组合筛选应可执行");
@@ -4476,8 +4576,26 @@ INSERT INTO repo_tags (repo_id, tag_id) VALUES ('1001:2', 'tag-ui');
         assert_eq!(page.items.len(), 1);
         assert_eq!(page.items[0].id, "1001:1");
         assert_eq!(page.items[0].full_name, "owner/react-ui");
+        assert_eq!(page.items[0].reading_status, "in_use");
         assert_eq!(page.items[0].tag_ids, vec!["tag-ui".to_owned()]);
         assert_eq!(page.items[0].tag_names, vec!["UI".to_owned()]);
+
+        let status_page = storage
+            .list_repository_page(
+                20,
+                0,
+                RepositoryListFilters {
+                    account_id: Some("1001"),
+                    keyword: None,
+                    language: None,
+                    tag_id: None,
+                    reading_status: Some("want_to_try"),
+                },
+            )
+            .expect("选型状态筛选应可执行");
+        assert_eq!(status_page.total_count, 1);
+        assert_eq!(status_page.items[0].id, "1001:2");
+        assert_eq!(status_page.items[0].reading_status, "want_to_try");
 
         let _ = std::fs::remove_file(database_path);
     }
@@ -4524,6 +4642,7 @@ INSERT INTO repo_tags (repo_id, tag_id) VALUES ('1001:1', 'tag-knowledge');
                     keyword: Some("vector-search"),
                     language: None,
                     tag_id: None,
+                    reading_status: None,
                 },
             )
             .expect("README 关键词筛选应可执行");
@@ -4536,6 +4655,7 @@ INSERT INTO repo_tags (repo_id, tag_id) VALUES ('1001:1', 'tag-knowledge');
                     keyword: Some("向量检索"),
                     language: None,
                     tag_id: None,
+                    reading_status: None,
                 },
             )
             .expect("AI 关键词筛选应可执行");
@@ -4548,6 +4668,7 @@ INSERT INTO repo_tags (repo_id, tag_id) VALUES ('1001:1', 'tag-knowledge');
                     keyword: Some("知识库"),
                     language: None,
                     tag_id: None,
+                    reading_status: None,
                 },
             )
             .expect("标签关键词筛选应可执行");
@@ -4621,6 +4742,7 @@ INSERT INTO repo_tags (repo_id, tag_id) VALUES ('1001:1', 'tag-knowledge');
             pushed_at: Some("2026-01-02T00:00:00Z".to_owned()),
             has_readme: 1,
             note_markdown: Some("重点关注组件化和状态管理".to_owned()),
+            reading_status: "unread".to_owned(),
             summary_zh: Some("React 适合构建组件化 UI，支持 Hooks 和声明式视图。".to_owned()),
             keywords_json: Some(r#"["组件化","Hooks","UI"]"#.to_owned()),
             suggested_tags_json: Some(r#"["前端框架","UI"]"#.to_owned()),
@@ -4677,6 +4799,7 @@ INSERT INTO repo_tags (repo_id, tag_id) VALUES ('1001:1', 'tag-knowledge');
             pushed_at: Some("2026-01-02T00:00:00Z".to_owned()),
             has_readme: 1,
             note_markdown: Some("适合离线缓存场景的组件知识库".to_owned()),
+            reading_status: "unread".to_owned(),
             summary_zh: Some("React UI 组件库，支持 Hooks 和前端工程化。".to_owned()),
             keywords_json: Some(r#"["React","UI","Hooks"]"#.to_owned()),
             suggested_tags_json: Some(r#"["前端","组件库"]"#.to_owned()),
@@ -4725,6 +4848,7 @@ INSERT INTO repo_tags (repo_id, tag_id) VALUES ('1001:1', 'tag-knowledge');
             pushed_at: Some("2026-01-02T00:00:00Z".to_owned()),
             has_readme: 1,
             note_markdown: None,
+            reading_status: "unread".to_owned(),
             summary_zh: None,
             keywords_json: None,
             suggested_tags_json: None,

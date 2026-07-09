@@ -8,11 +8,13 @@ import type {
   SearchMatchReasonView,
   TagItem,
 } from '@/types';
+import { getReadingStatusLabel } from '@/lib/reading-status';
 
 export const emptyRepositoryFilters: RepositoryFilters = {
   keyword: '',
   language: '',
   tagId: '',
+  readingStatus: '',
 };
 
 export function getRepositoryStats(page: RepositoryListPage | null): RepositoryStats {
@@ -80,6 +82,13 @@ export function buildRepositorySearchExplanation(
     reasons.push({
       label: '标签命中',
       detail: `项目已归入"${tagName}"。`,
+    });
+  }
+
+  if (filters.readingStatus && repository.readingStatus === filters.readingStatus) {
+    reasons.push({
+      label: '选型状态命中',
+      detail: `项目当前是"${getReadingStatusLabel(filters.readingStatus)}"。`,
     });
   }
 

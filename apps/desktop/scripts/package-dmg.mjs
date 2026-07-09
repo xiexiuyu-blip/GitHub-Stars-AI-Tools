@@ -13,6 +13,7 @@ const targetDir = process.env.CARGO_TARGET_DIR
 const config = JSON.parse(readFileSync(path.join(tauriDir, 'tauri.conf.json'), 'utf8'));
 const targetArg = readArgValue('--target') ?? process.env.TAURI_TARGET ?? '';
 const productName = config.productName;
+const packageName = productName.replace(/\s+/g, '-');
 const version = config.version;
 
 if (process.platform !== 'darwin') {
@@ -30,7 +31,7 @@ const appName = path.basename(appDir);
 const archSuffix = getArchSuffix(targetArg);
 const outputDmg = path.join(
   outputDir,
-  `${productName}_${version}${archSuffix}.dmg`,
+  `${packageName}_${version}${archSuffix}.dmg`,
 );
 
 rmSync(stageDir, { recursive: true, force: true });

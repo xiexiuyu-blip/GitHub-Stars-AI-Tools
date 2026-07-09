@@ -9,13 +9,8 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Separator } from '@/components/ui/separator';
 import { Textarea } from '@/components/ui/textarea';
 import { compactNumber, formatDate } from '@/lib/format';
+import { readingStatusOptions } from '@/lib/reading-status';
 import type { ReadingStatus, RepositoryAnnotationView, RepositoryDetailView, RepositoryListItem, TagItem } from '@/types';
-
-const readingStatusLabels: Record<ReadingStatus, string> = {
-  unread: '未读',
-  later: '稍后阅读',
-  read: '已读',
-};
 
 type KnowledgePanelProps = {
   annotation: RepositoryAnnotationView | null;
@@ -84,14 +79,14 @@ export function KnowledgePanel(props: KnowledgePanelProps) {
           <RepositoryKnowledgeSummary detail={props.repositoryDetail} repositoryFullName={props.repository.fullName} />
 
           <div className="grid gap-2.5">
-            <label className="text-xs font-semibold text-foreground">阅读状态</label>
+            <label className="text-xs font-semibold text-foreground">选型状态</label>
             <Select value={props.readingStatusDraft} onValueChange={(value) => props.onSetReadingStatusDraft(value as ReadingStatus)}>
               <SelectTrigger className="h-10 w-full rounded-lg shadow-sm">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                {Object.entries(readingStatusLabels).map(([value, label]) => (
-                  <SelectItem key={value} value={value}>{label}</SelectItem>
+                {readingStatusOptions.map((option) => (
+                  <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>
                 ))}
               </SelectContent>
             </Select>

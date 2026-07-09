@@ -1,6 +1,6 @@
 import type { AISettings } from '@/types-settings';
 
-export const SAVED_AI_API_KEY_PLACEHOLDER = '__GSAT_SAVED_AI_API_KEY__';
+export const SAVED_AI_API_KEY_PLACEHOLDER = '__FSL_SAVED_AI_API_KEY__';
 
 export type BackendAiRequestConfig = Pick<AISettings, 'provider' | 'baseUrl' | 'model'> & {
   apiKey: '';

@@ -4,7 +4,7 @@ import { isSavedAiApiKeyPlaceholder, SAVED_AI_API_KEY_PLACEHOLDER, shouldFlushAi
 import type { AppSettings } from '@/types-settings';
 import { DEFAULT_SETTINGS } from '@/types-settings';
 
-const STALE_SETTINGS_CACHE_KEY = 'gsat-settings';
+const STALE_SETTINGS_CACHE_KEY = 'fox-stars-lab-settings';
 type AiKeySaveStatus = 'idle' | 'saving' | 'saved' | 'error';
 type AppSettingsPatch = {
   theme?: Partial<AppSettings['theme']>;

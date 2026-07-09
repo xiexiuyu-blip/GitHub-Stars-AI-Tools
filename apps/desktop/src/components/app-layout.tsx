@@ -99,16 +99,16 @@ export function AppLayout(props: AppLayoutProps) {
         {/* 标题区 */}
         <div className={`mb-2 flex items-center gap-3 py-4 ${isSidebarCollapsed ? 'justify-center px-0' : 'px-2'}`}>
           <BrandIcon
-            title="GitHub-Stars-AI-Tools"
+            title="Fox Stars Lab"
             className={isSidebarCollapsed ? 'h-10 w-10' : 'h-11 w-11'}
           />
           {!isSidebarCollapsed && (
           <div className="min-w-0 leading-tight">
-            <h1 className="truncate text-[17px] font-semibold leading-5 text-on-surface" title="GitHub-Stars-AI-Tools">
-              GitHub Stars AI
+            <h1 className="truncate text-[17px] font-semibold leading-5 text-on-surface" title="Fox Stars Lab">
+              Fox Stars Lab
             </h1>
             <p className="truncate font-label-sm text-[11px] text-on-surface-variant opacity-85">
-              GSAT 本地知识库
+              FSL 本地知识库
             </p>
           </div>
           )}
@@ -215,10 +215,10 @@ export function AppLayout(props: AppLayoutProps) {
         {/* 顶部导航栏 */}
         <header className="glass-topbar sticky top-0 z-30 flex min-h-16 w-full flex-wrap items-center justify-between gap-3 px-3 py-2 sm:px-4 lg:flex-nowrap lg:px-gutter">
           <div className="flex min-w-0 items-center gap-2 lg:hidden">
-            <BrandIcon title="GitHub-Stars-AI-Tools" className="h-9 w-9" />
+            <BrandIcon title="Fox Stars Lab" className="h-9 w-9" />
             <div className="min-w-0">
-              <h1 className="truncate text-[16px] font-semibold leading-5 text-on-surface" title="GitHub-Stars-AI-Tools">
-                GitHub Stars AI
+              <h1 className="truncate text-[16px] font-semibold leading-5 text-on-surface" title="Fox Stars Lab">
+                Fox Stars Lab
               </h1>
               <p className="truncate font-label-sm text-[11px] text-on-surface-variant">
                 Stars 知识库

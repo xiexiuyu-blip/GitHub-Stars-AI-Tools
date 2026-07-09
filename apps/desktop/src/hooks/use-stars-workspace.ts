@@ -271,6 +271,7 @@ export function useStarsWorkspace() {
         keyword: optionalRequestText(filters.keyword),
         language: optionalRequestText(filters.language),
         tagId: optionalRequestText(filters.tagId),
+        readingStatus: optionalRequestText(filters.readingStatus),
       },
     });
   }
@@ -1027,7 +1028,7 @@ export function useStarsWorkspace() {
       setNoteDraft(nextAnnotation.noteMarkdown);
       setReadingStatusDraft(nextAnnotation.readingStatus);
       await loadRepositories(repositoryFilters);
-      setAnnotationMessage('笔记和阅读状态已保存。');
+      setAnnotationMessage('笔记和选型状态已保存。');
     } catch (reason) {
       setError(toErrorMessage(reason));
     } finally {

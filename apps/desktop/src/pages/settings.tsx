@@ -12,7 +12,7 @@ import {
 } from '@/lib/ai-config';
 import { compactNumber } from '@/lib/format';
 import { COLOR_PRESETS } from '@/types-settings';
-import type { DashboardStats, RuntimeReadinessCheckItem, RuntimeReadinessCheckResult } from '@/types';
+import type { AppIdentity, DashboardStats, RuntimeReadinessCheckItem, RuntimeReadinessCheckResult } from '@/types';
 import type { AISettings as AISettingsValue, RuntimeSelfCheckRecord, ThemeSettings as ThemeSettingsValue } from '@/types-settings';
 
 type SettingsTab = 'github' | 'ai' | 'general' | 'backup';
@@ -151,10 +151,10 @@ const AI_PROVIDER_PRESETS: AIProviderPresetOption[] = [
     modelSuggestions: [],
   },
 ];
-const PROJECT_REPOSITORY_URL = 'https://github.com/xingranya/GitHub-Stars-AI-Tools';
-const PROJECT_ISSUES_URL = 'https://github.com/xingranya/GitHub-Stars-AI-Tools/issues';
-const PROJECT_LICENSE_URL = 'https://github.com/xingranya/GitHub-Stars-AI-Tools/blob/main/LICENSE';
-const PROJECT_ACKNOWLEDGEMENTS_URL = 'https://github.com/xingranya/GitHub-Stars-AI-Tools#%E8%87%B4%E8%B0%A2';
+const PROJECT_REPOSITORY_URL = 'https://github.com/xiexiuyu-blip/GitHub-Stars-AI-Tools/tree/fox-product-lab';
+const PROJECT_ISSUES_URL = 'https://github.com/xiexiuyu-blip/GitHub-Stars-AI-Tools/issues';
+const PROJECT_LICENSE_URL = 'https://github.com/xiexiuyu-blip/GitHub-Stars-AI-Tools/blob/fox-product-lab/LICENSE';
+const PROJECT_ACKNOWLEDGEMENTS_URL = 'https://github.com/xiexiuyu-blip/GitHub-Stars-AI-Tools/tree/fox-product-lab#%E8%87%B4%E8%B0%A2';
 
 type AiConnectionTestResult = {
   summaryZh: string;
@@ -166,6 +166,26 @@ type AiModelOption = {
   id: string;
   displayName?: string | null;
   ownedBy?: string | null;
+};
+
+type AiRequestDiagnostics = {
+  provider: string;
+  wireProtocol: string;
+  baseUrl: string | null;
+  endpoint: string | null;
+  model: string;
+  apiKeyState: string;
+  connectTimeoutSeconds: number;
+  requestTimeoutSeconds: number;
+  modelListTimeoutSeconds: number;
+  retryAttempts: number;
+  retryBaseDelayMs: number;
+  readmePromptCharLimit: number;
+  tagNetworkBatchSize: number;
+  summaryPromptVersion: string;
+  tagNetworkPromptVersion: string;
+  status: 'ready' | 'invalid' | string;
+  failureReason: string | null;
 };
 
 export function SettingsPage() {
@@ -960,7 +980,10 @@ function AISettings({ settingsHook }: { settingsHook: ReturnType<typeof useAppSe
   const [apiKeyDraft, setApiKeyDraft] = useState(hasSavedApiKey ? '' : ai.apiKey);
   const [isTestingAi, setIsTestingAi] = useState(false);
   const [isLoadingModels, setIsLoadingModels] = useState(false);
+  const [isLoadingDiagnostics, setIsLoadingDiagnostics] = useState(false);
   const [availableModels, setAvailableModels] = useState<AiModelOption[]>([]);
+  const [aiDiagnostics, setAiDiagnostics] = useState<AiRequestDiagnostics | null>(null);
+  const [diagnosticsError, setDiagnosticsError] = useState<string | null>(null);
   const [testMessage, setTestMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const [modelListMessage, setModelListMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const currentPreset = getAiProviderPreset(ai.providerPreset);
@@ -981,6 +1004,10 @@ function AISettings({ settingsHook }: { settingsHook: ReturnType<typeof useAppSe
     setAvailableModels([]);
     setModelListMessage(null);
   }, [ai.providerPreset, ai.provider, ai.baseUrl]);
+
+  useEffect(() => {
+    void refreshAiDiagnostics();
+  }, [ai.provider, ai.baseUrl, ai.model, ai.apiKey]);
 
   async function handleProviderPresetChange(providerPreset: AIProviderPreset) {
     const preset = getAiProviderPreset(providerPreset);
@@ -1014,6 +1041,7 @@ function AISettings({ settingsHook }: { settingsHook: ReturnType<typeof useAppSe
       if (shouldFlushAiApiKey(nextAi)) {
         await settingsHook.flushAIKey(nextAi.apiKey);
       }
+      await refreshAiDiagnostics({ skipLoading: true });
       const result = await invoke<AiConnectionTestResult>('test_ai_connection', {
         request: {
           aiConfig: toBackendAiRequestConfig(nextAi),
@@ -1025,8 +1053,35 @@ function AISettings({ settingsHook }: { settingsHook: ReturnType<typeof useAppSe
       });
     } catch (error) {
       setTestMessage({ type: 'error', text: toErrorMessage(error) });
+      await refreshAiDiagnostics({ skipLoading: true });
     } finally {
       setIsTestingAi(false);
+    }
+  }
+
+  async function refreshAiDiagnostics(options?: { flushKey?: boolean; skipLoading?: boolean }) {
+    const nextAi = { ...ai, apiKey: effectiveApiKey };
+    if (!options?.skipLoading) {
+      setIsLoadingDiagnostics(true);
+    }
+    setDiagnosticsError(null);
+    try {
+      if (options?.flushKey && shouldFlushAiApiKey(nextAi)) {
+        await settingsHook.flushAIKey(nextAi.apiKey);
+      }
+      const diagnostics = await invoke<AiRequestDiagnostics>('diagnose_ai_request', {
+        request: {
+          aiConfig: toBackendAiRequestConfig(nextAi),
+        },
+      });
+      setAiDiagnostics(diagnostics);
+    } catch (error) {
+      setAiDiagnostics(null);
+      setDiagnosticsError(toErrorMessage(error));
+    } finally {
+      if (!options?.skipLoading) {
+        setIsLoadingDiagnostics(false);
+      }
     }
   }
 
@@ -1294,6 +1349,13 @@ function AISettings({ settingsHook }: { settingsHook: ReturnType<typeof useAppSe
             )}
           </div>
         </div>
+        <AiRequestDiagnosticsPanel
+          diagnostics={aiDiagnostics}
+          errorMessage={diagnosticsError}
+          isLoading={isLoadingDiagnostics}
+          testMessage={testMessage}
+          onRefresh={() => void refreshAiDiagnostics({ flushKey: true })}
+        />
         <div className="flex flex-col items-stretch justify-between gap-4 border-t border-card-border py-4 sm:flex-row sm:items-start">
           <div className="flex-1">
             <h4 className="font-body-lg font-medium text-on-surface">测试 AI 配置</h4>
@@ -1460,6 +1522,30 @@ function GeneralSettings({
   const [isClearingAllLocalData, setIsClearingAllLocalData] = useState(false);
   const [isClearDataConfirmOpen, setIsClearDataConfirmOpen] = useState(false);
   const [localDataMessage, setLocalDataMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+  const [appIdentity, setAppIdentity] = useState<AppIdentity | null>(null);
+  const [appIdentityError, setAppIdentityError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    invoke<AppIdentity>('get_app_identity')
+      .then((identity) => {
+        if (!cancelled) {
+          setAppIdentity(identity);
+          setAppIdentityError(null);
+        }
+      })
+      .catch((error) => {
+        if (!cancelled) {
+          setAppIdentity(null);
+          setAppIdentityError(toErrorMessage(error));
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   async function handleClearAllLocalData() {
     setIsClearingAllLocalData(true);
@@ -1679,13 +1765,13 @@ function GeneralSettings({
               <div className="min-w-0">
                 <div className="flex items-center gap-2">
                   <Icon name="stars" size={20} className="text-primary" />
-                  <h4 className="font-body-lg font-semibold text-on-surface">GitHub-Stars-AI-Tools</h4>
+                  <h4 className="font-body-lg font-semibold text-on-surface">Fox Stars Lab</h4>
                 </div>
                 <p className="mt-2 max-w-2xl font-body-md text-sm leading-relaxed text-on-surface-variant">
-                  本项目源码公开，采用非商用许可。个人学习、研究和非营利用途可以使用；商业使用、集成或再分发需要另行获得授权。
+                  这是 Fox 长期使用的个人定制版，应用身份、数据目录和凭据服务已与原版隔离；通用修复可后续再拆分回上游。
                 </p>
                 <div className="mt-3 flex flex-wrap gap-2 text-xs text-on-surface-variant">
-                  <span className="rounded-lg border border-outline-variant/30 bg-surface px-2.5 py-1">GSAT</span>
+                  <span className="rounded-lg border border-outline-variant/30 bg-surface px-2.5 py-1">FSL</span>
                   <span className="rounded-lg border border-outline-variant/30 bg-surface px-2.5 py-1">本地优先客户端</span>
                   <span className="rounded-lg border border-outline-variant/30 bg-surface px-2.5 py-1">PolyForm Noncommercial 1.0.0</span>
                 </div>
@@ -1713,6 +1799,7 @@ function GeneralSettings({
                 </a>
               </div>
             </div>
+            <AppIdentityDetails identity={appIdentity} errorMessage={appIdentityError} />
             <div className="mt-4 grid gap-2 border-t border-outline-variant/25 pt-3 md:grid-cols-2">
               <a
                 href={PROJECT_LICENSE_URL}
@@ -1743,6 +1830,60 @@ function GeneralSettings({
         </div>
       </div>
     </section>
+  );
+}
+
+function AppIdentityDetails({ identity, errorMessage }: { identity: AppIdentity | null; errorMessage: string | null }) {
+  const identityRows = identity ? [
+    { label: '显示名称', value: identity.displayName },
+    { label: 'Bundle ID', value: identity.bundleIdentifier },
+    { label: 'App Bundle', value: identity.appBundleName },
+    { label: '安装包命名', value: identity.dmgFilePattern },
+    { label: '数据目录', value: identity.dataDir },
+    { label: '配置目录', value: identity.configDir },
+    { label: '本地数据库', value: identity.databasePath },
+    { label: '设置文件', value: identity.settingsPath },
+    { label: '系统凭据服务', value: identity.credentialService },
+    { label: 'Gist 备份文件', value: identity.annotationGistFile },
+    { label: '更新地址', value: identity.updateEndpoint },
+    { label: '个人版分支', value: identity.repositoryUrl },
+  ] : [];
+
+  return (
+    <div className="mt-4 border-t border-outline-variant/25 pt-4">
+      <div className="mb-3 flex items-center gap-2">
+        <Icon name="fingerprint" size={19} className="text-primary" />
+        <h5 className="font-body-md font-semibold text-on-surface">个人版身份与本机位置</h5>
+      </div>
+      {errorMessage ? (
+        <p className="rounded-lg border border-error/20 bg-error/10 px-3 py-2 text-sm text-error">
+          身份信息读取失败：{errorMessage}
+        </p>
+      ) : null}
+      {!identity && !errorMessage ? (
+        <p className="rounded-lg border border-outline-variant/25 bg-surface px-3 py-2 text-sm text-on-surface-variant">
+          正在读取应用身份和本机数据位置。
+        </p>
+      ) : null}
+      {identity ? (
+        <dl className="grid gap-x-4 gap-y-3 text-sm md:grid-cols-2">
+          {identityRows.map((row) => (
+            <IdentityField key={row.label} label={row.label} value={row.value} />
+          ))}
+        </dl>
+      ) : null}
+    </div>
+  );
+}
+
+function IdentityField({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="min-w-0 border-b border-outline-variant/20 pb-2">
+      <dt className="text-xs font-medium text-on-surface-variant">{label}</dt>
+      <dd className="mt-1 break-words font-mono text-[12px] leading-5 text-on-surface [overflow-wrap:anywhere]" title={value}>
+        {value}
+      </dd>
+    </div>
   );
 }
 
@@ -1923,9 +2064,9 @@ function BackupSettings({ workspace }: { workspace: ReturnType<typeof useWorkspa
   const isConnected = workspace.authState.hasToken && Boolean(workspace.authState.user);
   const importHint = !isConnected
     ? '请先连接 GitHub 账号后再导入 Gist 备份。'
-    : workspace.gistIdDraft.trim()
-      ? '导入会覆盖匹配仓库的本地注解，请确认 Gist ID 来自你的 GSAT 备份。'
-      : '输入 Gist ID 后即可从备份恢复标签、笔记和阅读状态。';
+      : workspace.gistIdDraft.trim()
+        ? '导入会覆盖匹配仓库的本地注解，请确认 Gist ID 来自你的 FSL 备份。'
+      : '输入 Gist ID 后即可从备份恢复标签、笔记和选型状态。';
 
   return (
     <section className="glass-panel rounded-xl p-6">
@@ -1952,12 +2093,12 @@ function BackupSettings({ workspace }: { workspace: ReturnType<typeof useWorkspa
             导出到 GitHub Gist
           </h4>
           <p className="font-body-md text-sm text-on-surface-variant mb-3">
-            将标签、笔记、阅读状态等注解数据导出为私密 Gist，用于跨设备同步。
+            将标签、笔记、选型状态等注解数据导出为私密 Gist，用于跨设备同步。
           </p>
           <button
             onClick={() => void workspace.handleExportAnnotations()}
             disabled={workspace.isExportingAnnotations || !isConnected}
-            title={isConnected ? '导出标签、笔记和阅读状态到私密 Gist' : '请先连接 GitHub 账号'}
+            title={isConnected ? '导出标签、笔记和选型状态到私密 Gist' : '请先连接 GitHub 账号'}
             className="px-4 py-2 bg-primary text-white rounded-lg font-body-md flex items-center gap-2 hover:brightness-110 transition-all shadow-sm disabled:opacity-60"
           >
             <Icon name="upload" size={18} />

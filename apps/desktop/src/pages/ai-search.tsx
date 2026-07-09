@@ -20,9 +20,9 @@ const FALLBACK_SUGGESTIONS = [
 ];
 
 /* 搜索历史 localStorage key */
-const HISTORY_KEY = 'gsat-search-history';
-const CONVERSATION_KEY_PREFIX = 'gsat-ai-search-conversation';
-const SESSIONS_KEY_PREFIX = 'gsat-ai-search-sessions';
+const HISTORY_KEY = 'fox-stars-lab-search-history';
+const CONVERSATION_KEY_PREFIX = 'fox-stars-lab-ai-search-conversation';
+const SESSIONS_KEY_PREFIX = 'fox-stars-lab-ai-search-sessions';
 const MAX_CONTEXT_QUERIES = 4;
 const MAX_CONTEXT_REPOSITORIES = 30;
 const MAX_SEARCH_TURNS = 8;

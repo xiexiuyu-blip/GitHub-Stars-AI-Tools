@@ -5,6 +5,23 @@ export type BackendStatus = {
   provider: string;
 };
 
+export type AppIdentity = {
+  displayName: string;
+  bundleIdentifier: string;
+  appBundleName: string;
+  dmgFilePattern: string;
+  dataDir: string;
+  configDir: string;
+  databaseFile: string;
+  databasePath: string;
+  settingsFile: string;
+  settingsPath: string;
+  credentialService: string;
+  annotationGistFile: string;
+  updateEndpoint: string;
+  repositoryUrl: string;
+};
+
 export type GitHubUser = {
   id: number;
   login: string;
@@ -96,6 +113,7 @@ export type RepositoryListItem = {
   forksCount: number;
   starredAt: string;
   pushedAt: string | null;
+  readingStatus: ReadingStatus;
   hasReadme: boolean;
   aiSummary: string | null;
   aiKeywords: string[];
@@ -116,6 +134,7 @@ export type RepositoryFilters = {
   keyword: string;
   language: string;
   tagId: string;
+  readingStatus: ReadingStatus | '';
 };
 
 export type TagItem = {
@@ -127,7 +146,7 @@ export type TagItem = {
   updatedAt: string;
 };
 
-export type ReadingStatus = 'unread' | 'read' | 'later';
+export type ReadingStatus = 'unread' | 'want_to_try' | 'tried' | 'in_use' | 'watching' | 'deprecated' | 'later' | 'read';
 
 export type RepositoryAnnotationView = {
   repositoryId: string;

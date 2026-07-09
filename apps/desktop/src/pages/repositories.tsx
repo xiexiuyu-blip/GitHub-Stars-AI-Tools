@@ -6,6 +6,7 @@ import { ReadmeRenderer } from '@/components/readme-renderer';
 import { Icon } from '@/components/ui/icon';
 import { getAiConfigMessage, shouldFlushAiApiKey } from '@/lib/ai-config';
 import { compactNumber } from '@/lib/format';
+import { getReadingStatusShortLabel, getReadingStatusToneClass, readingStatusOptions } from '@/lib/reading-status';
 import { computeVirtualWindow } from '@/lib/virtual-list';
 import type {
   GithubRecommendationResponse,
@@ -64,12 +65,16 @@ function getBatchAiLimitValue(limit: BatchAiLimit) {
   return Number(limit);
 }
 
-function repositoryMatchesLocalFilters(repo: RepositoryListItem, filters: { keyword: string; language: string; tagId: string }) {
+function repositoryMatchesLocalFilters(repo: RepositoryListItem, filters: { keyword: string; language: string; tagId: string; readingStatus: ReadingStatus | '' }) {
   if (filters.language && repo.language !== filters.language) {
     return false;
   }
 
   if (filters.tagId && !repo.tagIds.includes(filters.tagId)) {
+    return false;
+  }
+
+  if (filters.readingStatus && repo.readingStatus !== filters.readingStatus) {
     return false;
   }
 
@@ -121,6 +126,7 @@ export function RepositoriesPage(props: RepositoriesPageProps) {
   const [searchKeyword, setSearchKeyword] = useState('');
   const [selectedLanguage, setSelectedLanguage] = useState('');
   const [selectedTagId, setSelectedTagId] = useState('');
+  const [selectedReadingStatus, setSelectedReadingStatus] = useState<ReadingStatus | ''>('');
   const [sortBy, setSortBy] = useState<SortBy>('recent');
   const [viewMode, setViewMode] = useState<ViewMode>('detail');
   const [batchAiLimit, setBatchAiLimit] = useState<BatchAiLimit>('all');
@@ -144,6 +150,7 @@ export function RepositoriesPage(props: RepositoriesPageProps) {
     setSearchKeyword(props.globalSearchQuery?.trim() ?? '');
     setSelectedLanguage(props.globalLanguageFilter?.trim() ?? '');
     setSelectedTagId(props.globalTagFilter?.trim() ?? '');
+    setSelectedReadingStatus('');
     if (props.globalSelectedRepositoryId) {
       workspace.setSelectedRepositoryId(props.globalSelectedRepositoryId);
     }
@@ -177,20 +184,22 @@ export function RepositoriesPage(props: RepositoriesPageProps) {
         keyword: searchKeyword,
         language: selectedLanguage,
         tagId: selectedTagId,
+        readingStatus: selectedReadingStatus,
       });
     }, 220);
 
     return () => window.clearTimeout(timer);
-  }, [searchKeyword, selectedLanguage, selectedTagId]);
+  }, [searchKeyword, selectedLanguage, selectedTagId, selectedReadingStatus]);
 
   useEffect(() => {
     resetListScroll();
-  }, [searchKeyword, selectedLanguage, selectedTagId, sortBy, viewMode, resetListScroll]);
+  }, [searchKeyword, selectedLanguage, selectedTagId, selectedReadingStatus, sortBy, viewMode, resetListScroll]);
 
   const hasPendingRepositoryFilters = workspace.isLoadingRepositories || (
     searchKeyword.trim() !== workspace.repositoryFilters.keyword.trim()
     || selectedLanguage !== workspace.repositoryFilters.language
     || selectedTagId !== workspace.repositoryFilters.tagId
+    || selectedReadingStatus !== workspace.repositoryFilters.readingStatus
   );
 
   // 后端负责完整 SQLite 检索；请求返回前先用本地已加载数据做即时筛选。
@@ -203,6 +212,7 @@ export function RepositoriesPage(props: RepositoriesPageProps) {
         keyword: searchKeyword,
         language: selectedLanguage,
         tagId: selectedTagId,
+        readingStatus: selectedReadingStatus,
       }));
     }
 
@@ -219,7 +229,7 @@ export function RepositoriesPage(props: RepositoriesPageProps) {
     });
 
     return repos;
-  }, [workspace.repositoryPage, hasPendingRepositoryFilters, searchKeyword, selectedLanguage, selectedTagId, sortBy]);
+  }, [workspace.repositoryPage, hasPendingRepositoryFilters, searchKeyword, selectedLanguage, selectedTagId, selectedReadingStatus, sortBy]);
 
   const selectedRepo = workspace.selectedRepository;
   const aiConfigMessage = getAiConfigMessage(settingsHook.settings.ai);
@@ -235,7 +245,7 @@ export function RepositoriesPage(props: RepositoriesPageProps) {
       stickyHeaderHeight: viewMode === 'table' ? REPOSITORY_TABLE_HEADER_HEIGHT : 0,
     });
   }, [filteredRepos, listScrollTop, listViewportHeight, viewMode]);
-  const hasActiveFilters = Boolean(searchKeyword.trim() || selectedLanguage || selectedTagId);
+  const hasActiveFilters = Boolean(searchKeyword.trim() || selectedLanguage || selectedTagId || selectedReadingStatus);
   const batchTargetRepositoryIds = hasActiveFilters ? filteredRepos.map((repository) => repository.id) : undefined;
   const batchTargetCount = batchTargetRepositoryIds?.length ?? workspace.repositoryStats.total;
   const hasBatchTargets = batchTargetCount > 0;
@@ -646,6 +656,18 @@ export function RepositoriesPage(props: RepositoriesPageProps) {
                 ))}
               </select>
             </div>
+            <select
+              value={selectedReadingStatus}
+              onChange={(event) => setSelectedReadingStatus(event.target.value as ReadingStatus | '')}
+              className="w-full cursor-pointer rounded border border-outline-variant/30 bg-surface px-2 py-1 text-xs text-on-surface-variant hover:border-outline-variant"
+            >
+              <option value="">全部选型状态</option>
+              {readingStatusOptions.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
           </div>
 
           {/* 快捷标签 */}
@@ -690,6 +712,7 @@ export function RepositoriesPage(props: RepositoriesPageProps) {
                 setSearchKeyword('');
                 setSelectedLanguage('');
                 setSelectedTagId('');
+                setSelectedReadingStatus('');
                 void workspace.resetRepositoryFilters();
               }}
             />
@@ -1049,6 +1072,9 @@ function RepositoryTableRow(props: {
         {compactNumber(repo.starsCount)}
       </span>
       <span className="hidden flex-wrap gap-1 lg:flex">
+        <span className={`rounded-full border px-2 py-0.5 text-[11px] ${getReadingStatusToneClass(repo.readingStatus)}`}>
+          {getReadingStatusShortLabel(repo.readingStatus)}
+        </span>
         <span className={`rounded-full px-2 py-0.5 text-[11px] ${repo.hasReadme ? 'bg-success/10 text-success' : 'bg-outline-variant/20 text-on-surface-variant'}`}>
           {repo.hasReadme ? 'README' : '待抓取'}
         </span>
@@ -1654,7 +1680,7 @@ function RepoDetailPanel(props: {
                 </p>
               </div>
               <div className="shrink-0 rounded-md bg-primary/10 px-2 py-0.5 text-[10px] font-semibold text-primary">
-                GSAT
+                FSL
               </div>
             </div>
             <div className="mb-2 flex shrink-0 flex-wrap gap-1.5 text-[11px]">
@@ -1880,15 +1906,17 @@ function RepoDetailPanel(props: {
                   </div>
                 )}
                 <label className="mb-3 grid gap-1.5 text-[11px] font-label-sm text-on-surface-variant">
-                  阅读状态
+                  选型状态
                   <select
                     value={readingStatusDraft}
                     onChange={(event) => onReadingStatusChange(event.target.value as ReadingStatus)}
                     className="rounded-md border border-outline-variant/30 bg-surface px-2 py-1.5 text-xs text-on-surface focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary"
                   >
-                    <option value="unread">未读</option>
-                    <option value="later">稍后阅读</option>
-                    <option value="read">已读</option>
+                    {readingStatusOptions.map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {option.label}
+                      </option>
+                    ))}
                   </select>
                 </label>
                 <div className="mb-3">
