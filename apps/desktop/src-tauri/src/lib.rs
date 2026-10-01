@@ -7,8 +7,10 @@ mod embedding;
 mod embedding_state;
 mod github;
 mod library;
+mod local_api;
 mod ranking_query;
 mod storage;
+mod v2_ops;
 mod vector_index;
 
 use serde::{Deserialize, Serialize};
@@ -912,6 +914,187 @@ fn get_library_item(
 #[tauri::command]
 fn extract_links_from_text(text: String) -> Vec<capture::ExtractedLink> {
     capture::extract_links_from_text(&text)
+}
+
+#[tauri::command]
+fn get_today_actions(app_handle: tauri::AppHandle) -> Result<v2_ops::TodayActions, String> {
+    let storage = AppStorage::from_app_handle(&app_handle)?;
+    v2_ops::recover_interrupted_jobs(storage.database_path())?;
+    v2_ops::today_actions(storage.database_path())
+}
+
+#[tauri::command]
+fn list_workspace_cards(
+    app_handle: tauri::AppHandle,
+    keyword: Option<String>,
+    language: Option<String>,
+    reading: Option<String>,
+    limit: Option<i64>,
+    offset: Option<i64>,
+) -> Result<v2_ops::WorkspacePage, String> {
+    let storage = AppStorage::from_app_handle(&app_handle)?;
+    v2_ops::list_workspace(
+        storage.database_path(),
+        keyword.as_deref().unwrap_or(""),
+        language.as_deref().unwrap_or(""),
+        reading.as_deref().unwrap_or(""),
+        limit.unwrap_or(80).clamp(1, 200),
+        offset.unwrap_or(0).max(0),
+    )
+}
+
+#[tauri::command]
+fn get_workspace_detail(app_handle: tauri::AppHandle, id: String) -> Result<v2_ops::WorkspaceDetail, String> {
+    let storage = AppStorage::from_app_handle(&app_handle)?;
+    v2_ops::workspace_detail(storage.database_path(), &id)
+}
+
+#[tauri::command]
+fn search_command_palette(app_handle: tauri::AppHandle, query: String) -> Result<Vec<v2_ops::PaletteHit>, String> {
+    let storage = AppStorage::from_app_handle(&app_handle)?;
+    v2_ops::palette_search(storage.database_path(), &query)
+}
+
+#[tauri::command]
+fn list_ai_jobs(app_handle: tauri::AppHandle) -> Result<Vec<v2_ops::JobRow>, String> {
+    let storage = AppStorage::from_app_handle(&app_handle)?;
+    v2_ops::list_jobs(storage.database_path(), 40)
+}
+
+#[tauri::command]
+fn pause_ai_queue(app_handle: tauri::AppHandle) -> Result<(), String> {
+    let storage = AppStorage::from_app_handle(&app_handle)?;
+    v2_ops::set_queue_paused(storage.database_path(), true)
+}
+
+#[tauri::command]
+fn resume_ai_queue(app_handle: tauri::AppHandle) -> Result<(), String> {
+    let storage = AppStorage::from_app_handle(&app_handle)?;
+    v2_ops::set_queue_paused(storage.database_path(), false)
+}
+
+#[tauri::command]
+fn retry_failed_ai_jobs(app_handle: tauri::AppHandle) -> Result<usize, String> {
+    let storage = AppStorage::from_app_handle(&app_handle)?;
+    v2_ops::retry_failed_jobs(storage.database_path())
+}
+
+#[tauri::command]
+fn cancel_ai_job(app_handle: tauri::AppHandle, id: String) -> Result<(), String> {
+    let storage = AppStorage::from_app_handle(&app_handle)?;
+    v2_ops::cancel_job(storage.database_path(), &id)
+}
+
+#[tauri::command]
+fn set_ai_daily_budget(app_handle: tauri::AppHandle, tokens: u64) -> Result<u64, String> {
+    let storage = AppStorage::from_app_handle(&app_handle)?;
+    v2_ops::set_daily_budget(storage.database_path(), tokens)
+}
+
+#[tauri::command]
+fn get_local_api_status(app_handle: tauri::AppHandle) -> Result<local_api::LocalApiStatus, String> {
+    let storage = AppStorage::from_app_handle(&app_handle)?;
+    Ok(local_api::status(storage.database_path()))
+}
+
+#[tauri::command]
+fn set_local_api_enabled(app_handle: tauri::AppHandle, enabled: bool) -> Result<local_api::LocalApiStatus, String> {
+    let storage = AppStorage::from_app_handle(&app_handle)?;
+    local_api::set_enabled(storage.database_path(), enabled)
+}
+
+#[tauri::command]
+fn export_library_csv(app_handle: tauri::AppHandle, destination: String) -> Result<usize, String> {
+    let storage = AppStorage::from_app_handle(&app_handle)?;
+    v2_ops::export_csv(storage.database_path(), std::path::Path::new(&destination))
+}
+
+#[tauri::command]
+fn prepare_knowledge(app_handle: tauri::AppHandle) -> Result<String, String> {
+    let storage = AppStorage::from_app_handle(&app_handle)?;
+    let path = storage.database_path();
+    let seeded = v2_ops::seed_taxonomy(path)?;
+    let classified = v2_ops::rule_classify(path)?;
+    let cards = v2_ops::import_summary_cards(path)?;
+    Ok(format!("分类种子 {seeded}，规则归类 {classified}，旧摘要转理解卡 {cards}"))
+}
+
+#[tauri::command]
+fn commit_capture_batch(app_handle: tauri::AppHandle, text: String, source_context: Option<String>) -> Result<v2_ops::CaptureCommit, String> {
+    let storage = AppStorage::from_app_handle(&app_handle)?;
+    v2_ops::commit_capture(storage.database_path(), &text, source_context.as_deref().unwrap_or(""))
+}
+
+#[tauri::command]
+fn get_graph_overview(app_handle: tauri::AppHandle) -> Result<Vec<v2_ops::CategoryBlock>, String> {
+    let storage = AppStorage::from_app_handle(&app_handle)?;
+    v2_ops::seed_taxonomy(storage.database_path())?;
+    v2_ops::rule_classify(storage.database_path())?;
+    v2_ops::graph_overview(storage.database_path())
+}
+
+#[tauri::command]
+fn solve_problem(app_handle: tauri::AppHandle, question: String) -> Result<v2_ops::SolveAnswer, String> {
+    let storage = AppStorage::from_app_handle(&app_handle)?;
+    v2_ops::solve_problem(storage.database_path(), &question)
+}
+
+#[tauri::command]
+fn create_reference_pack(
+    app_handle: tauri::AppHandle,
+    title: String,
+    problem: String,
+    question: String,
+    format: Option<String>,
+) -> Result<String, String> {
+    let storage = AppStorage::from_app_handle(&app_handle)?;
+    let answer = v2_ops::solve_problem(storage.database_path(), &question)?;
+    let markdown = v2_ops::render_pack(&title, &problem, &answer.owned);
+    let content = match format.as_deref().unwrap_or("markdown") {
+        "json" => serde_json::json!({
+            "title": title,
+            "problem": problem,
+            "owned": answer.owned,
+            "instruction": "只使用列出的仓库和原文摘要，不要补充未给出的安装步骤。"
+        })
+        .to_string(),
+        "agents" => format!("# AGENTS.md\n\n只使用下面列出的仓库和原文摘要，不要补充未给出的安装步骤。\n\n{markdown}"),
+        _ => markdown.clone(),
+    };
+    let id = v2_ops::save_pack(storage.database_path(), &title, &problem, &markdown)?;
+    Ok(format!("{id}\n\n{content}"))
+}
+
+#[tauri::command]
+fn create_dev_backup(app_handle: tauri::AppHandle) -> Result<String, String> {
+    let storage = AppStorage::from_app_handle(&app_handle)?;
+    let backup_dir = storage.database_path().parent().unwrap_or(storage.database_path()).join("backups");
+    let path = v2_ops::backup_database_file(storage.database_path(), &backup_dir)?;
+    Ok(path.display().to_string())
+}
+
+#[tauri::command]
+fn export_library_markdown(app_handle: tauri::AppHandle, destination: String) -> Result<usize, String> {
+    let storage = AppStorage::from_app_handle(&app_handle)?;
+    v2_ops::export_markdown(storage.database_path(), std::path::Path::new(&destination))
+}
+
+#[tauri::command]
+fn log_repository_usage(app_handle: tauri::AppHandle, entity_id: String, verdict: String, note: Option<String>) -> Result<(), String> {
+    let storage = AppStorage::from_app_handle(&app_handle)?;
+    v2_ops::log_usage(storage.database_path(), &entity_id, &verdict, note.as_deref().unwrap_or(""), "ui")
+}
+
+#[tauri::command]
+fn list_ranking_board(app_handle: tauri::AppHandle) -> Result<Vec<v2_ops::RankingRow>, String> {
+    let storage = AppStorage::from_app_handle(&app_handle)?;
+    v2_ops::list_ranking_board(storage.database_path())
+}
+
+#[tauri::command]
+fn get_health_summary(app_handle: tauri::AppHandle) -> Result<String, String> {
+    let storage = AppStorage::from_app_handle(&app_handle)?;
+    v2_ops::health_summary(storage.database_path())
 }
 
 #[tauri::command]
@@ -6338,11 +6521,37 @@ pub fn run() {
                 }
             }
             start_embedding_maintenance(app.handle().clone());
+            if let Ok(storage) = AppStorage::from_app_handle(app.handle()) {
+                let _ = local_api::start_if_enabled(storage.database_path());
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             get_backend_status,
             get_today_overview,
+            get_today_actions,
+            list_workspace_cards,
+            get_workspace_detail,
+            search_command_palette,
+            list_ai_jobs,
+            pause_ai_queue,
+            resume_ai_queue,
+            retry_failed_ai_jobs,
+            cancel_ai_job,
+            set_ai_daily_budget,
+            get_local_api_status,
+            set_local_api_enabled,
+            export_library_csv,
+            prepare_knowledge,
+            commit_capture_batch,
+            get_graph_overview,
+            solve_problem,
+            create_reference_pack,
+            create_dev_backup,
+            export_library_markdown,
+            log_repository_usage,
+            list_ranking_board,
+            get_health_summary,
             list_library_cards,
             get_library_item,
             extract_links_from_text,

@@ -74,6 +74,32 @@ function createServer(ctx) {
     kinds: external_exports.array(external_exports.enum(["skill", "mcp"])).optional(),
     limit: external_exports.number().int().optional()
   }), listOutput, listCapabilities.bind(null, ctx));
+  s.registerTool("log_usage", {
+    description: "把使用反馈写回 usage_log。默认关闭，需要 FOX_STARS_LAB_ALLOW_WRITE=1。不改仓库、标签和 web-search 正在读的表。",
+    inputSchema: external_exports.object({
+      entityId: external_exports.string(),
+      verdict: external_exports.enum(["useful", "meh", "useless"]),
+      note: external_exports.string().optional()
+    })
+  }, async (input) => {
+    try {
+      if (process.env.FOX_STARS_LAB_ALLOW_WRITE !== "1") {
+        throw new PublicError("write_disabled", "log_usage 默认关闭");
+      }
+      const verdict = String(input.verdict || "");
+      if (!["useful", "meh", "useless"].includes(verdict)) throw new PublicError("invalid_input", "verdict 非法");
+      if (typeof DatabaseSync !== "function") {
+        throw new PublicError("write_unavailable", "写回请使用 docs/rebuild/mcp/log_usage.js，并设置 FOX_STARS_LAB_ALLOW_WRITE=1");
+      }
+      const db = new DatabaseSync(process.env.FOX_STARS_LAB_DB, { timeout: 1500 });
+      db.prepare("INSERT INTO usage_log(id, account_id, entity_type, entity_id, verdict, note, via, client_name) VALUES (?, ?, 'repository', ?, ?, ?, 'mcp', 'mcp')").run(`mcp-${Date.now()}`, ctx.account, String(input.entityId), verdict, String(input.note || "").slice(0, 4000));
+      db.close();
+      return { content: [{ type: "text", text: "已写入使用记录" }], structuredContent: { ok: true } };
+    } catch (e) {
+      const x = e instanceof PublicError ? e : new PublicError("write_failed", "使用记录写入失败");
+      return { isError: true, content: [{ type: "text", text: `${x.code}: ${x.message}` }], structuredContent: { error: { code: x.code, message: x.message } } };
+    }
+  });
   s.registerResource("about", "fox-stars-lab://about", { description: "Fox Stars Lab \u672C\u5730\u53EA\u8BFB\u67E5\u8BE2\u8FB9\u754C" }, async () => ({
     contents: [
       {

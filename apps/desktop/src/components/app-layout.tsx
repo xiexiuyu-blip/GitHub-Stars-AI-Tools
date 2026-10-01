@@ -27,6 +27,7 @@ type AppLayoutProps = {
   statusMessage: string | null;
   errorMessage: string | null;
   notificationOpenSignal: number;
+  onOpenCommandPalette: () => void;
 };
 
 const NAV_ITEMS: { key: AppPage; icon: string; label: string }[] = [
@@ -60,7 +61,7 @@ export function AppLayout(props: AppLayoutProps) {
     function handleKeyDown(event: KeyboardEvent) {
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
         event.preventDefault();
-        searchInputRef.current?.focus();
+        props.onOpenCommandPalette();
       }
     }
 

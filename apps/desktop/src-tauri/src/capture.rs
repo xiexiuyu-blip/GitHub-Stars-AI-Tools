@@ -94,4 +94,17 @@ mod tests {
         assert_eq!(links[0].name.as_deref(), Some("codex"));
         assert_eq!(links[1].kind, "x_post");
     }
+
+    #[test]
+    fn thirty_chat_links_extract_within_a_second() {
+        let text = (1..=30)
+            .map(|index| format!("https://github.com/fox/tool-{index}"))
+            .collect::<Vec<_>>()
+            .join(" 群里还有 ");
+        let started = std::time::Instant::now();
+        let links = extract_links_from_text(&text);
+        assert!(started.elapsed().as_secs_f64() < 1.0);
+        assert_eq!(links.len(), 30);
+        assert!(links.iter().all(|link| link.kind == "github_repo"));
+    }
 }

@@ -1,6 +1,7 @@
 import { lazy, Suspense, useEffect, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { AppLayout } from '@/components/app-layout';
+import { CommandPalette } from '@/components/command-palette';
 import { AppUpdateDialog } from '@/components/app-update-panel';
 import { Icon } from '@/components/ui/icon';
 import { WelcomeFlow } from '@/components/welcome-flow';
@@ -12,7 +13,6 @@ import type { AppPage, RepositoryListItem } from '@/types';
 
 const DashboardPage = lazy(() => import('@/pages/dashboard').then((module) => ({ default: module.DashboardPage })));
 const RepositoriesPage = lazy(() => import('@/pages/repositories').then((module) => ({ default: module.RepositoriesPage })));
-const DiscoverPage = lazy(() => import('@/pages/discover').then((module) => ({ default: module.DiscoverPage })));
 const RankingsPage = lazy(() => import('@/pages/rankings').then((module) => ({ default: module.RankingsPage })));
 const TagNetworkPage = lazy(() => import('@/pages/tag-network').then((module) => ({ default: module.TagNetworkPage })));
 const AISearchPage = lazy(() => import('@/pages/ai-search').then((module) => ({ default: module.AISearchPage })));
@@ -21,7 +21,11 @@ const SettingsPage = lazy(() => import('@/pages/settings').then((module) => ({ d
 const TodayPage = lazy(() => import('@/pages/v2/today').then((module) => ({ default: module.TodayPage })));
 const V2LibraryPage = lazy(() => import('@/pages/v2/library').then((module) => ({ default: module.LibraryPage })));
 const CapturePage = lazy(() => import('@/pages/v2/capture').then((module) => ({ default: module.CapturePage })));
-const LaterPage = lazy(() => import('@/pages/v2/later').then((module) => ({ default: module.LaterPage })));
+const MapPage = lazy(() => import('@/pages/v2/map').then((module) => ({ default: module.MapPage })));
+const SolvePage = lazy(() => import('@/pages/v2/solve').then((module) => ({ default: module.SolvePage })));
+const PacksPage = lazy(() => import('@/pages/v2/packs').then((module) => ({ default: module.PacksPage })));
+const ToolboxPage = lazy(() => import('@/pages/v2/toolbox').then((module) => ({ default: module.ToolboxPage })));
+const V2RankingsPage = lazy(() => import('@/pages/v2/rankings').then((module) => ({ default: module.RankingsPage })));
 
 type RepositoryNavigationState = {
   query: string;
@@ -36,6 +40,9 @@ function AppContent() {
   const settingsHook = useAppSettings();
   const appUpdate = useAppUpdate();
   const [currentPage, setCurrentPage] = useState<AppPage>('today');
+  const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
+  const [solveQuestion, setSolveQuestion] = useState('我想整理群聊里的工具链接');
+  const [libraryKeyword, setLibraryKeyword] = useState('');
   const [showWelcome, setShowWelcome] = useState(false);
   const [hasDismissedWelcome, setHasDismissedWelcome] = useState(false);
   const [hasDismissedUpdateNotice, setHasDismissedUpdateNotice] = useState(false);
@@ -292,19 +299,21 @@ function AppContent() {
   function renderPage() {
     switch (currentPage) {
       case 'today':
-        return <TodayPage onOpenLibrary={() => setCurrentPage('library')} onOpenCapture={() => setCurrentPage('capture')} />;
+        return <TodayPage onOpenLibrary={() => setCurrentPage('library')} onOpenCapture={() => setCurrentPage('capture')} onOpenSolve={() => setCurrentPage('solve')} />;
       case 'capture':
         return <CapturePage />;
       case 'library':
-        return <V2LibraryPage />;
+        return <V2LibraryPage initialKeyword={libraryKeyword} />;
       case 'map':
-        return <LaterPage title="地图" detail="分类和能力网络的表已经准备好，图还没画。明早看到的是资料库和收集，不是地图。" />;
+        return <MapPage />;
       case 'solve':
-        return <LaterPage title="找方案" detail="问题驱动检索还没接上。现在可以先在资料库里搜已有摘要。" />;
+        return <SolvePage initialQuestion={solveQuestion} onCreatePack={(question) => { setSolveQuestion(question); setCurrentPage('packs'); }} />;
       case 'packs':
-        return <LaterPage title="参考包" detail="参考包的表已经建好，编辑和导出还没做。" />;
+        return <PacksPage question={solveQuestion} />;
       case 'toolbox':
-        return <LaterPage title="工具箱" detail="本机 Skills 对照还没接。工具表里目前只有原来的 1 条。" />;
+        return <ToolboxPage />;
+      case 'discover':
+        return <V2RankingsPage />;
       case 'dashboard':
         return (
           <DashboardPage
@@ -324,13 +333,6 @@ function AppContent() {
             globalTagFilter={repositoryNavigation.tagId}
             globalSelectedRepositoryId={repositoryNavigation.selectedRepositoryId}
             onOpenDiscover={() => setCurrentPage('discover')}
-          />
-        );
-      case 'discover':
-        return (
-          <DiscoverPage
-            onOpenRepositories={() => setCurrentPage('repositories')}
-            onOpenSettings={() => setCurrentPage('settings')}
           />
         );
       case 'rankings':
@@ -391,6 +393,7 @@ function AppContent() {
         statusMessage={workspace.authMessage}
         errorMessage={workspace.error ?? settingsHook.settingsError}
         notificationOpenSignal={notificationOpenSignal}
+        onOpenCommandPalette={() => setCommandPaletteOpen(true)}
       >
         <Suspense fallback={<PageLoadingFallback />}>
           {renderPage()}
@@ -406,6 +409,19 @@ function AppContent() {
       {isUpdateDialogOpen && (
         <AppUpdateDialog appUpdate={appUpdate} onClose={() => setIsUpdateDialogOpen(false)} />
       )}
+      <CommandPalette
+        open={commandPaletteOpen}
+        onClose={() => setCommandPaletteOpen(false)}
+        onOpenSolve={(query) => {
+          setSolveQuestion(query || solveQuestion);
+          setCurrentPage('solve');
+        }}
+        onOpenLibrary={(query) => {
+          setLibraryKeyword(query);
+          setCurrentPage('library');
+        }}
+        onSync={() => void workspace.handleSyncStars()}
+      />
     </>
   );
 }

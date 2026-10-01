@@ -1,63 +1,50 @@
 import { useEffect, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 
-type TodayOverview = {
+type TodayActions = {
   activeRepositories: number;
-  readmes: number;
-  aiDocuments: number;
-  citations: number;
-  inboxItems: number;
-  tools: number;
+  suggestedCards: number;
+  failedJobs: number;
+  starredThisWeek: number;
+  topLanguages: { language: string; count: number }[];
   schemaVersion: string;
 };
 
-export function TodayPage(props: { onOpenLibrary: () => void; onOpenCapture: () => void }) {
-  const [overview, setOverview] = useState<TodayOverview | null>(null);
+export function TodayPage(props: { onOpenLibrary: () => void; onOpenCapture: () => void; onOpenSolve: () => void }) {
+  const [overview, setOverview] = useState<TodayActions | null>(null);
+  const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
-    let cancelled = false;
-    invoke<TodayOverview>('get_today_overview')
-      .then((value) => {
-        if (!cancelled) {
-          setOverview(value);
-        }
-      })
-      .catch((reason: unknown) => {
-        if (!cancelled) {
-          setError(reason instanceof Error ? reason.message : String(reason));
-        }
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+  function load() {
+    invoke<TodayActions>('get_today_actions').then(setOverview).catch((reason: unknown) => setError(String(reason)));
+  }
+
+  useEffect(load, []);
 
   return (
     <section className="flex h-full min-h-0 flex-col gap-4 overflow-auto p-6">
       <header>
-        <p className="text-sm text-on-surface-variant">Fox Stars Lab 2.0</p>
-        <h2 className="text-2xl font-semibold text-on-surface">今日</h2>
-        <p className="mt-1 max-w-2xl text-sm text-on-surface-variant">
-          这是重建后的第一版可用骨架。收藏还在本机，理解卡和找方案还没接上模型。
-        </p>
+        <p className="text-sm text-on-surface-variant">按 ⌘K 搜索，输入 ? 去找方案</p>
+        <h2 className="text-2xl font-semibold">今日</h2>
       </header>
-      {error ? <p className="text-sm text-error">{error}</p> : null}
-      <div className="grid gap-3 sm:grid-cols-3">
+      {error ? <p className="text-sm text-red-700">{error}</p> : null}
+      {message ? <p className="text-sm text-on-surface-variant">{message}</p> : null}
+      <div className="grid gap-3 sm:grid-cols-4">
         <Stat label="有效仓库" value={overview?.activeRepositories} />
-        <Stat label="README" value={overview?.readmes} />
-        <Stat label="已有 AI 摘要" value={overview?.aiDocuments} />
+        <Stat label="待确认理解卡" value={overview?.suggestedCards} />
+        <Stat label="失败可重试" value={overview?.failedJobs} />
+        <Stat label="近 7 天收藏" value={overview?.starredThisWeek} />
       </div>
-      <p className="text-xs text-on-surface-variant">
-        迁移版本 {overview?.schemaVersion ?? '…'} · 引用 {overview?.citations ?? '…'} · 投喂 {overview?.inboxItems ?? '…'} · 工具 {overview?.tools ?? '…'}
+      <p className="text-sm text-on-surface-variant">
+        收藏画像：{overview?.topLanguages.map((item) => `${item.language} ${item.count}`).join(' · ') || '读取中'}
       </p>
-      <div className="flex gap-2">
-        <button className="rounded-full bg-primary px-4 py-2 text-sm text-on-primary" onClick={props.onOpenLibrary} type="button">
-          打开资料库
-        </button>
-        <button className="rounded-full border border-outline-variant px-4 py-2 text-sm" onClick={props.onOpenCapture} type="button">
-          去收集
-        </button>
+      <p className="text-xs text-on-surface-variant">迁移版本 {overview?.schemaVersion ?? '…'}</p>
+      <div className="flex flex-wrap gap-2">
+        <button className="rounded-full bg-primary px-4 py-2 text-sm text-on-primary" type="button" onClick={props.onOpenLibrary}>资料库</button>
+        <button className="rounded-full border px-4 py-2 text-sm" type="button" onClick={props.onOpenCapture}>收集</button>
+        <button className="rounded-full border px-4 py-2 text-sm" type="button" onClick={props.onOpenSolve}>找方案</button>
+        <button className="rounded-full border px-4 py-2 text-sm" type="button" onClick={() => void invoke<string>('prepare_knowledge').then(setMessage).catch((reason: unknown) => setError(String(reason)))}>生成建议卡和分类</button>
+        <button className="rounded-full border px-4 py-2 text-sm" type="button" onClick={() => void invoke('retry_failed_ai_jobs').then(load)}>重试失败任务</button>
       </div>
     </section>
   );

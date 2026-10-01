@@ -1763,6 +1763,7 @@ dependencies = [
  "tauri-plugin-updater",
  "time",
  "tokio",
+ "url",
  "windows-native-keyring-store",
  "zbus-secret-service-keyring-store",
  "zvec-rust",
