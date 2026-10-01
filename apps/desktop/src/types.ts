@@ -35,7 +35,22 @@ export type GitHubAuthState = {
   user: GitHubUser | null;
 };
 
-export type AppPage = 'dashboard' | 'repositories' | 'discover' | 'rankings' | 'tag-network' | 'ai-search' | 'profile' | 'settings';
+export type AppPage =
+  | 'today'
+  | 'capture'
+  | 'library'
+  | 'map'
+  | 'solve'
+  | 'packs'
+  | 'discover'
+  | 'toolbox'
+  | 'settings'
+  | 'dashboard'
+  | 'repositories'
+  | 'rankings'
+  | 'tag-network'
+  | 'ai-search'
+  | 'profile';
 
 export type RankingSection = 'global' | 'personal';
 export type GithubRankingKind = 'trending' | 'rising' | 'popular';

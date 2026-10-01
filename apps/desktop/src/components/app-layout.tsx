@@ -30,12 +30,14 @@ type AppLayoutProps = {
 };
 
 const NAV_ITEMS: { key: AppPage; icon: string; label: string }[] = [
-  { key: 'dashboard', icon: 'home', label: '概览' },
-  { key: 'repositories', icon: 'folder_special', label: '全部仓库' },
-  { key: 'discover', icon: 'travel_explore', label: '发现' },
-  { key: 'rankings', icon: 'leaderboard', label: '排行榜' },
-  { key: 'tag-network', icon: 'hub', label: '标签网络' },
-  { key: 'ai-search', icon: 'psychology', label: 'AI 搜索' },
+  { key: 'today', icon: 'home', label: '今日' },
+  { key: 'capture', icon: 'add_link', label: '收集' },
+  { key: 'library', icon: 'folder_special', label: '资料库' },
+  { key: 'map', icon: 'hub', label: '地图' },
+  { key: 'solve', icon: 'psychology', label: '找方案' },
+  { key: 'packs', icon: 'inventory_2', label: '参考包' },
+  { key: 'discover', icon: 'leaderboard', label: '发现与榜单' },
+  { key: 'toolbox', icon: 'construction', label: '工具箱' },
 ];
 export function AppLayout(props: AppLayoutProps) {
   const [searchQuery, setSearchQuery] = useState('');

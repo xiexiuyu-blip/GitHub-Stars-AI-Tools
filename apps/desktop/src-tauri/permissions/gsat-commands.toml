@@ -66,4 +66,8 @@ commands.allow = [
   "import_annotation_gist",
   "export_repository_library_gist",
   "import_repository_library_gist",
+  "get_today_overview",
+  "list_library_cards",
+  "get_library_item",
+  "extract_links_from_text",
 ]

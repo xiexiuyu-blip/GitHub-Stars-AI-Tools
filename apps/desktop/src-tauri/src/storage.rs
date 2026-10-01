@@ -706,6 +706,10 @@ impl AppStorage {
         Ok(storage)
     }
 
+    pub fn database_path(&self) -> &Path {
+        &self.database_path
+    }
+
     pub fn clear_local_database(app_handle: &tauri::AppHandle) -> Result<(), String> {
         let database_path = Self::database_path_from_app_handle(app_handle)?;
         remove_sqlite_database_files(&database_path)

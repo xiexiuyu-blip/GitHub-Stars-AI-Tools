@@ -146,6 +146,51 @@ const MIGRATIONS: &[Migration] = &[
             "../../../../../packages/storage/migrations/fox/020_upstream_embedding_dirty_queue.sql"
         ),
     },
+    Migration {
+        version: "021",
+        name: "capture_sources",
+        sql: include_str!("../../../../../packages/storage/migrations/fox/021_capture_sources.sql"),
+    },
+    Migration {
+        version: "022",
+        name: "taxonomy",
+        sql: include_str!("../../../../../packages/storage/migrations/fox/022_taxonomy.sql"),
+    },
+    Migration {
+        version: "023",
+        name: "knowledge_graph",
+        sql: include_str!("../../../../../packages/storage/migrations/fox/023_knowledge_graph.sql"),
+    },
+    Migration {
+        version: "024",
+        name: "ai_cards",
+        sql: include_str!("../../../../../packages/storage/migrations/fox/024_ai_cards.sql"),
+    },
+    Migration {
+        version: "025",
+        name: "ai_jobs",
+        sql: include_str!("../../../../../packages/storage/migrations/fox/025_ai_jobs.sql"),
+    },
+    Migration {
+        version: "026",
+        name: "rankings",
+        sql: include_str!("../../../../../packages/storage/migrations/fox/026_rankings.sql"),
+    },
+    Migration {
+        version: "027",
+        name: "reference_packs",
+        sql: include_str!("../../../../../packages/storage/migrations/fox/027_reference_packs.sql"),
+    },
+    Migration {
+        version: "028",
+        name: "extensibility",
+        sql: include_str!("../../../../../packages/storage/migrations/fox/028_extensibility.sql"),
+    },
+    Migration {
+        version: "029",
+        name: "public_views",
+        sql: include_str!("../../../../../packages/storage/migrations/fox/029_public_views.sql"),
+    },
 ];
 
 pub fn latest_migration() -> &'static Migration {
@@ -360,12 +405,12 @@ mod tests {
     fn empty_database_applies_001_through_020() {
         let path = temp_db("empty");
         let report = migrate_database(&path).expect("空库应能迁移到 020");
-        assert_eq!(report.applied.len(), 20);
+        assert_eq!(report.applied.len(), 29);
         assert!(report.backup_path.is_none());
 
         let connection = Connection::open(&path).expect("应能打开空库结果");
         let versions = read_applied(&connection).expect("应能读取版本");
-        assert_eq!(versions.len(), 20);
+        assert_eq!(versions.len(), 29);
         for migration in MIGRATIONS {
             assert!(
                 versions
@@ -436,10 +481,22 @@ mod tests {
             count_query(&path, "SELECT COUNT(*) FROM tools"),
         );
         let report = migrate_database(&path).expect("018 副本应只追加 019/020");
-        assert_eq!(report.applied, vec![
-            "019 upstream_embedding_invalidation".to_owned(),
-            "020 upstream_embedding_dirty_queue".to_owned(),
-        ]);
+        assert_eq!(
+            report.applied,
+            vec![
+                "019 upstream_embedding_invalidation".to_owned(),
+                "020 upstream_embedding_dirty_queue".to_owned(),
+                "021 capture_sources".to_owned(),
+                "022 taxonomy".to_owned(),
+                "023 knowledge_graph".to_owned(),
+                "024 ai_cards".to_owned(),
+                "025 ai_jobs".to_owned(),
+                "026 rankings".to_owned(),
+                "027 reference_packs".to_owned(),
+                "028 extensibility".to_owned(),
+                "029 public_views".to_owned(),
+            ]
+        );
         assert!(report.backup_path.is_some());
         let after = (
             count_query(

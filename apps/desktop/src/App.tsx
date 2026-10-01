@@ -18,6 +18,10 @@ const TagNetworkPage = lazy(() => import('@/pages/tag-network').then((module) =>
 const AISearchPage = lazy(() => import('@/pages/ai-search').then((module) => ({ default: module.AISearchPage })));
 const ProfilePage = lazy(() => import('@/pages/profile').then((module) => ({ default: module.ProfilePage })));
 const SettingsPage = lazy(() => import('@/pages/settings').then((module) => ({ default: module.SettingsPage })));
+const TodayPage = lazy(() => import('@/pages/v2/today').then((module) => ({ default: module.TodayPage })));
+const V2LibraryPage = lazy(() => import('@/pages/v2/library').then((module) => ({ default: module.LibraryPage })));
+const CapturePage = lazy(() => import('@/pages/v2/capture').then((module) => ({ default: module.CapturePage })));
+const LaterPage = lazy(() => import('@/pages/v2/later').then((module) => ({ default: module.LaterPage })));
 
 type RepositoryNavigationState = {
   query: string;
@@ -31,7 +35,7 @@ function AppContent() {
   const workspace = useWorkspace();
   const settingsHook = useAppSettings();
   const appUpdate = useAppUpdate();
-  const [currentPage, setCurrentPage] = useState<AppPage>('dashboard');
+  const [currentPage, setCurrentPage] = useState<AppPage>('today');
   const [showWelcome, setShowWelcome] = useState(false);
   const [hasDismissedWelcome, setHasDismissedWelcome] = useState(false);
   const [hasDismissedUpdateNotice, setHasDismissedUpdateNotice] = useState(false);
@@ -287,6 +291,20 @@ function AppContent() {
   // 渲染当前页面
   function renderPage() {
     switch (currentPage) {
+      case 'today':
+        return <TodayPage onOpenLibrary={() => setCurrentPage('library')} onOpenCapture={() => setCurrentPage('capture')} />;
+      case 'capture':
+        return <CapturePage />;
+      case 'library':
+        return <V2LibraryPage />;
+      case 'map':
+        return <LaterPage title="地图" detail="分类和能力网络的表已经准备好，图还没画。明早看到的是资料库和收集，不是地图。" />;
+      case 'solve':
+        return <LaterPage title="找方案" detail="问题驱动检索还没接上。现在可以先在资料库里搜已有摘要。" />;
+      case 'packs':
+        return <LaterPage title="参考包" detail="参考包的表已经建好，编辑和导出还没做。" />;
+      case 'toolbox':
+        return <LaterPage title="工具箱" detail="本机 Skills 对照还没接。工具表里目前只有原来的 1 条。" />;
       case 'dashboard':
         return (
           <DashboardPage

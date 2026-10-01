@@ -1,10 +1,12 @@
 mod ai;
 mod auth;
+mod capture;
 mod db;
 mod dev_guard;
 mod embedding;
 mod embedding_state;
 mod github;
+mod library;
 mod ranking_query;
 mod storage;
 mod vector_index;
@@ -871,6 +873,45 @@ struct GithubRecommendationSearchFailure {
 #[serde(rename_all = "camelCase")]
 struct ImportAnnotationGistRequest {
     gist_id: String,
+}
+
+#[tauri::command]
+fn get_today_overview(app_handle: tauri::AppHandle) -> Result<library::TodayOverview, String> {
+    let storage = AppStorage::from_app_handle(&app_handle)?;
+    library::today_overview(storage.database_path())
+}
+
+#[tauri::command]
+fn list_library_cards(
+    app_handle: tauri::AppHandle,
+    keyword: Option<String>,
+    limit: Option<i64>,
+    offset: Option<i64>,
+) -> Result<library::LibraryPage, String> {
+    let storage = AppStorage::from_app_handle(&app_handle)?;
+    let limit = limit.unwrap_or(50).clamp(1, 200);
+    let offset = offset.unwrap_or(0).max(0);
+    library::list_library_cards(
+        storage.database_path(),
+        keyword.as_deref().unwrap_or(""),
+        limit,
+        offset,
+    )
+}
+
+#[tauri::command]
+fn get_library_item(
+    app_handle: tauri::AppHandle,
+    id: String,
+) -> Result<library::LibraryItem, String> {
+    let storage = AppStorage::from_app_handle(&app_handle)?;
+    library::get_library_item(storage.database_path(), &id)?
+        .ok_or_else(|| "没有找到这个条目".to_owned())
+}
+
+#[tauri::command]
+fn extract_links_from_text(text: String) -> Vec<capture::ExtractedLink> {
+    capture::extract_links_from_text(&text)
 }
 
 #[tauri::command]
@@ -6301,6 +6342,10 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             get_backend_status,
+            get_today_overview,
+            list_library_cards,
+            get_library_item,
+            extract_links_from_text,
             get_app_identity,
             get_github_auth_state,
             save_github_token,
