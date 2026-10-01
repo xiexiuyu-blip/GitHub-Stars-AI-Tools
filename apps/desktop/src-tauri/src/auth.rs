@@ -3,8 +3,20 @@ use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
-const GITHUB_TOKEN_SERVICE: &str = "fox-stars-lab";
 const GITHUB_TOKEN_ACCOUNT: &str = "github-pat";
+static CREDENTIAL_SERVICE: OnceLock<&'static str> = OnceLock::new();
+
+pub fn configure_credential_service(identifier: &str) {
+    let _ = CREDENTIAL_SERVICE.set(crate::dev_guard::credential_service_for(identifier));
+}
+
+pub fn credential_service() -> &'static str {
+    CREDENTIAL_SERVICE.get().copied().unwrap_or(if cfg!(debug_assertions) {
+        crate::dev_guard::DEV_CREDENTIAL_SERVICE
+    } else {
+        crate::dev_guard::PRODUCTION_CREDENTIAL_SERVICE
+    })
+}
 const GITHUB_USER_API: &str = "https://api.github.com/user";
 const GITHUB_API_VERSION: &str = "2022-11-28";
 const GITHUB_CONNECT_TIMEOUT_SECONDS: u16 = 12;
@@ -509,15 +521,15 @@ fn is_github_token_scope_message(message: &str) -> bool {
 }
 
 fn read_github_token() -> Result<Option<String>, String> {
-    read_password_from_secure_store(GITHUB_TOKEN_SERVICE, GITHUB_TOKEN_ACCOUNT)
+    read_password_from_secure_store(credential_service(), GITHUB_TOKEN_ACCOUNT)
 }
 
 fn save_github_token_to_secure_store(token: &str) -> Result<(), String> {
-    save_password_to_secure_store(GITHUB_TOKEN_SERVICE, GITHUB_TOKEN_ACCOUNT, token)
+    save_password_to_secure_store(credential_service(), GITHUB_TOKEN_ACCOUNT, token)
 }
 
 fn delete_github_token_from_secure_store() -> Result<(), String> {
-    delete_password_from_secure_store(GITHUB_TOKEN_SERVICE, GITHUB_TOKEN_ACCOUNT)
+    delete_password_from_secure_store(credential_service(), GITHUB_TOKEN_ACCOUNT)
 }
 
 fn read_password_from_secure_store(service: &str, account: &str) -> Result<Option<String>, String> {

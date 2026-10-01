@@ -1,5 +1,6 @@
 mod ai;
 mod auth;
+mod dev_guard;
 mod embedding;
 mod embedding_state;
 mod github;
@@ -25,7 +26,6 @@ use tauri::{Emitter, Manager};
 const TASK_PROGRESS_EVENT: &str = "task-progress";
 const AI_STREAM_EVENT: &str = "ai-stream";
 const APP_DISPLAY_NAME: &str = "Fox Stars Lab";
-const APP_BUNDLE_IDENTIFIER: &str = "com.foxwork.fox-stars-lab";
 const APP_BUNDLE_NAME: &str = "Fox Stars Lab.app";
 const APP_DMG_FILE_PATTERN: &str = "Fox-Stars-Lab_<version>.dmg";
 const APP_REPOSITORY_URL: &str =
@@ -38,7 +38,6 @@ const GITHUB_RECOMMENDATION_REFERENCE_LIMIT: usize = 8;
 const AI_SEARCH_CANDIDATE_LIMIT: usize = 30;
 const AI_SEARCH_FINAL_LIMIT: usize = 10;
 const DEFAULT_OPENAI_EMBEDDING_BASE_URL: &str = "https://api.openai.com/v1";
-const AI_API_KEY_SERVICE: &str = "fox-stars-lab";
 const EMBEDDING_API_KEY_ACCOUNT: &str = "embedding-api-key:openai-compatible";
 const AI_API_KEY_PROVIDER_ACCOUNTS: &[&str] = &[
     "ai-api-key:openai",
@@ -70,8 +69,8 @@ struct BackendStatus {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct AppIdentity {
-    display_name: &'static str,
-    bundle_identifier: &'static str,
+    display_name: String,
+    bundle_identifier: String,
     app_bundle_name: &'static str,
     dmg_file_pattern: &'static str,
     data_dir: String,
@@ -80,7 +79,7 @@ struct AppIdentity {
     database_path: String,
     settings_file: &'static str,
     settings_path: String,
-    credential_service: &'static str,
+    credential_service: String,
     annotation_gist_file: &'static str,
     update_endpoint: &'static str,
     repository_url: &'static str,
@@ -896,9 +895,17 @@ fn get_app_identity(app_handle: tauri::AppHandle) -> Result<AppIdentity, String>
     let database_path = data_dir.join(storage::SQLITE_DATABASE_FILE_NAME);
     let settings_path = app_settings_path(&app_handle)?;
 
+    let identifier = app_handle.config().identifier.clone();
+    let display_name = app_handle
+        .config()
+        .product_name
+        .clone()
+        .unwrap_or_else(|| APP_DISPLAY_NAME.to_owned());
+    auth::configure_credential_service(&identifier);
+
     Ok(AppIdentity {
-        display_name: APP_DISPLAY_NAME,
-        bundle_identifier: APP_BUNDLE_IDENTIFIER,
+        display_name,
+        bundle_identifier: identifier,
         app_bundle_name: APP_BUNDLE_NAME,
         dmg_file_pattern: APP_DMG_FILE_PATTERN,
         data_dir: display_path(&data_dir),
@@ -907,7 +914,7 @@ fn get_app_identity(app_handle: tauri::AppHandle) -> Result<AppIdentity, String>
         database_path: display_path(&database_path),
         settings_file: APP_SETTINGS_FILE,
         settings_path: display_path(&settings_path),
-        credential_service: AI_API_KEY_SERVICE,
+        credential_service: auth::credential_service().to_owned(),
         annotation_gist_file: github::ANNOTATION_GIST_FILE,
         update_endpoint: APP_UPDATE_ENDPOINT,
         repository_url: APP_REPOSITORY_URL,
@@ -1127,7 +1134,7 @@ fn has_ai_api_key(provider: String) -> Result<bool, String> {
         return Ok(false);
     }
     let account = ai_api_key_account(&provider)?;
-    Ok(auth::read_secure_password(AI_API_KEY_SERVICE, &account)?
+    Ok(auth::read_secure_password(auth::credential_service(), &account)?
         .as_deref()
         .is_some_and(|api_key| !api_key.trim().is_empty()))
 }
@@ -1135,7 +1142,7 @@ fn has_ai_api_key(provider: String) -> Result<bool, String> {
 #[tauri::command]
 fn save_ai_api_key(provider: String, api_key: String) -> Result<(), String> {
     let account = ai_api_key_account(&provider)?;
-    auth::save_secure_password(AI_API_KEY_SERVICE, &account, &api_key)
+    auth::save_secure_password(auth::credential_service(), &account, &api_key)
 }
 
 #[tauri::command]
@@ -1159,12 +1166,12 @@ fn save_embedding_api_key(
     };
     let serialized = serde_json::to_string(&credential)
         .map_err(|error| format!("Embedding Key 安全记录序列化失败：{error}"))?;
-    auth::save_secure_password(AI_API_KEY_SERVICE, EMBEDDING_API_KEY_ACCOUNT, &serialized)
+    auth::save_secure_password(auth::credential_service(), EMBEDDING_API_KEY_ACCOUNT, &serialized)
 }
 
 #[tauri::command]
 fn clear_embedding_api_key() -> Result<(), String> {
-    auth::delete_secure_password(AI_API_KEY_SERVICE, EMBEDDING_API_KEY_ACCOUNT)
+    auth::delete_secure_password(auth::credential_service(), EMBEDDING_API_KEY_ACCOUNT)
 }
 
 fn read_embedding_api_key(
@@ -1173,7 +1180,7 @@ fn read_embedding_api_key(
 ) -> Result<Option<String>, String> {
     let expected_scope = embedding_api_key_scope(provider, base_url)?;
     let Some(serialized) =
-        auth::read_secure_password(AI_API_KEY_SERVICE, EMBEDDING_API_KEY_ACCOUNT)?
+        auth::read_secure_password(auth::credential_service(), EMBEDDING_API_KEY_ACCOUNT)?
     else {
         return Ok(None);
     };
@@ -1208,12 +1215,12 @@ fn embedding_api_key_scope(provider: &str, base_url: Option<&str>) -> Result<Str
 
 fn read_ai_api_key_for_provider(provider: &str) -> Result<Option<String>, String> {
     let account = ai_api_key_account(provider)?;
-    auth::read_secure_password(AI_API_KEY_SERVICE, &account)
+    auth::read_secure_password(auth::credential_service(), &account)
 }
 
 fn clear_all_ai_api_keys() -> Result<(), String> {
     for account in AI_API_KEY_PROVIDER_ACCOUNTS {
-        auth::delete_secure_password(AI_API_KEY_SERVICE, account)?;
+        auth::delete_secure_password(auth::credential_service(), account)?;
     }
     Ok(())
 }
@@ -1467,7 +1474,7 @@ fn clear_ai_api_key(provider: Option<String>) -> Result<(), String> {
     {
         Some(provider) if !provider.eq_ignore_ascii_case("none") => {
             let account = ai_api_key_account(provider)?;
-            auth::delete_secure_password(AI_API_KEY_SERVICE, &account)
+            auth::delete_secure_password(auth::credential_service(), &account)
         }
         Some(_) => Ok(()),
         None => clear_all_ai_api_keys(),
@@ -6264,12 +6271,30 @@ fn import_repository_library_gist_worker(
     })
 }
 
+fn enforce_dev_data_isolation(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error::Error>> {
+    let identifier = app.config().identifier.clone();
+    auth::configure_credential_service(&identifier);
+    let data_dir = app.path().app_data_dir().map_err(|error| {
+        format!("应用数据目录解析失败，已停止启动，避免误开正式库：{error}")
+    })?;
+    if dev_guard::must_refuse_production_data_dir(cfg!(debug_assertions), &identifier, &data_dir) {
+        return Err(dev_guard::production_data_dir_refusal_message().into());
+    }
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .setup(|app| {
+            enforce_dev_data_isolation(app.handle())?;
+            if dev_guard::is_dev_identifier(&app.config().identifier) {
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.set_title("Fox Stars Lab Dev");
+                }
+            }
             start_embedding_maintenance(app.handle().clone());
             Ok(())
         })

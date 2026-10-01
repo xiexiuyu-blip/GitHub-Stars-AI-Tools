@@ -722,6 +722,11 @@ impl AppStorage {
             .path()
             .app_data_dir()
             .map_err(|error| format!("本地数据目录初始化失败：{error}"))?;
+        crate::dev_guard::refuse_if_production_data_dir(
+            cfg!(debug_assertions),
+            app_handle.config().identifier.as_str(),
+            &data_dir,
+        )?;
 
         std::fs::create_dir_all(&data_dir)
             .map_err(|error| format!("本地数据目录创建失败：{error}"))?;

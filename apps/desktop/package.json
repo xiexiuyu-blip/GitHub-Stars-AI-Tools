@@ -12,6 +12,7 @@
   },
   "scripts": {
     "dev": "vite --host 127.0.0.1 --port 1420 --strictPort",
+    "dev:app": "tauri dev --config src-tauri/tauri.dev.conf.json",
     "build": "tsc --noEmit && vite build",
     "test": "vitest run src",
     "preview": "vite preview --host 127.0.0.1",

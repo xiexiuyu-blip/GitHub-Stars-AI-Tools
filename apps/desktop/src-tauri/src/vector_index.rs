@@ -45,11 +45,16 @@ pub struct ZvecRepositoryIndex {
 
 impl ZvecRepositoryIndex {
     pub fn from_app_handle(app_handle: &tauri::AppHandle) -> Result<Self, String> {
-        let base_dir = app_handle
+        let data_dir = app_handle
             .path()
             .app_data_dir()
-            .map_err(|error| format!("无法定位向量索引目录：{error}"))?
-            .join("vector-index");
+            .map_err(|error| format!("无法定位向量索引目录：{error}"))?;
+        crate::dev_guard::refuse_if_production_data_dir(
+            cfg!(debug_assertions),
+            app_handle.config().identifier.as_str(),
+            &data_dir,
+        )?;
+        let base_dir = data_dir.join("vector-index");
         Ok(Self::new(base_dir))
     }
 

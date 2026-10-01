@@ -12,6 +12,7 @@
   "packageManager": "pnpm@11.8.0",
   "scripts": {
     "dev": "pnpm --filter @gsat/desktop dev",
+    "dev:desktop": "pnpm --filter @gsat/desktop dev:app",
     "build": "pnpm build:packages && pnpm --filter @gsat/desktop build",
     "build:packages": "tsc -b tsconfig.packages.json",
     "package:desktop": "pnpm build:packages && pnpm --filter @gsat/desktop tauri build",
