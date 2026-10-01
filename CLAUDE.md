@@ -21,12 +21,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ### 开发与启动
 
 ```bash
-# 启动完整桌面应用（推荐日常开发）
-COREPACK_HOME="$PWD/.corepack" pnpm tauri dev
+# 启动开发版桌面应用。必须用这条，会加载 dev 身份，不会打开正式库。
+COREPACK_HOME="$PWD/.corepack" pnpm dev:desktop
 
 # 仅启动前端开发服务器（无桌面能力）
 COREPACK_HOME="$PWD/.corepack" pnpm dev
 ```
+
+不要用 `pnpm tauri dev`。那条命令仍是正式 bundle id，debug 构建会被启动检查直接退出。
 
 ### 构建与检查
 
@@ -111,20 +113,29 @@ Rust 后端通过 Tauri 命令暴露给前端，主要模块：
 
 前端通过 `@tauri-apps/api` 的 `invoke` 调用这些命令。
 
-### Schema 初始化与本机数据重置
+### Schema 与迁移（S3 / S4）
 
-SQLite Schema 由 `packages/storage/migrations/` 下的 `.sql` 文件管理：
+Fox 的正式库已经有 001–018。这些文件在 `packages/storage/migrations/fox/`，一个字都不能改，也不能删库重建。
 
-- 当前本机测试阶段不做旧 SQLite 迁移
-- 后端启动时执行完整、幂等的 `001_initial_schema.sql`
-- 如果已有本机数据库缺少当前版本必需表或字段，直接删除旧数据库文件并重建
+禁止：
 
-修改 Schema 时：
+- 删除、移动、覆盖 `~/Library/Application Support/com.foxwork.fox-stars-lab/` 里的任何文件
+- `DROP` Fox 已有的表
+- 对正式目录执行 `clear_local_database` 或旧库删除
+- 用 `INSERT OR IGNORE` 写 `schema_migrations`
+- 把 upstream 的 002/003 直接套到 Fox 库上。Fox 的 002/003 已经是别的迁移
 
-1. 更新 `migrations/001_initial_schema.sql`
-2. 更新 `apps/desktop/src-tauri/src/storage.rs` 的必需表字段检测
-3. 更新 `packages/domain/src/index.ts` 中的相关类型定义
-4. 运行 `COREPACK_HOME="$PWD/.corepack" pnpm build` 和 `cargo check --manifest-path "$PWD/apps/desktop/src-tauri/Cargo.toml"` 检查
+规则：
+
+- 新迁移从 019 开始，只追加。草案在 `docs/rebuild/migrations/proposed/`
+- upstream 以后的迁移改编成新的 Fox 编号，名字加 `upstream_` 前缀
+- runner 必须核对版本号和名称都匹配。名称不符就拒绝启动
+- 每次迁移前自动备份，并做 `PRAGMA integrity_check`
+- 每个迁移单独一个事务
+- 开发只用 dev 身份：`com.foxwork.fox-stars-lab.dev`，产品名 `Fox Stars Lab Dev`，Keychain 服务名 `fox-stars-lab-dev`
+- debug 构建或 dev 身份如果解析到正式数据目录，必须立即退出
+
+P1 会把现在的 upstream `migrate()` 换成这套版本化 runner。在那之前，不要对正式库启动本仓库。
 
 ### 前端架构约定
 
@@ -155,7 +166,7 @@ SQLite Schema 由 `packages/storage/migrations/` 下的 `.sql` 文件管理：
 ### 修改前端代码
 
 - 前端代码位于 `apps/desktop/src/`
-- 修改后运行 `pnpm tauri dev` 查看效果（热重载支持）
+- 修改后运行 `COREPACK_HOME="$PWD/.corepack" pnpm dev:desktop` 查看效果。不要用 `pnpm tauri dev`。
 - TypeScript 类型错误会在 `pnpm build` 时暴露
 
 ### 修改 Rust 后端
