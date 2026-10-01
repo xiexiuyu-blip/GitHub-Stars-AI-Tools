@@ -1,5 +1,6 @@
 mod ai;
 mod auth;
+mod db;
 mod dev_guard;
 mod embedding;
 mod embedding_state;

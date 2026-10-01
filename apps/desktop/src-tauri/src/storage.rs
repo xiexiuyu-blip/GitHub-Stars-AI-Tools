@@ -1,7 +1,7 @@
 use crate::auth::GitHubUser;
 use crate::github::{GitHubRepositoryRecommendation, ReadmeDocument, StarredRepository};
 use crate::ranking_query::personal_ranking_order_clause;
-use rusqlite::{types::ValueRef, Connection, OptionalExtension};
+use rusqlite::{types::ValueRef, Connection};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
@@ -10,13 +10,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::Manager;
 
-const INITIAL_SCHEMA_SQL: &str =
-    include_str!("../../../../packages/storage/migrations/001_initial_schema.sql");
 pub(crate) const SQLITE_DATABASE_FILE_NAME: &str = "fox-stars-lab.sqlite3";
-const EMBEDDING_INVALIDATION_MIGRATION_SQL: &str =
-    include_str!("../../../../packages/storage/migrations/002_embedding_invalidation.sql");
-const EMBEDDING_DIRTY_QUEUE_MIGRATION_SQL: &str =
-    include_str!("../../../../packages/storage/migrations/003_embedding_dirty_queue.sql");
 const LEGACY_SQLITE_DATABASE_FILE_NAMES: &[&str] = &["stars-ai-tools.sqlite3"];
 const OTHER_LANGUAGE_LABEL: &str = "其他";
 const RECOMMENDATION_CATEGORY_OPTIONS: &[(&str, &str)] = &[
@@ -3845,116 +3839,11 @@ ORDER BY e.repo_id;
     }
 
     fn migrate(&self) -> Result<(), String> {
-        self.execute_sql(INITIAL_SCHEMA_SQL)?;
-        self.migrate_annotation_read_status_constraint()?;
-        // Upstream embedding SQL is still numbered 002/003 and records versions with
-        // INSERT OR IGNORE. A Fox database already uses those numbers for other migrations.
-        // Skip it there; P1 renumbers this SQL to 019/020 before applying it.
-        if self.upstream_numbered_embedding_sql_is_safe()? {
-            self.execute_sql(EMBEDDING_INVALIDATION_MIGRATION_SQL)?;
-            self.execute_sql(EMBEDDING_DIRTY_QUEUE_MIGRATION_SQL)?;
-        }
-
+        crate::db::migrations::migrate_database(&self.database_path)?;
         if !self.database_uses_current_schema()? {
             return Err("本地数据库初始化后仍缺少当前版本所需表结构".to_owned());
         }
-
         Ok(())
-    }
-
-    fn migrate_annotation_read_status_constraint(&self) -> Result<(), String> {
-        let connection = Connection::open(&self.database_path)
-            .map_err(|error| format!("SQLite 选型状态约束检查失败：{error}"))?;
-        let create_sql = connection
-            .query_row(
-                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'annotations';",
-                [],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()
-            .map_err(|error| format!("SQLite annotations 表结构读取失败：{error}"))?;
-        let Some(create_sql) = create_sql else {
-            return Ok(());
-        };
-
-        if create_sql.contains("want_to_try")
-            && create_sql.contains("deprecated")
-            && create_sql.contains("watching")
-        {
-            return Ok(());
-        }
-
-        self.execute_sql(
-            r#"
-PRAGMA foreign_keys = OFF;
-BEGIN;
-DROP TABLE IF EXISTS annotations_migrated;
-CREATE TABLE annotations_migrated (
-  repo_id TEXT PRIMARY KEY,
-  account_id TEXT NOT NULL,
-  note_md TEXT NOT NULL DEFAULT '',
-  rating INTEGER,
-  read_status TEXT NOT NULL DEFAULT 'unread' CHECK (read_status IN ('unread', 'read', 'later', 'want_to_try', 'tried', 'in_use', 'watching', 'deprecated')),
-  updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-  FOREIGN KEY (repo_id) REFERENCES repositories(id) ON DELETE CASCADE,
-  FOREIGN KEY (account_id) REFERENCES github_accounts(id) ON DELETE CASCADE
-);
-INSERT INTO annotations_migrated (repo_id, account_id, note_md, rating, read_status, updated_at)
-SELECT
-  repo_id,
-  account_id,
-  note_md,
-  rating,
-  CASE read_status
-    WHEN 'unread' THEN 'unread'
-    WHEN 'read' THEN 'read'
-    WHEN 'later' THEN 'later'
-    WHEN 'want_to_try' THEN 'want_to_try'
-    WHEN 'tried' THEN 'tried'
-    WHEN 'in_use' THEN 'in_use'
-    WHEN 'watching' THEN 'watching'
-    WHEN 'deprecated' THEN 'deprecated'
-    ELSE 'unread'
-  END,
-  updated_at
-FROM annotations;
-DROP TABLE annotations;
-ALTER TABLE annotations_migrated RENAME TO annotations;
-CREATE INDEX IF NOT EXISTS idx_annotations_account ON annotations(account_id);
-CREATE INDEX IF NOT EXISTS idx_annotations_account_repo ON annotations(account_id, repo_id);
-CREATE INDEX IF NOT EXISTS idx_annotations_read_status ON annotations(read_status);
-COMMIT;
-PRAGMA foreign_keys = ON;
-"#,
-        )
-    }
-
-    fn upstream_numbered_embedding_sql_is_safe(&self) -> Result<bool, String> {
-        let connection = Connection::open(&self.database_path)
-            .map_err(|error| format!("SQLite 迁移编号检查失败：{error}"))?;
-        let mut statement = connection
-            .prepare(
-                "SELECT version, name FROM schema_migrations WHERE version IN ('002', '003') ORDER BY version",
-            )
-            .map_err(|error| format!("SQLite 迁移编号读取失败：{error}"))?;
-        let rows = statement
-            .query_map([], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-            })
-            .map_err(|error| format!("SQLite 迁移编号遍历失败：{error}"))?;
-        for row in rows {
-            let (version, name) =
-                row.map_err(|error| format!("SQLite 迁移编号解析失败：{error}"))?;
-            let expected = match version.as_str() {
-                "002" => "embedding_invalidation",
-                "003" => "embedding_dirty_queue",
-                _ => continue,
-            };
-            if name != expected {
-                return Ok(false);
-            }
-        }
-        Ok(true)
     }
 
     fn execute_sql(&self, sql: &str) -> Result<(), String> {
@@ -3997,10 +3886,11 @@ fn sqlite_database_uses_current_schema(connection: &Connection) -> Result<bool, 
 }
 
 fn sqlite_schema_has_current_marker(connection: &Connection) -> Result<bool, String> {
+    let latest = crate::db::migrations::latest_migration();
     let count = connection
         .query_row(
-            "SELECT COUNT(*) FROM schema_migrations WHERE version = '001' AND name = 'initial_schema';",
-            [],
+            "SELECT COUNT(*) FROM schema_migrations WHERE version = ?1 AND name = ?2",
+            [latest.version, latest.name],
             |row| row.get::<_, i64>(0),
         )
         .map_err(|error| format!("SQLite schema_migrations 读取失败：{error}"))?;
