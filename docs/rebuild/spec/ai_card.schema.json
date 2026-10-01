@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "fox-stars-lab/ai-card/v1",
+  "title": "理解卡 v1（仓库 / 投喂条目 / 工具 通用）",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["one_liner_zh", "what_it_is", "form", "primary_category", "capabilities", "problems_solved", "how_to_try", "maturity", "zh_friendly", "confidence"],
+  "properties": {
+    "one_liner_zh": {"type": "string", "maxLength": 60, "description": "一句话：它是什么（给人扫一眼）"},
+    "what_it_is": {"type": "string", "maxLength": 400},
+    "form": {"enum": ["app", "cli", "skill", "mcp", "api", "library", "service", "collection", "other"]},
+    "platforms": {"type": "array", "items": {"enum": ["macos", "windows", "linux", "web", "ios", "android", "cross"]}, "maxItems": 5},
+    "primary_category": {"type": "string", "description": "taxonomy_seed.json 中的 slug"},
+    "secondary_categories": {"type": "array", "items": {"type": "string"}, "maxItems": 2},
+    "capabilities": {"type": "array", "maxItems": 6, "items": {"type": "object", "additionalProperties": false, "required": ["name_zh"], "properties": {"name_zh": {"type": "string", "maxLength": 30, "description": "动宾短语，如“把网页转成 Markdown”"}, "evidence_line": {"type": "integer"}}}},
+    "problems_solved": {"type": "array", "maxItems": 5, "items": {"type": "string", "maxLength": 60, "description": "用户视角的问题，如“想批量给小红书配图”"}},
+    "use_when": {"type": "array", "items": {"type": "string", "maxLength": 80}, "maxItems": 4},
+    "not_for": {"type": "array", "items": {"type": "string", "maxLength": 80}, "maxItems": 3},
+    "how_to_try": {"type": "string", "maxLength": 300, "description": "最短上手路径（安装命令/入口）"},
+    "integrates_with": {"type": "array", "items": {"type": "string", "maxLength": 40}, "maxItems": 8, "description": "如 Claude Code、Codex、Obsidian"},
+    "alternatives_hint": {"type": "array", "items": {"type": "string"}, "maxItems": 5, "description": "owner/repo 或产品名，后续用向量 + 图谱校验"},
+    "inspiration_for_fox": {"type": "string", "maxLength": 200, "description": "可以借鉴的思路（给 Fox 找灵感用）"},
+    "maturity": {"enum": ["experimental", "usable", "mature", "stale"]},
+    "zh_friendly": {"type": "boolean"},
+    "license": {"type": ["string", "null"]},
+    "risks": {"type": "array", "items": {"type": "string", "maxLength": 80}, "maxItems": 3},
+    "confidence": {"type": "number", "minimum": 0, "maximum": 1}
+  }
+}

@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "grounded_on": "live fox-stars-lab.sqlite3, 492 active repos, 2026-10-01; rule pass coverage 89% (53 unclassified -> added ui-design / network-proxy / general-agent)",
+  "facets": {
+    "form": ["app", "cli", "skill", "mcp", "api", "library", "service", "collection", "other"],
+    "platform": ["macos", "windows", "linux", "web", "ios", "android", "cross"],
+    "maturity": ["experimental", "usable", "mature", "stale"],
+    "zh_friendly": [true, false],
+    "my_status": ["unseen", "want_to_try", "in_use", "dropped"]
+  },
+  "categories": [
+    {"slug": "coding-agent", "name_zh": "AI 编程助手与 Agent 运行时", "rule_count": 223, "children": ["claude-code 生态", "codex 生态", "opencode/cursor/其他", "Agent 运行时与外壳(Hermes/OpenClaw)"], "rx": "claude-code|codex|opencode|cursor|windsurf|coding-agent|gemini-cli|hermes|openclaw|antigravity|vibe-coding|ai-coding|编程助手"},
+    {"slug": "skills-mcp", "name_zh": "Agent 技能 / 插件 / MCP", "rule_count": 222, "children": ["技能包与技能商店", "MCP Server", "插件与扩展"], "rx": "\\bskills?\\b|agent-skill|claude-skills|codex-skill|\\bmcp\\b|mcp-server|model-context-protocol|plugin|技能|插件"},
+    {"slug": "general-agent", "name_zh": "通用智能体与框架", "rule_count": null, "children": ["通用 Agent 产品", "Agent 开发框架"], "rx": "openmanus|agency-agents|agent framework|agent-framework|智能体"},
+    {"slug": "agent-orchestration", "name_zh": "多智能体与工作流编排", "rule_count": 112, "children": ["多智能体协作", "工作流自动化"], "rx": "multi-agent|agent-orchestration|orchestration|workflow|automation|n8n|agentic|编排|自动化"},
+    {"slug": "memory-knowledge", "name_zh": "记忆 / 知识库 / RAG / 检索", "rule_count": 88, "children": ["Agent 记忆", "个人知识库与笔记", "RAG 与语义检索"], "rx": "\\brag\\b|knowledge|memory|semantic-search|wiki|obsidian|note|embedding|vector|知识库|记忆|检索"},
+    {"slug": "content-creation", "name_zh": "内容创作与自媒体增长", "rule_count": 66, "children": ["小红书/公众号/抖音", "X 与海外社媒", "营销与增长"], "rx": "xiaohongshu|wechat|tiktok|douyin|marketing|content-creation|social|自媒体|小红书|公众号|抖音|营销"},
+    {"slug": "media-gen", "name_zh": "图像 / 视频 / 语音生成", "rule_count": 86, "children": ["图像生成与编辑", "视频生成与剪辑", "语音 TTS/ASR"], "rx": "image-generation|video-generation|text-to-video|ai-video|tts|whisper|ffmpeg|图像|视频|语音"},
+    {"slug": "office-docs", "name_zh": "办公文档与演示", "rule_count": 66, "children": ["PPT/演示", "Excel/表格", "PDF/Markdown 转换"], "rx": "pptx|ppt|slides|presentation|xlsx|docx|office|pdf|markdown|文档|演示"},
+    {"slug": "ui-design", "name_zh": "前端 UI 与设计资源", "rule_count": null, "children": ["组件库与模板", "设计与图表"], "rx": "\\bui\\b|shadcn|component|design-system|tailwind|mermaid|starter|template|设计"},
+    {"slug": "model-access", "name_zh": "模型接入 / 网关 / 本地推理", "rule_count": 54, "children": ["API 网关与中转", "本地模型推理"], "rx": "deepseek|ollama|openai-compatible|gateway|proxy|llama|vllm|inference|模型接入|本地模型"},
+    {"slug": "browser-scrape", "name_zh": "浏览器自动化与网页抓取", "rule_count": 36, "children": ["浏览器 Agent", "爬虫与抓取"], "rx": "playwright|puppeteer|browser|scrap|crawl|爬|浏览器"},
+    {"slug": "desktop-productivity", "name_zh": "桌面与效率工具", "rule_count": 91, "children": ["macOS 工具", "跨平台桌面应用"], "rx": "macos|desktop|tauri|electron|productivity|windows|menubar|效率"},
+    {"slug": "network-proxy", "name_zh": "网络 / 代理 / 下载", "rule_count": null, "children": [], "rx": "tunnel|proxy|clash|v2ray|acl4ssr|download|网盘|代理"},
+    {"slug": "dev-infra", "name_zh": "开发基础设施与命令行", "rule_count": 130, "children": ["CLI/TUI", "自托管与容器", "数据库与存储"], "rx": "\\bcli\\b|tui|terminal|docker|self-hosted|devops|sqlite|database|命令行"},
+    {"slug": "awesome-lists", "name_zh": "资源合集 / 教程 / 学习", "rule_count": 30, "children": [], "rx": "awesome|tutorial|course|guide|roadmap|合集|教程|学习|nanochat"}
+  ],
+  "rules": "规则只做第一遍候选（confidence 0.5，origin=rule）；LLM 理解卡给出 primary_category（confidence 来自模型自评），用户确认/改动后 origin=user,status=confirmed。每个条目 1 个主分类 + 最多 2 个副分类。"
+}
