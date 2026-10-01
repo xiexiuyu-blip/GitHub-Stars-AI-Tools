@@ -16,11 +16,13 @@ import type {
   GistRepositoryLibraryImportSummary,
   GitHubAuthState,
   GitHubUser,
+  GithubRecommendationPage,
   GithubRecommendationResponse,
   ReadmeFetchSummary,
   ReadingStatus,
   RepositoryAnnotationView,
   RepositoryDetailView,
+  RepositoryFilterCounts,
   RepositoryFilters,
   RepositoryListItem,
   RepositoryListPage,
@@ -41,6 +43,12 @@ const emptyRepositoryPage: RepositoryListPage = {
   totalCount: 0,
   limit: REPOSITORY_PAGE_SIZE,
   offset: 0,
+};
+
+const emptyRepositoryFilterCounts: RepositoryFilterCounts = {
+  totalCount: 0,
+  languageCounts: {},
+  tagCounts: {},
 };
 
 class ReadmePostProcessWarning extends Error {
@@ -98,6 +106,7 @@ export function useStarsWorkspace() {
   const [readmeSummary, setReadmeSummary] = useState<ReadmeFetchSummary | null>(null);
   const [repositoryPage, setRepositoryPage] = useState<RepositoryListPage | null>(null);
   const [repositoryLanguages, setRepositoryLanguages] = useState<string[]>([]);
+  const [repositoryFilterCounts, setRepositoryFilterCounts] = useState<RepositoryFilterCounts>(emptyRepositoryFilterCounts);
   const [repositoryFilters, setRepositoryFilters] = useState<RepositoryFilters>(emptyRepositoryFilters);
   const [selectedRepositoryId, setSelectedRepositoryId] = useState<string | null>(null);
   const [tags, setTags] = useState<TagItem[]>([]);
@@ -178,6 +187,18 @@ export function useStarsWorkspace() {
       unlistenAiStream?.();
     };
   }, []);
+
+  useEffect(() => {
+    if (taskProgress?.status !== 'succeeded') {
+      return undefined;
+    }
+
+    const completedProgress = taskProgress;
+    const timeoutId = window.setTimeout(() => {
+      setTaskProgress((current) => current === completedProgress ? null : current);
+    }, 6000);
+    return () => window.clearTimeout(timeoutId);
+  }, [taskProgress]);
 
   useEffect(() => {
     selectedRepositoryIdRef.current = selectedRepositoryId;
@@ -285,13 +306,15 @@ export function useStarsWorkspace() {
       const accountId = accountIdOverride ?? (authState.user ? String(authState.user.id) : undefined);
       if (!accountId) {
         setRepositoryLanguages([]);
+        setRepositoryFilterCounts(emptyRepositoryFilterCounts);
         return;
       }
-      const languages = await invoke<string[]>(
-        'list_repository_languages',
-        { request: { accountId } },
-      );
+      const [languages, counts] = await Promise.all([
+        invoke<string[]>('list_repository_languages', { request: { accountId } }),
+        invoke<RepositoryFilterCounts>('get_repository_filter_counts', { request: { accountId } }),
+      ]);
       setRepositoryLanguages(languages);
+      setRepositoryFilterCounts(counts);
     } catch (reason) {
       setError(toErrorMessage(reason));
     }
@@ -338,13 +361,19 @@ export function useStarsWorkspace() {
     }
 
     try {
-      const response = await invoke<GithubRecommendationResponse>('list_github_recommendation_candidates', {
+      const page = await invoke<GithubRecommendationPage>('list_github_recommendation_candidates', {
         request: {
           accountId,
           limit: 12,
+          offset: 0,
         },
       });
-      setGithubRecommendationResponse(response.results.length > 0 ? response : null);
+      setGithubRecommendationResponse(page.results.length > 0 ? {
+        rationaleZh: page.rationaleZh,
+        queries: page.queries,
+        searchFailures: [],
+        results: page.results,
+      } : null);
       setGithubRecommendationError(null);
     } catch (reason) {
       setGithubRecommendationError(`推荐候选恢复失败：${toErrorMessage(reason)}`);
@@ -532,6 +561,7 @@ export function useStarsWorkspace() {
       if (didClearDatabase) {
         setRepositoryPage(emptyRepositoryPage);
         setRepositoryLanguages([]);
+        setRepositoryFilterCounts(emptyRepositoryFilterCounts);
         setRepositoryFilters(emptyRepositoryFilters);
         setSelectedRepositoryId(null);
         setTags([]);
@@ -560,21 +590,19 @@ export function useStarsWorkspace() {
     }
   }
 
-  async function handleSyncStars(options?: { forceFull?: boolean; throwOnError?: boolean }) {
+  async function handleSyncStars(options?: { throwOnError?: boolean }) {
     setIsSyncingStars(true);
     setError(null);
     setAuthMessage(null);
     setTaskProgress(buildRunningTaskProgress('sync-stars', 'sync', '正在准备同步 GitHub Stars'));
 
     try {
-      const summary = await invoke<StarSyncSummary>('sync_github_stars', {
-        request: { forceFull: options?.forceFull ?? false },
-      });
+      const summary = await invoke<StarSyncSummary>('sync_github_stars');
       setSyncSummary(summary);
       setReadmeSummary(null);
       await refreshRepositoryWorkspace();
       setAuthMessage(
-        `同步完成：当前 ${summary.activeCount} 个，新增 ${summary.createdCount} 个，更新 ${summary.updatedCount} 个，移除 ${summary.removedCount} 个，扫描 ${summary.scannedCount} 个，模式 ${summary.mode === 'incremental' ? '增量' : '全量'}。`,
+        `同步完成：当前 ${summary.activeCount} 个，新增 ${summary.createdCount} 个，更新 ${summary.updatedCount} 个，移除 ${summary.removedCount} 个，扫描 ${summary.scannedCount} 个。`,
       );
     } catch (reason) {
       const message = toErrorMessage(reason);
@@ -1229,7 +1257,7 @@ export function useStarsWorkspace() {
     setIsBatchGeneratingAiDocuments(true);
     setError(null);
     setAuthMessage(null);
-    setTaskProgress(buildRunningTaskProgress('batch-generate-ai-documents', 'ai', '正在准备批量解析 README'));
+    setTaskProgress(buildRunningTaskProgress('batch-generate-ai-documents', 'ai', '正在检查需要更新的 README'));
 
     try {
       const summary = await invoke<BatchAiDocumentSummary>('batch_generate_repository_ai_documents', {
@@ -1245,9 +1273,9 @@ export function useStarsWorkspace() {
       if (selectedRepository) {
         await loadAnnotationWorkspace(selectedRepository);
       }
-      setAuthMessage(
-        `AI 批量处理完成：生成 ${summary.generatedCount} 个，跳过 ${summary.skippedCount} 个，缺少 README ${summary.missingReadmeCount} 个，失败 ${summary.failedCount} 个。`,
-      );
+      setAuthMessage(summary.totalCount === 0
+        ? 'AI 解析已是最新，无需重复处理。'
+        : `AI 增量处理完成：生成 ${summary.generatedCount} 个，跳过 ${summary.skippedCount} 个，缺少 README ${summary.missingReadmeCount} 个，失败 ${summary.failedCount} 个。`);
       const batchAiFailureMessage = buildBatchAiFailureMessage(summary);
       if (batchAiFailureMessage) {
         setError(batchAiFailureMessage);
@@ -1520,6 +1548,7 @@ export function useStarsWorkspace() {
     repositoryAiStream,
     repositoryReadmeError,
     repositoryLanguages,
+    repositoryFilterCounts,
     repositoryPage,
     repositoryStats,
     resetRepositoryFilters,
@@ -1595,7 +1624,7 @@ function buildBatchAiFailureMessage(summary: BatchAiDocumentSummary) {
   const firstFailureDetail = firstFailure
     ? `首个失败仓库：${firstFailure.fullName}，原因：${firstFailure.error}`
     : '未返回具体失败仓库。';
-  return `批量 AI 有 ${summary.failedCount} 个仓库失败，已生成的摘要和本地数据不会回滚。${firstFailureDetail} 可稍后重试、降低批量数量，或换用更大上下文模型。`;
+  return `增量 AI 有 ${summary.failedCount} 个仓库失败，已生成的摘要和本地数据不会回滚。${firstFailureDetail} 可稍后重试、降低本次数量，或换用更大上下文模型。`;
 }
 
 function buildFailedTaskProgress(

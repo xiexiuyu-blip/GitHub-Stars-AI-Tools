@@ -4,10 +4,19 @@ import { listen } from '@tauri-apps/api/event';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { Icon } from '@/components/ui/icon';
+import { CopyLinkButton } from '@/components/copy-link-button';
 import { useWorkspace } from '@/providers/workspace-provider';
 import { useAppSettings } from '@/providers/settings-provider';
-import { getAiConfigMessage, shouldFlushAiApiKey, toBackendAiRequestConfig } from '@/lib/ai-config';
+import {
+  getAiConfigMessage,
+  getEmbeddingConfigMessage,
+  shouldFlushAiApiKey,
+  shouldFlushEmbeddingApiKey,
+  toBackendAiRequestConfig,
+  toBackendEmbeddingRequestConfig,
+} from '@/lib/ai-config';
 import { compactNumber } from '@/lib/format';
+import { normalizeAiSearchResponse } from '@/lib/ai-search-response';
 import type { AiSearchResponse, AiSearchResult, AiStreamEvent, GitHubUser } from '@/types';
 
 const FALLBACK_SUGGESTIONS = [
@@ -27,7 +36,7 @@ const MAX_CONTEXT_QUERIES = 4;
 const MAX_CONTEXT_REPOSITORIES = 30;
 const MAX_SEARCH_TURNS = 8;
 const MAX_STORED_SEARCH_SESSIONS = 6;
-const SEARCH_RESULTS_PAGE_SIZE = 6;
+const SEARCH_RESULTS_PAGE_SIZE = 10;
 
 type AISearchPageProps = {
   onOpenRepository: (repository: AiSearchResult['repository']) => void;
@@ -69,6 +78,19 @@ type SearchPageRequest = {
   contextRepositoryIds: string[];
 };
 
+type SearchProgressState = {
+  stage: string;
+  status: string;
+  message: string;
+};
+
+const SEARCH_PROGRESS_STAGES = [
+  { id: 'plan', label: '理解问题', detail: '提取项目类型、能力和使用场景' },
+  { id: 'vector', label: '向量召回', detail: '从本地 Stars 中查找语义相关候选' },
+  { id: 'analyze', label: '核对证据', detail: '检查仓库名称、描述、Topics 和摘要' },
+  { id: 'answer', label: 'AI 筛选', detail: '去除噪声并确认最终推荐仓库' },
+] as const;
+
 export function AISearchPage(props: AISearchPageProps) {
   const workspace = useWorkspace();
   const settingsHook = useAppSettings();
@@ -86,6 +108,11 @@ export function AISearchPage(props: AISearchPageProps) {
   const [searchSessions, setSearchSessions] = useState<StoredSearchSession[]>([]);
   const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
   const [searchPageRequest, setSearchPageRequest] = useState<SearchPageRequest | null>(null);
+  const [searchProgress, setSearchProgress] = useState<SearchProgressState>({
+    stage: 'plan',
+    status: 'started',
+    message: '正在理解你的搜索问题',
+  });
   const activeSearchRequestIdRef = useRef<string | null>(null);
   const accountId = workspace.authState.user ? String(workspace.authState.user.id) : null;
   const hasWorkspaceFilters = Boolean(
@@ -100,9 +127,13 @@ export function AISearchPage(props: AISearchPageProps) {
       && workspace.repositoryStats.total === 0,
   );
   const aiConfigMessage = getAiConfigMessage(settingsHook.settings.ai);
+  const embeddingConfigMessage = getEmbeddingConfigMessage(settingsHook.settings.embedding);
   const aiEnhancementNotice = aiConfigMessage
-    ? `AI 增强未启用：${aiConfigMessage} 当前仍可使用本地知识搜索。`
-    : 'AI 增强已启用：搜索时会先用当前 AI 设置优化搜索问题，再在本地知识库中查找匹配仓库。';
+    ? `AI 问题理解未启用：${aiConfigMessage}`
+    : 'AI 会先理解你的问题，再基于本地检索结果给出回答。';
+  const embeddingNotice = embeddingConfigMessage
+    ? `向量检索未启用：${embeddingConfigMessage} 当前会使用严格关键词检索。`
+    : `向量检索已启用：默认返回 ${settingsHook.settings.embedding.maxResults} 个结果，最多不超过 10 个。`;
   const searchPreconditionNotice = accountId
     ? hasNoLocalStars
       ? '当前账号还没有本地 Stars 数据，请先同步 Stars 后再搜索。智能知识搜索会在本地知识库中检索仓库元数据、README、AI 摘要、标签和笔记。'
@@ -215,6 +246,13 @@ export function AISearchPage(props: AISearchPageProps) {
         return;
       }
       setMessages((current) => updateAssistantStreamMessage(current, payload));
+      if (payload.status !== 'delta') {
+        setSearchProgress({
+          stage: payload.stage,
+          status: payload.status,
+          message: payload.message ?? getSearchProgressFallbackMessage(payload.stage),
+        });
+      }
     }).then((nextUnlisten) => {
       unlisten = nextUnlisten;
     });
@@ -251,10 +289,16 @@ export function AISearchPage(props: AISearchPageProps) {
     setCurrentSessionId(nextSessionId);
     setIsWorkspaceMode(true);
     setIsSearching(true);
+    setResponse(null);
     setSearchPage(1);
     setSearchPageRequest(null);
     setErrorMessage(null);
     setSubmittedQuery(q);
+    setSearchProgress({
+      stage: 'plan',
+      status: 'started',
+      message: '正在理解你的搜索问题',
+    });
     setQuery('');
     saveHistory(q);
     const requestId = `ai-search-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -290,6 +334,14 @@ export function AISearchPage(props: AISearchPageProps) {
           aiKeyFlushError = toErrorMessage(reason);
         }
       }
+      let embeddingKeyFlushError: string | null = null;
+      if (!embeddingConfigMessage && shouldFlushEmbeddingApiKey(settingsHook.settings.embedding)) {
+        try {
+          await settingsHook.flushEmbeddingKey(settingsHook.settings.embedding.apiKey);
+        } catch (reason) {
+          embeddingKeyFlushError = toErrorMessage(reason);
+        }
+      }
       const recentTurns = shouldStartNewSession ? [] : searchTurns.slice(-MAX_CONTEXT_QUERIES);
       const contextQueries = recentTurns
         .flatMap((turn) => [turn.query, turn.aiQuery].filter(isNonEmptyString))
@@ -307,9 +359,12 @@ export function AISearchPage(props: AISearchPageProps) {
           contextRepositoryIds,
           requestId,
           ...(aiConfigMessage || aiKeyFlushError ? {} : { aiConfig: toBackendAiRequestConfig(settingsHook.settings.ai) }),
+          ...(embeddingConfigMessage || embeddingKeyFlushError
+            ? {}
+            : { embeddingConfig: toBackendEmbeddingRequestConfig(settingsHook.settings.embedding) }),
         },
       });
-      const visibleData = aiKeyFlushError
+      let visibleData = aiKeyFlushError
         ? {
             ...data,
             mode: 'local_knowledge' as const,
@@ -319,6 +374,14 @@ export function AISearchPage(props: AISearchPageProps) {
             aiError: `AI Key 保存失败，已改用本地知识搜索：${aiKeyFlushError}`,
           }
         : data;
+      if (embeddingKeyFlushError) {
+        visibleData = {
+          ...visibleData,
+          retrievalMode: 'keyword',
+          vectorApplied: false,
+          vectorError: `Embedding Key 保存失败，已改用严格关键词检索：${embeddingKeyFlushError}`,
+        };
+      }
       setResponse(visibleData);
       setSearchPageRequest({
         query: visibleData.aiQuery?.trim() || visibleData.query.trim() || q,
@@ -403,6 +466,9 @@ export function AISearchPage(props: AISearchPageProps) {
           accountId,
           contextQueries: paging.contextQueries,
           contextRepositoryIds: paging.contextRepositoryIds,
+          ...(embeddingConfigMessage
+            ? {}
+            : { embeddingConfig: toBackendEmbeddingRequestConfig(settingsHook.settings.embedding) }),
         },
       });
       setResponse((current) => current
@@ -580,7 +646,7 @@ export function AISearchPage(props: AISearchPageProps) {
   }
 
   return (
-    <div className="h-full overflow-hidden">
+    <div className="ai-search-page h-full overflow-hidden">
       {isWorkspaceMode && hasActiveSession ? (
         <div className="flex h-full flex-col gap-4 p-4 sm:p-5 lg:p-6">
           <div className="flex flex-col gap-3 border-b border-outline-variant/30 pb-3 sm:flex-row sm:items-center sm:justify-between">
@@ -593,17 +659,22 @@ export function AISearchPage(props: AISearchPageProps) {
                 <Icon name="arrow_back" size={16} />
                 返回搜索主页
               </button>
-              <h2 className="truncate text-lg font-semibold text-on-surface">
+              <h2 className="truncate text-2xl font-bold tracking-tight text-on-surface">
                 {submittedQuery || '智能知识搜索'}
               </h2>
             </div>
-            <div className="flex shrink-0 items-center gap-2 text-xs text-on-surface-variant">
-              <span className="rounded-full border border-outline-variant/30 bg-surface-container-low px-2.5 py-1">
+            <div className="flex shrink-0 items-center gap-2 text-xs">
+              <span className="rounded-full border border-primary/20 bg-primary/10 px-2.5 py-1 font-medium text-primary">
                 {response ? `${response.totalCount} 个结果` : isSearching ? '正在搜索' : '等待搜索'}
               </span>
               {response?.aiEnhanced && (
                 <span className="rounded-full border border-primary/20 bg-primary/10 px-2.5 py-1 text-primary">
                   AI 已理解问题
+                </span>
+              )}
+              {response?.vectorApplied && (
+                <span className="rounded-full border border-success/20 bg-success/10 px-2.5 py-1 text-success">
+                  向量检索
                 </span>
               )}
             </div>
@@ -626,14 +697,18 @@ export function AISearchPage(props: AISearchPageProps) {
               <div className="flex items-center justify-between gap-3 border-b border-outline-variant/25 px-4 py-3">
                 <div className="min-w-0">
                   <h3 className="flex items-center gap-2 text-base font-semibold text-on-surface">
-                    <Icon name="temp_preferences_custom" size={18} className="text-primary" />
-                    搜索结果
+                    <Icon name={isSearching ? 'manage_search' : 'temp_preferences_custom'} size={18} className="text-primary" />
+                    {isSearching ? '正在筛选' : '搜索结果'}
                   </h3>
                   <p className="mt-0.5 truncate text-xs text-on-surface-variant">
-                    {isSearching ? '正在更新匹配结果' : response ? `已找到 ${response.totalCount} 个匹配仓库` : '搜索后会在这里保留结果'}
+                    {isSearching ? searchProgress.message : response ? `已找到 ${response.totalCount} 个匹配仓库` : '搜索后会在这里保留结果'}
                   </p>
                 </div>
-                {response && (
+                {isSearching ? (
+                  <span className="shrink-0 rounded-full bg-primary/10 px-2.5 py-1 text-xs font-medium text-primary">
+                    {getSearchProgressStep(searchProgress.stage)} / {SEARCH_PROGRESS_STAGES.length}
+                  </span>
+                ) : response && (
                   <span className="shrink-0 rounded-full bg-surface-container-high px-2.5 py-1 text-xs font-medium text-on-surface-variant">
                     {results.length > 0 ? `${pageStart}-${pageEnd}` : '0'}/{response.totalCount}
                   </span>
@@ -667,6 +742,18 @@ export function AISearchPage(props: AISearchPageProps) {
                     </div>
                   )}
 
+                  {response?.vectorError && (
+                    <div className="rounded-lg border border-warning/20 bg-warning/10 px-3 py-2 text-xs text-on-surface-variant">
+                      <div className="flex items-start gap-2">
+                        <Icon name="info" size={16} className="text-warning" />
+                        <div className="min-w-0 space-y-1">
+                          <p className="font-medium text-on-surface">向量检索已降级</p>
+                          <p>{response.vectorError}</p>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
                   {response && results.length > 0 && (
                     <SearchResultOverview
                       query={submittedQuery}
@@ -682,13 +769,8 @@ export function AISearchPage(props: AISearchPageProps) {
                     </div>
                   )}
 
-                  {!errorMessage && !response && isSearching && (
-                    <div className="flex min-h-[160px] items-center justify-center rounded-lg border border-outline-variant/25 bg-surface-container-low px-4 py-10 text-sm text-on-surface-variant">
-                      <div className="inline-flex items-center justify-center gap-3">
-                        <Icon name="progress_activity" size={28} className="shrink-0 animate-spin text-primary" />
-                        <span className="leading-none">正在搜索你的 Stars 知识库</span>
-                      </div>
-                    </div>
+                  {!errorMessage && isSearching && (
+                    <SearchProcessPanel progress={searchProgress} />
                   )}
 
                   {!errorMessage && response && results.length === 0 && !isSearching && (
@@ -699,7 +781,7 @@ export function AISearchPage(props: AISearchPageProps) {
                     />
                   )}
 
-                  {results.length > 0 && (
+                  {!isSearching && results.length > 0 && (
                     <div className="space-y-3">
                       <div className={`grid grid-cols-1 gap-4 transition-opacity ${isLoadingResultsPage ? 'opacity-55' : 'opacity-100'}`}>
                         {results.map((result) => (
@@ -820,7 +902,10 @@ export function AISearchPage(props: AISearchPageProps) {
                   size={18}
                   className={`mt-0.5 shrink-0 ${aiConfigMessage ? 'text-warning' : 'text-primary'}`}
                 />
-                <p>{aiEnhancementNotice}</p>
+                <div className="space-y-1">
+                  <p>{aiEnhancementNotice}</p>
+                  <p>{embeddingNotice}</p>
+                </div>
               </div>
             )}
           </div>
@@ -1119,6 +1204,73 @@ function UserMessageAvatar({ user }: { user: GitHubUser | null }) {
   );
 }
 
+function SearchProcessPanel({ progress }: { progress: SearchProgressState }) {
+  const activeIndex = Math.max(
+    0,
+    SEARCH_PROGRESS_STAGES.findIndex((stage) => stage.id === progress.stage),
+  );
+  const isDone = progress.stage === 'done';
+
+  return (
+    <section className="px-1 py-2" role="status" aria-live="polite" aria-label="搜索处理进度">
+      <div className="overflow-hidden rounded-full bg-surface-container-high">
+        <div className="task-progress-indeterminate h-1.5 w-1/3 rounded-full bg-primary" />
+      </div>
+      <div className="mt-5 flex items-start gap-3">
+        <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
+          <Icon name="manage_search" size={21} />
+        </span>
+        <div className="min-w-0">
+          <h4 className="text-sm font-semibold text-on-surface">正在准备可信结果</h4>
+          <p className="mt-1 max-w-[58ch] text-xs leading-relaxed text-on-surface-variant">
+            {progress.message}
+          </p>
+        </div>
+      </div>
+
+      <ol className="mt-5 divide-y divide-outline-variant/25">
+        {SEARCH_PROGRESS_STAGES.map((stage, index) => {
+          const completed = isDone || index < activeIndex;
+          const active = !isDone && index === activeIndex;
+          return (
+            <li key={stage.id} className={`flex min-h-[62px] items-center gap-3 px-1 py-3 ${active ? 'bg-primary/5' : ''}`}>
+              <span className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-md ${
+                completed
+                  ? 'bg-success/10 text-success'
+                  : active
+                    ? 'bg-primary/10 text-primary'
+                    : 'bg-surface-container-high text-on-surface-variant'
+              }`}>
+                <Icon
+                  name={completed ? 'check' : active ? 'progress_activity' : 'radio_button_unchecked'}
+                  size={15}
+                  className={active ? 'animate-spin' : ''}
+                />
+              </span>
+              <span className="min-w-0 flex-1">
+                <span className={`block text-sm font-medium ${active || completed ? 'text-on-surface' : 'text-on-surface-variant'}`}>
+                  {stage.label}
+                </span>
+                <span className="mt-0.5 block text-xs leading-relaxed text-on-surface-variant">
+                  {stage.detail}
+                </span>
+              </span>
+              <span className={`shrink-0 text-[11px] font-medium ${active ? 'text-primary' : completed ? 'text-success' : 'text-on-surface-variant'}`}>
+                {completed ? '完成' : active ? '进行中' : '等待'}
+              </span>
+            </li>
+          );
+        })}
+      </ol>
+
+      <div className="mt-4 flex items-start gap-2 rounded-md bg-surface-container-low px-3 py-2.5 text-xs leading-relaxed text-on-surface-variant">
+        <Icon name="verified" size={16} className="mt-0.5 shrink-0 text-primary" />
+        <span>最终仓库将在筛选完成后一次显示，处理中不会展示尚未确认的候选。</span>
+      </div>
+    </section>
+  );
+}
+
 function SearchResultOverview({
   query,
   response,
@@ -1377,6 +1529,7 @@ function SearchResultCard({
               <Icon name={isFindingSimilar ? 'progress_activity' : 'travel_explore'} size={15} className={isFindingSimilar ? 'animate-spin' : ''} />
               {isFindingSimilar ? '发现中' : 'GitHub 相似发现'}
             </button>
+            <CopyLinkButton url={repo.htmlUrl} compact />
             {similarDiscoveryDisabledReason && (
               <p className="basis-full text-[11px] leading-relaxed text-on-surface-variant">
                 GitHub 相似发现需要先完成：{similarDiscoveryDisabledReason}
@@ -1589,6 +1742,11 @@ function failAssistantMessage(messages: SearchMessage[], requestId: string, cont
 }
 
 function buildSearchAssistantSummary(response: AiSearchResponse) {
+  if (response.answerZh?.trim()) {
+    const vectorNote = response.vectorError ? `\n\n${response.vectorError}` : '';
+    const aiNote = response.aiError ? `\n\n${response.aiError}` : '';
+    return `${response.answerZh.trim()}${vectorNote}${aiNote}`;
+  }
   const topResult = response.results[0]?.repository.fullName;
   const mode = response.aiEnhanced ? '我已结合你的问题重新理解，并在本地知识库中完成匹配。' : '我已使用本地知识库完成匹配。';
   const top = topResult ? `最佳匹配是 ${topResult}。` : '';
@@ -1705,6 +1863,10 @@ function getStreamStageLabel(stage: string | null) {
       return '理解问题';
     case 'analyze':
       return '匹配仓库';
+    case 'vector':
+      return '向量召回';
+    case 'answer':
+      return '生成回答';
     case 'explain':
       return '解释问题';
     case 'done':
@@ -1713,6 +1875,29 @@ function getStreamStageLabel(stage: string | null) {
       return '搜索失败';
     default:
       return 'AI';
+  }
+}
+
+function getSearchProgressStep(stage: string) {
+  if (stage === 'done') {
+    return SEARCH_PROGRESS_STAGES.length;
+  }
+  const index = SEARCH_PROGRESS_STAGES.findIndex((item) => item.id === stage);
+  return index >= 0 ? index + 1 : 1;
+}
+
+function getSearchProgressFallbackMessage(stage: string) {
+  switch (stage) {
+    case 'vector':
+      return '正在从本地向量索引召回候选仓库';
+    case 'analyze':
+      return '正在核对候选仓库的本地知识证据';
+    case 'answer':
+      return '正在筛选最终推荐仓库';
+    case 'done':
+      return '搜索处理完成';
+    default:
+      return '正在理解你的搜索问题';
   }
 }
 
@@ -1760,17 +1945,6 @@ function normalizeStoredSearchSessions(value: unknown): StoredSearchSession[] {
     .filter((session): session is StoredSearchSession => Boolean(session))
     .sort((left, right) => new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime())
     .slice(0, MAX_STORED_SEARCH_SESSIONS);
-}
-
-function normalizeAiSearchResponse(value: unknown): AiSearchResponse | null {
-  if (!value || typeof value !== 'object') {
-    return null;
-  }
-  const response = value as AiSearchResponse;
-  if (!Array.isArray(response.results) || typeof response.totalCount !== 'number') {
-    return null;
-  }
-  return response;
 }
 
 function normalizeSearchMessages(value: unknown): SearchMessage[] {

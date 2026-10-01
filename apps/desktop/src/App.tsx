@@ -1,22 +1,23 @@
 import { lazy, Suspense, useEffect, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { AppLayout } from '@/components/app-layout';
+import { AppUpdateDialog } from '@/components/app-update-panel';
 import { Icon } from '@/components/ui/icon';
 import { WelcomeFlow } from '@/components/welcome-flow';
 import { WorkspaceProvider, useWorkspace } from '@/providers/workspace-provider';
 import { SettingsProvider, useAppSettings } from '@/providers/settings-provider';
 import { AppUpdateProvider, useAppUpdate } from '@/providers/app-update-provider';
 import { shouldFlushAiApiKey } from '@/lib/ai-config';
-import type { RepositoryListItem } from '@/types';
+import type { AppPage, RepositoryListItem } from '@/types';
 
 const DashboardPage = lazy(() => import('@/pages/dashboard').then((module) => ({ default: module.DashboardPage })));
 const RepositoriesPage = lazy(() => import('@/pages/repositories').then((module) => ({ default: module.RepositoriesPage })));
+const DiscoverPage = lazy(() => import('@/pages/discover').then((module) => ({ default: module.DiscoverPage })));
+const RankingsPage = lazy(() => import('@/pages/rankings').then((module) => ({ default: module.RankingsPage })));
 const TagNetworkPage = lazy(() => import('@/pages/tag-network').then((module) => ({ default: module.TagNetworkPage })));
 const AISearchPage = lazy(() => import('@/pages/ai-search').then((module) => ({ default: module.AISearchPage })));
 const ProfilePage = lazy(() => import('@/pages/profile').then((module) => ({ default: module.ProfilePage })));
 const SettingsPage = lazy(() => import('@/pages/settings').then((module) => ({ default: module.SettingsPage })));
-
-type Page = 'dashboard' | 'repositories' | 'tag-network' | 'ai-search' | 'profile' | 'settings';
 
 type RepositoryNavigationState = {
   query: string;
@@ -30,10 +31,11 @@ function AppContent() {
   const workspace = useWorkspace();
   const settingsHook = useAppSettings();
   const appUpdate = useAppUpdate();
-  const [currentPage, setCurrentPage] = useState<Page>('dashboard');
+  const [currentPage, setCurrentPage] = useState<AppPage>('dashboard');
   const [showWelcome, setShowWelcome] = useState(false);
   const [hasDismissedWelcome, setHasDismissedWelcome] = useState(false);
   const [hasDismissedUpdateNotice, setHasDismissedUpdateNotice] = useState(false);
+  const [isUpdateDialogOpen, setIsUpdateDialogOpen] = useState(false);
   const [notificationOpenSignal, setNotificationOpenSignal] = useState(0);
   const [repositoryNavigation, setRepositoryNavigation] = useState<RepositoryNavigationState>({
     query: '',
@@ -52,6 +54,12 @@ function AppContent() {
   const hasTriggeredAutoSyncRef = useRef(false);
   const autoSyncAccountIdRef = useRef<string | null>(null);
   const isSyncingStarsRef = useRef(false);
+
+  useEffect(() => {
+    if (appUpdate.status === 'available') {
+      setHasDismissedUpdateNotice(false);
+    }
+  }, [appUpdate.availableVersion, appUpdate.status]);
 
   useEffect(() => {
     isSyncingStarsRef.current = workspace.isSyncingStars;
@@ -297,8 +305,18 @@ function AppContent() {
             globalLanguageFilter={repositoryNavigation.language}
             globalTagFilter={repositoryNavigation.tagId}
             globalSelectedRepositoryId={repositoryNavigation.selectedRepositoryId}
+            onOpenDiscover={() => setCurrentPage('discover')}
           />
         );
+      case 'discover':
+        return (
+          <DiscoverPage
+            onOpenRepositories={() => setCurrentPage('repositories')}
+            onOpenSettings={() => setCurrentPage('settings')}
+          />
+        );
+      case 'rankings':
+        return <RankingsPage onOpenSettings={() => setCurrentPage('settings')} />;
       case 'tag-network':
         return <TagNetworkPage onSelectTag={handleRepositoryTagSelect} />;
       case 'ai-search':
@@ -320,6 +338,16 @@ function AppContent() {
     }
   }
 
+  function handleOpenUpdateDialog() {
+    setIsUpdateDialogOpen(true);
+    setHasDismissedUpdateNotice(true);
+  }
+
+  function handleCheckForUpdate() {
+    setIsUpdateDialogOpen(true);
+    void appUpdate.checkForUpdate();
+  }
+
   return (
     <>
       <AppLayout
@@ -334,7 +362,7 @@ function AppContent() {
         isBatchGeneratingAiDocuments={workspace.isBatchGeneratingAiDocuments}
         onGenerateAiTagNetwork={() => void handleQuickGenerateAiTagNetwork()}
         isGeneratingTagNetwork={workspace.isGeneratingTagNetwork}
-        onCheckForUpdate={() => void appUpdate.checkForUpdate()}
+        onCheckForUpdate={handleCheckForUpdate}
         isCheckingUpdate={appUpdate.status === 'checking'}
         syncSummary={workspace.syncSummary}
         onGlobalSearch={handleGlobalSearch}
@@ -353,15 +381,18 @@ function AppContent() {
       {appUpdate.status === 'available' && appUpdate.availableVersion && !hasDismissedUpdateNotice && (
         <StartupUpdateNotice
           version={appUpdate.availableVersion}
-          onOpenSettings={() => setCurrentPage('settings')}
+          onOpenUpdate={handleOpenUpdateDialog}
           onDismiss={() => setHasDismissedUpdateNotice(true)}
         />
+      )}
+      {isUpdateDialogOpen && (
+        <AppUpdateDialog appUpdate={appUpdate} onClose={() => setIsUpdateDialogOpen(false)} />
       )}
     </>
   );
 }
 
-function StartupUpdateNotice(props: { version: string; onOpenSettings: () => void; onDismiss: () => void }) {
+function StartupUpdateNotice(props: { version: string; onOpenUpdate: () => void; onDismiss: () => void }) {
   return (
     <div className="fixed bottom-4 right-4 z-50 w-[calc(100vw-2rem)] max-w-sm rounded-xl border border-primary/20 bg-surface p-4 shadow-xl shadow-black/15 backdrop-blur-md">
       <div className="flex items-start gap-3">
@@ -371,15 +402,15 @@ function StartupUpdateNotice(props: { version: string; onOpenSettings: () => voi
         <div className="min-w-0 flex-1">
           <p className="font-body-md text-sm font-semibold text-on-surface">发现新版本 {props.version}</p>
           <p className="mt-1 font-body-md text-xs leading-relaxed text-on-surface-variant">
-            可在设置中查看更新说明并手动安装，当前操作不会被打断。
+            可直接查看更新说明并安装，当前操作不会被打断。
           </p>
           <div className="mt-3 flex flex-wrap gap-2">
             <button
               type="button"
-              onClick={props.onOpenSettings}
+              onClick={props.onOpenUpdate}
               className="inline-flex items-center gap-1.5 rounded-lg bg-primary px-3 py-1.5 font-body-md text-xs font-medium text-white transition-colors hover:brightness-110"
             >
-              <Icon name="settings" size={14} />
+              <Icon name="system_update_alt" size={14} />
               查看更新
             </button>
             <button
@@ -519,7 +550,7 @@ function getFailedTaskRetry(options: {
     case 'batch-generate-ai-documents': {
       const failedAiRepositoryIds = getFailureRepositoryIds(options.workspace.batchAiSummary?.failures);
       return {
-        label: failedAiRepositoryIds.length > 0 ? '重试失败 AI' : '重试批量 AI',
+        label: failedAiRepositoryIds.length > 0 ? '重试失败 AI' : '重试增量 AI',
         isRetrying: options.workspace.isBatchGeneratingAiDocuments,
         onRetry: () => {
           void (async () => {

@@ -1,6 +1,6 @@
 {
   "name": "@gsat/desktop",
-  "version": "1.1.2",
+  "version": "1.5.3",
   "private": true,
   "type": "module",
   "license": "SEE LICENSE IN LICENSE",
@@ -13,6 +13,7 @@
   "scripts": {
     "dev": "vite --host 127.0.0.1 --port 1420 --strictPort",
     "build": "tsc --noEmit && vite build",
+    "test": "vitest run src",
     "preview": "vite preview --host 127.0.0.1",
     "tauri": "tauri",
     "package:dmg:macos": "tauri build --bundles dmg || true && tauri build --bundles app && pnpm package:dmg",
@@ -57,6 +58,7 @@
     "autoprefixer": "^10.5.2",
     "postcss": "^8.5.16",
     "tailwindcss": "^4.3.2",
-    "tailwindcss-animate": "^1.0.7"
+    "tailwindcss-animate": "^1.0.7",
+    "vitest": "4.1.10"
   }
 }

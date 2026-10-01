@@ -1,7 +1,11 @@
 mod ai;
 mod auth;
+mod embedding;
+mod embedding_state;
 mod github;
+mod ranking_query;
 mod storage;
+mod vector_index;
 
 use serde::{Deserialize, Serialize};
 use std::{
@@ -28,9 +32,14 @@ const APP_REPOSITORY_URL: &str =
     "https://github.com/xiexiuyu-blip/GitHub-Stars-AI-Tools/tree/fox-product-lab";
 const APP_UPDATE_ENDPOINT: &str =
     "https://github.com/xiexiuyu-blip/GitHub-Stars-AI-Tools/releases/latest/download/latest.json";
+const EMBEDDING_RUNTIME_EVENT: &str = "embedding-runtime-status";
 const README_FETCH_CONCURRENCY: usize = 6;
 const GITHUB_RECOMMENDATION_REFERENCE_LIMIT: usize = 8;
+const AI_SEARCH_CANDIDATE_LIMIT: usize = 30;
+const AI_SEARCH_FINAL_LIMIT: usize = 10;
+const DEFAULT_OPENAI_EMBEDDING_BASE_URL: &str = "https://api.openai.com/v1";
 const AI_API_KEY_SERVICE: &str = "fox-stars-lab";
+const EMBEDDING_API_KEY_ACCOUNT: &str = "embedding-api-key:openai-compatible";
 const AI_API_KEY_PROVIDER_ACCOUNTS: &[&str] = &[
     "ai-api-key:openai",
     "ai-api-key:openai-compatible",
@@ -41,6 +50,13 @@ const GITHUB_AUTH_STATE_TOTAL_TIMEOUT_SECONDS: u64 = 25;
 const GITHUB_CONNECT_TOTAL_TIMEOUT_SECONDS: u64 = 25;
 static BACKGROUND_TASK_QUEUE: OnceLock<(Mutex<BackgroundTaskQueueState>, Condvar)> =
     OnceLock::new();
+static EMBEDDING_MAINTENANCE_WAKE: OnceLock<(Mutex<bool>, Condvar)> = OnceLock::new();
+
+#[derive(Deserialize, Serialize)]
+struct StoredEmbeddingApiCredential {
+    scope: String,
+    api_key: String,
+}
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -79,7 +95,6 @@ struct StarSyncSummary {
     updated_count: usize,
     removed_count: usize,
     scanned_count: usize,
-    mode: &'static str,
 }
 
 #[derive(Serialize)]
@@ -106,12 +121,6 @@ struct ReadmeFetchFailure {
 struct FetchReadmesRequest {
     only_missing: Option<bool>,
     repository_ids: Option<Vec<String>>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct SyncGithubStarsRequest {
-    force_full: Option<bool>,
 }
 
 #[derive(Serialize, Clone)]
@@ -375,7 +384,10 @@ where
     );
 
     match run_background_task(task_label, operation).await {
-        Ok(output) => Ok(output),
+        Ok(output) => {
+            notify_embedding_maintenance();
+            Ok(output)
+        }
         Err(error) => {
             emit_task_progress(
                 &app_handle,
@@ -401,7 +413,10 @@ where
         .await
         .map_err(|error| format!("{task_label}执行失败：{error}"))?
     {
-        Ok(output) => Ok(output),
+        Ok(output) => {
+            notify_embedding_maintenance();
+            Ok(output)
+        }
         Err(error) => {
             emit_task_progress(
                 &app_handle,
@@ -622,7 +637,65 @@ struct SearchRepositoriesRequest {
     context_queries: Option<Vec<String>>,
     context_repository_ids: Option<Vec<String>>,
     ai_config: Option<ai::AiRequestConfig>,
+    embedding_config: Option<ai::EmbeddingRequestConfig>,
     request_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TestEmbeddingConnectionRequest {
+    embedding_config: ai::EmbeddingRequestConfig,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RebuildVectorIndexRequest {
+    account_id: String,
+    embedding_config: Option<ai::EmbeddingRequestConfig>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct VectorIndexStatusRequest {
+    account_id: String,
+    embedding_config: Option<ai::EmbeddingRequestConfig>,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct EmbeddingRuntimeRequest {
+    account_id: String,
+    embedding_config: Option<ai::EmbeddingRequestConfig>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct VectorIndexBuildSummary {
+    total_count: usize,
+    indexed_count: usize,
+    restored_count: usize,
+    skipped_count: usize,
+    failed_count: usize,
+    failures: Vec<String>,
+    #[serde(skip_serializing)]
+    failed_repository_ids: Vec<String>,
+}
+
+enum VectorBuildState {
+    Restored,
+    Indexed,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct VectorIndexStatusData {
+    enabled: bool,
+    model: Option<String>,
+    dimensions: Option<usize>,
+    sqlite_count: usize,
+    zvec_count: usize,
+    ready: bool,
+    message: String,
 }
 
 #[derive(Deserialize)]
@@ -647,7 +720,9 @@ struct RecommendGithubRepositoriesRequest {
 struct ListGithubRecommendationCandidatesRequest {
     account_id: String,
     status: Option<String>,
+    category: Option<String>,
     limit: Option<usize>,
+    offset: Option<usize>,
 }
 
 #[derive(Deserialize)]
@@ -665,6 +740,58 @@ struct StarGithubRecommendationCandidateRequest {
     full_name: String,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FetchGithubRecommendationReadmeRequest {
+    account_id: String,
+    full_name: String,
+    force_refresh: Option<bool>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TranslateGithubRecommendationReadmeRequest {
+    account_id: String,
+    full_name: String,
+    ai_config: Option<ai::AiRequestConfig>,
+    force_refresh: Option<bool>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ListGithubRankingsRequest {
+    account_id: String,
+    kind: String,
+    language: Option<String>,
+    page: Option<usize>,
+    limit: Option<usize>,
+    force_refresh: Option<bool>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ListPersonalRankingsRequest {
+    account_id: String,
+    kind: String,
+    language: Option<String>,
+    page: Option<usize>,
+    limit: Option<usize>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FetchGithubRankingReadmeRequest {
+    account_id: String,
+    full_name: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StarGithubRankingRepositoryRequest {
+    account_id: String,
+    full_name: String,
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct GithubRecommendationResponse {
@@ -672,6 +799,65 @@ struct GithubRecommendationResponse {
     queries: Vec<String>,
     search_failures: Vec<GithubRecommendationSearchFailure>,
     results: Vec<github::GitHubRepositoryRecommendation>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GithubRecommendationPage {
+    rationale_zh: String,
+    queries: Vec<String>,
+    results: Vec<github::GitHubRepositoryRecommendation>,
+    total_count: usize,
+    limit: usize,
+    offset: usize,
+    categories: Vec<storage::GithubRecommendationCategoryCount>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GithubRecommendationReadme {
+    full_name: String,
+    raw_markdown: String,
+    source_path: String,
+    fetched_at: String,
+    from_cache: bool,
+    translation: Option<ai::AiReadmeTranslation>,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RankingItem {
+    full_name: String,
+    description: Option<String>,
+    language: Option<String>,
+    topics: Vec<String>,
+    html_url: String,
+    stars_count: u64,
+    forks_count: u64,
+    pushed_at: Option<String>,
+    starred_at: Option<String>,
+    is_starred: bool,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RankingPage {
+    kind: String,
+    items: Vec<RankingItem>,
+    total_count: usize,
+    page: usize,
+    limit: usize,
+    has_more: bool,
+    generated_at: String,
+    is_stale: bool,
+    from_cache: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RankingStarResult {
+    full_name: String,
+    is_starred: bool,
 }
 
 #[derive(Serialize)]
@@ -952,6 +1138,74 @@ fn save_ai_api_key(provider: String, api_key: String) -> Result<(), String> {
     auth::save_secure_password(AI_API_KEY_SERVICE, &account, &api_key)
 }
 
+#[tauri::command]
+fn has_embedding_api_key(provider: String, base_url: Option<String>) -> Result<bool, String> {
+    Ok(read_embedding_api_key(&provider, base_url.as_deref())?.is_some())
+}
+
+#[tauri::command]
+fn save_embedding_api_key(
+    provider: String,
+    base_url: Option<String>,
+    api_key: String,
+) -> Result<(), String> {
+    let normalized_api_key = api_key.trim();
+    if normalized_api_key.is_empty() {
+        return clear_embedding_api_key();
+    }
+    let credential = StoredEmbeddingApiCredential {
+        scope: embedding_api_key_scope(&provider, base_url.as_deref())?,
+        api_key: normalized_api_key.to_owned(),
+    };
+    let serialized = serde_json::to_string(&credential)
+        .map_err(|error| format!("Embedding Key 安全记录序列化失败：{error}"))?;
+    auth::save_secure_password(AI_API_KEY_SERVICE, EMBEDDING_API_KEY_ACCOUNT, &serialized)
+}
+
+#[tauri::command]
+fn clear_embedding_api_key() -> Result<(), String> {
+    auth::delete_secure_password(AI_API_KEY_SERVICE, EMBEDDING_API_KEY_ACCOUNT)
+}
+
+fn read_embedding_api_key(
+    provider: &str,
+    base_url: Option<&str>,
+) -> Result<Option<String>, String> {
+    let expected_scope = embedding_api_key_scope(provider, base_url)?;
+    let Some(serialized) =
+        auth::read_secure_password(AI_API_KEY_SERVICE, EMBEDDING_API_KEY_ACCOUNT)?
+    else {
+        return Ok(None);
+    };
+    Ok(embedding_api_key_from_serialized(
+        &serialized,
+        &expected_scope,
+    ))
+}
+
+fn embedding_api_key_from_serialized(serialized: &str, expected_scope: &str) -> Option<String> {
+    let credential = serde_json::from_str::<StoredEmbeddingApiCredential>(serialized).ok()?;
+    (credential.scope == expected_scope && !credential.api_key.trim().is_empty())
+        .then_some(credential.api_key)
+}
+
+fn embedding_api_key_scope(provider: &str, base_url: Option<&str>) -> Result<String, String> {
+    let provider = provider.trim().to_ascii_lowercase();
+    if !matches!(provider.as_str(), "openai" | "openai-compatible") {
+        return Err("Embedding Key 只能保存到 OpenAI 或 OpenAI 兼容接口配置。".to_owned());
+    }
+    let base_url = base_url
+        .map(str::trim)
+        .unwrap_or_default()
+        .trim_end_matches('/');
+    let base_url = if provider == "openai" && base_url.is_empty() {
+        DEFAULT_OPENAI_EMBEDDING_BASE_URL
+    } else {
+        base_url
+    };
+    Ok(format!("{provider}\n{base_url}"))
+}
+
 fn read_ai_api_key_for_provider(provider: &str) -> Result<Option<String>, String> {
     let account = ai_api_key_account(provider)?;
     auth::read_secure_password(AI_API_KEY_SERVICE, &account)
@@ -989,6 +1243,62 @@ fn hydrate_ai_request_config(
         }
     }
     Ok(config)
+}
+
+fn hydrate_embedding_request_config(
+    app_handle: &tauri::AppHandle,
+    config: Option<ai::EmbeddingRequestConfig>,
+) -> Result<Option<ai::EmbeddingRequestConfig>, String> {
+    let saved_config = load_saved_embedding_request_config(app_handle)?;
+    let Some(config) = config.or(saved_config) else {
+        return Ok(None);
+    };
+    if !config.enabled || config.provider.trim().eq_ignore_ascii_case("none") {
+        return Ok(None);
+    }
+    if config
+        .provider
+        .trim()
+        .eq_ignore_ascii_case(embedding::LOCAL_PROVIDER_ID)
+    {
+        let mut local = config;
+        local.api_key.clear();
+        local.base_url = None;
+        local.model = embedding::LOCAL_MODEL_ID.to_owned();
+        local.dimensions = embedding::LOCAL_DIMENSIONS;
+        local.min_score = local.min_score.clamp(0.0, 1.0);
+        local.max_results = local.max_results.clamp(1, 10);
+        return Ok(Some(local));
+    }
+    let mut config = config;
+    if config.api_key.trim().is_empty() {
+        let can_use_keyless_local = config
+            .provider
+            .trim()
+            .eq_ignore_ascii_case("openai-compatible")
+            && config.base_url.as_deref().is_some_and(is_local_ai_base_url);
+        match read_embedding_api_key(&config.provider, config.base_url.as_deref()) {
+            Ok(Some(api_key)) if !api_key.trim().is_empty() => config.api_key = api_key,
+            Ok(_) => {}
+            Err(_) if can_use_keyless_local => {}
+            Err(error) => return Err(error),
+        }
+    }
+    config.max_results = config.max_results.clamp(1, 10);
+    config.min_score = config.min_score.clamp(0.0, 1.0);
+    Ok(Some(config))
+}
+
+fn embedding_storage_model(config: &ai::EmbeddingRequestConfig) -> String {
+    embedding::profile_for_config(config).profile_id()
+}
+
+fn embedding_storage_version(config: &ai::EmbeddingRequestConfig) -> String {
+    embedding::profile_for_config(config).knowledge_text_version
+}
+
+fn embedding_display_model(config: &ai::EmbeddingRequestConfig) -> String {
+    embedding::profile_for_config(config).model
 }
 
 fn can_use_ai_without_api_key(config: &ai::AiRequestConfig) -> bool {
@@ -1036,6 +1346,20 @@ fn load_saved_ai_request_config(
     Ok(ai_request_config_from_settings_value(&settings))
 }
 
+fn load_saved_embedding_request_config(
+    app_handle: &tauri::AppHandle,
+) -> Result<Option<ai::EmbeddingRequestConfig>, String> {
+    let settings_path = app_settings_path(app_handle)?;
+    if !settings_path.exists() {
+        return Ok(None);
+    }
+    let content =
+        fs::read_to_string(settings_path).map_err(|error| format!("应用设置读取失败：{error}"))?;
+    let settings = serde_json::from_str::<serde_json::Value>(&content)
+        .map_err(|error| format!("应用设置解析失败：{error}"))?;
+    Ok(embedding_request_config_from_settings_value(&settings))
+}
+
 fn merge_ai_request_config(
     config: Option<ai::AiRequestConfig>,
     saved_config: Option<&ai::AiRequestConfig>,
@@ -1075,6 +1399,54 @@ fn ai_request_config_from_settings_value(
     })
 }
 
+fn embedding_request_config_from_settings_value(
+    settings: &serde_json::Value,
+) -> Option<ai::EmbeddingRequestConfig> {
+    let embedding = settings.get("embedding")?.as_object()?;
+    let mut provider = json_string_field(embedding, "provider")
+        .unwrap_or_else(|| embedding::LOCAL_PROVIDER_ID.to_owned());
+    let legacy_disabled = provider.eq_ignore_ascii_case("none");
+    if legacy_disabled {
+        provider = embedding::LOCAL_PROVIDER_ID.to_owned();
+    }
+    let enabled = embedding
+        .get("enabled")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+        && !legacy_disabled;
+    let dimensions = embedding
+        .get("dimensions")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|value| usize::try_from(value).ok())
+        .unwrap_or_else(|| {
+            if provider.eq_ignore_ascii_case(embedding::LOCAL_PROVIDER_ID) {
+                embedding::LOCAL_DIMENSIONS
+            } else {
+                1536
+            }
+        });
+    let min_score = embedding
+        .get("minScore")
+        .and_then(serde_json::Value::as_f64)
+        .unwrap_or(0.80) as f32;
+    let max_results = embedding
+        .get("maxResults")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|value| usize::try_from(value).ok())
+        .unwrap_or(8);
+    Some(ai::EmbeddingRequestConfig {
+        enabled,
+        provider,
+        download_source: json_string_field(embedding, "downloadSource"),
+        api_key: String::new(),
+        base_url: json_string_field(embedding, "baseUrl").filter(|value| !value.trim().is_empty()),
+        model: json_string_field(embedding, "model").unwrap_or_default(),
+        dimensions,
+        min_score,
+        max_results,
+    })
+}
+
 fn json_string_field(
     object: &serde_json::Map<String, serde_json::Value>,
     key: &str,
@@ -1100,6 +1472,825 @@ fn clear_ai_api_key(provider: Option<String>) -> Result<(), String> {
         Some(_) => Ok(()),
         None => clear_all_ai_api_keys(),
     }
+}
+
+#[tauri::command]
+async fn test_embedding_connection(
+    app_handle: tauri::AppHandle,
+    request: TestEmbeddingConnectionRequest,
+) -> Result<ai::EmbeddingTestResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let config = hydrate_embedding_request_config(&app_handle, Some(request.embedding_config))?
+            .ok_or_else(|| "向量检索尚未启用".to_owned())?;
+        let cache_dir = app_handle
+            .path()
+            .app_cache_dir()
+            .map_err(|error| format!("无法定位模型缓存目录：{error}"))?;
+        let service = embedding::EmbeddingService::new(config, cache_dir);
+        service.prepare(&|_| {})?;
+        let vector = service.embed_query("GitHub Stars 本地知识库向量检索测试")?;
+        Ok(ai::EmbeddingTestResult {
+            model: service.descriptor().model,
+            dimensions: vector.len(),
+        })
+    })
+    .await
+    .map_err(|error| format!("Embedding 配置测试执行失败：{error}"))?
+}
+
+fn local_embedding_config() -> ai::EmbeddingRequestConfig {
+    ai::EmbeddingRequestConfig {
+        enabled: true,
+        provider: embedding::LOCAL_PROVIDER_ID.to_owned(),
+        download_source: Some(embedding::LOCAL_DOWNLOAD_SOURCE_MODELSCOPE.to_owned()),
+        api_key: String::new(),
+        base_url: None,
+        model: embedding::LOCAL_MODEL_ID.to_owned(),
+        dimensions: embedding::LOCAL_DIMENSIONS,
+        min_score: 0.80,
+        max_results: 8,
+    }
+}
+
+fn emit_embedding_runtime_status(
+    app_handle: &tauri::AppHandle,
+    account_id: &str,
+    status: embedding::EmbeddingRuntimeStatus,
+) -> embedding::EmbeddingRuntimeStatus {
+    let status = embedding::set_runtime_status(account_id, status).unwrap_or_else(|_| {
+        embedding::EmbeddingRuntimeStatus::local(account_id, "error", "Embedding 状态保存失败")
+    });
+    let _ = app_handle.emit(EMBEDDING_RUNTIME_EVENT, status.clone());
+    status
+}
+
+fn read_local_runtime_status(
+    app_handle: &tauri::AppHandle,
+    account_id: &str,
+    enabled: bool,
+) -> Result<embedding::EmbeddingRuntimeStatus, String> {
+    if !enabled {
+        let cache_dir = app_handle
+            .path()
+            .app_cache_dir()
+            .map_err(|error| format!("无法定位模型缓存目录：{error}"))?;
+        let model_ready = embedding::local_model_is_ready(&cache_dir);
+        let message = if model_ready {
+            "本地模型已下载，打开开关即可启用向量检索"
+        } else {
+            "本地模型尚未下载，启用时会先确认约 490 MB 下载"
+        };
+        let mut status = embedding::EmbeddingRuntimeStatus::local(account_id, "disabled", message);
+        status.enabled = false;
+        status.model_ready = model_ready;
+        status.cache_bytes = embedding::local_cache_size(&cache_dir);
+        return Ok(status);
+    }
+    let cache_dir = app_handle
+        .path()
+        .app_cache_dir()
+        .map_err(|error| format!("无法定位模型缓存目录：{error}"))?;
+    let config = local_embedding_config();
+    let storage_model = embedding_storage_model(&config);
+    let storage_version = embedding_storage_version(&config);
+    let storage = AppStorage::from_app_handle(app_handle)?;
+    let candidates = storage.list_vector_index_candidates(
+        account_id,
+        &storage_model,
+        config.dimensions,
+        &storage_version,
+    )?;
+    let sqlite_state = storage.get_repository_embedding_state(
+        account_id,
+        &storage_model,
+        config.dimensions,
+        &storage_version,
+    )?;
+    let index = vector_index::ZvecRepositoryIndex::from_app_handle(app_handle)?;
+    let zvec_count = index
+        .count(account_id, &storage_model, config.dimensions)
+        .unwrap_or(0);
+    let zvec_fingerprint = index
+        .bucket_fingerprint(account_id, &storage_model, config.dimensions)
+        .ok()
+        .flatten();
+    let model_ready = embedding::local_model_is_ready(&cache_dir);
+    let index_ready = embedding_snapshot_is_ready(
+        candidates.len(),
+        sqlite_state.count,
+        zvec_count,
+        zvec_fingerprint.as_deref(),
+        &sqlite_state.fingerprint,
+    );
+    let ready = model_ready && index_ready;
+    let state = if !model_ready {
+        "missing"
+    } else if ready {
+        "ready"
+    } else {
+        "partial"
+    };
+    let message = match state {
+        "missing" => "本地模型尚未下载，打开开关后即可准备".to_owned(),
+        "ready" => format!("本地向量检索可用，共 {zvec_count} 个仓库"),
+        _ if sqlite_state.count == 0 => "模型已准备，尚未生成仓库向量".to_owned(),
+        _ => "本地向量索引需要增量恢复或重建".to_owned(),
+    };
+    let mut status = embedding::EmbeddingRuntimeStatus::local(account_id, state, message);
+    status.model_ready = model_ready;
+    status.cache_bytes = embedding::local_cache_size(&cache_dir);
+    status.indexed_count = zvec_count;
+    status.total_count = candidates.len();
+    Ok(status)
+}
+
+fn embedding_snapshot_is_ready(
+    candidate_count: usize,
+    sqlite_count: usize,
+    zvec_count: usize,
+    zvec_fingerprint: Option<&str>,
+    sqlite_fingerprint: &str,
+) -> bool {
+    sqlite_count == candidate_count
+        && zvec_count == sqlite_count
+        && zvec_fingerprint == Some(sqlite_fingerprint)
+}
+
+fn run_local_embedding_setup(
+    app_handle: tauri::AppHandle,
+    account_id: String,
+    download_source: Option<String>,
+) -> Result<embedding::EmbeddingRuntimeStatus, String> {
+    if account_id.trim().is_empty() {
+        return Err("缺少 GitHub 账号编号，无法建立向量索引".to_owned());
+    }
+    let download_source = embedding::LocalModelDownloadSource::parse(download_source.as_deref())?;
+    embedding::begin_runtime_job(&account_id)?;
+    let result: Result<embedding::EmbeddingRuntimeStatus, String> = (|| {
+        emit_embedding_runtime_status(
+            &app_handle,
+            &account_id,
+            embedding::EmbeddingRuntimeStatus::local(
+                &account_id,
+                "downloading",
+                format!(
+                    "正在从 {} 下载本地 Embedding 模型",
+                    download_source.display_name()
+                ),
+            ),
+        );
+        let cache_dir = app_handle
+            .path()
+            .app_cache_dir()
+            .map_err(|error| format!("无法定位模型缓存目录：{error}"))?;
+        let provider = embedding::local_provider();
+        let stage_account = account_id.clone();
+        provider.prepare_with_source(&cache_dir, download_source, &|stage| {
+            let (state, message) = match stage {
+                "verifying" => ("verifying", "正在校验本地模型工件"),
+                "loading" => ("loading", "正在加载本地 Embedding 模型"),
+                _ => (
+                    "downloading",
+                    if download_source == embedding::LocalModelDownloadSource::ModelScope {
+                        "正在从 ModelScope 国内源下载本地模型"
+                    } else {
+                        "正在从 Hugging Face 官方源下载本地模型"
+                    },
+                ),
+            };
+            emit_embedding_runtime_status(
+                &app_handle,
+                &stage_account,
+                embedding::EmbeddingRuntimeStatus::local(&stage_account, state, message),
+            );
+        })?;
+        emit_embedding_runtime_status(
+            &app_handle,
+            &account_id,
+            embedding::EmbeddingRuntimeStatus::local(
+                &account_id,
+                "indexing",
+                "正在批量生成仓库向量并写入 zvec",
+            ),
+        );
+        let storage = AppStorage::from_app_handle(&app_handle)?;
+        let claimed_dirty_ids = storage.take_dirty_embedding_repositories(&account_id, 500)?;
+        let summary = match rebuild_vector_index_worker(
+            app_handle.clone(),
+            RebuildVectorIndexRequest {
+                account_id: account_id.clone(),
+                embedding_config: Some(local_embedding_config()),
+            },
+        ) {
+            Ok(summary) => summary,
+            Err(error) => {
+                emit_task_progress(
+                    &app_handle,
+                    TaskProgressEvent::failed(
+                        "rebuild-vector-index",
+                        "vector-index",
+                        error.clone(),
+                    ),
+                );
+                storage.queue_dirty_embedding_repositories(&account_id, &claimed_dirty_ids)?;
+                return Err(error);
+            }
+        };
+        storage.queue_dirty_embedding_repositories(&account_id, &summary.failed_repository_ids)?;
+        let mut status = read_local_runtime_status(&app_handle, &account_id, true)?;
+        status.state = if summary.failed_count == 0 {
+            "ready"
+        } else {
+            "partial"
+        }
+        .to_owned();
+        status.failed_count = summary.failed_count;
+        status.can_retry = summary.failed_count > 0;
+        status.message = if summary.failed_count == 0 {
+            format!("本地向量检索已就绪，共 {} 个仓库", summary.total_count)
+        } else {
+            format!("本地向量索引部分完成，{} 个仓库失败", summary.failed_count)
+        };
+        Ok(emit_embedding_runtime_status(
+            &app_handle,
+            &account_id,
+            status,
+        ))
+    })();
+    embedding::finish_runtime_job(&account_id);
+    match result {
+        Ok(status) => Ok(status),
+        Err(error) => {
+            let mut status = read_local_runtime_status(&app_handle, &account_id, true)
+                .unwrap_or_else(|_| {
+                    embedding::EmbeddingRuntimeStatus::local(&account_id, "error", error.clone())
+                });
+            status.enabled = true;
+            status.state = "error".to_owned();
+            status.message = error.clone();
+            status.can_retry = true;
+            emit_embedding_runtime_status(&app_handle, &account_id, status);
+            Err(error)
+        }
+    }
+}
+
+fn embedding_maintenance_wake() -> &'static (Mutex<bool>, Condvar) {
+    EMBEDDING_MAINTENANCE_WAKE.get_or_init(|| (Mutex::new(false), Condvar::new()))
+}
+
+fn notify_embedding_maintenance() {
+    let (pending, notifier) = embedding_maintenance_wake();
+    if let Ok(mut pending) = pending.lock() {
+        *pending = true;
+        notifier.notify_one();
+    }
+}
+
+fn wait_for_embedding_maintenance() {
+    let (pending, notifier) = embedding_maintenance_wake();
+    let Ok(pending) = pending.lock() else {
+        thread::sleep(Duration::from_secs(30));
+        return;
+    };
+    let Ok((mut pending, _)) =
+        notifier.wait_timeout_while(pending, Duration::from_secs(30), |pending| !*pending)
+    else {
+        return;
+    };
+    *pending = false;
+}
+
+fn run_embedding_maintenance_once(app_handle: &tauri::AppHandle) -> Result<(), String> {
+    let storage = AppStorage::from_app_handle(app_handle)?;
+    let Some(config) = load_saved_embedding_request_config(app_handle)? else {
+        return Ok(());
+    };
+    if !config.enabled
+        || !config
+            .provider
+            .trim()
+            .eq_ignore_ascii_case(embedding::LOCAL_PROVIDER_ID)
+    {
+        return Ok(());
+    }
+    let Some(account) = storage.get_recent_github_account()? else {
+        return Ok(());
+    };
+    let account_id = account.id.to_string();
+    let status = read_local_runtime_status(app_handle, &account_id, true)?;
+    if matches!(
+        status.state.as_str(),
+        "missing" | "downloading" | "indexing"
+    ) {
+        return Ok(());
+    }
+    let dirty = !storage
+        .list_dirty_embedding_repositories(&account_id, 1)?
+        .is_empty();
+    if dirty || status.state == "partial" {
+        run_local_embedding_setup(
+            app_handle.clone(),
+            account_id,
+            config.download_source.clone(),
+        )?;
+    }
+    Ok(())
+}
+
+fn start_embedding_maintenance(app_handle: tauri::AppHandle) {
+    thread::spawn(move || loop {
+        let _ = run_embedding_maintenance_once(&app_handle);
+        wait_for_embedding_maintenance();
+    });
+}
+
+#[tauri::command]
+async fn get_embedding_runtime_status(
+    app_handle: tauri::AppHandle,
+    request: EmbeddingRuntimeRequest,
+) -> Result<embedding::EmbeddingRuntimeStatus, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let config = request
+            .embedding_config
+            .or(load_saved_embedding_request_config(&app_handle)?)
+            .unwrap_or_else(local_embedding_config);
+        if let Some(status) = embedding::runtime_status(&request.account_id) {
+            let requested_local = config
+                .provider
+                .trim()
+                .eq_ignore_ascii_case(embedding::LOCAL_PROVIDER_ID);
+            let status_local = status.provider == embedding::LOCAL_PROVIDER_ID;
+            let is_running = matches!(
+                status.state.as_str(),
+                "downloading" | "verifying" | "loading" | "indexing"
+            );
+            if is_running && status.enabled == config.enabled && requested_local == status_local {
+                return Ok(status);
+            }
+        }
+        if config
+            .provider
+            .trim()
+            .eq_ignore_ascii_case(embedding::LOCAL_PROVIDER_ID)
+        {
+            read_local_runtime_status(&app_handle, &request.account_id, config.enabled)
+        } else {
+            let mut status = embedding::EmbeddingRuntimeStatus::local(
+                &request.account_id,
+                if config.enabled { "ready" } else { "disabled" },
+                if config.enabled {
+                    "远程 Embedding 配置已启用"
+                } else {
+                    "向量检索尚未启用"
+                },
+            );
+            let profile = embedding::profile_for_config(&config);
+            status.enabled = config.enabled;
+            status.provider = profile.provider.clone();
+            status.model = profile.model.clone();
+            status.revision = Some(profile.revision.clone());
+            status.profile_id = profile.profile_id();
+            status.dimensions = profile.dimensions;
+            Ok(status)
+        }
+    })
+    .await
+    .map_err(|error| format!("读取 Embedding 运行状态失败：{error}"))?
+}
+
+#[tauri::command]
+async fn enable_local_embedding(
+    app_handle: tauri::AppHandle,
+    request: EmbeddingRuntimeRequest,
+) -> Result<embedding::EmbeddingRuntimeStatus, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let config = request
+            .embedding_config
+            .or(load_saved_embedding_request_config(&app_handle)?)
+            .unwrap_or_else(local_embedding_config);
+        run_local_embedding_setup(app_handle, request.account_id, config.download_source)
+    })
+    .await
+    .map_err(|error| format!("启用本地 Embedding 失败：{error}"))?
+}
+
+#[tauri::command]
+async fn retry_embedding_setup(
+    app_handle: tauri::AppHandle,
+    request: EmbeddingRuntimeRequest,
+) -> Result<embedding::EmbeddingRuntimeStatus, String> {
+    enable_local_embedding(app_handle, request).await
+}
+
+#[tauri::command]
+fn disable_embedding_runtime(
+    app_handle: tauri::AppHandle,
+    request: EmbeddingRuntimeRequest,
+) -> Result<embedding::EmbeddingRuntimeStatus, String> {
+    embedding::local_provider().unload()?;
+    let mut status = embedding::EmbeddingRuntimeStatus::local(
+        &request.account_id,
+        "disabled",
+        "向量检索已关闭，当前使用关键词检索",
+    );
+    status.enabled = false;
+    Ok(emit_embedding_runtime_status(
+        &app_handle,
+        &request.account_id,
+        status,
+    ))
+}
+
+#[tauri::command]
+fn delete_local_embedding_model(
+    app_handle: tauri::AppHandle,
+    request: EmbeddingRuntimeRequest,
+) -> Result<embedding::EmbeddingRuntimeStatus, String> {
+    if embedding::runtime_job_is_running() {
+        return Err("本地 Embedding 正在准备，请等待完成后再删除模型".to_owned());
+    }
+    let saved_enabled = load_saved_embedding_request_config(&app_handle)?.is_some_and(|config| {
+        config.enabled
+            && config
+                .provider
+                .trim()
+                .eq_ignore_ascii_case(embedding::LOCAL_PROVIDER_ID)
+    });
+    if saved_enabled
+        || embedding::runtime_status(&request.account_id).is_some_and(|status| status.enabled)
+    {
+        return Err("请先关闭向量检索，再删除本地模型".to_owned());
+    }
+    let cache_dir = app_handle
+        .path()
+        .app_cache_dir()
+        .map_err(|error| format!("无法定位模型缓存目录：{error}"))?;
+    embedding::delete_local_model(&cache_dir)?;
+    let mut status = embedding::EmbeddingRuntimeStatus::local(
+        &request.account_id,
+        "missing",
+        "本地模型已删除，重新启用时会再次下载",
+    );
+    status.enabled = false;
+    Ok(emit_embedding_runtime_status(
+        &app_handle,
+        &request.account_id,
+        status,
+    ))
+}
+
+#[tauri::command]
+async fn rebuild_vector_index(
+    app_handle: tauri::AppHandle,
+    request: RebuildVectorIndexRequest,
+) -> Result<VectorIndexBuildSummary, String> {
+    let progress_handle = app_handle.clone();
+    run_background_task_with_failure_progress(
+        "重建向量索引",
+        app_handle.clone(),
+        "rebuild-vector-index",
+        "vector-index",
+        move || rebuild_vector_index_worker(progress_handle, request),
+    )
+    .await
+}
+
+fn rebuild_vector_index_worker(
+    app_handle: tauri::AppHandle,
+    request: RebuildVectorIndexRequest,
+) -> Result<VectorIndexBuildSummary, String> {
+    let config = hydrate_embedding_request_config(&app_handle, request.embedding_config)?
+        .ok_or_else(|| "请先在设置中启用并配置向量检索".to_owned())?;
+    let cache_dir = app_handle
+        .path()
+        .app_cache_dir()
+        .map_err(|error| format!("无法定位模型缓存目录：{error}"))?;
+    let service = embedding::EmbeddingService::new(config.clone(), cache_dir);
+    service.prepare(&|_| {})?;
+    let storage_model = embedding_storage_model(&config);
+    let storage_version = embedding_storage_version(&config);
+    let storage = AppStorage::from_app_handle(&app_handle)?;
+    let candidates = storage.list_vector_index_candidates(
+        &request.account_id,
+        &storage_model,
+        config.dimensions,
+        &storage_version,
+    )?;
+    let mut stored_embeddings = storage.list_stored_repository_embeddings(
+        &request.account_id,
+        &storage_model,
+        config.dimensions,
+        &storage_version,
+    )?;
+    if stored_embeddings.is_empty()
+        && !config
+            .provider
+            .trim()
+            .eq_ignore_ascii_case(embedding::LOCAL_PROVIDER_ID)
+    {
+        let legacy_records = storage.list_stored_repository_embeddings(
+            &request.account_id,
+            &config.model,
+            config.dimensions,
+            "repository-knowledge-v1",
+        )?;
+        stored_embeddings.extend(legacy_records.into_iter().map(|mut record| {
+            record.model = storage_model.clone();
+            record
+        }));
+    }
+    let stored_by_repo = stored_embeddings
+        .into_iter()
+        .map(|record| (record.repo_id.clone(), record))
+        .collect::<HashMap<_, _>>();
+    let index = vector_index::ZvecRepositoryIndex::from_app_handle(&app_handle)?;
+    let mut built_records = Vec::with_capacity(candidates.len());
+    let mut summary = VectorIndexBuildSummary {
+        total_count: candidates.len(),
+        indexed_count: 0,
+        restored_count: 0,
+        skipped_count: 0,
+        failed_count: 0,
+        failures: Vec::new(),
+        failed_repository_ids: Vec::new(),
+    };
+    emit_task_progress(
+        &app_handle,
+        TaskProgressEvent::running(
+            "rebuild-vector-index",
+            "vector-index",
+            "embedding",
+            0,
+            summary.total_count.max(1),
+            "正在生成并恢复仓库向量",
+            None,
+        ),
+    );
+
+    let mut pending_candidates = Vec::new();
+    for candidate in candidates {
+        let can_restore = candidate.existing_source_hash.as_deref()
+            == Some(candidate.source_hash.as_str())
+            || stored_by_repo
+                .get(&candidate.repo_id)
+                .is_some_and(|record| record.source_hash == candidate.source_hash);
+        if can_restore {
+            if let Some(stored) = stored_by_repo.get(&candidate.repo_id) {
+                summary.restored_count += 1;
+                built_records.push((
+                    VectorBuildState::Restored,
+                    candidate.full_name,
+                    stored.clone(),
+                ));
+                continue;
+            }
+        }
+        pending_candidates.push(candidate);
+    }
+    emit_task_progress(
+        &app_handle,
+        TaskProgressEvent::running(
+            "rebuild-vector-index",
+            "vector-index",
+            "embedding",
+            summary.restored_count,
+            summary.total_count.max(1),
+            format!(
+                "已恢复 {} 个本地向量，准备批量生成 {} 个向量",
+                summary.restored_count,
+                pending_candidates.len()
+            ),
+            None,
+        ),
+    );
+
+    let batch_size = if config
+        .provider
+        .trim()
+        .eq_ignore_ascii_case(embedding::LOCAL_PROVIDER_ID)
+    {
+        embedding::LOCAL_BATCH_SIZE
+    } else {
+        1
+    };
+    for batch in pending_candidates.chunks(batch_size) {
+        let texts = batch
+            .iter()
+            .map(|candidate| candidate.knowledge_text.clone())
+            .collect::<Vec<_>>();
+        match service.embed_passages(&texts) {
+            Ok(vectors) if vectors.len() == batch.len() => {
+                for (candidate, vector) in batch.iter().zip(vectors) {
+                    summary.indexed_count += 1;
+                    built_records.push((
+                        VectorBuildState::Indexed,
+                        candidate.full_name.clone(),
+                        storage::StoredRepositoryEmbedding {
+                            account_id: candidate.account_id.clone(),
+                            repo_id: candidate.repo_id.clone(),
+                            source_hash: candidate.source_hash.clone(),
+                            model: storage_model.clone(),
+                            vector,
+                        },
+                    ));
+                }
+            }
+            Ok(_) => {
+                summary.failed_count += batch.len();
+                summary
+                    .failed_repository_ids
+                    .extend(batch.iter().map(|candidate| candidate.repo_id.clone()));
+                if summary.failures.len() < 20 {
+                    summary
+                        .failures
+                        .push("Embedding 批量返回数量不匹配".to_owned());
+                }
+            }
+            Err(error) => {
+                summary.failed_count += batch.len();
+                summary
+                    .failed_repository_ids
+                    .extend(batch.iter().map(|candidate| candidate.repo_id.clone()));
+                if summary.failures.len() < 20 {
+                    summary
+                        .failures
+                        .push(format!("{}：{error}", batch[0].full_name));
+                }
+            }
+        }
+        emit_task_progress(
+            &app_handle,
+            TaskProgressEvent::running(
+                "rebuild-vector-index",
+                "vector-index",
+                "embedding",
+                summary.indexed_count + summary.restored_count + summary.failed_count,
+                summary.total_count.max(1),
+                format!(
+                    "向量索引进度：新生成 {}，本地恢复 {}，失败 {}",
+                    summary.indexed_count, summary.restored_count, summary.failed_count
+                ),
+                batch.first().map(|candidate| candidate.full_name.clone()),
+            ),
+        );
+    }
+
+    let mut vector_records = built_records
+        .iter()
+        .map(|(_, _, record)| record.clone())
+        .collect::<Vec<_>>();
+    storage.replace_repository_embeddings(
+        &request.account_id,
+        &storage_model,
+        config.dimensions,
+        &storage_version,
+        &vector_records,
+    )?;
+    let current_source_hashes = storage
+        .list_vector_index_candidates(
+            &request.account_id,
+            &storage_model,
+            config.dimensions,
+            &storage_version,
+        )?
+        .into_iter()
+        .map(|candidate| (candidate.repo_id, candidate.source_hash))
+        .collect::<HashMap<_, _>>();
+    built_records.retain(|(state, full_name, record)| {
+        if current_source_hashes.get(&record.repo_id) == Some(&record.source_hash) {
+            return true;
+        }
+
+        match state {
+            VectorBuildState::Restored => summary.restored_count -= 1,
+            VectorBuildState::Indexed => summary.indexed_count -= 1,
+        }
+        summary.failed_count += 1;
+        summary.failed_repository_ids.push(record.repo_id.clone());
+        if summary.failures.len() < 20 {
+            summary
+                .failures
+                .push(format!("{full_name}：内容在重建期间发生变化，请重新重建"));
+        }
+        false
+    });
+    if built_records.len() != vector_records.len() {
+        vector_records = built_records
+            .iter()
+            .map(|(_, _, record)| record.clone())
+            .collect();
+        storage.replace_repository_embeddings(
+            &request.account_id,
+            &storage_model,
+            config.dimensions,
+            &storage_version,
+            &vector_records,
+        )?;
+    }
+    let zvec_records = vector_records
+        .into_iter()
+        .map(|record| vector_index::RepositoryVectorRecord {
+            account_id: record.account_id,
+            repo_id: record.repo_id,
+            source_hash: record.source_hash,
+            model: record.model,
+            vector: record.vector,
+        })
+        .collect::<Vec<_>>();
+    index.replace_bucket(
+        &request.account_id,
+        &storage_model,
+        config.dimensions,
+        &zvec_records,
+    )?;
+
+    emit_task_progress(
+        &app_handle,
+        if summary.failed_count == 0 {
+            TaskProgressEvent::succeeded(
+                "rebuild-vector-index",
+                "vector-index",
+                summary.total_count,
+                summary.total_count,
+                format!(
+                    "向量索引完成：新生成 {}，本地恢复 {}",
+                    summary.indexed_count, summary.restored_count
+                ),
+            )
+        } else {
+            TaskProgressEvent::partial(
+                "rebuild-vector-index",
+                "vector-index",
+                summary.total_count,
+                summary.total_count,
+                format!(
+                    "向量索引部分完成：成功 {}，失败 {}",
+                    summary.indexed_count + summary.restored_count,
+                    summary.failed_count
+                ),
+            )
+        },
+    );
+    Ok(summary)
+}
+
+#[tauri::command]
+async fn get_vector_index_status(
+    app_handle: tauri::AppHandle,
+    request: VectorIndexStatusRequest,
+) -> Result<VectorIndexStatusData, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let Some(config) = hydrate_embedding_request_config(&app_handle, request.embedding_config)?
+        else {
+            return Ok(VectorIndexStatusData {
+                enabled: false,
+                model: None,
+                dimensions: None,
+                sqlite_count: 0,
+                zvec_count: 0,
+                ready: false,
+                message: "向量检索尚未启用".to_owned(),
+            });
+        };
+        let storage_model = embedding_storage_model(&config);
+        let storage_version = embedding_storage_version(&config);
+        let storage = AppStorage::from_app_handle(&app_handle)?;
+        let sqlite_state = storage.get_repository_embedding_state(
+            &request.account_id,
+            &storage_model,
+            config.dimensions,
+            &storage_version,
+        )?;
+        let index = vector_index::ZvecRepositoryIndex::from_app_handle(&app_handle)?;
+        let zvec_count = index
+            .count(&request.account_id, &storage_model, config.dimensions)
+            .unwrap_or(0);
+        let zvec_fingerprint = index
+            .bucket_fingerprint(&request.account_id, &storage_model, config.dimensions)
+            .ok()
+            .flatten();
+        let ready = sqlite_state.count > 0
+            && zvec_count == sqlite_state.count
+            && zvec_fingerprint.as_deref() == Some(sqlite_state.fingerprint.as_str());
+        Ok(VectorIndexStatusData {
+            enabled: true,
+            model: Some(embedding_display_model(&config)),
+            dimensions: Some(config.dimensions),
+            sqlite_count: sqlite_state.count,
+            zvec_count,
+            ready,
+            message: if ready {
+                format!("向量索引可用，共 {zvec_count} 个仓库")
+            } else if sqlite_state.count > 0 {
+                "zvec 索引需要从 SQLite 恢复，请执行重建".to_owned()
+            } else {
+                "尚未生成仓库向量，请执行重建".to_owned()
+            },
+        })
+    })
+    .await
+    .map_err(|error| format!("读取向量索引状态失败：{error}"))?
 }
 
 #[tauri::command]
@@ -1144,7 +2335,17 @@ fn clear_app_settings(app_handle: tauri::AppHandle) -> Result<(), String> {
 
 #[tauri::command]
 fn clear_local_database(app_handle: tauri::AppHandle) -> Result<(), String> {
-    AppStorage::clear_local_database(&app_handle)
+    let database_result = AppStorage::clear_local_database(&app_handle);
+    let vector_result = vector_index::ZvecRepositoryIndex::from_app_handle(&app_handle)
+        .and_then(|index| index.reset_all());
+    match (database_result, vector_result) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(database_error), Ok(())) => Err(database_error),
+        (Ok(()), Err(vector_error)) => Err(vector_error),
+        (Err(database_error), Err(vector_error)) => Err(format!(
+            "本地数据库清理失败：{database_error}；向量索引清理失败：{vector_error}"
+        )),
+    }
 }
 
 fn app_settings_path(app_handle: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
@@ -1858,28 +3059,19 @@ fn runtime_check_skipped_with_action(
 }
 
 #[tauri::command]
-async fn sync_github_stars(
-    app_handle: tauri::AppHandle,
-    request: Option<SyncGithubStarsRequest>,
-) -> Result<StarSyncSummary, String> {
-    let force_full = request
-        .and_then(|request| request.force_full)
-        .unwrap_or(false);
+async fn sync_github_stars(app_handle: tauri::AppHandle) -> Result<StarSyncSummary, String> {
     let progress_handle = app_handle.clone();
     run_background_task_with_failure_progress(
         "Stars 同步",
         progress_handle,
         "sync-stars",
         "sync",
-        move || sync_github_stars_worker(app_handle, force_full),
+        move || sync_github_stars_worker(app_handle),
     )
     .await
 }
 
-fn sync_github_stars_worker(
-    app_handle: tauri::AppHandle,
-    force_full: bool,
-) -> Result<StarSyncSummary, String> {
+fn sync_github_stars_worker(app_handle: tauri::AppHandle) -> Result<StarSyncSummary, String> {
     emit_task_progress(
         &app_handle,
         TaskProgressEvent::running(
@@ -1916,109 +3108,54 @@ fn sync_github_stars_worker(
             None,
         ),
     );
-    let mut repositories = Vec::new();
-    let mut page = 1_u32;
-    let has_existing_active_repositories = !force_full
-        && existing_states
-            .values()
-            .any(|sync_status| sync_status == "active");
-    let mut completed_full_scan = true;
-
-    loop {
+    let mut scanned_count = 0_usize;
+    let repositories = collect_authoritative_star_pages(github::starred_page_size(), |page| {
         let page_items = github::fetch_starred_repositories_page(&token, &account_id, page)?;
         let page_len = page_items.len();
-        let page_repository_ids = page_items
-            .iter()
-            .map(|repository| repository.id.clone())
-            .collect::<Vec<_>>();
-        let page_contains_only_known_active = should_stop_incremental_on_page(
-            has_existing_active_repositories,
-            &existing_states,
-            &page_repository_ids,
-        );
-        storage.upsert_repositories(&page_items)?;
-        repositories.extend(page_items);
-        let estimated_total =
-            if page_contains_only_known_active || page_len < github::starred_page_size() {
-                repositories.len()
-            } else {
-                repositories.len() + github::starred_page_size()
-            };
+        scanned_count += page_len;
+        let estimated_total = if page_len < github::starred_page_size() {
+            scanned_count
+        } else {
+            scanned_count + github::starred_page_size()
+        };
         emit_task_progress(
             &app_handle,
             TaskProgressEvent::running(
                 "sync-stars",
                 "sync",
-                "save",
-                repositories.len(),
+                "fetch",
+                scanned_count,
                 estimated_total,
-                format!(
-                    "正在同步第 {page} 页，已写入 {} 个 Stars",
-                    repositories.len()
-                ),
+                format!("正在读取第 {page} 页，已扫描 {scanned_count} 个 Stars"),
                 None,
             ),
         );
-
-        if page_contains_only_known_active {
-            completed_full_scan = false;
-            emit_task_progress(
-                &app_handle,
-                TaskProgressEvent::running(
-                    "sync-stars",
-                    "sync",
-                    "incremental-stop",
-                    repositories.len(),
-                    repositories.len(),
-                    "已遇到本地已同步的 Stars 页面，本次增量同步提前完成",
-                    None,
-                ),
-            );
-            break;
-        }
-
-        if page_len < github::starred_page_size() {
-            break;
-        }
-
-        page += 1;
-    }
+        Ok(page_items)
+    })?;
+    storage.upsert_repositories(&repositories)?;
 
     let incoming_ids = repositories
         .iter()
         .map(|repository| repository.id.as_str())
         .collect::<HashSet<_>>();
-    let created_count = repositories
+    let created_count = incoming_ids
         .iter()
-        .filter(|repository| !existing_states.contains_key(repository.id.as_str()))
+        .filter(|repository_id| !existing_states.contains_key(**repository_id))
         .count();
-    let updated_count = repositories.len().saturating_sub(created_count);
-    let removed_ids =
-        compute_removed_repository_ids(completed_full_scan, &existing_states, &incoming_ids);
-    if completed_full_scan {
-        storage.mark_repositories_removed(&account_id, &removed_ids)?;
-    }
+    let updated_count = incoming_ids.len().saturating_sub(created_count);
+    let removed_ids = compute_removed_repository_ids(&existing_states, &incoming_ids);
+    storage.mark_repositories_removed(&account_id, &removed_ids)?;
     let removed_count = removed_ids.len();
     let active_count = storage.count_active_repositories_for_account(&account_id)?;
-    let sync_mode = if completed_full_scan {
-        "full"
-    } else {
-        "incremental"
-    };
     emit_task_progress(
         &app_handle,
         TaskProgressEvent::succeeded(
             "sync-stars",
             "sync",
-            repositories.len(),
-            repositories.len(),
+            incoming_ids.len(),
+            incoming_ids.len(),
             format!(
-                "同步完成：当前 {active_count} 个，新增 {created_count} 个，模式 {}",
-                if completed_full_scan {
-                    "全量"
-                } else {
-                    "增量"
-                }
+                "同步完成：当前 {active_count} 个，新增 {created_count} 个，移除 {removed_count} 个"
             ),
         ),
     );
@@ -2029,39 +3166,48 @@ fn sync_github_stars_worker(
         created_count,
         updated_count,
         removed_count,
-        scanned_count: repositories.len(),
-        mode: sync_mode,
+        scanned_count: incoming_ids.len(),
     })
 }
 
-fn should_stop_incremental_on_page(
-    has_existing_active_repositories: bool,
-    existing_states: &HashMap<String, String>,
-    page_repository_ids: &[String],
-) -> bool {
-    has_existing_active_repositories
-        && !page_repository_ids.is_empty()
-        && page_repository_ids.iter().all(|repository_id| {
-            existing_states
-                .get(repository_id.as_str())
-                .is_some_and(|sync_status| sync_status == "active")
-        })
+fn collect_authoritative_star_pages<T, FetchPage>(
+    page_size: usize,
+    mut fetch_page: FetchPage,
+) -> Result<Vec<T>, String>
+where
+    FetchPage: FnMut(u32) -> Result<Vec<T>, String>,
+{
+    if page_size == 0 {
+        return Err("GitHub Stars 分页大小必须大于 0".to_owned());
+    }
+
+    let mut repositories = Vec::new();
+    let mut page = 1_u32;
+    loop {
+        let page_items = fetch_page(page)?;
+        let page_len = page_items.len();
+        repositories.extend(page_items);
+        if page_len < page_size {
+            return Ok(repositories);
+        }
+        page = page
+            .checked_add(1)
+            .ok_or_else(|| "GitHub Stars 分页数量超出支持范围".to_owned())?;
+    }
 }
 
 fn compute_removed_repository_ids(
-    completed_full_scan: bool,
     existing_states: &HashMap<String, String>,
     incoming_ids: &HashSet<&str>,
 ) -> Vec<String> {
-    if !completed_full_scan {
-        return Vec::new();
-    }
-
     existing_states
         .iter()
         .filter_map(|(repository_id, sync_status)| {
-            (sync_status == "active" && !incoming_ids.contains(repository_id.as_str()))
-                .then(|| repository_id.to_owned())
+            if sync_status == "active" && !incoming_ids.contains(repository_id.as_str()) {
+                Some(repository_id.to_owned())
+            } else {
+                None
+            }
         })
         .collect()
 }
@@ -2456,6 +3602,16 @@ fn list_repository_languages(
 }
 
 #[tauri::command]
+fn get_repository_filter_counts(
+    app_handle: tauri::AppHandle,
+    request: ListTagsRequest,
+) -> Result<storage::RepositoryFilterCounts, String> {
+    let storage = AppStorage::from_app_handle(&app_handle)?;
+
+    storage.get_repository_filter_counts(&request.account_id)
+}
+
+#[tauri::command]
 fn get_repository_detail(
     app_handle: tauri::AppHandle,
     request: RepositoryDetailRequest,
@@ -2492,19 +3648,23 @@ fn update_tag(
 ) -> Result<storage::TagItem, String> {
     let storage = AppStorage::from_app_handle(&app_handle)?;
 
-    storage.update_tag(
+    let tag = storage.update_tag(
         &request.account_id,
         &request.tag_id,
         &request.name,
         request.color.as_deref(),
-    )
+    )?;
+    notify_embedding_maintenance();
+    Ok(tag)
 }
 
 #[tauri::command]
 fn delete_tag(app_handle: tauri::AppHandle, request: DeleteTagRequest) -> Result<(), String> {
     let storage = AppStorage::from_app_handle(&app_handle)?;
 
-    storage.delete_tag(&request.account_id, &request.tag_id)
+    storage.delete_tag(&request.account_id, &request.tag_id)?;
+    notify_embedding_maintenance();
+    Ok(())
 }
 
 #[tauri::command]
@@ -2539,11 +3699,13 @@ fn set_repository_tags(
 ) -> Result<storage::RepositoryAnnotationView, String> {
     let storage = AppStorage::from_app_handle(&app_handle)?;
 
-    storage.set_repository_tags(
+    let annotation = storage.set_repository_tags(
         &request.repository_id,
         &request.account_id,
         &request.tag_ids,
-    )
+    )?;
+    notify_embedding_maintenance();
+    Ok(annotation)
 }
 
 #[tauri::command]
@@ -2997,18 +4159,18 @@ fn generate_repository_ai_document_worker(
         },
     )?;
 
-    storage.save_repository_ai_document(
-        &source.id,
-        &document.summary_zh,
-        document.readme_zh.as_deref(),
-        &document.keywords,
-        &document.suggested_tags,
-        &document.model,
-        &document.prompt_version,
-        &readme.content_hash,
-        document.input_tokens,
-        document.output_tokens,
-    )?;
+    storage.save_repository_ai_document(storage::RepositoryAiDocumentInput {
+        repository_id: &source.id,
+        summary_zh: &document.summary_zh,
+        readme_zh: document.readme_zh.as_deref(),
+        keywords: &document.keywords,
+        suggested_tags: &document.suggested_tags,
+        model: &document.model,
+        prompt_version: &document.prompt_version,
+        source_hash: &readme.content_hash,
+        input_tokens: document.input_tokens,
+        output_tokens: document.output_tokens,
+    })?;
     emit_task_progress(
         &app_handle,
         TaskProgressEvent::succeeded(
@@ -3038,7 +4200,7 @@ async fn batch_generate_repository_ai_documents(
 ) -> Result<BatchAiDocumentSummary, String> {
     let progress_handle = app_handle.clone();
     run_background_task_with_failure_progress(
-        "批量 AI 摘要生成",
+        "增量 AI 摘要生成",
         progress_handle,
         "batch-generate-ai-documents",
         "ai",
@@ -3062,15 +4224,19 @@ fn batch_generate_repository_ai_documents_worker(
         repository_ids,
     } = request;
     let ai_config = hydrate_ai_request_config(&app_handle, ai_config)?;
+    let only_missing = only_missing.unwrap_or(true);
     let repositories = filter_repositories_by_ids(
-        storage.list_active_repositories(Some(&account_id))?,
+        if only_missing {
+            storage.list_repositories_requiring_ai_document(&account_id)?
+        } else {
+            storage.list_active_repositories(Some(&account_id))?
+        },
         repository_ids,
     );
     let processing_limit = limit.map(|value| value.clamp(1, 1000));
     let progress_total = processing_limit
         .map(|limit| limit.min(repositories.len()))
         .unwrap_or(repositories.len());
-    let only_missing = only_missing.unwrap_or(true);
     let mut scanned_count = 0_usize;
     let mut generated_count = 0_usize;
     let mut skipped_count = 0_usize;
@@ -3085,7 +4251,9 @@ fn batch_generate_repository_ai_documents_worker(
             "batch",
             0,
             progress_total,
-            if processing_limit.is_some() {
+            if only_missing {
+                "正在增量解析缺失或内容已更新的 README"
+            } else if processing_limit.is_some() {
                 "正在按本次上限批量解析 README"
             } else {
                 "正在批量解析全部 Stars 的 README"
@@ -3188,18 +4356,18 @@ fn batch_generate_repository_ai_documents_worker(
                 source.description.as_deref(),
                 &readme.raw_markdown,
             )?;
-            storage.save_repository_ai_document(
-                &source.id,
-                &document.summary_zh,
-                document.readme_zh.as_deref(),
-                &document.keywords,
-                &document.suggested_tags,
-                &document.model,
-                &document.prompt_version,
-                &readme.content_hash,
-                document.input_tokens,
-                document.output_tokens,
-            )?;
+            storage.save_repository_ai_document(storage::RepositoryAiDocumentInput {
+                repository_id: &source.id,
+                summary_zh: &document.summary_zh,
+                readme_zh: document.readme_zh.as_deref(),
+                keywords: &document.keywords,
+                suggested_tags: &document.suggested_tags,
+                model: &document.model,
+                prompt_version: &document.prompt_version,
+                source_hash: &readme.content_hash,
+                input_tokens: document.input_tokens,
+                output_tokens: document.output_tokens,
+            })?;
             Ok(BatchItemOutcome::Generated)
         })();
 
@@ -3227,10 +4395,14 @@ fn batch_generate_repository_ai_documents_worker(
             ),
         );
     }
-    let completion_message = format!(
-        "批量 AI 完成：生成 {generated_count} 个，跳过 {skipped_count} 个，缺少 README {missing_readme_count} 个，失败 {} 个",
-        failures.len(),
-    );
+    let completion_message = if only_missing && progress_total == 0 {
+        "AI 解析已是最新，无需重复处理。".to_owned()
+    } else {
+        format!(
+            "增量 AI 完成：生成 {generated_count} 个，跳过 {skipped_count} 个，缺少 README {missing_readme_count} 个，失败 {} 个",
+            failures.len(),
+        )
+    };
     let completion_progress = if failures.is_empty() {
         TaskProgressEvent::succeeded(
             "batch-generate-ai-documents",
@@ -3389,20 +4561,39 @@ fn search_repositories_worker(
 ) -> Result<storage::AiSearchResponseData, String> {
     let storage = AppStorage::from_app_handle(&app_handle)?;
     let original_query = request.query.trim().to_owned();
+    if let Some(answer) = conversational_query_reply(&original_query) {
+        return Ok(storage::AiSearchResponseData {
+            query: original_query,
+            mode: "conversation".to_owned(),
+            results: Vec::new(),
+            total_count: 0,
+            context_queries_used: Vec::new(),
+            context_applied: false,
+            ai_enhanced: false,
+            ai_query: None,
+            ai_rationale_zh: Some("当前内容是对话问候，不应触发仓库召回。".to_owned()),
+            ai_error: None,
+            answer_zh: Some(answer),
+            retrieval_mode: "none".to_owned(),
+            vector_applied: false,
+            vector_error: None,
+        });
+    }
     let request_id = request
         .request_id
         .clone()
         .unwrap_or_else(|| format!("ai-search-{}", original_query));
     let context_queries = request.context_queries.unwrap_or_default();
     let context_repository_ids = request.context_repository_ids.unwrap_or_default();
-    let progress_total = if request.ai_config.is_some() { 3 } else { 2 };
+    let ai_config = request.ai_config.clone();
+    let progress_total = if ai_config.is_some() { 4 } else { 3 };
     emit_ai_stream_status(
         &app_handle,
         &request_id,
         "ai-search",
         "plan",
         "started",
-        if request.ai_config.is_some() {
+        if ai_config.is_some() {
             "正在理解你的搜索问题"
         } else {
             "正在准备本地知识搜索"
@@ -3417,7 +4608,7 @@ fn search_repositories_worker(
             "plan",
             0,
             progress_total,
-            if request.ai_config.is_some() {
+            if ai_config.is_some() {
                 "正在理解搜索问题并准备 AI 增强"
             } else {
                 "正在准备本地知识搜索"
@@ -3430,9 +4621,70 @@ fn search_repositories_worker(
         &request_id,
         original_query.clone(),
         &context_queries,
-        request.ai_config,
+        ai_config.clone(),
     )?;
+    let should_ai_filter = metadata.ai_enhanced && ai_config.is_some();
+    let fallback_metadata = metadata.clone();
 
+    emit_ai_stream_status(
+        &app_handle,
+        &request_id,
+        "ai-search",
+        "vector",
+        "started",
+        "正在从本地向量索引召回候选仓库",
+        None,
+    );
+    emit_task_progress(
+        &app_handle,
+        TaskProgressEvent::running(
+            "ai-search",
+            "ai",
+            "vector",
+            progress_total.saturating_sub(2),
+            progress_total,
+            "正在执行向量召回与严格相关度过滤",
+            Some(original_query.clone()),
+        ),
+    );
+    let vector_search = match build_vector_search_scores(
+        &app_handle,
+        &storage,
+        &request.account_id,
+        &effective_query,
+        request.embedding_config,
+        should_ai_filter,
+    ) {
+        Ok(result) => result,
+        Err(error) => VectorSearchOutcome {
+            scores: HashMap::new(),
+            strict_scores: HashMap::new(),
+            error: Some(format!("向量检索已降级：{error}")),
+            max_results: 8,
+        },
+    };
+    emit_ai_stream_status(
+        &app_handle,
+        &request_id,
+        "ai-search",
+        "vector",
+        "finished",
+        format!(
+            "向量召回完成，获得 {} 个候选仓库",
+            vector_search.scores.len()
+        ),
+        None,
+    );
+
+    emit_ai_stream_status(
+        &app_handle,
+        &request_id,
+        "ai-search",
+        "analyze",
+        "started",
+        "正在核对仓库名称、描述、Topics 和本地摘要",
+        None,
+    );
     emit_task_progress(
         &app_handle,
         TaskProgressEvent::running(
@@ -3441,28 +4693,133 @@ fn search_repositories_worker(
             "analyze",
             progress_total.saturating_sub(1),
             progress_total,
-            "正在匹配本地 Stars、README、AI 摘要、标签和笔记",
+            "正在融合向量、Stars 元数据、README、AI 摘要、标签和笔记",
             Some(original_query.clone()),
         ),
     );
-    let response = storage.search_repositories(
-        &effective_query,
-        &context_queries,
-        &context_repository_ids,
-        request.limit.unwrap_or(20),
-        request.offset.unwrap_or(0),
-        Some(&request.account_id),
-        Some(metadata),
-    )?;
+    let search_limit = if should_ai_filter {
+        AI_SEARCH_CANDIDATE_LIMIT
+    } else {
+        request.limit.unwrap_or(vector_search.max_results)
+    };
+    let search_max_results = if should_ai_filter {
+        AI_SEARCH_CANDIDATE_LIMIT
+    } else {
+        vector_search.max_results
+    };
+    let mut response = storage.search_repositories(storage::RepositorySearchOptions {
+        query: &effective_query,
+        context_queries: &context_queries,
+        context_repository_ids: &context_repository_ids,
+        limit: search_limit,
+        offset: if should_ai_filter {
+            0
+        } else {
+            request.offset.unwrap_or(0)
+        },
+        max_results: search_max_results,
+        candidate_limit: should_ai_filter.then_some(AI_SEARCH_CANDIDATE_LIMIT),
+        account_id: Some(&request.account_id),
+        vector_scores: &vector_search.scores,
+        vector_error: vector_search.error.clone(),
+        metadata: Some(metadata),
+    })?;
     emit_ai_stream_status(
         &app_handle,
         &request_id,
         "ai-search",
         "analyze",
         "finished",
-        format!("本地知识库已完成匹配，找到 {} 个仓库", response.total_count),
+        format!(
+            "本地证据核对完成，保留 {} 个待筛选候选",
+            response.total_count
+        ),
         None,
     );
+    let mut ai_answer_applied = false;
+    let mut ai_answer_error = None;
+    if response.ai_enhanced && !response.results.is_empty() {
+        if let Some(config) = ai_config {
+            emit_ai_stream_status(
+                &app_handle,
+                &request_id,
+                "ai-search",
+                "answer",
+                "started",
+                "正在根据检索结果生成回答",
+                None,
+            );
+            let evidence = response
+                .results
+                .iter()
+                .map(|result| ai::AiSearchEvidence {
+                    repository_full_name: result.repository.full_name.clone(),
+                    description: result.repository.description.clone(),
+                    topics: result.repository.topics.clone(),
+                    summary_zh: result.ai_summary.clone(),
+                })
+                .collect::<Vec<_>>();
+            match hydrate_ai_request_config(&app_handle, Some(config))
+                .and_then(|config| ai::answer_search_results(&config, &original_query, &evidence))
+            {
+                Ok(answer) => {
+                    retain_ai_selected_search_results(&mut response, &answer.repository_full_names);
+                    response.answer_zh = Some(answer.answer_zh);
+                    ai_answer_applied = true;
+                    emit_ai_stream_status(
+                        &app_handle,
+                        &request_id,
+                        "ai-search",
+                        "answer",
+                        "finished",
+                        "已根据检索结果生成回答",
+                        None,
+                    );
+                }
+                Err(error) => {
+                    eprintln!("AI 搜索筛选失败，已降级到本地证据：{error}");
+                    let answer_error =
+                        "AI 筛选未完成，已改用本地证据生成结果。可在设置中测试 AI 连接后重试。"
+                            .to_owned();
+                    ai_answer_error = Some(answer_error.clone());
+                    emit_ai_stream_status(
+                        &app_handle,
+                        &request_id,
+                        "ai-search",
+                        "answer",
+                        "fallback",
+                        answer_error,
+                        None,
+                    );
+                }
+            }
+        }
+    }
+    if !ai_answer_applied {
+        if should_ai_filter && ai_answer_error.is_some() {
+            response = storage.search_repositories(storage::RepositorySearchOptions {
+                query: &effective_query,
+                context_queries: &context_queries,
+                context_repository_ids: &context_repository_ids,
+                limit: request.limit.unwrap_or(vector_search.max_results),
+                offset: request.offset.unwrap_or(0),
+                max_results: vector_search.max_results,
+                candidate_limit: None,
+                account_id: Some(&request.account_id),
+                vector_scores: &vector_search.strict_scores,
+                vector_error: vector_search.error.clone(),
+                metadata: Some(fallback_metadata),
+            })?;
+        }
+        if let Some(answer_error) = ai_answer_error {
+            response.ai_error = Some(match response.ai_error.take() {
+                Some(existing) => format!("{existing}；{answer_error}"),
+                None => answer_error,
+            });
+        }
+        limit_search_results(&mut response, AI_SEARCH_FINAL_LIMIT);
+        response.answer_zh = Some(build_local_search_answer(&original_query, &response));
+    }
     emit_task_progress(
         &app_handle,
         TaskProgressEvent::succeeded(
@@ -3485,6 +4842,264 @@ fn search_repositories_worker(
     Ok(response)
 }
 
+fn retain_ai_selected_search_results(
+    response: &mut storage::AiSearchResponseData,
+    repository_full_names: &[String],
+) {
+    let selected_order = repository_full_names
+        .iter()
+        .enumerate()
+        .map(|(index, name)| (name.to_ascii_lowercase(), index))
+        .collect::<HashMap<_, _>>();
+    response.results.retain(|result| {
+        selected_order.contains_key(&result.repository.full_name.to_ascii_lowercase())
+    });
+    response.results.sort_by_key(|result| {
+        selected_order
+            .get(&result.repository.full_name.to_ascii_lowercase())
+            .copied()
+            .unwrap_or(usize::MAX)
+    });
+    refresh_search_response_result_state(response);
+}
+
+fn limit_search_results(response: &mut storage::AiSearchResponseData, limit: usize) {
+    response.results.truncate(limit);
+    refresh_search_response_result_state(response);
+}
+
+fn refresh_search_response_result_state(response: &mut storage::AiSearchResponseData) {
+    response.total_count = response.results.len();
+    response.context_applied = response.results.iter().any(|result| {
+        result
+            .reasons
+            .iter()
+            .any(|reason| reason.label.starts_with("上下文") || reason.label == "上一轮结果命中")
+    });
+    response.vector_applied = response.results.iter().any(|result| {
+        result
+            .reasons
+            .iter()
+            .any(|reason| reason.label == "语义相似命中")
+    });
+    response.retrieval_mode = if response.vector_applied {
+        "vector+keyword".to_owned()
+    } else {
+        "keyword".to_owned()
+    };
+    response.mode = if response.vector_applied && response.ai_enhanced {
+        "hybrid".to_owned()
+    } else if response.vector_applied {
+        "vector".to_owned()
+    } else if response.ai_enhanced {
+        "ai_enhanced".to_owned()
+    } else {
+        "local_knowledge".to_owned()
+    };
+}
+
+fn conversational_query_reply(query: &str) -> Option<String> {
+    let normalized = query
+        .trim()
+        .to_ascii_lowercase()
+        .chars()
+        .filter(|character| !character.is_whitespace() && !"，。！？,.!?~～".contains(*character))
+        .collect::<String>();
+    let is_greeting = matches!(
+        normalized.as_str(),
+        "你好"
+            | "您好"
+            | "嗨"
+            | "哈喽"
+            | "hello"
+            | "hi"
+            | "hey"
+            | "谢谢"
+            | "感谢"
+            | "你是谁"
+            | "在吗"
+    );
+    is_greeting.then(|| {
+        "你好！这里用于精准查找你的 GitHub Stars。请描述你想找的项目能力，例如“支持离线缓存的 Rust HTTP 客户端”，我会最多返回 10 个高相关结果。".to_owned()
+    })
+}
+
+struct VectorSearchOutcome {
+    scores: HashMap<String, f64>,
+    strict_scores: HashMap<String, f64>,
+    error: Option<String>,
+    max_results: usize,
+}
+
+fn build_vector_search_scores(
+    app_handle: &tauri::AppHandle,
+    storage: &AppStorage,
+    account_id: &str,
+    query: &str,
+    embedding_config: Option<ai::EmbeddingRequestConfig>,
+    allow_broad_candidates: bool,
+) -> Result<VectorSearchOutcome, String> {
+    let Some(config) = hydrate_embedding_request_config(app_handle, embedding_config)? else {
+        return Ok(VectorSearchOutcome {
+            scores: HashMap::new(),
+            strict_scores: HashMap::new(),
+            error: None,
+            max_results: 8,
+        });
+    };
+    let cache_dir = app_handle
+        .path()
+        .app_cache_dir()
+        .map_err(|error| format!("无法定位模型缓存目录：{error}"))?;
+    let service = embedding::EmbeddingService::new(config.clone(), cache_dir);
+    service.prepare(&|_| {})?;
+    let query_vector = service.embed_query(query)?;
+    let storage_model = embedding_storage_model(&config);
+    let storage_version = embedding_storage_version(&config);
+    let index = vector_index::ZvecRepositoryIndex::from_app_handle(app_handle)?;
+    let is_local = config
+        .provider
+        .trim()
+        .eq_ignore_ascii_case(embedding::LOCAL_PROVIDER_ID);
+    let request = vector_index::VectorSearchRequest {
+        account_id: account_id.to_owned(),
+        model: storage_model.clone(),
+        vector: query_vector,
+        limit: AI_SEARCH_CANDIDATE_LIMIT,
+        min_score: vector_candidate_min_score(is_local, config.min_score, allow_broad_candidates),
+    };
+    let sqlite_state = storage.get_repository_embedding_state(
+        account_id,
+        &storage_model,
+        config.dimensions,
+        &storage_version,
+    )?;
+    let zvec_count = index
+        .count(account_id, &storage_model, config.dimensions)
+        .ok();
+    let zvec_fingerprint = index
+        .bucket_fingerprint(account_id, &storage_model, config.dimensions)
+        .ok()
+        .flatten();
+    let mut hits = index.search(&request);
+    let should_restore = vector_index_needs_restore(
+        hits.is_err(),
+        zvec_count,
+        sqlite_state.count,
+        zvec_fingerprint.as_deref(),
+        &sqlite_state.fingerprint,
+    );
+    if should_restore {
+        if sqlite_state.count == 0 {
+            index.replace_bucket(account_id, &storage_model, config.dimensions, &[])?;
+            hits = Ok(Vec::new());
+        } else {
+            let stored = storage.list_stored_repository_embeddings(
+                account_id,
+                &storage_model,
+                config.dimensions,
+                &storage_version,
+            )?;
+            let records = stored
+                .into_iter()
+                .map(|record| vector_index::RepositoryVectorRecord {
+                    account_id: record.account_id,
+                    repo_id: record.repo_id,
+                    source_hash: record.source_hash,
+                    model: record.model,
+                    vector: record.vector,
+                })
+                .collect::<Vec<_>>();
+            index.replace_bucket(account_id, &storage_model, config.dimensions, &records)?;
+            hits = index.search(&request);
+        }
+    }
+    let hits = hits?;
+    let scores = hits
+        .into_iter()
+        .map(|hit| {
+            let score = if is_local {
+                embedding::normalize_local_similarity(hit.score)
+            } else {
+                hit.score
+            };
+            (hit.repo_id, f64::from(score))
+        })
+        .collect::<HashMap<_, _>>();
+    let strict_scores = scores
+        .iter()
+        .filter(|(_, score)| **score >= f64::from(config.min_score))
+        .map(|(repo_id, score)| (repo_id.clone(), *score))
+        .collect::<HashMap<_, _>>();
+    let message = scores
+        .is_empty()
+        .then(|| "向量索引尚无达到阈值的候选，已使用严格关键词检索。".to_owned());
+    Ok(VectorSearchOutcome {
+        scores,
+        strict_scores,
+        error: message,
+        max_results: config.max_results.clamp(1, 10),
+    })
+}
+
+fn vector_candidate_min_score(
+    is_local: bool,
+    configured_min_score: f32,
+    allow_broad_candidates: bool,
+) -> f32 {
+    if allow_broad_candidates && is_local {
+        embedding::raw_local_similarity_threshold(0.0)
+    } else if allow_broad_candidates {
+        0.0
+    } else if is_local {
+        embedding::raw_local_similarity_threshold(configured_min_score)
+    } else {
+        configured_min_score
+    }
+}
+
+fn vector_index_needs_restore(
+    search_failed: bool,
+    zvec_count: Option<usize>,
+    sqlite_count: usize,
+    zvec_fingerprint: Option<&str>,
+    sqlite_fingerprint: &str,
+) -> bool {
+    search_failed
+        || zvec_count != Some(sqlite_count)
+        || zvec_fingerprint != Some(sqlite_fingerprint)
+}
+
+fn build_local_search_answer(query: &str, response: &storage::AiSearchResponseData) -> String {
+    if response.results.is_empty() {
+        return format!(
+            "没有找到与“{query}”达到相关度门槛的仓库。可以补充技术栈、使用场景或关键能力后再试。"
+        );
+    }
+    let recommendations = response
+        .results
+        .iter()
+        .take(3)
+        .map(|result| {
+            let summary = result
+                .ai_summary
+                .as_deref()
+                .or(result.repository.description.as_deref())
+                .unwrap_or("暂无摘要");
+            format!(
+                "- {}：{}",
+                result.repository.full_name,
+                summary.chars().take(100).collect::<String>()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        "为“{query}”筛选出 {} 个高相关仓库，优先建议：\n{}",
+        response.total_count, recommendations
+    )
+}
+
 fn build_ai_search_query(
     app_handle: &tauri::AppHandle,
     request_id: &str,
@@ -3503,6 +5118,13 @@ fn build_ai_search_query(
         return Ok((original_query, metadata));
     };
     if ai_config.provider.trim().eq_ignore_ascii_case("none") {
+        return Ok((original_query, metadata));
+    }
+    if storage::requires_exact_ascii_query_anchor(&original_query) {
+        metadata.ai_enhanced = true;
+        metadata.ai_query = Some(original_query.clone());
+        metadata.ai_rationale_zh =
+            Some("短技术词使用完整词精确检索，避免 AI 扩写引入宽泛或无关候选。".to_owned());
         return Ok((original_query, metadata));
     }
 
@@ -3584,6 +5206,223 @@ fn build_ai_search_query(
 }
 
 #[tauri::command]
+async fn list_github_rankings(
+    app_handle: tauri::AppHandle,
+    request: ListGithubRankingsRequest,
+) -> Result<RankingPage, String> {
+    run_background_task("加载开源榜单", move || {
+        let storage = AppStorage::from_app_handle(&app_handle)?;
+        let page = request.page.unwrap_or(1).max(1);
+        let limit = request.limit.unwrap_or(20).clamp(1, 50);
+        let language = request
+            .language
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let cache_key = format!(
+            "{}:{}:{}:{}:{}",
+            request.account_id,
+            request.kind.trim(),
+            language.unwrap_or("all"),
+            page,
+            limit,
+        );
+        let now = time::OffsetDateTime::now_utc().unix_timestamp();
+        let cached = storage.get_github_ranking_cache(&cache_key)?;
+        let starred_full_names = storage.list_active_repository_full_names(&request.account_id)?;
+
+        if !request.force_refresh.unwrap_or(false) {
+            if let Some(cache) = cached.as_ref() {
+                if ranking_query::is_ranking_cache_fresh(cache.fetched_at, now) {
+                    return parse_cached_ranking_page(cache, false, &starred_full_names);
+                }
+            }
+        }
+
+        let thirty_days_ago = (time::OffsetDateTime::now_utc() - time::Duration::days(30))
+            .date()
+            .to_string();
+        let ninety_days_ago = (time::OffsetDateTime::now_utc() - time::Duration::days(90))
+            .date()
+            .to_string();
+        let one_year_ago = (time::OffsetDateTime::now_utc() - time::Duration::days(365))
+            .date()
+            .to_string();
+        let query = ranking_query::build_global_ranking_query(
+            request.kind.trim(),
+            language,
+            ranking_query::RankingDateThresholds {
+                thirty_days_ago: &thirty_days_ago,
+                ninety_days_ago: &ninety_days_ago,
+                one_year_ago: &one_year_ago,
+            },
+        )?;
+        let token = auth::require_github_token()?;
+        match github::search_repository_page(&token, &query, "stars", "desc", page, limit) {
+            Ok(result) => {
+                let accessible_total = result.total_count.min(1_000);
+                let response = RankingPage {
+                    kind: request.kind.trim().to_owned(),
+                    items: result
+                        .items
+                        .into_iter()
+                        .map(|repository| RankingItem {
+                            is_starred: starred_full_names.contains(&repository.full_name),
+                            full_name: repository.full_name,
+                            description: repository.description,
+                            language: repository.language,
+                            topics: repository.topics,
+                            html_url: repository.html_url,
+                            stars_count: repository.stars_count,
+                            forks_count: repository.forks_count,
+                            pushed_at: repository.pushed_at,
+                            starred_at: None,
+                        })
+                        .collect(),
+                    total_count: accessible_total,
+                    page,
+                    limit,
+                    has_more: page.saturating_mul(limit) < accessible_total,
+                    generated_at: current_ranking_timestamp()?,
+                    is_stale: false,
+                    from_cache: false,
+                };
+                let payload_json = serde_json::to_string(&response)
+                    .map_err(|error| format!("GitHub 排行榜缓存序列化失败：{error}"))?;
+                storage.save_github_ranking_cache(&cache_key, &payload_json, now)?;
+                Ok(response)
+            }
+            Err(error) => match cached.as_ref() {
+                Some(cache) => parse_cached_ranking_page(cache, true, &starred_full_names),
+                None => Err(error),
+            },
+        }
+    })
+    .await
+}
+
+#[tauri::command]
+fn list_personal_rankings(
+    app_handle: tauri::AppHandle,
+    request: ListPersonalRankingsRequest,
+) -> Result<RankingPage, String> {
+    let storage = AppStorage::from_app_handle(&app_handle)?;
+    let page = request.page.unwrap_or(1).max(1);
+    let limit = request.limit.unwrap_or(20).clamp(1, 50);
+    let repository_page = storage.list_personal_ranking_page(
+        limit,
+        (page - 1).saturating_mul(limit),
+        &request.account_id,
+        request.language.as_deref(),
+        request.kind.trim(),
+    )?;
+    let total_count = repository_page.total_count;
+
+    Ok(RankingPage {
+        kind: request.kind.trim().to_owned(),
+        items: repository_page
+            .items
+            .into_iter()
+            .map(|repository| RankingItem {
+                full_name: repository.full_name,
+                description: repository.description,
+                language: repository.language,
+                topics: repository.topics,
+                html_url: repository.html_url,
+                stars_count: repository.stars_count,
+                forks_count: repository.forks_count,
+                pushed_at: repository.pushed_at,
+                starred_at: Some(repository.starred_at),
+                is_starred: true,
+            })
+            .collect(),
+        total_count,
+        page,
+        limit,
+        has_more: page.saturating_mul(limit) < total_count,
+        generated_at: current_ranking_timestamp()?,
+        is_stale: false,
+        from_cache: false,
+    })
+}
+
+#[tauri::command]
+async fn fetch_github_ranking_readme(
+    app_handle: tauri::AppHandle,
+    request: FetchGithubRankingReadmeRequest,
+) -> Result<GithubRecommendationReadme, String> {
+    run_background_task("读取排行榜项目介绍", move || {
+        let storage = AppStorage::from_app_handle(&app_handle)?;
+        let full_name = request.full_name.trim().to_owned();
+        if let Some(readme) =
+            storage.get_github_recommendation_readme(&request.account_id, &full_name)?
+        {
+            return github_recommendation_readme_response(
+                &storage,
+                &request.account_id,
+                &full_name,
+                readme,
+                true,
+            );
+        }
+
+        let token = auth::require_github_token()?;
+        let readme = github::fetch_readme(&token, &full_name, &full_name)?
+            .ok_or_else(|| format!("{full_name} 暂未提供 README"))?;
+        storage.save_github_recommendation_readme(&request.account_id, &full_name, &readme)?;
+        github_recommendation_readme_response(
+            &storage,
+            &request.account_id,
+            &full_name,
+            readme,
+            false,
+        )
+    })
+    .await
+}
+
+#[tauri::command]
+async fn star_github_ranking_repository(
+    request: StarGithubRankingRepositoryRequest,
+) -> Result<RankingStarResult, String> {
+    run_background_task("加入 GitHub Stars", move || {
+        let token = auth::require_github_token()?;
+        let user = auth::verify_github_token(&token)?;
+        if request.account_id != user.id.to_string() {
+            return Err("当前 GitHub 账号与排行榜所属账号不一致，请重新连接后再操作。".to_owned());
+        }
+        let full_name = request.full_name.trim().to_owned();
+        github::star_repository(&token, &full_name)?;
+        Ok(RankingStarResult {
+            full_name,
+            is_starred: true,
+        })
+    })
+    .await
+}
+
+fn parse_cached_ranking_page(
+    cache: &storage::GithubRankingCacheEntry,
+    is_stale: bool,
+    starred_full_names: &HashSet<String>,
+) -> Result<RankingPage, String> {
+    let mut response = serde_json::from_str::<RankingPage>(&cache.payload_json)
+        .map_err(|error| format!("GitHub 排行榜缓存内容解析失败：{error}"))?;
+    response.from_cache = true;
+    response.is_stale = is_stale;
+    for repository in &mut response.items {
+        repository.is_starred = starred_full_names.contains(&repository.full_name);
+    }
+    Ok(response)
+}
+
+fn current_ranking_timestamp() -> Result<String, String> {
+    time::OffsetDateTime::now_utc()
+        .format(&time::format_description::well_known::Rfc3339)
+        .map_err(|error| format!("排行榜生成时间格式化失败：{error}"))
+}
+
+#[tauri::command]
 async fn recommend_github_repositories(
     app_handle: tauri::AppHandle,
     request: RecommendGithubRepositoriesRequest,
@@ -3603,19 +5442,24 @@ async fn recommend_github_repositories(
 fn list_github_recommendation_candidates(
     app_handle: tauri::AppHandle,
     request: ListGithubRecommendationCandidatesRequest,
-) -> Result<GithubRecommendationResponse, String> {
+) -> Result<GithubRecommendationPage, String> {
     let storage = AppStorage::from_app_handle(&app_handle)?;
     let candidates = storage.list_github_recommendation_candidates(
         &request.account_id,
         request.status.as_deref(),
+        request.category.as_deref(),
         request.limit.unwrap_or(12),
+        request.offset.unwrap_or(0),
     )?;
 
-    Ok(GithubRecommendationResponse {
+    Ok(GithubRecommendationPage {
         rationale_zh: candidates.rationale_zh,
         queries: candidates.queries,
-        search_failures: Vec::new(),
         results: candidates.repositories,
+        total_count: candidates.total_count,
+        limit: candidates.limit,
+        offset: candidates.offset,
+        categories: candidates.categories,
     })
 }
 
@@ -3630,6 +5474,135 @@ fn update_github_recommendation_candidate_status(
         &request.full_name,
         &request.status,
     )
+}
+
+#[tauri::command]
+async fn fetch_github_recommendation_readme(
+    app_handle: tauri::AppHandle,
+    request: FetchGithubRecommendationReadmeRequest,
+) -> Result<GithubRecommendationReadme, String> {
+    run_background_task("读取推荐项目介绍", move || {
+        let storage = AppStorage::from_app_handle(&app_handle)?;
+        let full_name = request.full_name.trim().to_owned();
+        ensure_github_recommendation_candidate(&storage, &request.account_id, &full_name)?;
+
+        if !request.force_refresh.unwrap_or(false) {
+            if let Some(readme) =
+                storage.get_github_recommendation_readme(&request.account_id, &full_name)?
+            {
+                return github_recommendation_readme_response(
+                    &storage,
+                    &request.account_id,
+                    &full_name,
+                    readme,
+                    true,
+                );
+            }
+        }
+
+        let token = auth::require_github_token()?;
+        let readme = github::fetch_readme(&token, &full_name, &full_name)?
+            .ok_or_else(|| format!("{full_name} 暂未提供 README"))?;
+        storage.save_github_recommendation_readme(&request.account_id, &full_name, &readme)?;
+        github_recommendation_readme_response(
+            &storage,
+            &request.account_id,
+            &full_name,
+            readme,
+            false,
+        )
+    })
+    .await
+}
+
+#[tauri::command]
+async fn translate_github_recommendation_readme(
+    app_handle: tauri::AppHandle,
+    request: TranslateGithubRecommendationReadmeRequest,
+) -> Result<ai::AiReadmeTranslation, String> {
+    run_background_task("翻译推荐项目介绍", move || {
+        let storage = AppStorage::from_app_handle(&app_handle)?;
+        let full_name = request.full_name.trim().to_owned();
+        ensure_github_recommendation_candidate(&storage, &request.account_id, &full_name)?;
+        let readme = storage
+            .get_github_recommendation_readme(&request.account_id, &full_name)?
+            .ok_or_else(|| "请先加载项目 README，再生成中文翻译。".to_owned())?;
+        if !request.force_refresh.unwrap_or(false) {
+            if let Some(translation) = storage.get_github_recommendation_translation(
+                &request.account_id,
+                &full_name,
+                &readme.content_hash,
+            )? {
+                return Ok(cached_github_translation_response(translation));
+            }
+        }
+
+        let ai_config = hydrate_ai_request_config(&app_handle, request.ai_config)?;
+        let translation = ai::translate_readme(&ai_config, &full_name, &readme.raw_markdown)?;
+        storage.save_github_recommendation_translation(
+            &request.account_id,
+            &full_name,
+            &readme.content_hash,
+            &translation.markdown_zh,
+            &translation.model,
+            translation.input_tokens,
+            translation.output_tokens,
+            translation.source_char_count,
+            translation.translated_char_count,
+            translation.is_truncated,
+        )?;
+        Ok(translation)
+    })
+    .await
+}
+
+fn ensure_github_recommendation_candidate(
+    storage: &AppStorage,
+    account_id: &str,
+    full_name: &str,
+) -> Result<(), String> {
+    let candidate_exists = storage
+        .list_github_recommendation_candidate_states(account_id, &[full_name.to_owned()])?
+        .contains_key(full_name);
+    if candidate_exists {
+        Ok(())
+    } else {
+        Err("推荐候选项目不存在，请刷新发现列表后重试。".to_owned())
+    }
+}
+
+fn github_recommendation_readme_response(
+    storage: &AppStorage,
+    account_id: &str,
+    full_name: &str,
+    readme: github::ReadmeDocument,
+    from_cache: bool,
+) -> Result<GithubRecommendationReadme, String> {
+    let translation = storage
+        .get_github_recommendation_translation(account_id, full_name, &readme.content_hash)?
+        .map(cached_github_translation_response);
+    Ok(GithubRecommendationReadme {
+        full_name: full_name.to_owned(),
+        raw_markdown: readme.raw_markdown,
+        source_path: readme.source_path,
+        fetched_at: readme.fetched_at,
+        from_cache,
+        translation,
+    })
+}
+
+fn cached_github_translation_response(
+    translation: storage::GithubRecommendationCachedTranslation,
+) -> ai::AiReadmeTranslation {
+    ai::AiReadmeTranslation {
+        markdown_zh: translation.markdown_zh,
+        model: translation.model,
+        input_tokens: translation.input_tokens,
+        output_tokens: translation.output_tokens,
+        source_char_count: translation.source_char_count,
+        translated_char_count: translation.translated_char_count,
+        is_truncated: translation.is_truncated,
+    }
 }
 
 #[tauri::command]
@@ -3818,7 +5791,7 @@ fn recommend_github_repositories_worker(
         return Err(format_recommendation_search_failure(&search_failures));
     }
 
-    let candidate_states = storage.upsert_github_recommendation_candidates(
+    let candidate_states = storage.replace_github_recommendation_candidates(
         &request.account_id,
         &plan.rationale_zh,
         &plan.queries,
@@ -3872,28 +5845,27 @@ fn format_recommendation_search_failure(
 
 fn build_github_recommendation_completion_progress(
     result_count: usize,
-    limit: usize,
+    _limit: usize,
     search_failure_count: usize,
     message: impl Into<String>,
 ) -> TaskProgressEvent {
-    let total = limit.max(1);
-    let current = result_count.min(total);
+    let completed_count = result_count.max(1);
     let message = message.into();
 
     if search_failure_count > 0 {
         TaskProgressEvent::partial(
             "recommend-github-repositories",
             "ai",
-            current,
-            total,
+            completed_count,
+            completed_count,
             message,
         )
     } else {
         TaskProgressEvent::succeeded(
             "recommend-github-repositories",
             "ai",
-            current,
-            total,
+            completed_count,
+            completed_count,
             message,
         )
     }
@@ -4297,6 +6269,10 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
+        .setup(|app| {
+            start_embedding_maintenance(app.handle().clone());
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             get_backend_status,
             get_app_identity,
@@ -4306,6 +6282,17 @@ pub fn run() {
             has_ai_api_key,
             save_ai_api_key,
             clear_ai_api_key,
+            has_embedding_api_key,
+            save_embedding_api_key,
+            clear_embedding_api_key,
+            test_embedding_connection,
+            get_embedding_runtime_status,
+            enable_local_embedding,
+            disable_embedding_runtime,
+            retry_embedding_setup,
+            delete_local_embedding_model,
+            rebuild_vector_index,
+            get_vector_index_status,
             get_app_settings,
             save_app_settings,
             clear_app_settings,
@@ -4320,6 +6307,7 @@ pub fn run() {
             fetch_repository_readmes,
             list_repositories,
             list_repository_languages,
+            get_repository_filter_counts,
             get_repository_detail,
             list_tags,
             create_tag,
@@ -4340,9 +6328,15 @@ pub fn run() {
             batch_generate_repository_ai_documents,
             explain_ai_search_topic,
             search_repositories,
+            list_github_rankings,
+            list_personal_rankings,
+            fetch_github_ranking_readme,
+            star_github_ranking_repository,
             recommend_github_repositories,
             list_github_recommendation_candidates,
             update_github_recommendation_candidate_status,
+            fetch_github_recommendation_readme,
+            translate_github_recommendation_readme,
             star_github_recommendation_candidate,
         ])
         .run(tauri::generate_context!())
@@ -4354,6 +6348,292 @@ mod tests {
     use super::*;
     use std::sync::{mpsc, Arc};
     use std::time::Duration;
+
+    #[test]
+    fn recommendation_readme_commands_are_allowed_by_main_capability() {
+        let permissions = include_str!("../permissions/gsat-commands.toml");
+
+        assert!(permissions.contains("\"fetch_github_recommendation_readme\""));
+        assert!(permissions.contains("\"translate_github_recommendation_readme\""));
+    }
+
+    #[test]
+    fn ranking_commands_are_allowed_by_main_capability() {
+        let permissions = include_str!("../permissions/gsat-commands.toml");
+
+        assert!(permissions.contains("\"list_github_rankings\""));
+        assert!(permissions.contains("\"list_personal_rankings\""));
+        assert!(permissions.contains("\"fetch_github_ranking_readme\""));
+        assert!(permissions.contains("\"star_github_ranking_repository\""));
+    }
+
+    #[test]
+    fn embedding_commands_are_allowed_by_main_capability() {
+        let permissions = include_str!("../permissions/gsat-commands.toml");
+
+        for command in [
+            "has_embedding_api_key",
+            "save_embedding_api_key",
+            "clear_embedding_api_key",
+            "test_embedding_connection",
+            "get_embedding_runtime_status",
+            "enable_local_embedding",
+            "disable_embedding_runtime",
+            "retry_embedding_setup",
+            "delete_local_embedding_model",
+            "rebuild_vector_index",
+            "get_vector_index_status",
+        ] {
+            assert!(permissions.contains(&format!("\"{command}\"")));
+        }
+    }
+
+    #[test]
+    fn embedding_api_key_scope_is_bound_to_provider_and_endpoint() {
+        let openai_scope = embedding_api_key_scope("openai", Some("https://api.openai.com/v1/"))
+            .expect("OpenAI 凭据作用域应有效");
+        assert_eq!(
+            openai_scope,
+            embedding_api_key_scope(" OPENAI ", Some("https://api.openai.com/v1"))
+                .expect("末尾斜杠不应改变凭据作用域")
+        );
+        assert_eq!(
+            openai_scope,
+            embedding_api_key_scope("openai", None)
+                .expect("OpenAI 默认地址应与显式官方地址使用同一作用域")
+        );
+        assert_ne!(
+            openai_scope,
+            embedding_api_key_scope(
+                "openai-compatible",
+                Some("https://embedding.example.com/v1")
+            )
+            .expect("兼容接口凭据作用域应有效")
+        );
+    }
+
+    #[test]
+    fn embedding_api_key_requires_matching_serialized_scope() {
+        let credential = StoredEmbeddingApiCredential {
+            scope: "openai\nhttps://api.openai.com/v1".to_owned(),
+            api_key: "secret-key".to_owned(),
+        };
+        let serialized = serde_json::to_string(&credential).expect("凭据测试数据应可序列化");
+
+        assert_eq!(
+            embedding_api_key_from_serialized(&serialized, "openai\nhttps://api.openai.com/v1")
+                .as_deref(),
+            Some("secret-key")
+        );
+        assert!(embedding_api_key_from_serialized(
+            &serialized,
+            "openai-compatible\nhttps://embedding.example.com/v1"
+        )
+        .is_none());
+        assert!(embedding_api_key_from_serialized(
+            "legacy-unscoped-secret",
+            "openai\nhttps://api.openai.com/v1"
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn partial_or_unreadable_vector_index_requires_restore() {
+        assert!(!vector_index_needs_restore(
+            false,
+            Some(12),
+            12,
+            Some("current"),
+            "current"
+        ));
+        assert!(vector_index_needs_restore(
+            false,
+            Some(3),
+            12,
+            Some("current"),
+            "current"
+        ));
+        assert!(vector_index_needs_restore(
+            false,
+            Some(12),
+            12,
+            Some("stale"),
+            "current"
+        ));
+        assert!(vector_index_needs_restore(
+            false,
+            Some(12),
+            12,
+            None,
+            "current"
+        ));
+        assert!(vector_index_needs_restore(
+            true,
+            Some(12),
+            12,
+            Some("current"),
+            "current"
+        ));
+    }
+
+    #[test]
+    fn embedding_runtime_only_reports_complete_snapshot_as_ready() {
+        assert!(embedding_snapshot_is_ready(
+            12,
+            12,
+            12,
+            Some("current"),
+            "current"
+        ));
+        assert!(!embedding_snapshot_is_ready(
+            12,
+            11,
+            11,
+            Some("partial"),
+            "partial"
+        ));
+        assert!(!embedding_snapshot_is_ready(
+            12,
+            12,
+            12,
+            Some("stale"),
+            "current"
+        ));
+    }
+
+    #[test]
+    fn ai_search_uses_broad_vector_candidates_before_strict_fallback() {
+        let broad_local = vector_candidate_min_score(true, 0.72, true);
+        let strict_local = vector_candidate_min_score(true, 0.72, false);
+        let broad_remote = vector_candidate_min_score(false, 0.72, true);
+        let strict_remote = vector_candidate_min_score(false, 0.72, false);
+
+        assert!((broad_local - 0.70).abs() < f32::EPSILON);
+        assert!((strict_local - 0.916).abs() < f32::EPSILON);
+        assert_eq!(broad_remote, 0.0);
+        assert_eq!(strict_remote, 0.72);
+    }
+
+    #[test]
+    fn ai_selected_repositories_drive_visible_result_order() {
+        let mut response = storage::AiSearchResponseData {
+            query: "测试".to_owned(),
+            mode: "hybrid".to_owned(),
+            results: vec![
+                test_search_result("owner/first", true),
+                test_search_result("owner/second", false),
+                test_search_result("owner/noise", true),
+            ],
+            total_count: 3,
+            context_queries_used: Vec::new(),
+            context_applied: false,
+            ai_enhanced: true,
+            ai_query: Some("expanded query".to_owned()),
+            ai_rationale_zh: None,
+            ai_error: None,
+            answer_zh: None,
+            retrieval_mode: "vector+keyword".to_owned(),
+            vector_applied: true,
+            vector_error: None,
+        };
+
+        retain_ai_selected_search_results(
+            &mut response,
+            &["OWNER/SECOND".to_owned(), "owner/first".to_owned()],
+        );
+
+        assert_eq!(response.total_count, 2);
+        assert_eq!(
+            response
+                .results
+                .iter()
+                .map(|result| result.repository.full_name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["owner/second", "owner/first"]
+        );
+        assert!(response.vector_applied);
+        assert_eq!(response.mode, "hybrid");
+    }
+
+    #[test]
+    fn conversational_queries_do_not_trigger_repository_retrieval() {
+        for query in [
+            "你好",
+            "您好！",
+            " hello ",
+            "Hi?",
+            "谢谢",
+            "你是谁",
+            "在吗～",
+        ] {
+            let reply = conversational_query_reply(query).expect("问候语应直接返回对话答复");
+            assert!(reply.contains("最多返回 10 个"));
+        }
+        assert!(conversational_query_reply("找一个 Rust 向量数据库").is_none());
+    }
+
+    #[test]
+    fn short_technical_queries_keep_exact_semantics() {
+        for query in ["AI", "ai", "RAG", "UI", "Go", "Grok", "OpenAI"] {
+            assert!(storage::requires_exact_ascii_query_anchor(query));
+        }
+        for query in [
+            "grok",
+            "obscure",
+            "AI agent",
+            "向量",
+            "C++",
+            "verylongquery",
+        ] {
+            assert!(!storage::requires_exact_ascii_query_anchor(query));
+        }
+    }
+
+    fn test_search_result(
+        repository_full_name: &str,
+        vector_match: bool,
+    ) -> storage::AiSearchResultData {
+        let (owner, name) = repository_full_name
+            .split_once('/')
+            .expect("测试仓库名应包含 owner/name");
+        storage::AiSearchResultData {
+            repository: storage::RepositoryListItem {
+                id: repository_full_name.to_owned(),
+                account_id: "account".to_owned(),
+                owner: owner.to_owned(),
+                name: name.to_owned(),
+                full_name: repository_full_name.to_owned(),
+                description: None,
+                language: None,
+                topics: Vec::new(),
+                html_url: format!("https://github.com/{repository_full_name}"),
+                stars_count: 0,
+                forks_count: 0,
+                starred_at: "2026-01-01T00:00:00Z".to_owned(),
+                pushed_at: None,
+                reading_status: "unread".to_owned(),
+                has_readme: false,
+                ai_summary: None,
+                ai_keywords: Vec::new(),
+                suggested_tags: Vec::new(),
+                tag_ids: Vec::new(),
+                tag_names: Vec::new(),
+                ai_generated_at: None,
+            },
+            score: 0.0,
+            explanation_zh: String::new(),
+            reasons: vector_match
+                .then(|| storage::SearchMatchReasonData {
+                    label: "语义相似命中".to_owned(),
+                    detail: String::new(),
+                })
+                .into_iter()
+                .collect(),
+            citations: Vec::new(),
+            keywords: Vec::new(),
+            ai_summary: None,
+        }
+    }
 
     fn sync_states(values: &[(&str, &str)]) -> HashMap<String, String> {
         values
@@ -4563,7 +6843,7 @@ mod tests {
         assert_eq!(progress.status, "partial");
         assert_eq!(progress.stage, "partial-failure");
         assert_eq!(progress.current, 3);
-        assert_eq!(progress.total, 12);
+        assert_eq!(progress.total, 3);
         assert!(progress.message.contains("搜索式暂未完成"));
     }
 
@@ -4579,7 +6859,7 @@ mod tests {
         assert_eq!(progress.status, "succeeded");
         assert_eq!(progress.stage, "done");
         assert_eq!(progress.current, 8);
-        assert_eq!(progress.total, 12);
+        assert_eq!(progress.total, 8);
     }
 
     #[test]
@@ -4687,56 +6967,74 @@ mod tests {
     }
 
     #[test]
-    fn incremental_sync_stops_on_page_with_only_known_active_repositories() {
-        let existing_states = sync_states(&[("account:1", "active"), ("account:2", "active")]);
+    fn authoritative_star_scan_reads_until_short_page() {
+        let pages = [vec!["account:1", "account:2"], vec!["account:3"]];
+        let mut requested_pages = Vec::new();
 
-        assert!(should_stop_incremental_on_page(
-            true,
-            &existing_states,
-            &ids(&["account:1", "account:2"]),
-        ));
+        let repositories = collect_authoritative_star_pages(2, |page| {
+            requested_pages.push(page);
+            Ok(pages[(page - 1) as usize].clone())
+        })
+        .expect("完整扫描应读取到末页");
+
+        assert_eq!(requested_pages, vec![1, 2]);
+        assert_eq!(repositories, vec!["account:1", "account:2", "account:3"]);
     }
 
     #[test]
-    fn incremental_sync_continues_when_page_contains_new_or_removed_repository() {
-        let existing_states = sync_states(&[("account:1", "active"), ("account:2", "removed")]);
+    fn authoritative_star_scan_requests_empty_page_after_exact_page_size() {
+        let pages = [vec!["account:1", "account:2"], Vec::new()];
+        let mut requested_pages = Vec::new();
 
-        assert!(!should_stop_incremental_on_page(
-            true,
-            &existing_states,
-            &ids(&["account:1", "account:3"]),
-        ));
-        assert!(!should_stop_incremental_on_page(
-            true,
-            &existing_states,
-            &ids(&["account:1", "account:2"]),
-        ));
+        let repositories = collect_authoritative_star_pages(2, |page| {
+            requested_pages.push(page);
+            Ok(pages[(page - 1) as usize].clone())
+        })
+        .expect("满页后应继续确认末页");
+
+        assert_eq!(requested_pages, vec![1, 2]);
+        assert_eq!(repositories, vec!["account:1", "account:2"]);
     }
 
     #[test]
-    fn first_sync_does_not_stop_incrementally_without_existing_active_repositories() {
-        let existing_states = sync_states(&[]);
+    fn authoritative_star_scan_accepts_empty_remote_list() {
+        let mut requested_pages = Vec::new();
 
-        assert!(!should_stop_incremental_on_page(
-            false,
-            &existing_states,
-            &ids(&["account:1", "account:2"]),
-        ));
+        let repositories = collect_authoritative_star_pages::<String, _>(2, |page| {
+            requested_pages.push(page);
+            Ok(Vec::new())
+        })
+        .expect("空 Stars 列表应是有效完整结果");
+
+        assert_eq!(requested_pages, vec![1]);
+        assert!(repositories.is_empty());
     }
 
     #[test]
-    fn removed_repositories_are_computed_only_after_full_scan() {
+    fn authoritative_star_scan_discards_partial_result_after_page_failure() {
+        let result = collect_authoritative_star_pages(2, |page| match page {
+            1 => Ok(vec!["account:1", "account:2"]),
+            _ => Err("第二页请求失败".to_owned()),
+        });
+
+        assert_eq!(
+            result.expect_err("分页失败不得返回可用于删除对账的集合"),
+            "第二页请求失败"
+        );
+    }
+
+    #[test]
+    fn authoritative_sync_computes_only_missing_active_repositories() {
         let existing_states = sync_states(&[
             ("account:1", "active"),
             ("account:2", "active"),
             ("account:3", "removed"),
         ]);
         let incoming_ids = HashSet::from(["account:1"]);
-        let mut removed_ids = compute_removed_repository_ids(true, &existing_states, &incoming_ids);
+        let mut removed_ids = compute_removed_repository_ids(&existing_states, &incoming_ids);
         removed_ids.sort();
 
         assert_eq!(removed_ids, vec!["account:2".to_owned()]);
-        assert!(compute_removed_repository_ids(false, &existing_states, &incoming_ids).is_empty());
     }
 
     #[test]

@@ -17,7 +17,9 @@ const ANTHROPIC_SUMMARY_MAX_TOKENS: u16 = 1600;
 const ANTHROPIC_TAG_NETWORK_MAX_TOKENS: u16 = 2400;
 const ANTHROPIC_RECOMMENDATION_MAX_TOKENS: u16 = 1000;
 const ANTHROPIC_SEARCH_PLAN_MAX_TOKENS: u16 = 800;
+const ANTHROPIC_SEARCH_ANSWER_MAX_TOKENS: u16 = 1200;
 const ANTHROPIC_EXPLANATION_MAX_TOKENS: u16 = 1000;
+const ANTHROPIC_TRANSLATION_MAX_TOKENS: u16 = 6000;
 const AI_SYSTEM_PROMPT: &str =
     "你是开源项目知识库助手。严格遵守用户消息中的输出格式要求；需要结构化 JSON 时只输出 JSON，需要自然语言时直接回答。";
 
@@ -28,6 +30,42 @@ pub struct AiRequestConfig {
     pub api_key: String,
     pub base_url: Option<String>,
     pub model: String,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EmbeddingRequestConfig {
+    pub enabled: bool,
+    pub provider: String,
+    #[serde(default)]
+    pub download_source: Option<String>,
+    pub api_key: String,
+    pub base_url: Option<String>,
+    pub model: String,
+    pub dimensions: usize,
+    pub min_score: f32,
+    pub max_results: usize,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EmbeddingTestResult {
+    pub model: String,
+    pub dimensions: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct AiSearchEvidence {
+    pub repository_full_name: String,
+    pub description: Option<String>,
+    pub topics: Vec<String>,
+    pub summary_zh: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AiSearchAnswer {
+    pub answer_zh: String,
+    pub repository_full_names: Vec<String>,
 }
 
 #[derive(Clone, Serialize)]
@@ -63,6 +101,19 @@ pub struct AiSummaryDocument {
     pub prompt_version: String,
     pub input_tokens: u64,
     pub output_tokens: u64,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+/// README 中文翻译结果及其覆盖范围。
+pub struct AiReadmeTranslation {
+    pub markdown_zh: String,
+    pub model: String,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub source_char_count: usize,
+    pub translated_char_count: usize,
+    pub is_truncated: bool,
 }
 
 #[derive(Clone, Serialize)]
@@ -197,6 +248,16 @@ struct OpenAiModelsResponse {
 }
 
 #[derive(Deserialize)]
+struct OpenAiEmbeddingResponse {
+    data: Vec<OpenAiEmbeddingRecord>,
+}
+
+#[derive(Deserialize)]
+struct OpenAiEmbeddingRecord {
+    embedding: Vec<f32>,
+}
+
+#[derive(Deserialize)]
 struct OpenAiModelRecord {
     id: String,
     owned_by: Option<String>,
@@ -296,6 +357,42 @@ pub fn summarize_readme_streaming(
         prompt_version: PROMPT_VERSION.to_owned(),
         input_tokens: estimate_tokens(&prompt),
         output_tokens: estimate_tokens(&content),
+    })
+}
+
+/// 将 README 的说明文字翻译为中文，同时保留 Markdown 与技术内容。
+pub fn translate_readme(
+    config: &AiRequestConfig,
+    repository_full_name: &str,
+    readme_markdown: &str,
+) -> Result<AiReadmeTranslation, String> {
+    let provider = validate_request_config(config)?;
+    let prompt = build_readme_translation_prompt(repository_full_name, readme_markdown);
+    let content = match provider.as_str() {
+        "openai" => request_openai(config, &prompt)?,
+        "anthropic" => request_anthropic(config, &prompt, ANTHROPIC_TRANSLATION_MAX_TOKENS)?,
+        _ => return Err("当前仅支持 OpenAI、OpenAI 兼容接口或 Anthropic AI 服务".to_owned()),
+    };
+    let markdown_zh = content
+        .trim()
+        .strip_prefix("```markdown")
+        .and_then(|value| value.strip_suffix("```"))
+        .unwrap_or(content.trim())
+        .trim()
+        .to_owned();
+    if markdown_zh.is_empty() {
+        return Err("AI 未返回可用的 README 中文翻译".to_owned());
+    }
+
+    let source_char_count = readme_markdown.chars().count();
+    Ok(AiReadmeTranslation {
+        markdown_zh,
+        model: config.model.trim().to_owned(),
+        input_tokens: estimate_tokens(&prompt),
+        output_tokens: estimate_tokens(&content),
+        source_char_count,
+        translated_char_count: source_char_count.min(MAX_README_CHARS),
+        is_truncated: source_char_count > MAX_README_CHARS,
     })
 }
 
@@ -428,6 +525,26 @@ pub fn explain_search_topic_streaming(
     Ok(normalized_content)
 }
 
+pub fn answer_search_results(
+    config: &AiRequestConfig,
+    query: &str,
+    evidence: &[AiSearchEvidence],
+) -> Result<AiSearchAnswer, String> {
+    let provider = validate_request_config(config)?;
+    let normalized_query =
+        normalize_text(Some(query)).ok_or_else(|| "请输入要回答的搜索问题".to_owned())?;
+    if evidence.is_empty() {
+        return Err("没有可用于生成回答的检索结果".to_owned());
+    }
+    let prompt = build_search_answer_prompt(&normalized_query, evidence);
+    let content = match provider.as_str() {
+        "openai" => request_openai(config, &prompt)?,
+        "anthropic" => request_anthropic(config, &prompt, ANTHROPIC_SEARCH_ANSWER_MAX_TOKENS)?,
+        _ => return Err("当前仅支持 OpenAI、OpenAI 兼容接口或 Anthropic AI 服务".to_owned()),
+    };
+    parse_search_answer(&content, evidence)
+}
+
 pub fn list_models(config: &AiRequestConfig) -> Result<Vec<AiModelOption>, String> {
     let provider = validate_model_list_config(config)?;
     match provider.as_str() {
@@ -516,6 +633,105 @@ fn build_api_key_state(provider: &str, base_url: Option<&str>, api_key: &str) ->
     }
 
     "missing".to_owned()
+}
+
+pub fn embed_text(
+    config: &EmbeddingRequestConfig,
+    text: &str,
+) -> Result<EmbeddingTestResultWithVector, String> {
+    validate_embedding_config(config)?;
+    let normalized_text = text.trim();
+    if normalized_text.is_empty() {
+        return Err("Embedding 输入内容不能为空".to_owned());
+    }
+    let mut headers = vec![("Content-Type", "application/json".to_owned())];
+    if !config.api_key.trim().is_empty() {
+        headers.insert(
+            0,
+            ("Authorization", format!("Bearer {}", config.api_key.trim())),
+        );
+    }
+    let mut body = serde_json::json!({
+        "model": config.model.trim(),
+        "input": truncate_chars(normalized_text, 24_000),
+        "encoding_format": "float"
+    });
+    body["dimensions"] = serde_json::json!(config.dimensions);
+    let endpoint = build_endpoint(
+        config.base_url.as_deref(),
+        DEFAULT_OPENAI_BASE_URL,
+        "embeddings",
+    );
+    let response = execute_json_post(&endpoint, &headers, &body.to_string())?;
+    if !response.status_success {
+        return Err(format_ai_http_error(
+            "OpenAI Embeddings",
+            response.http_code,
+            &response.body,
+        ));
+    }
+    let parsed = serde_json::from_str::<OpenAiEmbeddingResponse>(&response.body)
+        .map_err(|error| format!("Embedding 响应解析失败：{error}"))?;
+    let vector = parsed
+        .data
+        .into_iter()
+        .next()
+        .map(|record| record.embedding)
+        .filter(|vector| !vector.is_empty())
+        .ok_or_else(|| "Embedding 响应中没有向量数据".to_owned())?;
+    if vector.len() != config.dimensions {
+        return Err(format!(
+            "Embedding 维度不匹配：配置为 {}，服务返回 {}",
+            config.dimensions,
+            vector.len()
+        ));
+    }
+    if vector.iter().any(|value| !value.is_finite()) {
+        return Err("Embedding 响应包含无效数值".to_owned());
+    }
+    Ok(EmbeddingTestResultWithVector { vector })
+}
+
+#[derive(Debug)]
+pub struct EmbeddingTestResultWithVector {
+    pub vector: Vec<f32>,
+}
+
+fn validate_embedding_config(config: &EmbeddingRequestConfig) -> Result<(), String> {
+    if !config.enabled {
+        return Err("向量检索尚未启用".to_owned());
+    }
+    let provider = config.provider.trim().to_ascii_lowercase();
+    if !matches!(provider.as_str(), "openai" | "openai-compatible") {
+        return Err("Embedding 仅支持 OpenAI 或 OpenAI 兼容接口".to_owned());
+    }
+    let base_url = config.base_url.as_deref().map(str::trim).unwrap_or("");
+    if provider == "openai-compatible" && base_url.is_empty() {
+        return Err("请填写 Embedding 服务的 OpenAI 兼容请求地址".to_owned());
+    }
+    if !base_url.is_empty() && !is_allowed_ai_base_url(base_url) {
+        return Err(
+            "Embedding 请求地址必须使用 https://；本机或局域网服务可以使用 http://。".to_owned(),
+        );
+    }
+    if config.model.trim().is_empty() {
+        return Err("请填写 Embedding 模型 ID".to_owned());
+    }
+    if !(1..=8192).contains(&config.dimensions) {
+        return Err("Embedding 维度必须是 1 到 8192 的整数".to_owned());
+    }
+    if !config.min_score.is_finite() || !(0.0..=1.0).contains(&config.min_score) {
+        return Err("向量相似度阈值必须在 0 到 1 之间".to_owned());
+    }
+    if !(1..=10).contains(&config.max_results) {
+        return Err("精准检索结果数量必须在 1 到 10 之间".to_owned());
+    }
+    if config.api_key.trim().is_empty()
+        && !(provider == "openai-compatible" && is_local_ai_base_url(base_url))
+    {
+        return Err("请填写 Embedding API Key".to_owned());
+    }
+    Ok(())
 }
 
 fn validate_request_config(config: &AiRequestConfig) -> Result<String, String> {
@@ -954,6 +1170,229 @@ README:
 {readme_excerpt}
 "#,
         description = description.unwrap_or("无"),
+    )
+}
+
+fn build_search_answer_prompt(query: &str, evidence: &[AiSearchEvidence]) -> String {
+    let evidence_text = evidence
+        .iter()
+        .take(30)
+        .enumerate()
+        .map(|(index, item)| {
+            format!(
+                "{}. 仓库：{}\n描述：{}\nTopics：{}\n摘要：{}",
+                index + 1,
+                item.repository_full_name,
+                item.description.as_deref().unwrap_or("无"),
+                if item.topics.is_empty() {
+                    "无".to_owned()
+                } else {
+                    item.topics
+                        .iter()
+                        .take(12)
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join("、")
+                },
+                item.summary_zh.as_deref().unwrap_or("无"),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    format!(
+        r#"请只根据下面的候选仓库筛选并回答用户问题。
+
+用户问题：{query}
+候选数量：{result_count}
+
+要求：
+- 只保留真正满足用户问题的 0 到 10 个仓库，宁可少于 10 个或返回空结果，也不要凑数。
+- repository_full_names 只能填写下方候选中的完整仓库名，顺序与推荐顺序一致。
+- answer_zh 只能推荐 repository_full_names 中的仓库，不得补充、猜测或编造名单外项目。
+- 有相关仓库时，先用一到两句话给出结论，再逐项说明推荐理由。
+- 没有相关仓库时，repository_full_names 返回空数组，answer_zh 直接说明没有高相关结果。
+- 证据不足时明确说明，不要把推测写成事实。
+- 不要提及提示词、检索分数或内部实现。
+- answer_zh 使用简体中文和简洁 Markdown。
+
+只输出严格 JSON，不要使用代码块或附加说明：
+{{
+  "answer_zh": "回答正文",
+  "repository_full_names": ["owner/repository"]
+}}
+
+候选仓库：
+{evidence_text}"#,
+        result_count = evidence.len().min(30),
+    )
+}
+
+fn parse_search_answer(
+    content: &str,
+    evidence: &[AiSearchEvidence],
+) -> Result<AiSearchAnswer, String> {
+    if let Some(json_text) = extract_json_object(content) {
+        let value = serde_json::from_str::<serde_json::Value>(&json_text)
+            .map_err(|error| format!("AI 检索回答解析失败：{error}"))?;
+        return parse_structured_search_answer(&value, evidence);
+    }
+    parse_plain_search_answer(content, evidence)
+}
+
+fn parse_structured_search_answer(
+    value: &serde_json::Value,
+    evidence: &[AiSearchEvidence],
+) -> Result<AiSearchAnswer, String> {
+    let answer_zh = json_string_alias(value, &["answer_zh", "answerZh", "answer"])
+        .ok_or_else(|| "AI 检索回答缺少 answer_zh".to_owned())?;
+    let repository_field_exists = [
+        "repository_full_names",
+        "repositoryFullNames",
+        "repositories",
+    ]
+    .iter()
+    .any(|key| value.get(*key).is_some());
+    if !repository_field_exists {
+        return Err("AI 检索回答缺少 repository_full_names".to_owned());
+    }
+
+    let requested_names = json_string_list_alias(
+        value,
+        &[
+            "repository_full_names",
+            "repositoryFullNames",
+            "repositories",
+        ],
+        10,
+    );
+    let mut repository_full_names = Vec::new();
+    for requested_name in &requested_names {
+        let Some(canonical_name) = evidence
+            .iter()
+            .map(|item| item.repository_full_name.as_str())
+            .find(|name| name.eq_ignore_ascii_case(requested_name))
+        else {
+            return Err(format!(
+                "AI 检索回答引用了候选列表外的仓库：{requested_name}"
+            ));
+        };
+        if !repository_full_names
+            .iter()
+            .any(|name: &String| name.eq_ignore_ascii_case(canonical_name))
+        {
+            repository_full_names.push(canonical_name.to_owned());
+        }
+    }
+
+    for item in evidence {
+        let selected = repository_full_names
+            .iter()
+            .any(|name| name.eq_ignore_ascii_case(&item.repository_full_name));
+        if !selected
+            && answer_zh
+                .to_ascii_lowercase()
+                .contains(&item.repository_full_name.to_ascii_lowercase())
+        {
+            return Err(format!(
+                "AI 检索回答正文引用了未选中的仓库：{}",
+                item.repository_full_name
+            ));
+        }
+    }
+
+    Ok(AiSearchAnswer {
+        answer_zh,
+        repository_full_names,
+    })
+}
+
+fn parse_plain_search_answer(
+    content: &str,
+    evidence: &[AiSearchEvidence],
+) -> Result<AiSearchAnswer, String> {
+    let answer_zh =
+        normalize_text(Some(content)).ok_or_else(|| "AI 没有返回可用的检索回答".to_owned())?;
+    let lower_answer = answer_zh.to_ascii_lowercase();
+    let mut matched = evidence
+        .iter()
+        .filter_map(|item| {
+            let full_name = item.repository_full_name.to_ascii_lowercase();
+            let repository_name = full_name.rsplit_once('/').map(|(_, name)| name)?;
+            lower_answer
+                .find(&full_name)
+                .or_else(|| {
+                    (repository_name.len() >= 4)
+                        .then(|| lower_answer.find(repository_name))
+                        .flatten()
+                })
+                .map(|position| (position, item.repository_full_name.clone()))
+        })
+        .collect::<Vec<_>>();
+    matched.sort_by_key(|(position, _)| *position);
+    let repository_full_names =
+        matched
+            .into_iter()
+            .map(|(_, name)| name)
+            .fold(Vec::new(), |mut names, name| {
+                if !names
+                    .iter()
+                    .any(|existing: &String| existing.eq_ignore_ascii_case(&name))
+                    && names.len() < 10
+                {
+                    names.push(name);
+                }
+                names
+            });
+    if repository_full_names.is_empty() && !plain_answer_indicates_no_match(&lower_answer) {
+        return Err("AI 检索回答没有明确引用候选池中的仓库".to_owned());
+    }
+
+    Ok(AiSearchAnswer {
+        answer_zh,
+        repository_full_names,
+    })
+}
+
+fn plain_answer_indicates_no_match(lower_answer: &str) -> bool {
+    [
+        "没有找到",
+        "没有高相关",
+        "无高相关",
+        "没有符合",
+        "未找到",
+        "no relevant",
+        "no matching",
+    ]
+    .iter()
+    .any(|phrase| lower_answer.contains(phrase))
+}
+
+fn build_readme_translation_prompt(repository_full_name: &str, readme_markdown: &str) -> String {
+    let readme_excerpt = readme_markdown
+        .chars()
+        .take(MAX_README_CHARS)
+        .collect::<String>();
+    let content_notice = if readme_markdown.chars().count() > MAX_README_CHARS {
+        "README 内容较长，本次翻译仅覆盖开头部分。不要补写未提供的章节。"
+    } else {
+        "README 内容完整。"
+    };
+
+    format!(
+        r#"请将这个 GitHub 仓库 README 翻译为简体中文。
+
+仓库：{repository_full_name}
+内容状态：{content_notice}
+
+要求：
+- 保留原有 Markdown 结构，包括标题层级、列表、表格、引用、链接和图片。
+- 代码块、命令、URL、API 名称和标识符保持原文，不要翻译或改写。
+- 只翻译自然语言说明，不添加原文没有的功能、结论或示例。
+- 直接输出翻译后的 Markdown，不要使用代码围栏包裹全文，不要添加解释。
+
+README:
+{readme_excerpt}
+"#,
     )
 }
 
@@ -2718,6 +3157,28 @@ mod tests {
     }
 
     #[test]
+    fn build_readme_translation_prompt_preserves_technical_markdown() {
+        let prompt = build_readme_translation_prompt(
+            "owner/project",
+            "# Install\n\n```bash\npnpm install\n```",
+        );
+
+        assert!(prompt.contains("保留原有 Markdown 结构"));
+        assert!(prompt.contains("代码块、命令、URL、API 名称和标识符保持原文"));
+        assert!(prompt.contains("# Install"));
+        assert!(prompt.contains("pnpm install"));
+    }
+
+    #[test]
+    fn build_readme_translation_prompt_marks_truncated_input() {
+        let readme = "a".repeat(MAX_README_CHARS + 1);
+        let prompt = build_readme_translation_prompt("owner/project", &readme);
+
+        assert!(prompt.contains("README 内容较长，本次翻译仅覆盖开头部分"));
+        assert!(!prompt.contains(&readme));
+    }
+
+    #[test]
     fn parse_github_recommendation_plan_normalizes_queries() {
         let plan = parse_github_recommendation_plan(
             r#"```json
@@ -2762,6 +3223,121 @@ mod tests {
         assert!(prompt.contains("React 组件库"));
         assert!(prompt.contains("弹簧效果"));
         assert!(prompt.contains("有没有轻量的动画库"));
+    }
+
+    #[test]
+    fn build_search_answer_prompt_uses_only_public_result_evidence() {
+        let prompt = build_search_answer_prompt(
+            "找一个 React 动画库",
+            &[AiSearchEvidence {
+                repository_full_name: "pmndrs/react-spring".to_owned(),
+                description: Some("Spring physics based animation library".to_owned()),
+                topics: vec!["react".to_owned(), "animation".to_owned()],
+                summary_zh: Some("适合构建 React 弹簧动画。".to_owned()),
+            }],
+        );
+
+        assert!(prompt.contains("候选数量：1"));
+        assert!(prompt.contains("pmndrs/react-spring"));
+        assert!(prompt.contains("react、animation"));
+        assert!(prompt.contains("适合构建 React 弹簧动画"));
+        assert!(prompt.contains("repository_full_names"));
+        assert!(prompt.contains("宁可少于 10 个或返回空结果"));
+        assert!(!prompt.contains("个人笔记"));
+    }
+
+    #[test]
+    fn parse_search_answer_keeps_only_real_candidates_in_ai_order() {
+        let evidence = vec![
+            AiSearchEvidence {
+                repository_full_name: "owner/first".to_owned(),
+                description: None,
+                topics: Vec::new(),
+                summary_zh: None,
+            },
+            AiSearchEvidence {
+                repository_full_name: "owner/second".to_owned(),
+                description: None,
+                topics: Vec::new(),
+                summary_zh: None,
+            },
+        ];
+        let answer = parse_search_answer(
+            r#"{
+                "answer_zh":"优先使用 owner/second，其次使用 owner/first。",
+                "repository_full_names":["OWNER/SECOND","owner/first"]
+            }"#,
+            &evidence,
+        )
+        .expect("结构化检索回答应可解析");
+
+        assert_eq!(
+            answer.repository_full_names,
+            vec!["owner/second", "owner/first"]
+        );
+        assert!(answer.answer_zh.contains("owner/second"));
+    }
+
+    #[test]
+    fn parse_search_answer_rejects_repository_outside_candidates() {
+        let evidence = vec![AiSearchEvidence {
+            repository_full_name: "owner/real".to_owned(),
+            description: None,
+            topics: Vec::new(),
+            summary_zh: None,
+        }];
+        let error = parse_search_answer(
+            r#"{
+                "answer_zh":"推荐 owner/hallucinated。",
+                "repository_full_names":["owner/hallucinated"]
+            }"#,
+            &evidence,
+        )
+        .expect_err("候选外仓库必须被拒绝");
+
+        assert!(error.contains("候选列表外"));
+    }
+
+    #[test]
+    fn parse_search_answer_accepts_plain_markdown_from_compatible_models() {
+        let evidence = vec![
+            AiSearchEvidence {
+                repository_full_name: "SunkenCost/grok-regkit".to_owned(),
+                description: None,
+                topics: Vec::new(),
+                summary_zh: None,
+            },
+            AiSearchEvidence {
+                repository_full_name: "router-for-me/CLIProxyAPI".to_owned(),
+                description: None,
+                topics: Vec::new(),
+                summary_zh: None,
+            },
+        ];
+        let answer = parse_search_answer(
+            "最相关的是：\n- **grok-regkit**：适合账号工具链。\n- **router-for-me/CLIProxyAPI**：适合 API 接入。",
+            &evidence,
+        )
+        .expect("普通 Markdown 回答应能映射到真实候选");
+
+        assert_eq!(
+            answer.repository_full_names,
+            vec!["SunkenCost/grok-regkit", "router-for-me/CLIProxyAPI"]
+        );
+    }
+
+    #[test]
+    fn parse_search_answer_accepts_explicit_plain_empty_result() {
+        let evidence = vec![AiSearchEvidence {
+            repository_full_name: "owner/unrelated".to_owned(),
+            description: None,
+            topics: Vec::new(),
+            summary_zh: None,
+        }];
+        let answer = parse_search_answer("没有找到与问题高相关的仓库。", &evidence)
+            .expect("明确的空结果回答应可解析");
+
+        assert!(answer.repository_full_names.is_empty());
     }
 
     #[test]
@@ -2827,6 +3403,57 @@ mod tests {
 
         assert!(message.contains("请求地址或模型 ID 不存在"));
         assert!(message.contains("model not found"));
+    }
+
+    #[test]
+    fn embed_text_sends_openai_compatible_request_and_parses_vector() {
+        let (url, request_handle) = spawn_http_server(
+            "200 OK",
+            r#"{"data":[{"embedding":[0.1,0.2,0.3]}],"model":"embedding-test"}"#,
+        );
+        let config = EmbeddingRequestConfig {
+            enabled: true,
+            provider: "openai-compatible".to_owned(),
+            download_source: None,
+            api_key: String::new(),
+            base_url: Some(url),
+            model: "embedding-test".to_owned(),
+            dimensions: 3,
+            min_score: 0.72,
+            max_results: 8,
+        };
+
+        let result = embed_text(&config, "Rust semantic search").expect("应解析 Embedding 响应");
+        assert_eq!(result.vector, vec![0.1, 0.2, 0.3]);
+        let request = request_handle.join().expect("测试服务应正常退出");
+        assert!(request.starts_with("POST /test/embeddings HTTP/1.1"));
+        assert!(request.contains("\"model\":\"embedding-test\""));
+        assert!(request.contains("\"dimensions\":3"));
+        assert!(request.contains("\"input\":\"Rust semantic search\""));
+        assert!(!request.contains("Authorization:"));
+    }
+
+    #[test]
+    fn embed_text_rejects_response_dimension_mismatch() {
+        let (url, request_handle) = spawn_http_server(
+            "200 OK",
+            r#"{"data":[{"embedding":[0.1,0.2]}],"model":"embedding-test"}"#,
+        );
+        let config = EmbeddingRequestConfig {
+            enabled: true,
+            provider: "openai-compatible".to_owned(),
+            download_source: None,
+            api_key: String::new(),
+            base_url: Some(url),
+            model: "embedding-test".to_owned(),
+            dimensions: 3,
+            min_score: 0.72,
+            max_results: 8,
+        };
+
+        let error = embed_text(&config, "dimension test").expect_err("维度不匹配必须失败");
+        assert!(error.contains("配置为 3，服务返回 2"));
+        request_handle.join().expect("测试服务应正常退出");
     }
 
     fn spawn_http_server(

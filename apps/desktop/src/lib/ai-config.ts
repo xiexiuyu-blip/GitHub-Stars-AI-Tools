@@ -1,8 +1,15 @@
-import type { AISettings } from '@/types-settings';
+import { DEFAULT_SETTINGS, type AISettings, type EmbeddingSettings } from '@/types-settings';
 
 export const SAVED_AI_API_KEY_PLACEHOLDER = '__FSL_SAVED_AI_API_KEY__';
 
 export type BackendAiRequestConfig = Pick<AISettings, 'provider' | 'baseUrl' | 'model'> & {
+  apiKey: '';
+};
+
+export type BackendEmbeddingRequestConfig = Pick<
+  EmbeddingSettings,
+  'enabled' | 'provider' | 'downloadSource' | 'baseUrl' | 'model' | 'dimensions' | 'minScore' | 'maxResults'
+> & {
   apiKey: '';
 };
 
@@ -12,6 +19,73 @@ export function toBackendAiRequestConfig(ai: AISettings): BackendAiRequestConfig
     baseUrl: ai.baseUrl,
     apiKey: '',
     model: ai.model,
+  };
+}
+
+export function toBackendEmbeddingRequestConfig(embedding: EmbeddingSettings): BackendEmbeddingRequestConfig {
+  return {
+    enabled: embedding.enabled,
+    provider: embedding.provider,
+    downloadSource: embedding.downloadSource,
+    baseUrl: embedding.baseUrl,
+    apiKey: '',
+    model: embedding.model,
+    dimensions: embedding.dimensions,
+    minScore: embedding.minScore,
+    maxResults: embedding.maxResults,
+  };
+}
+
+export function normalizeEmbeddingSettings(embedding: EmbeddingSettings): EmbeddingSettings {
+  const configuredProvider = embedding.provider === 'local'
+    || embedding.provider === 'openai'
+    || embedding.provider === 'openai-compatible'
+    || embedding.provider === 'none'
+    ? embedding.provider
+    : DEFAULT_SETTINGS.embedding.provider;
+  const provider = configuredProvider === 'none' ? 'local' : configuredProvider;
+  const enabled = configuredProvider !== 'none' && Boolean(embedding.enabled);
+  const downloadSource = embedding.downloadSource === 'huggingface' ? 'huggingface' : 'modelscope';
+  if (provider === 'local') {
+    return {
+      ...DEFAULT_SETTINGS.embedding,
+      enabled,
+      downloadSource,
+      apiKey: '',
+      minScore: configuredProvider === 'none'
+        ? DEFAULT_SETTINGS.embedding.minScore
+        : normalizeBoundedNumber(embedding.minScore, DEFAULT_SETTINGS.embedding.minScore, 0, 1, false),
+      maxResults: normalizeBoundedNumber(embedding.maxResults, DEFAULT_SETTINGS.embedding.maxResults, 1, 10, true),
+    };
+  }
+  return {
+    enabled,
+    provider,
+    downloadSource,
+    baseUrl: typeof embedding.baseUrl === 'string' ? embedding.baseUrl.trim() : '',
+    apiKey: typeof embedding.apiKey === 'string' ? embedding.apiKey : '',
+    model: typeof embedding.model === 'string' ? embedding.model.trim() : '',
+    dimensions: normalizeBoundedNumber(
+      embedding.dimensions,
+      DEFAULT_SETTINGS.embedding.dimensions,
+      1,
+      8192,
+      true,
+    ),
+    minScore: normalizeBoundedNumber(
+      embedding.minScore,
+      DEFAULT_SETTINGS.embedding.minScore,
+      0,
+      1,
+      false,
+    ),
+    maxResults: normalizeBoundedNumber(
+      embedding.maxResults,
+      DEFAULT_SETTINGS.embedding.maxResults,
+      1,
+      10,
+      true,
+    ),
   };
 }
 
@@ -26,6 +100,47 @@ export function shouldFlushAiApiKey(ai: AISettings): boolean {
   }
 
   return true;
+}
+
+export function shouldFlushEmbeddingApiKey(embedding: EmbeddingSettings): boolean {
+  const apiKey = embedding.apiKey.trim();
+  if (embedding.provider === 'local' || embedding.provider === 'none' || isSavedAiApiKeyPlaceholder(apiKey)) {
+    return false;
+  }
+  if (embedding.provider === 'openai-compatible' && isLocalAiBaseUrl(embedding.baseUrl) && !apiKey) {
+    return false;
+  }
+  return true;
+}
+
+export function getEmbeddingConfigMessage(embedding: EmbeddingSettings): string | null {
+  if (!embedding.enabled) {
+    return '向量检索尚未启用。';
+  }
+  if (embedding.provider === 'local') {
+    return null;
+  }
+  if (embedding.provider === 'none') {
+    return '请选择 OpenAI 或 OpenAI 兼容的 Embedding 服务。';
+  }
+  const baseUrl = embedding.baseUrl.trim();
+  if (embedding.provider === 'openai-compatible' && !baseUrl) {
+    return '请填写 Embedding 服务的 OpenAI 兼容请求地址。';
+  }
+  if (baseUrl && !isAllowedAiBaseUrl(baseUrl)) {
+    return 'Embedding 请求地址必须使用 https://；本机或局域网服务可以使用 http://。';
+  }
+  if (!embedding.model.trim()) {
+    return '请填写 Embedding 模型 ID。';
+  }
+  if (!Number.isInteger(embedding.dimensions) || embedding.dimensions < 1 || embedding.dimensions > 8192) {
+    return 'Embedding 维度必须是 1 到 8192 的整数。';
+  }
+  if (!hasUsableAiApiKey(embedding.apiKey)
+    && !(embedding.provider === 'openai-compatible' && isLocalAiBaseUrl(baseUrl))) {
+    return '请填写 Embedding API Key。';
+  }
+  return null;
 }
 
 export function getAiConfigMessage(ai: AISettings): string | null {
@@ -63,6 +178,21 @@ function hasUsableAiApiKey(apiKey: string) {
 
 function canUseAiWithoutApiKey(ai: AISettings, baseUrl: string) {
   return ai.provider === 'openai-compatible' && isLocalAiBaseUrl(baseUrl);
+}
+
+function normalizeBoundedNumber(
+  value: number,
+  fallback: number,
+  min: number,
+  max: number,
+  integer: boolean,
+) {
+  const parsed = typeof value === 'number' ? value : Number(value);
+  if (!Number.isFinite(parsed)) {
+    return fallback;
+  }
+  const bounded = Math.min(max, Math.max(min, parsed));
+  return integer ? Math.round(bounded) : bounded;
 }
 
 function isAllowedAiBaseUrl(baseUrl: string) {
