@@ -327,6 +327,22 @@ export function communityLinks(fullName: string): CommunityLink[] {
   ];
 }
 
+export type ExplainerLink = { id: string; label: string; url: string; hint: string };
+
+/**
+ * 别人已经替你读过这个项目了：DeepWiki、Zread 会给任意公开仓库生成一份 AI 解读文档（免费，不用登录）。
+ * 还没有中文说明时，先去这里扫一眼，比只看 GitHub 原文快；它们的内容以英文为主，对不对要自己判断。
+ * 链接就是把 github.com 换成它们的域名。
+ */
+export function explainerLinks(fullName: string): ExplainerLink[] {
+  const name = fullName.trim();
+  if (!/^[^/\s]+\/[^/\s]+$/.test(name)) return [];
+  return [
+    { id: 'deepwiki', label: 'DeepWiki', url: `https://deepwiki.com/${name}`, hint: '按模块讲清项目结构，可以追问' },
+    { id: 'zread', label: 'Zread', url: `https://zread.ai/${name}`, hint: '用 AI 通读仓库后的解读文档' },
+  ];
+}
+
 export function buildCommunityPrompt(input: { fullName: string; htmlUrl?: string | null }): string {
   const url = input.htmlUrl?.trim() || `https://github.com/${input.fullName}`;
   return [

@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react';
 import type { LibraryDetail, ReadingGroup, ScenarioSummary } from '@/lib/contracts';
 import { cleanHowToTry, clipText, firstSentences, monthDay, relativeDays, splitRepoName } from '@/lib/item-format';
-import { extractInstallSteps, extractPreviewImages, hasDownloadHint } from '@/lib/repo-assets';
+import { explainerLinks, extractInstallSteps, extractPreviewImages, hasDownloadHint } from '@/lib/repo-assets';
 import { itemPendingNote } from '@/lib/automation-view';
 import { useAiAutomation } from '@/hooks/use-ai-automation';
 import { useRepoReadme } from '@/hooks/use-repo-readme';
@@ -153,7 +153,7 @@ function DetailBody(props: Parameters<typeof ItemDetail>[0] & { detail: LibraryD
               </div>
             </div>
           ) : (
-            <PendingNote description={detail.description} onOpenToolbox={props.onOpenToolbox} />
+            <PendingNote fullName={detail.fullName} description={detail.description} onOpenToolbox={props.onOpenToolbox} />
           )}
 
           <div role="tablist" aria-label="项目详情" className="mt-5 flex gap-1 border-b border-border">
@@ -320,9 +320,10 @@ function DetailSkeleton() {
 }
 
 /** 还没有中文说明：说清为什么（没开启 / 暂停 / 额度用完 / 在排队），需要你动手时给一个去工具箱的入口，下面先显示 GitHub 原文。 */
-function PendingNote(props: { description: string | null | undefined; onOpenToolbox?: () => void }) {
+function PendingNote(props: { fullName: string; description: string | null | undefined; onOpenToolbox?: () => void }) {
   const { status } = useAiAutomation();
   const note = itemPendingNote(status);
+  const explainers = explainerLinks(props.fullName);
   return (
     <div className="mt-4 rounded-lg bg-accent px-4 py-3.5">
       <div className="flex items-center gap-1.5 text-xs font-medium text-accent-foreground">
@@ -334,6 +335,17 @@ function PendingNote(props: { description: string | null | undefined; onOpenTool
       </div>
       <p className="mt-1.5 text-sm text-on-surface-variant">{note.text}</p>
       <p className="mt-1.5 text-[15px] leading-[1.75] text-foreground">{props.description?.trim() || '—'}</p>
+      {explainers.length > 0 ? (
+        <div className="mt-2.5 flex flex-wrap items-center gap-x-3 gap-y-1 border-t border-border/60 pt-2.5 text-xs text-on-surface-variant">
+          <span>想先了解它？看别人生成的解读：</span>
+          {explainers.map((link) => (
+            <a key={link.id} href={link.url} target="_blank" rel="noopener noreferrer" title={link.hint} className="inline-flex items-center gap-0.5 text-accent-foreground hover:underline hover:underline-offset-[3px]">
+              {link.label}
+              <Icon name="open_in_new" size={13} />
+            </a>
+          ))}
+        </div>
+      ) : null}
     </div>
   );
 }
