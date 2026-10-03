@@ -13,10 +13,10 @@ use serde_json::{json, Value};
 use std::io::{Read, Write};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub const HOST: &str = "127.0.0.1";
 pub const PORT: u16 = 39217;
@@ -26,6 +26,14 @@ const MAX_CAPTURE_URLS: usize = 100;
 const MAX_CAPTURE_URL_CHARS: usize = 2048;
 const MAX_CAPTURE_TEXT_CHARS: usize = 50_000;
 const MAX_CAPTURE_CONTEXT_CHARS: usize = 2_000;
+/// 同时处理的连接数上限。每个连接占一个线程和一个文件描述符（macOS 默认只有 256 个），
+/// 没有上限时，本机任何程序打开几百个不说话的连接，就能让整个应用连数据库都打不开、让监听线程也死掉。
+const MAX_CONNECTIONS: usize = 16;
+/// 一个连接从建立到读完请求的总时限。原来只限制「每次读」2 秒，每 1.5 秒滴一行请求头能把连接占上几个小时。
+const REQUEST_DEADLINE: Duration = Duration::from_secs(5);
+const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+
+static ACTIVE_CONNECTIONS: AtomicUsize = AtomicUsize::new(0);
 
 struct Runtime {
     stop: std::sync::Arc<AtomicBool>,
@@ -152,10 +160,16 @@ pub fn is_enabled(database_path: &Path) -> bool {
 }
 
 pub fn status(database_path: &Path) -> LocalApiStatus {
+    // 监听线程已经退出（比如出过错）就不算在监听：以前只看有没有线程句柄，界面会一直显示「已开启」
     let listening = RUNTIME
         .get()
         .and_then(|runtime| runtime.lock().ok())
-        .is_some_and(|runtime| runtime.thread.is_some());
+        .is_some_and(|runtime| {
+            runtime
+                .thread
+                .as_ref()
+                .is_some_and(|thread| !thread.is_finished())
+        });
     LocalApiStatus {
         enabled: is_enabled(database_path),
         host: HOST.to_owned(),
@@ -207,8 +221,16 @@ fn start(database_path: PathBuf) -> Result<(), String> {
     let mut runtime = runtime()
         .lock()
         .map_err(|_| "本地 API 状态锁损坏".to_owned())?;
-    if runtime.thread.is_some() {
+    if runtime
+        .thread
+        .as_ref()
+        .is_some_and(|thread| !thread.is_finished())
+    {
         return Ok(());
+    }
+    // 上一个监听线程已经退出：收掉它，重新开
+    if let Some(dead) = runtime.thread.take() {
+        let _ = dead.join();
     }
     let listener = TcpListener::bind(addr)
         .map_err(|error| format!("本地 API 绑定 127.0.0.1:{PORT} 失败：{error}"))?;
@@ -228,11 +250,21 @@ fn start(database_path: PathBuf) -> Result<(), String> {
                         let _ = write_raw(&stream, 403, r#"{"error":"只接受本机连接"}"#);
                         continue;
                     }
-                    // 每个连接单独一个线程：慢客户端占着读超时的两秒，也不会卡住别的请求。
+                    // 同时处理的连接有上限：满了立刻回 503，不再开新线程。
+                    if ACTIVE_CONNECTIONS.fetch_add(1, Ordering::SeqCst) >= MAX_CONNECTIONS {
+                        ACTIVE_CONNECTIONS.fetch_sub(1, Ordering::SeqCst);
+                        let _ = write_raw(&stream, 503, r#"{"error":"连接太多，请稍后再试"}"#);
+                        continue;
+                    }
+                    // 每个连接单独一个线程：慢客户端占着时限，也不会卡住别的请求。
                     let database_path = database_path.clone();
-                    thread::spawn(move || handle_connection(stream, &database_path));
+                    thread::spawn(move || {
+                        let _release = ConnectionSlot;
+                        handle_connection(stream, &database_path);
+                    });
                 }
-                Err(_) => break,
+                // 偶发的接受错误（比如文件描述符一时用完）不能让监听线程永久退出：歇一下继续。
+                Err(_) => thread::sleep(Duration::from_millis(100)),
             }
         }
     });
@@ -253,9 +285,45 @@ fn stop() {
     }
 }
 
+/// 连接处理结束（含 panic）时把占用的名额还回去。
+struct ConnectionSlot;
+
+impl Drop for ConnectionSlot {
+    fn drop(&mut self) {
+        ACTIVE_CONNECTIONS.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// 读到总时限就停：每次读之前把读超时设成「离总时限还剩多久」。
+struct DeadlineReader<'a> {
+    stream: &'a mut TcpStream,
+    deadline: Instant,
+}
+
+impl Read for DeadlineReader<'_> {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        let remaining = self.deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "请求读取超时",
+            ));
+        }
+        self.stream.set_read_timeout(Some(remaining))?;
+        self.stream.read(buffer)
+    }
+}
+
 fn handle_connection(mut stream: TcpStream, database_path: &Path) {
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
-    let (status, body) = match read_request(&mut stream) {
+    let _ = stream.set_write_timeout(Some(WRITE_TIMEOUT));
+    let request = {
+        let mut reader = DeadlineReader {
+            stream: &mut stream,
+            deadline: Instant::now() + REQUEST_DEADLINE,
+        };
+        read_request(&mut reader)
+    };
+    let (status, body) = match request {
         Ok(raw) => route(database_path, &raw),
         Err((code, message)) => (code, error_body(message)),
     };
@@ -1725,5 +1793,58 @@ mod tests {
         assert!(!body.contains("boom"));
         assert!(!body.contains("secret"));
         assert!(!body.contains(&path.display().to_string()));
+    }
+
+    #[test]
+    fn a_connection_that_drips_one_header_line_at_a_time_is_cut_off_by_the_total_deadline() {
+        // 修复前只限制「每次读」2 秒：每 1.5 秒滴一行请求头，一个连接能占上几个小时
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let dripper = thread::spawn(move || {
+            let mut client = TcpStream::connect(address).unwrap();
+            let _ = client.write_all(b"GET /v1/health HTTP/1.1\r\n");
+            for _ in 0..20 {
+                thread::sleep(Duration::from_millis(400));
+                if client.write_all(b"X-Drip: a\r\n").is_err() {
+                    break;
+                }
+            }
+        });
+        let (mut server_side, _) = listener.accept().unwrap();
+        let started = Instant::now();
+        let result = {
+            let mut reader = DeadlineReader {
+                stream: &mut server_side,
+                deadline: Instant::now() + Duration::from_millis(1200),
+            };
+            read_request(&mut reader)
+        };
+        let elapsed = started.elapsed();
+        drop(server_side);
+        let _ = dripper.join();
+        assert_eq!(result.unwrap_err().0, 408, "总时限到了要停");
+        assert!(
+            elapsed < Duration::from_millis(2500),
+            "应该在总时限附近就停，实际 {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn connection_slots_are_returned_even_when_the_handler_panics() {
+        let before = ACTIVE_CONNECTIONS.load(Ordering::SeqCst);
+        ACTIVE_CONNECTIONS.fetch_add(1, Ordering::SeqCst);
+        let result = std::panic::catch_unwind(|| {
+            let _release = ConnectionSlot;
+            panic!("故意崩溃");
+        });
+        assert!(result.is_err());
+        assert_eq!(ACTIVE_CONNECTIONS.load(Ordering::SeqCst), before);
+    }
+
+    #[test]
+    fn the_connection_cap_is_small_enough_for_a_256_descriptor_limit() {
+        // macOS 默认每个进程只有 256 个文件描述符；监听线程和数据库、curl 都要用
+        assert!(MAX_CONNECTIONS <= 32);
+        assert!(REQUEST_DEADLINE <= Duration::from_secs(10));
     }
 }

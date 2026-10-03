@@ -54,6 +54,9 @@ const UNREADABLE_REASON: &str = "页面内容读不出来";
 const CHALLENGE_REASON: &str = "网站要求先做人机验证，这里读不了";
 const X_MISSING_REASON: &str = "帖子不存在、已删除或需要登录才能看";
 const BLOCKED_IP_REASON: &str = "域名指向内网或云元数据地址，不读取";
+const EXTRACT_FAILED_REASON: &str = "页面太复杂或有异常，没读出来";
+/// 解析一个页面最多等这么久（正常的 6 MB 页面只要零点几秒）。
+const EXTRACT_TIMEOUT_SECS: u64 = 20;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FetchProblemKind {
@@ -162,7 +165,13 @@ pub fn fetch_pending(
     let mut failed = 0_i64;
     let mut skipped = 0_i64;
     for row in rows {
-        let outcome = decide(&row, fetcher);
+        // 解析出错（panic）也要写成「读失败」：不写的话这一条永远是 pending，每次打开收集页都读它、
+        // 每次都出错，排在它后面的链接一个也读不到。
+        let outcome =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| decide(&row, fetcher)))
+                .unwrap_or_else(|_| Outcome::Failed {
+                    reason: EXTRACT_FAILED_REASON.to_owned(),
+                });
         write_outcome(db_path, &row.id, &outcome)?;
         match outcome {
             Outcome::Done { .. } => done += 1,
@@ -314,7 +323,24 @@ fn fetch_html(fetcher: &dyn PageFetcher, url: &str) -> Outcome {
     if let Some(reason) = failure_for_status(page.status, PageKind::Web) {
         return Outcome::Failed { reason };
     }
-    let extracted = extract_web(&page.body, url);
+    // 解析页面是纯计算，放进单独的线程并限时：万一遇到没想到的恶意结构，最多等这么久就放弃这一条，
+    // 不让整个读取一直卡在它上面（线程会自己跑完，不再占着调用方）。
+    let body = page.body;
+    let page_url = url.to_owned();
+    let parsed = run_bounded(Duration::from_secs(EXTRACT_TIMEOUT_SECS), move || {
+        let extracted = extract_web(&body, &page_url);
+        let repos = if extracted.failure.is_none() {
+            github_repos_in(&body, &page_url)
+        } else {
+            Vec::new()
+        };
+        (extracted, repos)
+    });
+    let Some((extracted, repos)) = parsed else {
+        return Outcome::Failed {
+            reason: EXTRACT_FAILED_REASON.to_owned(),
+        };
+    };
     if let Some(reason) = extracted.failure {
         return Outcome::Failed {
             reason: reason.to_owned(),
@@ -324,8 +350,23 @@ fn fetch_html(fetcher: &dyn PageFetcher, url: &str) -> Outcome {
         title: extracted.title,
         author: extracted.author,
         excerpt: extracted.excerpt,
-        repos: github_repos_in(&page.body, url),
+        repos,
     }
+}
+
+/// 在新线程里跑，最多等 `limit`。线程 panic 或超时都返回 `None`（panic 时发送端被丢掉，接收端立刻知道）。
+fn run_bounded<T: Send + 'static>(
+    limit: Duration,
+    job: impl FnOnce() -> T + Send + 'static,
+) -> Option<T> {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::Builder::new()
+        .name("inbox-extract".to_owned())
+        .spawn(move || {
+            let _ = sender.send(job());
+        })
+        .ok()?;
+    receiver.recv_timeout(limit).ok()
 }
 
 fn request_page(fetcher: &dyn PageFetcher, url: &str) -> Result<PageResponse, Outcome> {
@@ -488,7 +529,10 @@ fn user_agent_for(url: &str) -> &'static str {
     }
 }
 
-/// 拼 curl 参数。不带 `-L`、cookie 或 `Authorization`。只带这一个请求头。
+/// 拼 curl 参数。不带 `-L`、cookie 或 `Authorization`。只带 `Accept-Encoding` 这一个请求头。
+/// `-g`（关掉网址通配）：curl 默认把 `[1-100]`、`{a,b}` 当成要展开的范围，
+/// 一条 `https://x.example/a[1-100000]` 的链接会发出十万次请求，主机名里的 `{a,b}` 还会绕过固定 IP 的检查。
+/// `--noproxy *`：环境里有 `https_proxy` 时 curl 会把 `CONNECT 主机:443` 交给代理，`--resolve` 的固定 IP 就失效了。
 fn safe_curl_arguments(
     url: &str,
     header_dump: &str,
@@ -499,6 +543,9 @@ fn safe_curl_arguments(
     [
         "-q",
         "-sS",
+        "-g",
+        "--noproxy",
+        "*",
         "--proto",
         "=https",
         "--proto-redir",
@@ -544,8 +591,8 @@ fn curl_once_pinned(url: &str, ip: IpAddr) -> Result<PageResponse, FetchProblem>
     let pin = resolve_arg(host, 443, ip);
     let dump = HeaderDump::create()?;
     let header_path = dump.path_arg()?;
-    let args = safe_curl_arguments(url, &header_path, &pin, user_agent_for(url));
-    let output = std::process::Command::new("curl")
+    let args = safe_curl_arguments(parsed.as_str(), &header_path, &pin, user_agent_for(url));
+    let output = std::process::Command::new(curl_program())
         .args(&args)
         .output()
         .map_err(|_| FetchProblem::fail("联网程序启动失败"))?;
@@ -573,6 +620,15 @@ fn curl_once_pinned(url: &str, ip: IpAddr) -> Result<PageResponse, FetchProblem>
         final_url: url.to_owned(),
         location,
     })
+}
+
+/// 系统自带的 curl，不按 PATH 找：PATH 里可能有别的同名程序。
+fn curl_program() -> &'static str {
+    if Path::new("/usr/bin/curl").exists() {
+        "/usr/bin/curl"
+    } else {
+        "curl"
+    }
 }
 
 fn too_big_problem() -> FetchProblem {
@@ -1168,20 +1224,31 @@ fn without_page_chrome(html: &str) -> String {
             out.push_str(&html[start..index]);
             continue;
         }
-        if let Some(tag) = parse_tag_at(html, index) {
-            if !tag.closing
-                && !tag.self_closing
-                && matches!(tag.name.as_str(), "nav" | "header" | "footer" | "aside")
-            {
-                let end = skip_element(html, tag.end, &tag.name);
-                if ends_with_close_tag(html, end, &tag.name) {
-                    index = end;
-                    continue;
+        match scan_tag_at(html, index) {
+            TagScan::Tag(tag) => {
+                if !tag.closing
+                    && !tag.self_closing
+                    && matches!(tag.name.as_str(), "nav" | "header" | "footer" | "aside")
+                {
+                    let end = skip_element(html, tag.end, &tag.name);
+                    if ends_with_close_tag(html, end, &tag.name) {
+                        index = end;
+                        continue;
+                    }
+                    // 第一个没有配对结束标签的就到此为止：skip_element 已经扫到了末尾，
+                    // 后面每个没关的 <nav> 再扫一遍就是二次方（2 万个 <nav> 要 7 秒）。剩下的原样带上。
+                    out.push_str(&html[index..]);
+                    break;
                 }
+                out.push_str(&html[index..tag.end]);
+                index = tag.end;
+                continue;
             }
-            out.push_str(&html[index..tag.end]);
-            index = tag.end;
-            continue;
+            TagScan::NotATag => {}
+            TagScan::Unterminated => {
+                out.push_str(&html[index..]);
+                break;
+            }
         }
         out.push('<');
         index += 1;
@@ -1213,22 +1280,29 @@ fn repo_scan_text(html: &str) -> String {
             raw.push_str(&html[start..index]);
             continue;
         }
-        if let Some(tag) = parse_tag_at(html, index) {
-            if let Some(href) = attr(&tag, "href") {
-                if !href.is_empty() {
-                    raw.push('\n');
-                    raw.push_str(href);
+        match scan_tag_at(html, index) {
+            TagScan::Tag(tag) => {
+                if let Some(href) = attr(&tag, "href") {
+                    if !href.is_empty() {
+                        raw.push('\n');
+                        raw.push_str(href);
+                        raw.push('\n');
+                    }
+                }
+                // 行内标签（span、strong……）不打断文字：编辑器会把一个网址拆进几个 span。
+                // 其余标签（段落、列表、表格、br、不认识的标签）都当换行，
+                // 否则相邻两段的网址会粘成一个，两个都认不出来。
+                if !is_inline_tag(&tag.name) {
                     raw.push('\n');
                 }
+                index = tag.end;
+                continue;
             }
-            // 行内标签（span、strong……）不打断文字：编辑器会把一个网址拆进几个 span。
-            // 其余标签（段落、列表、表格、br、不认识的标签）都当换行，
-            // 否则相邻两段的网址会粘成一个，两个都认不出来。
-            if !is_inline_tag(&tag.name) {
-                raw.push('\n');
+            TagScan::NotATag => {}
+            TagScan::Unterminated => {
+                raw.push_str(&html[index..]);
+                break;
             }
-            index = tag.end;
-            continue;
         }
         raw.push('<');
         index += 1;
@@ -1422,15 +1496,19 @@ fn wechat_blocked(title: &str, excerpt: &str, body: &str) -> bool {
 /// 页面里还有 `nickname: "data-miniprogram-nickname"`（一张属性名对照表）和后面的 `nick_name: '微信广告'`，
 /// 所以每种写法只认固定的赋值符号，并且忽略「看起来是属性名」的值。
 fn wechat_author(raw: &str, cleaned: &str) -> String {
+    // 只在 <script> 里找：正文是谁都能写的，往文章里写一句 `nickname = '官方账号'` 不能变成显示的作者名。
+    let scripts = script_sections(raw);
     for (ident, separators) in [
         ("nickname", b"=".as_slice()),
         ("nick_name", b":".as_slice()),
         ("profile_nickname", b"=:".as_slice()),
     ] {
-        if let Some(name) = js_assigned_string_with(raw, ident, separators) {
-            let text = plain_text(&name, AUTHOR_CHARS);
-            if !text.is_empty() && !looks_like_attribute_name(&text) {
-                return text;
+        for script in &scripts {
+            if let Some(name) = js_assigned_string_with(script, ident, separators) {
+                let text = plain_text(&name, AUTHOR_CHARS);
+                if !text.is_empty() && !looks_like_attribute_name(&text) {
+                    return text;
+                }
             }
         }
     }
@@ -1441,6 +1519,22 @@ fn wechat_author(raw: &str, cleaned: &str) -> String {
         }
     }
     String::new()
+}
+
+/// 页面里所有 `<script>` 的内容（原样文本，不当 HTML 解析）。
+fn script_sections(raw: &str) -> Vec<&str> {
+    let mut sections = Vec::new();
+    let mut index = 0;
+    while let Some(tag) = next_tag(raw, index) {
+        if !tag.closing && !tag.self_closing && tag.name == "script" {
+            let end = skip_raw_text_element(raw, tag.end, "script");
+            sections.push(&raw[tag.end..end]);
+            index = end;
+        } else {
+            index = tag.end;
+        }
+    }
+    sections
 }
 
 /// `data-miniprogram-nickname` 这种全小写加连字符、没有汉字的值是代码里的名字，不是账号名。
@@ -1597,7 +1691,11 @@ fn decode_entities(input: &str) -> String {
 
 fn parse_entity(input: &str, start: usize) -> Option<(char, usize)> {
     let rest = input.get(start + 1..)?;
-    let end = rest.find(';')?;
+    // 实体最长 32 个字节：只在这个窗口里找分号。整段找的话，80 万个 `&` 要 10 秒。
+    let window = rest.len().min(33);
+    let end = rest.as_bytes()[..window]
+        .iter()
+        .position(|byte| *byte == b';')?;
     if end == 0 || end > 32 {
         return None;
     }
@@ -1631,8 +1729,26 @@ fn parse_entity(input: &str, start: usize) -> Option<(char, usize)> {
 
 fn strip_controls(text: &str) -> String {
     text.chars()
-        .filter(|ch| !ch.is_control() || ch.is_whitespace())
+        .filter(|ch| (!ch.is_control() || ch.is_whitespace()) && !is_invisible_format(*ch))
         .collect()
+}
+
+/// 看不见、只会用来伪装的格式字符：双向文字控制符（把标题显示得前后颠倒）、零宽空格、隐形的词连接符、标签字符。
+/// 不去掉零宽连接符 U+200C / U+200D：表情符号组合和印度文字要用它。
+fn is_invisible_format(ch: char) -> bool {
+    matches!(
+        ch as u32,
+        0x00AD
+            | 0x061C
+            | 0x180E
+            | 0x200B
+            | 0x200E..=0x200F
+            | 0x202A..=0x202E
+            | 0x2060..=0x2064
+            | 0x2066..=0x2069
+            | 0xFEFF
+            | 0xE0000..=0xE007F
+    )
 }
 
 fn collapse_ws(text: &str, keep_newlines: bool) -> String {
@@ -1699,12 +1815,19 @@ fn html_fragment_to_text(fragment: &str, keep_newlines: bool) -> String {
             raw.push_str(&cleaned[start..index]);
             continue;
         }
-        if let Some(tag) = parse_tag_at(&cleaned, index) {
-            if tag.name == "br" || (tag.closing && is_block_tag(&tag.name)) {
-                raw.push('\n');
+        match scan_tag_at(&cleaned, index) {
+            TagScan::Tag(tag) => {
+                if tag.name == "br" || (tag.closing && is_block_tag(&tag.name)) {
+                    raw.push('\n');
+                }
+                index = tag.end;
+                continue;
             }
-            index = tag.end;
-            continue;
+            TagScan::NotATag => {}
+            TagScan::Unterminated => {
+                raw.push_str(&cleaned[index..]);
+                break;
+            }
         }
         raw.push('<');
         index += 1;
@@ -1754,21 +1877,28 @@ fn remove_hidden(html: &str) -> String {
             out.push_str(&html[start..index]);
             continue;
         }
-        if let Some(tag) = parse_tag_at(html, index) {
-            if !tag.closing
-                && !tag.self_closing
-                && matches!(tag.name.as_str(), "script" | "style" | "noscript" | "svg")
-            {
-                index = if tag.name == "svg" {
-                    skip_element(html, tag.end, &tag.name)
-                } else {
-                    skip_raw_text_element(html, tag.end, &tag.name)
-                };
+        match scan_tag_at(html, index) {
+            TagScan::Tag(tag) => {
+                if !tag.closing
+                    && !tag.self_closing
+                    && matches!(tag.name.as_str(), "script" | "style" | "noscript" | "svg")
+                {
+                    index = if tag.name == "svg" {
+                        skip_element(html, tag.end, &tag.name)
+                    } else {
+                        skip_raw_text_element(html, tag.end, &tag.name)
+                    };
+                    continue;
+                }
+                out.push_str(&html[index..tag.end]);
+                index = tag.end;
                 continue;
             }
-            out.push_str(&html[index..tag.end]);
-            index = tag.end;
-            continue;
+            TagScan::NotATag => {}
+            TagScan::Unterminated => {
+                out.push_str(&html[index..]);
+                break;
+            }
         }
         out.push('<');
         index += 1;
@@ -1886,8 +2016,11 @@ fn next_tag(html: &str, from: usize) -> Option<Tag> {
                 }
                 return None;
             }
-            if let Some(tag) = parse_tag_at(html, index) {
-                return Some(tag);
+            match scan_tag_at(html, index) {
+                TagScan::Tag(tag) => return Some(tag),
+                TagScan::NotATag => {}
+                // 没结束的标签吞掉了剩下的整页：后面不会再有标签
+                TagScan::Unterminated => return None,
             }
         }
         index += 1;
@@ -1895,15 +2028,28 @@ fn next_tag(html: &str, from: usize) -> Option<Tag> {
     None
 }
 
-fn parse_tag_at(html: &str, start: usize) -> Option<Tag> {
-    let rest = html.get(start..)?;
+/// 一个 `<` 开头的东西是什么。
+enum TagScan {
+    Tag(Tag),
+    /// 不是标签（`<` 后面不是标签名，或是声明）。
+    NotATag,
+    /// 是标签的开头，但一直找不到结束的 `>`（或引号没配对）直到文档末尾。浏览器会把剩下的整页都当成这个标签的内容。
+    /// 调用方碰到它就必须停止找标签、把剩下的当文字：从下一个 `<` 重新扫会又扫到末尾，
+    /// 一页 10 万个没结束的 `<a` 就要 12 秒（二次方），6 MB 的页面要十几个小时。
+    Unterminated,
+}
+
+fn scan_tag_at(html: &str, start: usize) -> TagScan {
+    let Some(rest) = html.get(start..) else {
+        return TagScan::NotATag;
+    };
     let bytes = rest.as_bytes();
     if !rest.starts_with('<') {
-        return None;
+        return TagScan::NotATag;
     }
     let mut index = 1;
     if index < bytes.len() && (bytes[index] == b'!' || bytes[index] == b'?') {
-        return None;
+        return TagScan::NotATag;
     }
     let closing = if index < bytes.len() && bytes[index] == b'/' {
         index += 1;
@@ -1919,7 +2065,7 @@ fn parse_tag_at(html: &str, start: usize) -> Option<Tag> {
         index += 1;
     }
     if index == name_start {
-        return None;
+        return TagScan::NotATag;
     }
     let name = rest[name_start..index].to_ascii_lowercase();
     let attr_start = index;
@@ -1946,7 +2092,7 @@ fn parse_tag_at(html: &str, start: usize) -> Option<Tag> {
             } else {
                 parse_attrs(raw_attrs.trim_end().trim_end_matches('/'))
             };
-            return Some(Tag {
+            return TagScan::Tag(Tag {
                 name,
                 closing,
                 self_closing,
@@ -1957,7 +2103,7 @@ fn parse_tag_at(html: &str, start: usize) -> Option<Tag> {
         }
         index += 1;
     }
-    None
+    TagScan::Unterminated
 }
 
 fn is_name_byte(byte: u8) -> bool {
@@ -2133,16 +2279,24 @@ fn assignment_after(html: &str, mut index: usize, separators: &[u8]) -> Option<S
     let mut out = String::new();
     while index < bytes.len() {
         if !html.is_char_boundary(index) {
-            let next = next_boundary(html, index);
-            out.push_str(&html[index..next]);
-            index = next;
+            // 不该走到这里（下面的转义都按字符前进）；万一落在字符中间，跳过去，不能从中间切片
+            index = next_boundary(html, index);
             continue;
         }
         if bytes[index] == quote {
             return Some(out);
         }
         if bytes[index] == b'\\' && index + 1 < bytes.len() {
-            let escaped = bytes[index + 1];
+            // 转义符后面可能是多字节字符（`\é`）：按字符取，再按它的字节数前进。
+            // 以前只取一个字节再 index += 2，落在字符中间，下一次切片就 panic，整个收集箱读取卡死。
+            let Some(escaped_char) = html[index + 1..].chars().next() else {
+                break;
+            };
+            let escaped = if escaped_char.is_ascii() {
+                escaped_char as u8
+            } else {
+                0
+            };
             if escaped == b'u' && index + 6 <= bytes.len() && html.is_char_boundary(index + 6) {
                 let hex = &html[index + 2..index + 6];
                 if let Ok(code) = u32::from_str_radix(hex, 16) {
@@ -2162,12 +2316,10 @@ fn assignment_after(html: &str, mut index: usize, separators: &[u8]) -> Option<S
                 b'/' => out.push('/'),
                 _ => {
                     out.push('\\');
-                    if let Some(ch) = char::from_u32(u32::from(escaped)) {
-                        out.push(ch);
-                    }
+                    out.push(escaped_char);
                 }
             }
-            index += 2;
+            index += 1 + escaped_char.len_utf8();
             continue;
         }
         let next = next_boundary(html, index);
@@ -4334,5 +4486,170 @@ https://github.com/real/repo
             assert!(!lower.contains("cookie"), "{arg}");
             assert!(!lower.contains("authorization"), "{arg}");
         }
+    }
+
+    // ───────── 安全审查（2026-10-04）后补的测试 ─────────
+
+    #[test]
+    fn curl_arguments_turn_off_globbing_and_proxies() {
+        let args = safe_curl_arguments(
+            "https://evil.example/a[1-100000]",
+            "/tmp/h.txt",
+            "evil.example:443:93.184.216.34",
+            UA_SAFARI,
+        );
+        // 没有 -g，curl 会把 [1-100000] 展开成十万次请求
+        assert!(args.iter().any(|arg| arg == "-g"), "{args:?}");
+        let proxy = args
+            .iter()
+            .position(|arg| arg == "--noproxy")
+            .expect("应带 --noproxy");
+        assert_eq!(args[proxy + 1], "*");
+        // 网址仍然在 `--` 之后，当作一个普通参数
+        let dashes = args.iter().position(|arg| arg == "--").expect("应有 --");
+        assert_eq!(args[dashes + 1], "https://evil.example/a[1-100000]");
+    }
+
+    fn elapsed_under(limit_secs: u64, run: impl FnOnce()) {
+        let started = std::time::Instant::now();
+        run();
+        assert!(
+            started.elapsed() < Duration::from_secs(limit_secs),
+            "解析用了 {:?}，应该是线性的",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn unterminated_tags_are_parsed_in_linear_time() {
+        // 修复前：10 万字节的 `<a` 重复要 12 秒（每个都扫到文末），6 MB 要十几个小时
+        let html = "<a".repeat(300_000);
+        elapsed_under(5, || {
+            let page = extract_web(&html, "https://example.com/bomb");
+            let _ = page.title;
+            assert!(github_repos_in(&html, "https://example.com/bomb").is_empty());
+            assert_eq!(remove_hidden(&html).len(), html.len());
+        });
+        // 引号没配对：同样是一直扫到末尾
+        let quoted = "<a title=\"x ".repeat(100_000);
+        elapsed_under(5, || {
+            let _ = extract_web(&quoted, "https://example.com/quote");
+        });
+    }
+
+    #[test]
+    fn unclosed_chrome_tags_do_not_make_the_stripper_quadratic() {
+        let mut html = "<nav>".repeat(50_000);
+        html.push_str("<p>推荐 https://github.com/a/b</p>");
+        elapsed_under(5, || {
+            assert_eq!(
+                github_repos_in(&html, "https://blog.example/nav"),
+                vec!["a/b".to_owned()]
+            );
+        });
+    }
+
+    #[test]
+    fn entity_decoding_only_looks_a_few_bytes_ahead() {
+        let text = "&".repeat(800_000);
+        elapsed_under(5, || {
+            assert_eq!(decode_entities(&text).len(), 800_000);
+        });
+        assert_eq!(decode_entities("a &amp; b &#x4e2d; c"), "a & b 中 c");
+        assert_eq!(decode_entities("&amp"), "&amp", "没有分号不算实体");
+    }
+
+    #[test]
+    fn backslash_before_a_multibyte_char_does_not_panic_and_keeps_the_text() {
+        // 修复前：`\é` 让下标落在字符中间，下一次切片 panic，收集箱读取整个卡死
+        let html = r#"<script>var nickname = "a\é b\字 c";</script>"#;
+        let name = js_assigned_string_with(html, "nickname", b"=").expect("应读到值");
+        assert_eq!(name, "a\\é b\\字 c");
+        assert_eq!(
+            js_assigned_string_with(r#"nickname='\é'"#, "nickname", b"="),
+            Some("\\é".to_owned())
+        );
+        // 引号还没结束就到了末尾：不 panic，返回 None
+        assert_eq!(
+            js_assigned_string_with("nickname = 'abc\\", "nickname", b"="),
+            None
+        );
+    }
+
+    #[test]
+    fn wechat_author_comes_from_scripts_only() {
+        let html = concat!(
+            "<html><head><title>文章</title></head><body>",
+            "<div id=\"js_content\"><p>nickname = 'Tencent Official'</p>",
+            "<p>nickname='\\é'</p></div>",
+            "<script>var nickname = htmlDecode(\"真账号\");</script>",
+            "</body></html>",
+        );
+        let page = extract_web(html, "https://mp.weixin.qq.com/s/abc");
+        assert_eq!(page.author, "真账号", "正文里写的 nickname 不能当作者");
+        // 页面里没有 script 给出账号名时，不能从正文里捡
+        let spoofed = concat!(
+            "<html><head><title>文章</title></head><body>",
+            "<div id=\"js_content\"><p>nickname = 'Tencent Official'</p></div>",
+            "</body></html>",
+        );
+        let page = extract_web(spoofed, "https://mp.weixin.qq.com/s/abc");
+        assert_ne!(page.author, "Tencent Official");
+    }
+
+    #[test]
+    fn invisible_format_characters_are_removed_but_emoji_joiners_stay() {
+        let text = "a\u{202E}b\u{200B}c\u{FEFF}d\u{2066}e\u{E0041}f\u{00AD}g";
+        assert_eq!(strip_controls(text), "abcdefg");
+        // 零宽连接符是表情组合的一部分，去掉会拆散表情
+        let family = "👨\u{200D}👩\u{200D}👧";
+        assert_eq!(strip_controls(family), family);
+        assert_eq!(
+            strip_controls("换行\n制表\t保留\u{0007}响铃去掉"),
+            "换行\n制表\t保留响铃去掉"
+        );
+    }
+
+    struct PanicFetcher;
+
+    impl PageFetcher for PanicFetcher {
+        fn get(&self, _url: &str) -> Result<PageResponse, FetchProblem> {
+            panic!("故意崩溃");
+        }
+    }
+
+    #[test]
+    fn a_panic_while_reading_becomes_a_failed_row_not_a_stuck_pending_one() {
+        let db = TempDb::new("panic-row");
+        let url = "https://example.com/boom";
+        insert_item(&db, "boom", url, url, "webpage", "2026-10-01T00:00:00.000Z");
+        let summary =
+            fetch_pending(&db.path, &PanicFetcher, None, 20).expect("不能把 panic 抛出来");
+        assert_eq!(summary.failed, 1);
+        assert_eq!(
+            summary.remaining, 0,
+            "不能一直 pending，否则每次打开都再崩一次"
+        );
+        let row = stored(&db, "boom");
+        assert_eq!(row.fetch_status, "failed");
+        assert!(row.fetch_error.contains("没读出来"), "{}", row.fetch_error);
+    }
+
+    #[test]
+    fn bounded_runs_give_up_on_slow_or_panicking_jobs() {
+        assert_eq!(run_bounded(Duration::from_secs(2), || 7), Some(7));
+        let started = std::time::Instant::now();
+        assert_eq!(
+            run_bounded(Duration::from_millis(50), || {
+                std::thread::sleep(Duration::from_millis(600));
+                1
+            }),
+            None
+        );
+        assert!(started.elapsed() < Duration::from_millis(400));
+        assert_eq!(
+            run_bounded(Duration::from_secs(2), || -> i32 { panic!("故意崩溃") }),
+            None
+        );
     }
 }

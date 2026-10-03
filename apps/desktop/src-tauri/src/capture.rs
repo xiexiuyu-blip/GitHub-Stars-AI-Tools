@@ -1,6 +1,6 @@
 use serde::Serialize;
 use std::collections::HashSet;
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 /// 从聊天、帖子里抽出来的一条链接。
 ///
@@ -27,6 +27,13 @@ fn is_url_char(ch: char) -> bool {
     ch.is_ascii_alphanumeric() || "-._~:/?#[]@!$&()*+,;=%".contains(ch)
 }
 
+/// 一条链接最多这么长。浏览器和主流服务器的上限也是 2K 左右。
+const MAX_LINK_CHARS: usize = 2048;
+
+/// 一段文字最多认出这么多条链接。本地接口一次请求可以带 64 KB 文字，最多能塞进六千多条链接，
+/// 每一条都会变成一个要联网去读的收集箱条目。
+const MAX_LINKS_PER_TEXT: usize = 300;
+
 /// 没写 https:// 也认的几个站（X 和 GitHub 是主要来源，公众号文章偶尔也缺协议）。
 const BARE_HOSTS: [&str; 4] = ["github.com/", "x.com/", "twitter.com/", "mp.weixin.qq.com/"];
 
@@ -49,17 +56,26 @@ fn starts_url(rest: &str, previous: Option<char>) -> bool {
 /// 句子标点和 Markdown 加粗会粘在链接末尾；括号只在不成对时才剥。
 /// 不剥下划线：真实仓库名可以以 `_` 结尾。
 fn trim_trailing(raw: &str) -> &str {
+    // 括号数只数一次，剥掉一个就减一个：每剥一个字符都重数整段，一串 4 万个 `)` 要 3.6 秒（二次方）。
+    let open_paren = raw.matches('(').count();
+    let mut close_paren = raw.matches(')').count();
+    let open_bracket = raw.matches('[').count();
+    let mut close_bracket = raw.matches(']').count();
     let mut end = raw.len();
     while let Some(last) = raw[..end].chars().next_back() {
-        let slice = &raw[..end];
         let strip = match last {
             '.' | ',' | ';' | ':' | '!' | '?' | '*' => true,
-            ')' => slice.matches('(').count() < slice.matches(')').count(),
-            ']' => slice.matches('[').count() < slice.matches(']').count(),
+            ')' => open_paren < close_paren,
+            ']' => open_bracket < close_bracket,
             _ => false,
         };
         if !strip {
             break;
+        }
+        match last {
+            ')' => close_paren -= 1,
+            ']' => close_bracket -= 1,
+            _ => {}
         }
         end -= last.len_utf8();
     }
@@ -80,7 +96,8 @@ fn candidates(text: &str) -> Vec<String> {
                     .map(|(offset, _)| offset)
                     .unwrap_or(rest.len());
                 let raw = trim_trailing(&rest[..length]);
-                if raw.len() >= 8 {
+                // 太长的不是正常链接（一条 5 万字符的「链接」会绕过后面每一处长度限制）
+                if (8..=MAX_LINK_CHARS).contains(&raw.len()) {
                     found.push(raw.to_owned());
                 }
                 skip_until = index + length;
@@ -95,6 +112,9 @@ pub fn extract_links_from_text(text: &str) -> Vec<ExtractedLink> {
     let mut links = Vec::new();
     let mut seen = HashSet::new();
     for raw in candidates(text) {
+        if links.len() >= MAX_LINKS_PER_TEXT {
+            break;
+        }
         let Some(link) = build_link(&raw) else {
             continue;
         };
@@ -332,11 +352,27 @@ pub fn url_is_safe(url: &str) -> Result<(), String> {
         .trim_end_matches('.')
         .to_ascii_lowercase();
     let bare = host.trim_start_matches('[').trim_end_matches(']');
+    // 没有点的主机名（`nas`、`router`）只会是内网名字：fake-ip DNS 下它们也会被解析成 198.18.x.x 放行，
+    // 再由代理软件在它那一侧去解析，可能连到局域网里的设备。公网上的网站一定有点。
+    let single_label = !host.contains('.') && bare.parse::<IpAddr>().is_err();
     if host.is_empty()
         || host == "localhost"
-        || [".localhost", ".local", ".internal", ".lan"]
-            .iter()
-            .any(|suffix| host.ends_with(suffix))
+        || single_label
+        || [
+            ".localhost",
+            ".local",
+            ".internal",
+            ".lan",
+            ".home.arpa",
+            ".localdomain",
+            ".corp",
+            ".intranet",
+            ".private",
+            ".home",
+            ".svc",
+        ]
+        .iter()
+        .any(|suffix| host.ends_with(suffix))
     {
         return Err("本机或内网地址，不收".to_owned());
     }
@@ -358,24 +394,68 @@ fn ipv4_is_blocked(ip: Ipv4Addr) -> bool {
         || ip.is_unspecified()
         || ip.is_broadcast()
         || ip.is_documentation()
+        || ip.is_multicast()
         || octets[0] == 0
+        // 240.0.0.0/4：保留
+        || octets[0] >= 240
         // 100.64.0.0/10：运营商级 NAT，也不是公网
         || (octets[0] == 100 && (octets[1] & 0xc0) == 64)
+        // 192.0.0.0/24：IETF 协议分配；192.88.99.0/24：6to4 中继（已废弃）
+        || (octets[0] == 192 && octets[1] == 0 && octets[2] == 0)
+        || (octets[0] == 192 && octets[1] == 88 && octets[2] == 99)
+}
+
+fn embedded_ipv4(high: u16, low: u16) -> Ipv4Addr {
+    Ipv4Addr::new((high >> 8) as u8, high as u8, (low >> 8) as u8, low as u8)
+}
+
+/// IPv6 里藏着 IPv4 的写法很多：映射、兼容、NAT64、6to4。只看 IPv6 前缀会让
+/// `64:ff9b::a9fe:a9fe`（NAT64 里的 169.254.169.254）、`2002:7f00:1::`（6to4 里的 127.0.0.1）绕过去。
+fn ipv6_is_blocked(v6: Ipv6Addr) -> bool {
+    if let Some(mapped) = v6.to_ipv4_mapped() {
+        return ipv4_is_blocked(mapped);
+    }
+    let s = v6.segments();
+    // ::/96（含 `::`、`::1` 和已废弃的 IPv4 兼容地址）
+    if s[..6].iter().all(|segment| *segment == 0) {
+        return true;
+    }
+    // ::ffff:0:a.b.c.d（IPv4 转换）
+    if s[..4].iter().all(|segment| *segment == 0) && s[4] == 0xffff && s[5] == 0 {
+        return true;
+    }
+    // 64:ff9b::/96（NAT64）：按里面的 IPv4 判断，公网的放行（纯 IPv6 网络靠它上网）
+    if s[0] == 0x0064 && s[1] == 0xff9b && s[2..6].iter().all(|segment| *segment == 0) {
+        return ipv4_is_blocked(embedded_ipv4(s[6], s[7]));
+    }
+    // 64:ff9b:1::/48（本地用 NAT64）：IPv4 的位置随前缀长度变，不猜，整段拦
+    if s[0] == 0x0064 && s[1] == 0xff9b && s[2] == 1 {
+        return true;
+    }
+    // 2002::/16（6to4）：IPv4 在第 16–47 位
+    if s[0] == 0x2002 {
+        return ipv4_is_blocked(embedded_ipv4(s[1], s[2]));
+    }
+    // 2001::/32（Teredo）、2001:db8::/32（文档）、100::/64（丢弃专用）
+    if s[0] == 0x2001 && (s[1] == 0 || s[1] == 0x0db8) {
+        return true;
+    }
+    if s[0] == 0x0100 && s[1..4].iter().all(|segment| *segment == 0) {
+        return true;
+    }
+    v6.is_loopback()
+        || v6.is_unspecified()
+        || v6.is_unique_local()
+        || v6.is_multicast()
+        // fe80::/10 链路本地、fec0::/10 站点本地（已废弃）
+        || (s[0] & 0xffc0) == 0xfe80
+        || (s[0] & 0xffc0) == 0xfec0
 }
 
 pub(crate) fn ip_is_blocked(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => ipv4_is_blocked(v4),
-        IpAddr::V6(v6) => {
-            // ::ffff:127.0.0.1 这类「IPv4 映射」写法要按它背后的 IPv4 判断
-            if let Some(mapped) = v6.to_ipv4_mapped() {
-                return ipv4_is_blocked(mapped);
-            }
-            v6.is_loopback()
-                || v6.is_unspecified()
-                || v6.is_unique_local()
-                || (v6.segments()[0] & 0xffc0) == 0xfe80
-        }
+        IpAddr::V6(v6) => ipv6_is_blocked(v6),
     }
 }
 
@@ -546,6 +626,131 @@ mod tests {
             "http://example.com:8080/a?b=1",
         ] {
             assert!(url_is_safe(good).is_ok(), "{good} 应放行");
+        }
+    }
+
+    fn blocked(text: &str) -> bool {
+        ip_is_blocked(text.parse().expect("测试里的 IP 应能解析"))
+    }
+
+    #[test]
+    fn ipv6_forms_that_hide_a_private_ipv4_are_blocked() {
+        // 修复前这些都能绕过
+        for text in [
+            "::127.0.0.1",
+            "::a9fe:a9fe",
+            "64:ff9b::a9fe:a9fe", // NAT64 里的 169.254.169.254（云元数据）
+            "64:ff9b::7f00:1",
+            "64:ff9b::a00:1",
+            "64:ff9b:1::1",
+            "2002:7f00:1::1", // 6to4 里的 127.0.0.1
+            "2002:a00:1::1",
+            "2001::1", // Teredo
+            "2001:db8::1",
+            "100::1",
+            "fec0::1",
+            "ff02::1",
+            "::ffff:0:7f00:1",
+            "::ffff:127.0.0.1",
+        ] {
+            assert!(blocked(text), "{text} 应被拦");
+        }
+    }
+
+    #[test]
+    fn extra_ipv4_ranges_are_blocked() {
+        for text in [
+            "192.0.0.8",
+            "192.88.99.1",
+            "224.0.0.1",
+            "239.255.255.250",
+            "240.0.0.1",
+            "255.255.255.254",
+        ] {
+            assert!(blocked(text), "{text} 应被拦");
+        }
+    }
+
+    #[test]
+    fn public_addresses_and_the_fake_ip_range_stay_allowed() {
+        for text in [
+            "198.18.0.1", // Fox 的 fake-ip DNS 把所有域名解析到这里，绝不能拦
+            "198.19.255.254",
+            "93.184.216.34",
+            "8.8.8.8",
+            "2606:4700:4700::1111",
+            "64:ff9b::808:808", // NAT64 里的 8.8.8.8：纯 IPv6 网络靠它上网
+            "2002:808:808::1",  // 6to4 里的 8.8.8.8
+            "2a00:1450:4001:81b::200e",
+        ] {
+            assert!(!blocked(text), "{text} 不该被拦");
+        }
+    }
+
+    #[test]
+    fn trailing_punctuation_runs_are_trimmed_in_linear_time() {
+        // 修复前：4 万个 `)` 要 3.6 秒（每剥一个字符都重数整段的括号）
+        let url = format!("https://github.com/x/y{}", ")".repeat(60_000));
+        let started = std::time::Instant::now();
+        let trimmed = trim_trailing(&url);
+        assert!(
+            started.elapsed().as_secs_f64() < 1.0,
+            "{:?}",
+            started.elapsed()
+        );
+        assert_eq!(trimmed, "https://github.com/x/y");
+        // 成对的括号仍然保留
+        assert_eq!(
+            trim_trailing("https://en.wikipedia.org/wiki/Rust_(language)"),
+            "https://en.wikipedia.org/wiki/Rust_(language)"
+        );
+        assert_eq!(
+            trim_trailing("https://example.com/a)),"),
+            "https://example.com/a"
+        );
+    }
+
+    #[test]
+    fn absurdly_long_links_and_huge_link_lists_are_capped() {
+        let long = format!("https://github.com/fox/{}", "a".repeat(5000));
+        assert!(
+            extract_links_from_text(&long).is_empty(),
+            "5000 字符的链接不收"
+        );
+        let ok = format!("https://example.com/{}", "b".repeat(1900));
+        assert_eq!(extract_links_from_text(&ok).len(), 1);
+        let many = (0..1000)
+            .map(|index| format!("https://example.com/p{index}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let started = std::time::Instant::now();
+        let links = extract_links_from_text(&many);
+        assert_eq!(links.len(), MAX_LINKS_PER_TEXT);
+        assert!(started.elapsed().as_secs_f64() < 2.0);
+    }
+
+    #[test]
+    fn single_label_and_intranet_suffix_hosts_are_not_collected() {
+        for url in [
+            "https://nas/",
+            "https://router/admin",
+            "https://printer.local/",
+            "https://x.home.arpa/",
+            "https://box.localdomain/",
+            "https://wiki.corp/",
+            "https://git.intranet/",
+            "https://kubernetes.default.svc/",
+            "https://[::1]/",
+        ] {
+            assert!(url_is_safe(url).is_err(), "{url} 应被拦");
+        }
+        for url in [
+            "https://github.com/openai/codex",
+            "https://mp.weixin.qq.com/s/abc",
+            "https://example.com/",
+            "https://[2606:4700:4700::1111]/",
+        ] {
+            assert!(url_is_safe(url).is_ok(), "{url} 不该被拦");
         }
     }
 }
