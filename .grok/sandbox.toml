@@ -1,0 +1,27 @@
+# Grok 无人值守开发用的沙盒配置。只对 Fox 这台电脑有效（路径写死了 /Users/fox）。
+# 用法：grok --sandbox fsl-dev ...（见 tools/cards/dispatch.sh）
+#
+# 在内置的 workspace 档（可读全盘、只能写工作区和临时目录）之上，
+# 用内核级禁令挡住敏感位置：被禁的路径连 bash、grep 都读不到、改不了。
+[profiles.fsl-dev]
+extends = "workspace"
+restrict_network = true # macOS 上不生效，留给以后
+
+deny = [
+  # Fox Stars Lab 的数据：正式库；开发库（含设置、备份、本地接口令牌）
+  "/Users/fox/Library/Application Support/com.foxwork.fox-stars-lab",
+  "/Users/fox/Library/Application Support/com.foxwork.fox-stars-lab.dev",
+  # 钥匙串与各类凭据
+  "/Users/fox/Library/Keychains",
+  "/Users/fox/.ssh",
+  "/Users/fox/.aws",
+  "/Users/fox/.config/gh",
+  "/Users/fox/.docker",
+  "/Users/fox/.codex",
+  # 个人资料：微信等数据归档、别的 AI 工具的对话记录
+  "/Users/fox/FoxWork",
+  "/Users/fox/.claude/projects",
+  "/Users/fox/.claude/history.jsonl",
+  # 自检用的诱饵目录（环境自检卡会在这里放一个假文件，确认禁令生效）
+  "/tmp/fsl-denied-decoy",
+]

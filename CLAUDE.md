@@ -2,6 +2,8 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+**多个 AI 协作开发本仓库（Grok 主力开发，Claude 总控审核）。先读 `AGENTS.md`（红线）、`docs/rebuild/命令契约.md`、`docs/rebuild/接手说明.md`，再动手。**
+
 ## 项目概述
 
 这是一个基于 Tauri 2 的本地优先 GitHub Stars 管理桌面应用，采用 pnpm monorepo 架构。核心能力包括：GitHub Stars 同步到本地 SQLite、README 抓取与缓存、AI 中文摘要生成、自然语言搜索、标签与笔记管理、Gist 注解同步。
@@ -127,7 +129,7 @@ Fox 的正式库已经有 001–018。这些文件在 `packages/storage/migratio
 
 规则：
 
-- 新迁移从 019 开始，只追加。草案在 `docs/rebuild/migrations/proposed/`
+- 新迁移只追加，编号接在最后一个之后（目前最后是 029，下一个是 030），放在 `packages/storage/migrations/fox/`，并在 `apps/desktop/src-tauri/src/db/migrations.rs` 的 `MIGRATIONS` 里登记、补测试。`docs/rebuild/migrations/` 里是 001–018 的冻结副本
 - upstream 以后的迁移改编成新的 Fox 编号，名字加 `upstream_` 前缀
 - runner 必须核对版本号和名称都匹配。名称不符就拒绝启动
 - 每次迁移前自动备份，并做 `PRAGMA integrity_check`
@@ -135,7 +137,7 @@ Fox 的正式库已经有 001–018。这些文件在 `packages/storage/migratio
 - 开发只用 dev 身份：`com.foxwork.fox-stars-lab.dev`，产品名 `Fox Stars Lab Dev`，Keychain 服务名 `fox-stars-lab-dev`
 - debug 构建或 dev 身份如果解析到正式数据目录，必须立即退出
 
-P1 会把现在的 upstream `migrate()` 换成这套版本化 runner。在那之前，不要对正式库启动本仓库。
+版本化 runner 已经在用（`db/migrations.rs`，001–029 已登记）。何时切换正式库由 Fox 本人在切换日决定（见 `docs/rebuild/接手说明.md`）；在那之前，不要对正式库启动本仓库。
 
 ### 前端架构约定
 
@@ -183,8 +185,8 @@ P1 会把现在的 upstream `migrate()` 换成这套版本化 runner。在那之
 
 ### 修改数据库 Schema
 
-1. 在 `packages/storage/migrations/` 下新建 `.sql` 文件
-2. 文件名按序号递增（如 `002_add_new_table.sql`）
+1. 在 `packages/storage/migrations/fox/` 下新建 `.sql` 文件
+2. 文件名按序号递增，接在最后一个之后（如 `030_add_new_table.sql`），并在 `db/migrations.rs` 的 `MIGRATIONS` 里登记版本号、名称和 `include_str!`
 3. 更新后端必需表字段检测
 4. 更新 `packages/domain` 中的 TypeScript 类型
 5. 运行 `pnpm build` 和 `cargo check --manifest-path "$PWD/apps/desktop/src-tauri/Cargo.toml"` 检查
@@ -200,6 +202,4 @@ cargo check --manifest-path "$PWD/apps/desktop/src-tauri/Cargo.toml"
 
 ## 当前开发阶段
 
-已完成 Phase 1-6.2（基础设施、GitHub 同步、Star 管理、AI 知识库、增量同步、Gist 同步）。
-
-下一步：Phase 6.3（成本与任务监控）。
+2026-10 起在做 Fox Stars Lab 2.0 重建（分支 `fox-rebuild`）。做到哪了、下一步做什么、谁来做，只看 `docs/rebuild/接手说明.md`（真实状态）和 `docs/rebuild/任务卡/README.md`（任务卡状态）。原来的 Phase 1–6.2 记录已作废。

@@ -29,3 +29,11 @@ apps/desktop/src-tauri/runtime/
 
 # 系统文件
 .DS_Store
+
+# 任务卡工作区：交回报告与修改意见（总控读，不进仓库）
+/.card-report.md
+/.card-feedback.md
+
+# Grok 本地状态（只保留沙盒配置）
+.grok/*
+!.grok/sandbox.toml
