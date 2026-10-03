@@ -100,8 +100,8 @@ function DetailBody(props: Parameters<typeof ItemDetail>[0] & { detail: LibraryD
 
         <div className="px-6 pb-6">
           {/* 头像压在封面下沿上（只有头像重叠，标题完整落在封面下面） */}
-          <div className="relative z-10 grid grid-cols-[56px_minmax(0,1fr)] items-start gap-3.5">
-            <RepoAvatar name={detail.fullName} size="lg" className="-mt-7 shadow-[0_2px_8px_rgba(31,35,41,0.18)] ring-4 ring-card" />
+          <div className="relative z-10 grid grid-cols-[60px_minmax(0,1fr)] items-start gap-3">
+            <RepoAvatar name={detail.fullName} size="lg" className="-mt-7 ml-1 shadow-md ring-4 ring-card" />
             <div className="min-w-0 pt-2.5">
               <h2 className="m-0 text-[22px] leading-[1.25] font-bold tracking-tight break-words text-foreground">{repo || detail.fullName}</h2>
               {owner ? <div className="mt-0.5 text-[13px] text-on-surface-variant">{owner}</div> : null}
@@ -126,13 +126,13 @@ function DetailBody(props: Parameters<typeof ItemDetail>[0] & { detail: LibraryD
           <ReadingSegmented className="mt-4" value={detail.readingGroup} onChange={props.onReadingChange} />
 
           {detail.hasCard ? (
-            <div className="mt-4 rounded-xl bg-accent px-4 py-3.5">
+            <div className="mt-4 rounded-lg bg-accent px-4 py-3.5">
               <div className="flex items-center gap-1.5 text-xs font-medium text-accent-foreground">
                 <Icon name="auto_awesome" size={14} fill />
                 AI 说明
                 <span className="ml-auto font-normal text-on-surface-variant">依据 README</span>
               </div>
-              <p className="mt-1.5 text-[15px] leading-[1.75] text-foreground">{firstSentences(summarySource, 3)}</p>
+              <p className="mt-1.5 text-sm leading-[1.8] text-foreground">{firstSentences(summarySource, 3)}</p>
               <div className="mt-2 flex flex-wrap items-center gap-0.5 text-xs text-on-surface-variant">
                 {detail.cardReview === 'confirmed' ? (
                   <span className="inline-flex items-center gap-1">

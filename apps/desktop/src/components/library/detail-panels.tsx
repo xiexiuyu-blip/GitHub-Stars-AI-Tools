@@ -32,7 +32,7 @@ export function SectionTitle(props: { icon: string; hue: number; children: strin
 }
 
 export function SoftCard(props: { children: React.ReactNode; className?: string }) {
-  return <div className={cn('rounded-xl border border-border bg-card p-4', props.className)}>{props.children}</div>;
+  return <div className={cn('rounded-lg border border-border bg-card p-4', props.className)}>{props.children}</div>;
 }
 
 function PanelSkeleton() {
@@ -77,7 +77,7 @@ export function InstallPanel(props: {
   return (
     <div className="flex flex-col gap-3">
       {props.steps.map((step) => (
-        <div key={step.command} className="overflow-hidden rounded-xl border border-border bg-card">
+        <div key={step.command} className="overflow-hidden rounded-lg border border-border bg-card">
           <div className="flex items-center gap-2 border-b border-border bg-surface-container-low px-3 py-2">
             <Icon name={KIND_ICON[step.kind]} size={16} className="text-on-surface-variant" />
             <span className="min-w-0 truncate text-[13px] font-medium text-foreground">{step.title}</span>
@@ -92,7 +92,7 @@ export function InstallPanel(props: {
       ))}
 
       {props.steps.length === 0 && props.howFallback ? (
-        <div className="overflow-hidden rounded-xl border border-border bg-card">
+        <div className="overflow-hidden rounded-lg border border-border bg-card">
           <div className="flex items-center gap-2 border-b border-border bg-surface-container-low px-3 py-2">
             <Icon name="auto_awesome" size={16} className="text-accent-foreground" />
             <span className="text-[13px] font-medium text-foreground">AI 整理的上手提示</span>
@@ -111,7 +111,7 @@ export function InstallPanel(props: {
           href={releasesUrl(detail.fullName)}
           target="_blank"
           rel="noopener noreferrer"
-          className="flex items-center gap-3 rounded-xl border border-border bg-card p-3.5 transition-colors hover:border-input hover:bg-surface-container-low"
+          className="flex items-center gap-3 rounded-lg border border-border bg-card p-3.5 transition-colors hover:border-input hover:bg-surface-container-low"
         >
           <span className="hue-tile grid size-10 shrink-0 place-items-center rounded-[10px]" style={{ '--h': 148 } as React.CSSProperties}>
             <Icon name="download" size={22} fill />
@@ -174,7 +174,7 @@ export function PreviewPanel(props: { detail: LibraryDetail; readme: ReadmeState
           <button
             key={image.url}
             type="button"
-            className="group relative block overflow-hidden rounded-xl border border-border bg-card text-left transition-shadow hover:shadow-[0_4px_12px_rgba(31,35,41,0.12)]"
+            className="group relative block overflow-hidden rounded-lg border border-border bg-card text-left transition-shadow hover:shadow-[0_4px_12px_rgba(31,35,41,0.12)]"
             onClick={() => setOpen(index)}
             aria-label={`放大第 ${index + 1} 张截图`}
           >
@@ -302,7 +302,7 @@ export function CommunityPanel(props: { detail: LibraryDetail; onCopyPrompt: (te
               href={link.url}
               target="_blank"
               rel="noopener noreferrer"
-              className="flex items-center gap-2.5 rounded-xl border border-border bg-card px-3 py-2.5 transition-colors hover:border-input hover:bg-surface-container-low"
+              className="flex items-center gap-2.5 rounded-lg border border-border bg-card px-3 py-2.5 transition-colors hover:border-input hover:bg-surface-container-low"
             >
               <Icon name={link.icon} size={18} className="shrink-0 text-on-surface-variant" />
               <span className="min-w-0">
