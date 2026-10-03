@@ -317,7 +317,7 @@ export function ToolboxPage() {
         {pendingBudget !== null ? (
           <div className="mt-3 rounded-lg border border-primary/40 bg-accent p-4 text-sm leading-[1.7] text-foreground">
             <p className="m-0">
-              这会让应用在后台调用你配置的 AI 服务整理收藏，<b>按服务商的价格计费</b>。每天最多使用 <b>{formatTokens(pendingBudget)} token</b>，大约整理 {approxRepos(pendingBudget)} 个仓库；用完当天就停，不会超过。随时可以暂停或关闭。
+              这会让应用在后台调用你配置的 AI 服务整理收藏，<b>按服务商的价格计费</b>。每天最多使用 <b>{formatTokens(pendingBudget)} token</b>，大约整理 {approxRepos(pendingBudget)} 个仓库；快用完就停（最多多出一两个仓库的量，失败重试的也按估计计入）。随时可以暂停或关闭。
             </p>
             <div className="mt-3 flex gap-2">
               <Button variant="primary" onClick={() => saveBudget(pendingBudget)}>确认开启</Button>
