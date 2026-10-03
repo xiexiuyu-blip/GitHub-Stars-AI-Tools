@@ -1748,7 +1748,9 @@ version = "1.5.3-fox.2"
 dependencies = [
  "apple-native-keyring-store",
  "base64 0.22.1",
+ "encoding_rs",
  "fastembed",
+ "flate2",
  "getrandom 0.3.4",
  "hf-hub",
  "keyring",
