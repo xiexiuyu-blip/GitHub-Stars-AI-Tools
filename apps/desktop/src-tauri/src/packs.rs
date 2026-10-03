@@ -626,7 +626,10 @@ fn card_value(raw: Option<&str>) -> Option<Value> {
         return None;
     }
     match serde_json::from_str::<Value>(raw) {
-        Ok(value @ Value::Object(_)) => Some(value),
+        Ok(value @ Value::Object(_)) => match crate::card_view::sanitize(&value) {
+            std::borrow::Cow::Borrowed(_) => Some(value),
+            std::borrow::Cow::Owned(clean) => Some(clean),
+        },
         _ => None,
     }
 }
@@ -1689,6 +1692,78 @@ mod tests {
             assert_eq!(resolve_generated_on(Some(bad)), today, "{bad:?}");
         }
         assert_eq!(resolve_generated_on(None), today);
+    }
+
+    #[test]
+    fn imported_placeholder_cards_render_without_boilerplate() {
+        const SUMMARY_AWESOME: &str = "Awesome LLM Apps 是一个可运行的 LLM 应用模板集合，包含100+ AI Agent和RAG应用。每个模板均为原创、自包含的完整源代码，支持3条命令即可运行。覆盖AI Agents、多智能体团队、MCP、语音AI、RAG、微调等现代AI栈，支持Claude、Gemini、GPT、Llama等多种模型提供商。采用Apache-2.0许可证，可自由商用。";
+        const SUMMARY_CHATCUT: &str = "ChatCut Agent Plugin 是一个连接 Codex 与 ChatCut 的插件，支持通过 AI 辅助编辑 ChatCut 视频项目，具体功能包括导入媒体、修改时间线、创建动态图形、生成素材、音频转录、添加字幕、导出视频以及验证编辑可见性。";
+        const LINE_AWESOME: &str =
+            "Awesome LLM Apps 是一个可运行的 LLM 应用模板集合，包含100+ AI Agent和RAG应用。";
+        const LINE_CHATCUT: &str = "ChatCut Agent Plugin 是一个连接 Codex 与 ChatCut 的插件…";
+        let db = temp_db();
+        insert_repo(
+            &db.connection,
+            "awesome",
+            "lab/awesome-llm-apps",
+            "https://github.com/lab/awesome-llm-apps",
+            12,
+            None,
+            None,
+            "active",
+        );
+        insert_doc(&db.connection, "awesome", SUMMARY_AWESOME, None);
+        insert_repo(
+            &db.connection,
+            "chatcut",
+            "lab/chatcut-plugin",
+            "https://github.com/lab/chatcut-plugin",
+            8,
+            None,
+            None,
+            "active",
+        );
+        insert_doc(&db.connection, "chatcut", SUMMARY_CHATCUT, None);
+        assert_eq!(
+            crate::v2_ops::import_summary_cards(&db.path).expect("应能导入占位卡"),
+            2
+        );
+        let awesome = render_item_for_codex(&db.connection, "awesome").expect("应能复制");
+        let chatcut = render_item_for_codex(&db.connection, "chatcut").expect("应能复制");
+        let expected = |full_name: &str, url: &str, stars: &str, line: &str| {
+            format!(
+                "请参考这个 GitHub 项目：{full_name}\n- 链接：{url}（★{stars} · 许可证：未知 · 最近更新：未知）\n- 它是什么：{line}\n- 怎么试：{HOW_TO_TRY_FALLBACK}\n{CODEX_USAGE}"
+            )
+        };
+        assert_eq!(
+            awesome,
+            expected(
+                "lab/awesome-llm-apps",
+                "https://github.com/lab/awesome-llm-apps",
+                "12",
+                LINE_AWESOME
+            )
+        );
+        assert_eq!(
+            chatcut,
+            expected(
+                "lab/chatcut-plugin",
+                "https://github.com/lab/chatcut-plugin",
+                "8",
+                LINE_CHATCUT
+            )
+        );
+        for text in [&awesome, &chatcut] {
+            assert!(!text.contains("查看项目说明"));
+            assert!(!text.contains("打开仓库 README"));
+            assert!(!text.contains("想知道这个收藏是做什么的"));
+            assert!(!text.contains("可借鉴的能力"));
+        }
+        std::fs::write(
+            "/tmp/fsl-15-packs.txt",
+            format!("--- awesome ---\n{awesome}\n\n--- chatcut ---\n{chatcut}\n"),
+        )
+        .expect("应能写下核对文本");
     }
 
     fn markdown_for_card(card_json: &str) -> String {

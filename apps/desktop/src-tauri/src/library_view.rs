@@ -739,9 +739,11 @@ fn read_raw(row: &Row<'_>) -> rusqlite::Result<RawItem> {
 }
 
 fn into_item(raw: RawItem, scenario_ids: Vec<String>) -> LibraryItem {
-    let card = parse_card(raw.card_json.as_deref());
-    let one_liner = nonempty_spaces(raw.one_liner_zh);
-    let has_card = one_liner.is_some();
+    let raw_card = parse_card_value(raw.card_json.as_deref());
+    let stored = nonempty_spaces(raw.one_liner_zh);
+    let has_card = stored.is_some();
+    let one_liner = crate::card_view::display_one_liner(stored.as_deref(), &raw_card);
+    let card = sanitized_card(raw_card);
     let reading_status = raw.read_status.unwrap_or_else(|| "unread".to_owned());
     LibraryItem {
         id: raw.id,
@@ -957,10 +959,21 @@ fn today_counts(connection: &Connection, now: &str) -> Result<TodayCounts, Strin
 }
 
 fn parse_card(raw: Option<&str>) -> Value {
+    sanitized_card(parse_card_value(raw))
+}
+
+fn parse_card_value(raw: Option<&str>) -> Value {
     let Some(raw) = raw.map(str::trim).filter(|text| !text.is_empty()) else {
         return Value::Null;
     };
     serde_json::from_str(raw).unwrap_or(Value::Null)
+}
+
+fn sanitized_card(value: Value) -> Value {
+    match crate::card_view::sanitize(&value) {
+        std::borrow::Cow::Borrowed(_) => value,
+        std::borrow::Cow::Owned(clean) => clean,
+    }
 }
 
 fn card_string(card: &Value, key: &str) -> Option<String> {
@@ -2940,6 +2953,126 @@ mod tests {
         let wide_page = list_library_view(&lab.path, &wide).unwrap();
         assert_eq!(wide_page.items.len(), 200);
         assert_eq!(wide_page.total_count, 3000);
+    }
+
+    #[test]
+    fn imported_placeholder_cards_are_clean_in_library() {
+        const SUMMARY_AWESOME: &str = "Awesome LLM Apps 是一个可运行的 LLM 应用模板集合，包含100+ AI Agent和RAG应用。每个模板均为原创、自包含的完整源代码，支持3条命令即可运行。覆盖AI Agents、多智能体团队、MCP、语音AI、RAG、微调等现代AI栈，支持Claude、Gemini、GPT、Llama等多种模型提供商。采用Apache-2.0许可证，可自由商用。";
+        const SUMMARY_CHATCUT: &str = "ChatCut Agent Plugin 是一个连接 Codex 与 ChatCut 的插件，支持通过 AI 辅助编辑 ChatCut 视频项目，具体功能包括导入媒体、修改时间线、创建动态图形、生成素材、音频转录、添加字幕、导出视频以及验证编辑可见性。";
+        const LINE_AWESOME: &str =
+            "Awesome LLM Apps 是一个可运行的 LLM 应用模板集合，包含100+ AI Agent和RAG应用。";
+        const LINE_CHATCUT: &str = "ChatCut Agent Plugin 是一个连接 Codex 与 ChatCut 的插件…";
+        let lab = Lab::new("legacy-card");
+        lab.with(|conn| {
+            for (id, summary) in [("awesome", SUMMARY_AWESOME), ("chatcut", SUMMARY_CHATCUT)] {
+                let mut repo = Repo::new(id);
+                repo.full_name = format!("lab/{id}");
+                repo.summary = summary.to_owned();
+                repo.card_json = None;
+                repo.one_liner = None;
+                repo.description = None;
+                repo.save(conn);
+            }
+        });
+        assert_eq!(
+            crate::v2_ops::import_summary_cards(&lab.path).expect("应能导入占位卡"),
+            2
+        );
+        lab.with(|conn| {
+            let stored: String = conn
+                .query_row(
+                    "SELECT one_liner_zh FROM repo_ai_documents WHERE repo_id = 'awesome'",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("应能读到库里的一句话");
+            let hard_cut: String = SUMMARY_AWESOME.chars().take(60).collect();
+            assert_eq!(stored, hard_cut);
+            assert_ne!(stored, LINE_AWESOME);
+        });
+
+        let page =
+            list_library_view(&lab.path, &LibraryFilters::default()).expect("资料库应能列出");
+        let item = |id: &str| {
+            page.items
+                .iter()
+                .find(|item| item.id == id)
+                .expect("应能找到仓库")
+        };
+        let awesome = item("awesome");
+        let chatcut = item("chatcut");
+        assert_eq!(awesome.one_liner.as_deref(), Some(LINE_AWESOME));
+        assert_eq!(chatcut.one_liner.as_deref(), Some(LINE_CHATCUT));
+        assert!(awesome.highlight.is_none());
+        assert!(chatcut.highlight.is_none());
+        assert!(awesome.has_card);
+        assert!(chatcut.has_card);
+        assert_eq!(awesome.form.as_deref(), Some("other"));
+        assert_eq!(awesome.card_review.as_deref(), Some("suggested"));
+        assert!((awesome.confidence.unwrap_or(0.0) - 0.4).abs() < 1e-9);
+
+        let awesome_detail = get_library_detail(&lab.path, "awesome").expect("详情应能读取");
+        let chatcut_detail = get_library_detail(&lab.path, "chatcut").expect("详情应能读取");
+        for detail in [&awesome_detail, &chatcut_detail] {
+            assert!(detail.capabilities.is_empty());
+            assert!(detail.problems_solved.is_empty());
+            assert!(detail.how_to_try.is_none());
+            assert!(detail.item.highlight.is_none());
+            assert!(detail.item.has_card);
+        }
+        assert_eq!(awesome_detail.what_it_is.as_deref(), Some(SUMMARY_AWESOME));
+        assert_eq!(chatcut_detail.what_it_is.as_deref(), Some(SUMMARY_CHATCUT));
+        assert_eq!(awesome_detail.item.one_liner.as_deref(), Some(LINE_AWESOME));
+        assert_eq!(chatcut_detail.item.one_liner.as_deref(), Some(LINE_CHATCUT));
+
+        let today = get_today_view(&lab.path, "2026-10-03T00:00:00Z").expect("今日应能读取");
+        assert!(!today.picks.is_empty());
+        for item in today.picks.iter().chain(today.week_new.iter()) {
+            assert!(item.highlight.is_none());
+            assert!(item.has_card);
+            assert!(
+                item.one_liner.as_deref() == Some(LINE_AWESOME)
+                    || item.one_liner.as_deref() == Some(LINE_CHATCUT)
+            );
+        }
+
+        let page_json = serde_json::to_string(&page).expect("列表应能序列化");
+        let awesome_json = serde_json::to_string(&awesome_detail).expect("详情应能序列化");
+        let chatcut_json = serde_json::to_string(&chatcut_detail).expect("详情应能序列化");
+        let today_json = serde_json::to_string(&today).expect("今日应能序列化");
+        for json in [&page_json, &awesome_json, &chatcut_json, &today_json] {
+            assert_no_legacy_phrases(json);
+        }
+        let evidence = format!(
+            "awesome.oneLiner={}\nawesome.highlight={:?}\nawesome.hasCard={}\nawesome.whatItIs={}\nawesome.capabilities={:?}\nawesome.problemsSolved={:?}\nawesome.howToTry={:?}\nawesome.confidence={:?}\nawesome.cardReview={:?}\n\nchatcut.oneLiner={}\nchatcut.highlight={:?}\nchatcut.hasCard={}\nchatcut.whatItIs={}\nchatcut.capabilities={:?}\nchatcut.problemsSolved={:?}\nchatcut.howToTry={:?}\n",
+            awesome.one_liner.as_deref().unwrap_or(""),
+            awesome.highlight,
+            awesome.has_card,
+            awesome_detail.what_it_is.as_deref().unwrap_or(""),
+            awesome_detail.capabilities,
+            awesome_detail.problems_solved,
+            awesome_detail.how_to_try,
+            awesome.confidence,
+            awesome.card_review,
+            chatcut.one_liner.as_deref().unwrap_or(""),
+            chatcut.highlight,
+            chatcut.has_card,
+            chatcut_detail.what_it_is.as_deref().unwrap_or(""),
+            chatcut_detail.capabilities,
+            chatcut_detail.problems_solved,
+            chatcut_detail.how_to_try,
+        );
+        fs::write("/tmp/fsl-15-library.txt", &evidence).expect("应能写下核对文本");
+    }
+
+    fn assert_no_legacy_phrases(json: &str) {
+        for phrase in [
+            crate::card_view::LEGACY_PROBLEM,
+            crate::card_view::LEGACY_CAPABILITY,
+            crate::card_view::LEGACY_HOW_TO_TRY,
+        ] {
+            assert!(!json.contains(phrase), "不该出现「{phrase}」");
+        }
     }
 
     fn sample_item(confidence: Option<f64>) -> LibraryItem {

@@ -3,6 +3,7 @@ mod auth;
 mod backup;
 mod capture;
 mod card_pipeline;
+mod card_view;
 mod db;
 mod dev_guard;
 mod embedding;
