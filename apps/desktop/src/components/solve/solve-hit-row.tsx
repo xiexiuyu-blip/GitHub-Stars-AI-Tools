@@ -1,5 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
 import type { ScenarioSummary, SolveHit } from '@/lib/contracts';
+import { formLabel } from '@/lib/library-filters';
 import { matchBadge, whyLine } from '@/lib/solve-view';
 import { RepoAvatar, ScenarioChip, StarCount, Tag } from '@/components/kit';
 import { Icon } from '@/components/ui/icon';
@@ -16,7 +17,7 @@ export function SolveHitRow(props: {
   const badge = matchBadge(hit, props.intents);
   const oneLiner = hit.oneLiner?.trim() ?? '';
   const related = whyLine(hit);
-  const form = hit.form?.trim() ?? '';
+  const form = formLabel(hit.form);
   const chips = (hit.scenarioIds ?? [])
     .map((id) => props.scenarios?.find((scenario) => scenario.id === id))
     .filter((scenario): scenario is ScenarioSummary => Boolean(scenario))

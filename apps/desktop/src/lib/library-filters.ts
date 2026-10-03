@@ -40,6 +40,13 @@ const FORM_LABELS: Record<string, string> = {
   other: '其他',
 };
 
+/** 项目的「形态」写成中文标签。没填或者是「其他」（没有信息量）返回 null，界面就不画这个标签；不认识的原样给。 */
+export function formLabel(form: string | null | undefined): string | null {
+  const id = form?.trim();
+  if (!id || id === 'other') return null;
+  return FORM_LABELS[id] ?? id;
+}
+
 export function createLibraryUiState(): LibraryUiState {
   return {
     scenario: null,

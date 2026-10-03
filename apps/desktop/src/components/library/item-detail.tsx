@@ -3,6 +3,7 @@ import type { LibraryDetail, ReadingGroup, ScenarioSummary } from '@/lib/contrac
 import { cleanHowToTry, clipText, firstSentences, monthDay, relativeDays, splitRepoName } from '@/lib/item-format';
 import { explainerLinks, extractInstallSteps, extractPreviewImages, hasDownloadHint } from '@/lib/repo-assets';
 import { itemPendingNote } from '@/lib/automation-view';
+import { formLabel } from '@/lib/library-filters';
 import { useAiAutomation } from '@/hooks/use-ai-automation';
 import { useRepoReadme } from '@/hooks/use-repo-readme';
 import { Button, CoverImage, EmptyState, LangDot, RepoAvatar, ScenarioChip, StarCount, Tag } from '@/components/kit';
@@ -122,7 +123,7 @@ function DetailBody(props: Parameters<typeof ItemDetail>[0] & { detail: LibraryD
             {scenarioList.map((scenario) => (
               <ScenarioChip key={scenario.id} name={scenario.nameZh} scenarioKey={scenario.slug || scenario.id} />
             ))}
-            {detail.form ? <Tag>{detail.form}</Tag> : null}
+            {formLabel(detail.form) ? <Tag>{formLabel(detail.form)}</Tag> : null}
             {detail.maturity ? <Tag>{detail.maturity}</Tag> : null}
             {detail.zhFriendly === true ? <Tag tone="blue">中文友好</Tag> : null}
           </div>

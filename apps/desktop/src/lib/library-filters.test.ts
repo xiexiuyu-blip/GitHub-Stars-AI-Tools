@@ -5,6 +5,7 @@ import {
   cardStateOptions,
   clearFilters,
   createLibraryUiState,
+  formLabel,
   formOptions,
   hasActiveFilters,
   nextPageOffset,
@@ -292,3 +293,20 @@ describe('改状态的乐观更新', () => {
     expect(removeIfFilteredOut(items, 'missing', 'want').map((item) => item.id)).toEqual(['a', 'b']);
   });
 });
+
+describe('formLabel', () => {
+  it('常见形态写成中文', () => {
+    expect(formLabel('skill')).toBe('技能');
+    expect(formLabel(' app ')).toBe('应用');
+    expect(formLabel('cli')).toBe('命令行');
+  });
+
+  it('没填、空白、「其他」都不显示标签；不认识的原样给', () => {
+    expect(formLabel(null)).toBeNull();
+    expect(formLabel(undefined)).toBeNull();
+    expect(formLabel('  ')).toBeNull();
+    expect(formLabel('other')).toBeNull();
+    expect(formLabel('template')).toBe('template');
+  });
+});
+
