@@ -80,6 +80,7 @@ commands.allow = [
   "retry_failed_ai_jobs",
   "cancel_ai_job",
   "set_ai_daily_budget",
+  "get_ai_queue_status",
   "get_local_api_status",
   "set_local_api_enabled",
   "get_local_api_token",
