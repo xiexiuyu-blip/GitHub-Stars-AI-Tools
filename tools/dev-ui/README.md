@@ -50,3 +50,27 @@ python3 tools/dev-ui/mock-host/serve.py 38413
 - 不转发 websocket，热更新不起作用，改完代码刷新页面即可。
 - 真正的 WKWebView 里的渲染（字体、窗口被盖住时停止绘制等）仍要用上面的窗口截图方法看一眼开发版。
 - 注意：开发窗口被别的窗口完全盖住时，WebKit 会停止绘制，截图会是一片空白或旧画面（看起来像「白屏」），先用 `axui front <pid>` 把它拉到最前面再截图。
+
+### 真后端桥：假外壳 + 真 Rust 代码 + 开发库副本
+
+`serve.py` 带第三个参数时，页面里的命令先交给「真后端桥」回答（桥在 `review-harness/review_dump.rs` 里，跑真的 `library_view`、`solve`、`inbox_view`、`packs`、`card_handler` 等函数，数据库是**开发库的副本**），桥不认识的命令才退回 `shim.js` 的假数据：
+
+```bash
+python3 tools/dev-ui/mock-host/serve.py 38415 http://127.0.0.1:1422 http://127.0.0.1:38500
+```
+
+## 用真数据验收（review-harness）
+
+`tools/dev-ui/review-harness/review_dump.rs` 是总控的临时审核夹具，**不编译进仓库**。用法：
+
+1. 建一个临时工作区（例如 `git worktree add -b review/tmp ../fox-stars-lab-wt/_review fox-integration`），克隆编译缓存（`cp -c -R <集成区>/apps/desktop/src-tauri/target <临时区>/...`）并把 `apps/desktop/dist` 拷过去（否则 `tauri::generate_context!` 编译失败）。
+2. 把 `review_dump.rs` 放进 `apps/desktop/src-tauri/src/`，在 `lib.rs` 里加 `#[cfg(test)] mod review_dump;`（这两处都**不要提交**）。
+3. 取开发库副本：`cp` 开发库的 `.sqlite3`（和 `-wal`）到草稿目录，不要碰开发目录里的原文件；正式库目录只能 `stat`。
+4. 三个 `#[ignore]` 测试，都要环境变量 `FSL_REVIEW_DB`（副本路径）和 `FSL_REVIEW_OUT`（输出目录），**测试名要写全**（`review_dump::review_dump` 只是 dump；过滤词 `review_dump` 会连 `review_server` 一起启动，它会一直阻塞）：
+   - `review_dump::review_dump`：对副本跑迁移、种子、规则归类和所有新后端函数，把真实结果存成 JSON，并打印耗时。
+   - `review_dump::review_server`：在 `127.0.0.1:38500`（`FSL_REVIEW_PORT` 可改）起 HTTP 桥，供上面的 `serve.py` 第三个参数使用。
+   - `review_dump::review_pipeline_rehearsal`：**流水线演练**。起一个本机假的 OpenAI 兼容服务（返回固定合法理解卡，每次记 3600 token），用真队列、真处理器、真流水线在副本上跑：预算 0 时不调模型；授权 30000 后到预算就停；检查「调用次数 = 成功任务数」（曾靠它发现并发时 `database is locked` 白花模型费用）。不花钱、不读钥匙串。
+   ```bash
+   cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --lib review_dump::review_pipeline_rehearsal -- --ignored --nocapture --test-threads=1
+   ```
+
