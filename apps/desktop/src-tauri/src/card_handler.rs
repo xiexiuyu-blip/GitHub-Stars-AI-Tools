@@ -1,0 +1,1972 @@
+//! 理解卡任务：把队列、流水线和场景归类接成一条线。
+//! 预算默认是 0。没有授权时只入队，处理器不会被领走，也就不会读密钥。
+
+use crate::ai::AiRequestConfig;
+use crate::card_pipeline::{
+    self, CardRunError, CardRunErrorKind, CardRunOutcome, LlmClient, RealLlmClient,
+};
+use crate::jobs::{self, ErrorKind, JobFailure, JobHandler, JobRecord, JobSuccess};
+use crate::scenarios;
+use rusqlite::{params, params_from_iter, Connection, OptionalExtension, Transaction};
+use serde::Serialize;
+use serde_json::Value;
+use std::path::Path;
+use std::sync::Arc;
+use std::time::Duration;
+
+pub const NOT_CONFIGURED_MESSAGE: &str = "还没有配置 AI 服务或密钥，已暂停整理队列";
+const BACKFILL_PRIORITY: i64 = 6;
+const NEW_STAR_PRIORITY: i64 = 3;
+const REGENERATE_PRIORITY: i64 = 2;
+/// 空串和坏 JSON 上直接 `json_extract` 会让整句失败。`CASE` 只在合法 JSON 上取值。
+const NOT_CONFIRMED_SQL: &str = "CASE WHEN json_valid(repo_ai_documents.card_json) THEN IFNULL(json_extract(repo_ai_documents.card_json, '$.review_status'), '') ELSE '' END <> 'confirmed'";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CardEnqueueScope {
+    /// 有效仓库里还没有理解卡。
+    Missing,
+    /// 有卡，但还是第 2 版之前的结构，而且没有被确认。
+    Outdated,
+}
+
+type ConfigLoader = Arc<dyn Fn() -> Result<AiRequestConfig, String> + Send + Sync>;
+type ClientFactory = Arc<dyn Fn() -> Box<dyn LlmClient + Send> + Send + Sync>;
+
+/// `run_repo_card` 要求客户端是有固定大小的类型。测试注入的是 trait 对象，这里包一层。
+struct SizedClient(Box<dyn LlmClient + Send>);
+
+impl LlmClient for SizedClient {
+    fn complete_json(
+        &self,
+        request: &card_pipeline::LlmRequest,
+    ) -> Result<card_pipeline::LlmReply, card_pipeline::LlmError> {
+        self.0.complete_json(request)
+    }
+}
+
+pub struct RepoCardHandler {
+    config: ConfigLoader,
+    client_factory: Option<ClientFactory>,
+}
+
+impl RepoCardHandler {
+    pub fn new(config: ConfigLoader) -> Self {
+        Self {
+            config,
+            client_factory: None,
+        }
+    }
+
+    /// 测试注入假模型。正式构建不会调用，所以只在测试里编译。
+    #[cfg(test)]
+    pub fn with_client_factory(config: ConfigLoader, client_factory: ClientFactory) -> Self {
+        Self {
+            config,
+            client_factory: Some(client_factory),
+        }
+    }
+}
+
+impl JobHandler for RepoCardHandler {
+    fn job_type(&self) -> &'static str {
+        "repo_card"
+    }
+
+    fn spends_tokens(&self) -> bool {
+        true
+    }
+
+    fn run(&self, job: &JobRecord, db_path: &Path) -> Result<JobSuccess, JobFailure> {
+        if job.target_type != "repository" || job.target_id.trim().is_empty() {
+            return Err(JobFailure::Fatal {
+                kind: ErrorKind::Other,
+                message: "任务目标不是仓库".to_owned(),
+            });
+        }
+        let repo_id = job.target_id.trim();
+        let config = match (self.config)() {
+            Ok(config) if config_ready(&config) => config,
+            _ => {
+                return Err(JobFailure::PauseQueue {
+                    kind: ErrorKind::Auth,
+                    message: NOT_CONFIGURED_MESSAGE.to_owned(),
+                })
+            }
+        };
+        let client = SizedClient(match &self.client_factory {
+            Some(factory) => factory(),
+            None => Box::new(RealLlmClient {
+                config: config.clone(),
+            }),
+        });
+        let mut conn = open_db(db_path).map_err(|message| JobFailure::Retryable {
+            kind: ErrorKind::Other,
+            message,
+            retry_after_secs: None,
+        })?;
+        let report = card_pipeline::run_repo_card(
+            &mut conn,
+            &client,
+            repo_id,
+            &card_pipeline::CardRunOptions {
+                force: false,
+                now: now_stamp(),
+            },
+        )
+        .map_err(map_card_error)?;
+        if let Err(message) = apply_scenario_tags(&mut conn, &job.account_id, repo_id) {
+            return Err(JobFailure::Retryable {
+                kind: ErrorKind::Other,
+                message,
+                retry_after_secs: None,
+            });
+        }
+        let model = if report.model.trim().is_empty() {
+            config.model
+        } else {
+            report.model
+        };
+        Ok(JobSuccess {
+            input_tokens: report.input_tokens,
+            output_tokens: report.output_tokens,
+            provider: config.provider,
+            model,
+            prompt_version: report.prompt_version,
+            input_hash: report.source_hash,
+            skipped: matches!(report.outcome, CardRunOutcome::Skipped(_)),
+        })
+    }
+}
+
+pub fn enqueue_cards(
+    conn: &mut Connection,
+    scope: CardEnqueueScope,
+    priority: i64,
+) -> Result<usize, String> {
+    if !(0..=9).contains(&priority) {
+        return Err("任务优先级必须在 0 到 9 之间".to_owned());
+    }
+    let tx = conn
+        .transaction()
+        .map_err(|error| format!("理解卡入队失败：{error}"))?;
+    let inserted = insert_scoped(&tx, scope, priority)?;
+    tx.commit()
+        .map_err(|error| format!("理解卡入队失败：{error}"))?;
+    Ok(inserted)
+}
+
+pub fn enqueue_new_stars(db_path: &Path, repo_ids: &[String]) -> Result<usize, String> {
+    if repo_ids.is_empty() {
+        return Ok(0);
+    }
+    let mut conn = open_db(db_path)?;
+    let tx = conn
+        .transaction()
+        .map_err(|error| format!("新收藏入队失败：{error}"))?;
+    let mut inserted = 0;
+    for chunk in repo_ids.chunks(400) {
+        let mut sql = format!(
+            "INSERT OR IGNORE INTO ai_jobs(id, account_id, job_type, target_type, target_id, priority, status)
+             SELECT lower(hex(randomblob(8))), repositories.account_id, 'repo_card', 'repository', repositories.id, {NEW_STAR_PRIORITY}, 'queued'
+             FROM repositories
+             LEFT JOIN repo_ai_documents ON repo_ai_documents.repo_id = repositories.id
+             WHERE repositories.sync_status = 'active'
+               AND repositories.id IN ("
+        );
+        sql.push_str(
+            &std::iter::repeat("?")
+                .take(chunk.len())
+                .collect::<Vec<_>>()
+                .join(", "),
+        );
+        sql.push_str(
+            ") AND (repo_ai_documents.repo_id IS NULL OR IFNULL(trim(repo_ai_documents.card_json), '') = '')
+               AND ",
+        );
+        sql.push_str(NOT_CONFIRMED_SQL);
+        inserted += tx
+            .execute(&sql, params_from_iter(chunk.iter()))
+            .map_err(|error| format!("新收藏入队失败：{error}"))?;
+    }
+    tx.commit()
+        .map_err(|error| format!("新收藏入队失败：{error}"))?;
+    Ok(inserted)
+}
+
+pub fn confirm_card(db_path: &Path, repo_id: &str) -> Result<(), String> {
+    let mut conn = open_db(db_path)?;
+    let tx = conn
+        .transaction()
+        .map_err(|error| format!("理解卡确认失败：{error}"))?;
+    let card_json = read_card_json(&tx, repo_id)?;
+    let updated = rewrite_review_status(card_json.as_deref(), "confirmed")?;
+    let changed = tx
+        .execute(
+            "UPDATE repo_ai_documents SET card_json = ?1 WHERE repo_id = ?2",
+            params![updated, repo_id],
+        )
+        .map_err(|error| format!("理解卡确认失败：{error}"))?;
+    if changed == 0 {
+        return Err("这个仓库还没有理解卡".to_owned());
+    }
+    tx.execute(
+        "UPDATE entity_categories
+         SET status = 'confirmed', origin = 'user'
+         WHERE entity_type = 'repository' AND entity_id = ?1
+           AND is_primary = 1 AND status <> 'rejected'",
+        params![repo_id],
+    )
+    .map_err(|error| format!("分类确认失败：{error}"))?;
+    tx.commit()
+        .map_err(|error| format!("理解卡确认失败：{error}"))?;
+    Ok(())
+}
+
+pub fn request_regenerate(db_path: &Path, repo_id: &str) -> Result<(), String> {
+    let mut conn = open_db(db_path)?;
+    let tx = conn
+        .transaction()
+        .map_err(|error| format!("理解卡重做失败：{error}"))?;
+    let account_id: Option<String> = tx
+        .query_row(
+            "SELECT account_id FROM repositories WHERE id = ?1",
+            params![repo_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| format!("仓库读取失败：{error}"))?;
+    let Some(account_id) = account_id else {
+        return Err("找不到这个仓库".to_owned());
+    };
+    let card_json = read_card_json(&tx, repo_id)?;
+    let updated = rewrite_review_status(card_json.as_deref(), "suggested")?;
+    let changed = tx
+        .execute(
+            "UPDATE repo_ai_documents SET card_json = ?1, source_hash = '' WHERE repo_id = ?2",
+            params![updated, repo_id],
+        )
+        .map_err(|error| format!("理解卡重做失败：{error}"))?;
+    if changed == 0 {
+        return Err("这个仓库还没有理解卡".to_owned());
+    }
+    tx.execute(
+        "INSERT OR IGNORE INTO ai_jobs(id, account_id, job_type, target_type, target_id, priority, status)
+         VALUES (lower(hex(randomblob(8))), ?1, 'repo_card', 'repository', ?2, ?3, 'queued')",
+        params![account_id, repo_id, REGENERATE_PRIORITY],
+    )
+    .map_err(|error| format!("理解卡重做入队失败：{error}"))?;
+    tx.commit()
+        .map_err(|error| format!("理解卡重做失败：{error}"))?;
+    Ok(())
+}
+
+/// 只入队，不写预算。`scope` 是 `missing` 或 `outdated`。补旧账的优先级是 6。
+pub fn enqueue_cards_for_scope(db_path: &Path, scope: &str) -> Result<usize, String> {
+    let scope = match scope {
+        "missing" => CardEnqueueScope::Missing,
+        "outdated" => CardEnqueueScope::Outdated,
+        _ => return Err("排队范围只能是 missing 或 outdated".to_owned()),
+    };
+    let mut conn = open_db(db_path)?;
+    enqueue_cards(&mut conn, scope, BACKFILL_PRIORITY)
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AutomationStatus {
+    pub enabled: bool,
+    pub daily_budget_tokens: u64,
+    pub paused: bool,
+    pub pause_reason: Option<jobs::PauseReason>,
+    pub tokens_24h: i64,
+    pub budget_remaining: u64,
+    pub queued: i64,
+    pub running: i64,
+    pub failed: i64,
+    pub provider_configured: bool,
+    pub model: Option<String>,
+}
+
+/// `settings` 是设置文件里的 JSON。不读钥匙串，也不看 `apiKey`。
+pub fn automation_status(db_path: &Path, settings: &Value) -> Result<AutomationStatus, String> {
+    let control = jobs::read_control(&jobs::queue_control_path(db_path));
+    let queue = jobs::queue_status(db_path)?;
+    let (provider_configured, model) = provider_from_settings(settings);
+    Ok(AutomationStatus {
+        enabled: control.daily_budget_tokens > 0 && !control.paused,
+        daily_budget_tokens: control.daily_budget_tokens,
+        paused: control.paused,
+        pause_reason: control.pause_reason,
+        tokens_24h: queue.tokens_24h,
+        budget_remaining: queue.budget_remaining,
+        queued: queue.queued,
+        running: queue.running,
+        failed: queue.failed,
+        provider_configured,
+        model,
+    })
+}
+
+pub fn set_automation_budget(
+    db_path: &Path,
+    settings: &Value,
+    tokens: u64,
+) -> Result<AutomationStatus, String> {
+    jobs::set_daily_budget(&jobs::queue_control_path(db_path), tokens)?;
+    automation_status(db_path, settings)
+}
+
+fn provider_from_settings(settings: &Value) -> (bool, Option<String>) {
+    let Some(ai) = settings.get("ai").and_then(Value::as_object) else {
+        return (false, None);
+    };
+    let provider = ai
+        .get("provider")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim();
+    let model = ai
+        .get("model")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(str::to_owned);
+    let configured =
+        !provider.is_empty() && !provider.eq_ignore_ascii_case("none") && model.is_some();
+    (configured, model)
+}
+
+fn config_ready(config: &AiRequestConfig) -> bool {
+    let provider = config.provider.trim();
+    if provider.is_empty()
+        || provider.eq_ignore_ascii_case("none")
+        || config.model.trim().is_empty()
+    {
+        return false;
+    }
+    if !config.api_key.trim().is_empty() {
+        return true;
+    }
+    // 与设置页一致：本机 OpenAI 兼容接口可以不带密钥。别的情况空密钥一律当成没配好。
+    super::can_use_ai_without_api_key(config)
+}
+
+fn map_card_error(error: CardRunError) -> JobFailure {
+    let message = error.message;
+    match error.kind {
+        CardRunErrorKind::RateLimit { retry_after_secs } => JobFailure::Retryable {
+            kind: ErrorKind::RateLimit,
+            message,
+            retry_after_secs: error.retry_after_secs.or(retry_after_secs),
+        },
+        CardRunErrorKind::Timeout => JobFailure::Retryable {
+            kind: ErrorKind::Timeout,
+            message,
+            retry_after_secs: error.retry_after_secs,
+        },
+        CardRunErrorKind::Network => JobFailure::Retryable {
+            kind: ErrorKind::Network,
+            message,
+            retry_after_secs: error.retry_after_secs,
+        },
+        CardRunErrorKind::Auth => JobFailure::PauseQueue {
+            kind: ErrorKind::Auth,
+            message,
+        },
+        CardRunErrorKind::ContentTooLarge => JobFailure::Fatal {
+            kind: ErrorKind::ContentTooLarge,
+            message,
+        },
+        CardRunErrorKind::BadJson => JobFailure::Retryable {
+            kind: ErrorKind::BadJson,
+            message,
+            retry_after_secs: None,
+        },
+        CardRunErrorKind::Schema => JobFailure::Retryable {
+            kind: ErrorKind::Schema,
+            message,
+            retry_after_secs: None,
+        },
+        CardRunErrorKind::NotFound => JobFailure::Fatal {
+            kind: ErrorKind::Other,
+            message,
+        },
+        CardRunErrorKind::Database | CardRunErrorKind::Other => JobFailure::Retryable {
+            kind: ErrorKind::Other,
+            message,
+            retry_after_secs: error.retry_after_secs,
+        },
+    }
+}
+
+fn apply_scenario_tags(
+    conn: &mut Connection,
+    account_id: &str,
+    repo_id: &str,
+) -> Result<(), String> {
+    let card_json = read_card_json(conn, repo_id)?;
+    let Some(raw) = card_json.filter(|text| !text.trim().is_empty()) else {
+        return Ok(());
+    };
+    let Ok(value) = serde_json::from_str::<Value>(&raw) else {
+        return Ok(());
+    };
+    let confidence = value
+        .get("confidence")
+        .and_then(Value::as_f64)
+        .filter(|number| number.is_finite())
+        .unwrap_or(0.0)
+        .clamp(0.0, 1.0);
+    let slugs = value
+        .get("scenario_tags")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    scenarios::apply_ai_scenarios(conn, account_id, repo_id, &slugs, confidence)?;
+    Ok(())
+}
+
+fn insert_scoped(
+    tx: &Transaction<'_>,
+    scope: CardEnqueueScope,
+    priority: i64,
+) -> Result<usize, String> {
+    let extra = match scope {
+        CardEnqueueScope::Missing => {
+            "(repo_ai_documents.repo_id IS NULL OR IFNULL(trim(repo_ai_documents.card_json), '') = '')"
+        }
+        CardEnqueueScope::Outdated => {
+            "IFNULL(trim(repo_ai_documents.card_json), '') <> '' AND IFNULL(repo_ai_documents.card_schema_version, 0) < 2"
+        }
+    };
+    let sql = format!(
+        "INSERT OR IGNORE INTO ai_jobs(id, account_id, job_type, target_type, target_id, priority, status)
+         SELECT lower(hex(randomblob(8))), repositories.account_id, 'repo_card', 'repository', repositories.id, ?1, 'queued'
+         FROM repositories
+         LEFT JOIN repo_ai_documents ON repo_ai_documents.repo_id = repositories.id
+         WHERE repositories.sync_status = 'active'
+           AND {extra}
+           AND {NOT_CONFIRMED_SQL}"
+    );
+    tx.execute(&sql, params![priority])
+        .map_err(|error| format!("理解卡入队失败：{error}"))
+}
+
+fn read_card_json(conn: &Connection, repo_id: &str) -> Result<Option<String>, String> {
+    conn.query_row(
+        "SELECT card_json FROM repo_ai_documents WHERE repo_id = ?1",
+        params![repo_id],
+        |row| row.get(0),
+    )
+    .optional()
+    .map_err(|error| format!("理解卡读取失败：{error}"))
+}
+
+fn rewrite_review_status(card_json: Option<&str>, status: &str) -> Result<String, String> {
+    let raw = card_json.unwrap_or("").trim();
+    if raw.is_empty() {
+        return Err("这个仓库还没有理解卡".to_owned());
+    }
+    let mut value: Value =
+        serde_json::from_str(raw).map_err(|_| "这个仓库还没有理解卡".to_owned())?;
+    let Some(object) = value.as_object_mut() else {
+        return Err("这个仓库还没有理解卡".to_owned());
+    };
+    object.insert("review_status".to_owned(), Value::String(status.to_owned()));
+    serde_json::to_string(&value).map_err(|_| "理解卡无法保存".to_owned())
+}
+
+fn open_db(path: &Path) -> Result<Connection, String> {
+    let connection = Connection::open(path).map_err(|error| format!("数据库打开失败：{error}"))?;
+    connection
+        .busy_timeout(Duration::from_millis(5000))
+        .map_err(|error| format!("数据库参数设置失败：{error}"))?;
+    connection
+        .execute_batch("PRAGMA foreign_keys = ON;")
+        .map_err(|error| format!("数据库参数设置失败：{error}"))?;
+    Ok(connection)
+}
+
+fn now_stamp() -> String {
+    let value = time::OffsetDateTime::now_utc();
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z",
+        value.year(),
+        u8::from(value.month()),
+        value.day(),
+        value.hour(),
+        value.minute(),
+        value.second(),
+        value.millisecond()
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::card_pipeline::{LlmError, LlmErrorKind, LlmReply, PROMPT_VERSION};
+    use crate::db::migrations::migrate_database;
+    use crate::jobs::{QueueControl, Worker, WorkerConfig};
+    use rusqlite::Connection;
+    use serde_json::{json, Value};
+    use std::collections::BTreeSet;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+    use std::thread;
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+    struct TempDb {
+        path: PathBuf,
+    }
+
+    impl TempDb {
+        fn new(label: &str) -> Self {
+            static SEQ: AtomicUsize = AtomicUsize::new(0);
+            let n = SEQ.fetch_add(1, Ordering::Relaxed);
+            let nanos = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("系统时间应晚于纪元")
+                .as_nanos();
+            let dir = std::env::temp_dir().join(format!("fsl-cardh-{label}-{nanos}-{n}"));
+            fs::create_dir_all(&dir).expect("临时目录应能创建");
+            let path = dir.join("fox-stars-lab.sqlite3");
+            migrate_database(&path).expect("测试库应能完成迁移");
+            let conn = open_db(&path).expect("测试库应能打开");
+            conn.execute(
+                "INSERT INTO github_accounts(id, login, token_ref) VALUES ('acct', 'fox', 'test')",
+                [],
+            )
+            .expect("测试账号应能写入");
+            drop(conn);
+            Self { path }
+        }
+
+        fn path(&self) -> &Path {
+            &self.path
+        }
+
+        fn open(&self) -> Connection {
+            open_db(&self.path).expect("测试库应能打开")
+        }
+    }
+
+    impl Drop for TempDb {
+        fn drop(&mut self) {
+            let Some(parent) = self.path.parent() else {
+                return;
+            };
+            let Some(name) = parent.file_name().and_then(|name| name.to_str()) else {
+                return;
+            };
+            if name.starts_with("fsl-cardh-") {
+                let _ = fs::remove_dir_all(parent);
+            }
+        }
+    }
+
+    struct Scripted {
+        replies: Arc<Mutex<Vec<Result<LlmReply, LlmError>>>>,
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl LlmClient for Scripted {
+        fn complete_json(
+            &self,
+            _request: &card_pipeline::LlmRequest,
+        ) -> Result<LlmReply, LlmError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let mut replies = self.replies.lock().expect("剧本锁应可用");
+            if replies.is_empty() {
+                return Err(LlmError {
+                    kind: LlmErrorKind::Other,
+                    message: "剧本已用完".to_owned(),
+                });
+            }
+            replies.remove(0)
+        }
+    }
+
+    fn ok_config() -> AiRequestConfig {
+        AiRequestConfig {
+            provider: "openai-compatible".to_owned(),
+            api_key: "test-key".to_owned(),
+            base_url: None,
+            model: "config-model".to_owned(),
+        }
+    }
+
+    fn reply(content: &str, model: &str, input: u64, output: u64) -> Result<LlmReply, LlmError> {
+        Ok(LlmReply {
+            content: content.to_owned(),
+            input_tokens: Some(input),
+            output_tokens: Some(output),
+            model: Some(model.to_owned()),
+        })
+    }
+
+    fn llm_err(kind: LlmErrorKind, message: &str) -> Result<LlmReply, LlmError> {
+        Err(LlmError {
+            kind,
+            message: message.to_owned(),
+        })
+    }
+
+    fn scripted(
+        config: Result<AiRequestConfig, String>,
+        replies: Vec<Result<LlmReply, LlmError>>,
+    ) -> (RepoCardHandler, Arc<AtomicUsize>) {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_for_factory = Arc::clone(&calls);
+        let stored = Arc::new(Mutex::new(replies));
+        let stored_for_factory = Arc::clone(&stored);
+        let handler = RepoCardHandler::with_client_factory(
+            Arc::new(move || config.clone()),
+            Arc::new(move || {
+                Box::new(Scripted {
+                    replies: Arc::clone(&stored_for_factory),
+                    calls: Arc::clone(&calls_for_factory),
+                })
+            }),
+        );
+        (handler, calls)
+    }
+
+    fn job(id: &str, target_type: &str, target_id: &str) -> JobRecord {
+        JobRecord {
+            id: id.to_owned(),
+            account_id: "acct".to_owned(),
+            job_type: "repo_card".to_owned(),
+            target_type: target_type.to_owned(),
+            target_id: target_id.to_owned(),
+            attempts: 1,
+            max_attempts: 3,
+            input_hash: None,
+        }
+    }
+
+    fn usable_readme() -> String {
+        let mut text = String::from(
+            "# fox/demo\n\n做小红书封面的命令行工具。\n\n## 安装\n\nnpm install xhs-cover\n\n## 使用\n\n运行后即可生成封面。\n",
+        );
+        while text.chars().count() < 80 {
+            text.push('。');
+        }
+        text
+    }
+
+    fn valid_json() -> String {
+        serde_json::to_string(&json!({
+            "one_liner_zh": "给小红书做封面的命令行",
+            "what_it_is": "根据提示生成小红书封面图。",
+            "form": "cli",
+            "primary_category": "content-creation",
+            "secondary_categories": ["media-gen"],
+            "capabilities": [{"name_zh": "生成封面图"}],
+            "problems_solved": ["想批量做小红书封面"],
+            "how_to_try": "npm install xhs-cover",
+            "maturity": "usable",
+            "zh_friendly": true,
+            "confidence": 0.82,
+            "keywords": ["小红书", "封面", "xiaohongshu", "cover", "配图", "出图"],
+            "scenario_tags": ["xhs"]
+        }))
+        .expect("样例卡片应能序列化")
+    }
+
+    fn insert_repo(conn: &Connection, id: &str, status: &str) {
+        conn.execute(
+            "INSERT INTO repositories(
+                id, account_id, owner, name, full_name, html_url, starred_at, sync_status,
+                description, language, topics_json, stars_count, pushed_at
+             ) VALUES (
+                ?1, 'acct', 'fox', ?1, 'fox/' || ?1, 'https://github.com/fox/' || ?1,
+                '2026-09-01T00:00:00Z', ?2, '做小红书封面', 'Rust', '[\"xiaohongshu\",\"cover\"]',
+                12, '2026-09-30T08:00:00Z'
+             )",
+            params![id, status],
+        )
+        .expect("仓库应能写入");
+    }
+
+    fn seed_catalog(conn: &Connection) {
+        conn.execute_batch(
+            "
+            INSERT INTO categories(id, account_id, slug, name_zh, sort_order) VALUES
+              ('c1', 'acct', 'content-creation', '内容创作', 1),
+              ('c2', 'acct', 'media-gen', '图像生成', 2);
+            INSERT INTO scenarios(id, account_id, slug, name_zh) VALUES
+              ('s1', 'acct', 'xhs', '小红书');
+            ",
+        )
+        .expect("分类和场景应能写入");
+    }
+
+    fn insert_readme(conn: &Connection, repo_id: &str) {
+        let text = usable_readme();
+        conn.execute(
+            "INSERT INTO repo_readmes(repo_id, raw_markdown, content_hash, source_path, fetched_at)
+             VALUES (?1, ?2, 'hash', 'README.md', '2026-09-30T00:00:00Z')",
+            params![repo_id, text],
+        )
+        .expect("README 应能写入");
+    }
+
+    fn prepare_runnable(db: &TempDb) {
+        let conn = db.open();
+        insert_repo(&conn, "r1", "active");
+        seed_catalog(&conn);
+        insert_readme(&conn, "r1");
+    }
+
+    fn insert_card(conn: &Connection, repo_id: &str, card_json: &str, schema: i64, hash: &str) {
+        conn.execute(
+            "INSERT INTO repo_ai_documents(
+                repo_id, summary_zh, model, prompt_version, source_hash, generated_at, card_json, card_schema_version
+             ) VALUES (?1, '旧摘要', 'kept-model', 'card-v1', ?2, '2026-01-01T00:00:00Z', ?3, ?4)",
+            params![repo_id, hash, card_json, schema],
+        )
+        .expect("理解卡应能写入");
+    }
+
+    fn cell_string(conn: &Connection, sql: &str) -> String {
+        conn.query_row(sql, [], |row| row.get(0))
+            .expect("查询应返回文字")
+    }
+
+    fn cell_i64(conn: &Connection, sql: &str) -> i64 {
+        conn.query_row(sql, [], |row| row.get(0))
+            .expect("查询应返回整数")
+    }
+
+    fn assert_retryable(
+        result: Result<JobSuccess, JobFailure>,
+        kind: ErrorKind,
+        retry_after_secs: Option<u64>,
+        message_part: &str,
+    ) {
+        match result {
+            Err(JobFailure::Retryable {
+                kind: got,
+                message,
+                retry_after_secs: got_retry,
+            }) => {
+                assert_eq!(got, kind);
+                assert_eq!(got_retry, retry_after_secs);
+                assert!(message.contains(message_part), "{message}");
+            }
+            other => panic!("应为可重试失败，实际 {other:?}"),
+        }
+    }
+
+    #[test]
+    fn handler_success_writes_card_tokens_scenarios_and_job_row() {
+        let db = TempDb::new("success");
+        prepare_runnable(&db);
+        let conn = db.open();
+        conn.execute(
+            "INSERT INTO ai_jobs(id, account_id, job_type, target_type, target_id, status, attempts)
+             VALUES ('job-r1', 'acct', 'repo_card', 'repository', 'r1', 'running', 1)",
+            [],
+        )
+        .expect("运行中的任务应能写入");
+        drop(conn);
+        let (handler, calls) = scripted(
+            Ok(ok_config()),
+            vec![reply(&valid_json(), "fake-model", 111, 22)],
+        );
+        let success = handler
+            .run(&job("job-r1", "repository", "r1"), db.path())
+            .expect("合法卡应成功");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(success.input_tokens, 111);
+        assert_eq!(success.output_tokens, 22);
+        assert_eq!(success.provider, "openai-compatible");
+        assert_eq!(success.model, "fake-model");
+        assert_eq!(success.prompt_version, PROMPT_VERSION);
+        assert!(!success.skipped);
+        assert_eq!(success.input_hash.len(), 64);
+
+        let conn = db.open();
+        let card_json = cell_string(
+            &conn,
+            "SELECT card_json FROM repo_ai_documents WHERE repo_id = 'r1'",
+        );
+        assert!(!card_json.contains('\n'), "{card_json}");
+        assert!(
+            card_json.contains("\"review_status\":\"suggested\""),
+            "{card_json}"
+        );
+        assert!(
+            card_json.contains("\"scenario_tags\":[\"xhs\"]"),
+            "{card_json}"
+        );
+        assert_eq!(
+            cell_i64(
+                &conn,
+                "SELECT input_tokens FROM repo_ai_documents WHERE repo_id = 'r1'"
+            ),
+            111
+        );
+        assert_eq!(
+            cell_i64(
+                &conn,
+                "SELECT output_tokens FROM repo_ai_documents WHERE repo_id = 'r1'"
+            ),
+            22
+        );
+        assert_eq!(
+            cell_string(
+                &conn,
+                "SELECT source_hash FROM repo_ai_documents WHERE repo_id = 'r1'"
+            ),
+            success.input_hash
+        );
+        let (slug, origin, status, confidence): (String, String, String, f64) = conn
+            .query_row(
+                "SELECT s.slug, es.origin, es.status, es.confidence
+                 FROM entity_scenarios es
+                 JOIN scenarios s ON s.id = es.scenario_id
+                 WHERE es.entity_type = 'repository' AND es.entity_id = 'r1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .expect("场景归类应已写入");
+        assert_eq!(slug, "xhs");
+        assert_eq!(origin, "ai");
+        assert_eq!(status, "suggested");
+        assert!((confidence - 0.82).abs() < 1e-9, "{confidence}");
+        drop(conn);
+
+        assert!(jobs::finish_job(
+            db.path(),
+            &job("job-r1", "repository", "r1"),
+            &now_stamp(),
+            Ok(success.clone()),
+            0.0
+        )
+        .expect("收尾应成功"));
+        let conn = db.open();
+        assert_eq!(
+            cell_string(&conn, "SELECT status FROM ai_jobs WHERE id = 'job-r1'"),
+            "succeeded"
+        );
+        assert_eq!(
+            cell_i64(
+                &conn,
+                "SELECT input_tokens FROM ai_jobs WHERE id = 'job-r1'"
+            ),
+            111
+        );
+        assert_eq!(
+            cell_i64(
+                &conn,
+                "SELECT output_tokens FROM ai_jobs WHERE id = 'job-r1'"
+            ),
+            22
+        );
+        assert_eq!(
+            cell_string(&conn, "SELECT provider FROM ai_jobs WHERE id = 'job-r1'"),
+            "openai-compatible"
+        );
+        assert_eq!(
+            cell_string(&conn, "SELECT model FROM ai_jobs WHERE id = 'job-r1'"),
+            "fake-model"
+        );
+        assert_eq!(
+            cell_string(
+                &conn,
+                "SELECT prompt_version FROM ai_jobs WHERE id = 'job-r1'"
+            ),
+            PROMPT_VERSION
+        );
+        assert_eq!(
+            cell_string(&conn, "SELECT input_hash FROM ai_jobs WHERE id = 'job-r1'"),
+            success.input_hash
+        );
+    }
+
+    #[test]
+    fn handler_skips_when_the_same_content_is_already_current() {
+        let db = TempDb::new("skip-same");
+        prepare_runnable(&db);
+        let (handler, calls) = scripted(
+            Ok(ok_config()),
+            vec![reply(&valid_json(), "fake-model", 11, 5)],
+        );
+        let first = handler
+            .run(&job("job-1", "repository", "r1"), db.path())
+            .expect("第一次应生成");
+        assert!(!first.skipped);
+        let second = handler
+            .run(&job("job-2", "repository", "r1"), db.path())
+            .expect("内容没变应跳过");
+        assert!(second.skipped);
+        assert_eq!(second.input_tokens, 0);
+        assert_eq!(second.output_tokens, 0);
+        assert_eq!(second.input_hash, first.input_hash);
+        assert_eq!(second.model, "fake-model");
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "跳过时不应再调用模型");
+
+        let conn = db.open();
+        conn.execute(
+            "INSERT INTO ai_jobs(id, account_id, job_type, target_type, target_id, status, attempts)
+             VALUES ('job-2', 'acct', 'repo_card', 'repository', 'r1', 'running', 1)",
+            [],
+        )
+        .expect("运行中的任务应能写入");
+        drop(conn);
+        assert!(jobs::finish_job(
+            db.path(),
+            &job("job-2", "repository", "r1"),
+            &now_stamp(),
+            Ok(second),
+            0.0
+        )
+        .expect("收尾应成功"));
+        assert_eq!(
+            cell_string(&db.open(), "SELECT status FROM ai_jobs WHERE id = 'job-2'"),
+            "skipped"
+        );
+        assert_eq!(
+            cell_i64(
+                &db.open(),
+                "SELECT input_tokens + output_tokens FROM ai_jobs WHERE id = 'job-2'"
+            ),
+            0
+        );
+    }
+
+    #[test]
+    fn handler_skips_a_confirmed_card_without_calling_the_model() {
+        let db = TempDb::new("skip-confirmed");
+        prepare_runnable(&db);
+        insert_card(
+            &db.open(),
+            "r1",
+            r#"{"review_status":"confirmed","one_liner_zh":"已确认","confidence":0.2}"#,
+            1,
+            "other-hash",
+        );
+        let (handler, calls) = scripted(
+            Ok(ok_config()),
+            vec![reply(&valid_json(), "fake-model", 11, 5)],
+        );
+        let success = handler
+            .run(&job("job-1", "repository", "r1"), db.path())
+            .expect("已确认的卡应跳过");
+        assert!(success.skipped);
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(success.input_tokens, 0);
+        assert_eq!(success.output_tokens, 0);
+    }
+
+    #[test]
+    fn unusable_config_pauses_without_calling_the_model() {
+        let db = TempDb::new("config-bad");
+        prepare_runnable(&db);
+        let cases = [
+            Err("没有密钥".to_owned()),
+            Ok(AiRequestConfig {
+                provider: "none".to_owned(),
+                api_key: String::new(),
+                base_url: None,
+                model: "m".to_owned(),
+            }),
+            Ok(AiRequestConfig {
+                provider: "openai".to_owned(),
+                api_key: "test-key".to_owned(),
+                base_url: None,
+                model: "  ".to_owned(),
+            }),
+            Ok(AiRequestConfig {
+                provider: "openai".to_owned(),
+                api_key: String::new(),
+                base_url: Some("https://api.openai.com/v1".to_owned()),
+                model: "gpt".to_owned(),
+            }),
+        ];
+        for config in cases {
+            let (handler, calls) = scripted(config, vec![reply(&valid_json(), "fake-model", 1, 1)]);
+            match handler.run(&job("job-1", "repository", "r1"), db.path()) {
+                Err(JobFailure::PauseQueue { kind, message }) => {
+                    assert_eq!(kind, ErrorKind::Auth);
+                    assert_eq!(message, NOT_CONFIGURED_MESSAGE);
+                }
+                other => panic!("不可用的配置应暂停队列，实际 {other:?}"),
+            }
+            assert_eq!(calls.load(Ordering::SeqCst), 0);
+        }
+    }
+
+    #[test]
+    fn loopback_without_a_key_still_reaches_the_model() {
+        let db = TempDb::new("loopback");
+        prepare_runnable(&db);
+        let config = Ok(AiRequestConfig {
+            provider: "openai-compatible".to_owned(),
+            api_key: String::new(),
+            base_url: Some("http://127.0.0.1:11434/v1".to_owned()),
+            model: "local-model".to_owned(),
+        });
+        let (handler, calls) = scripted(config, vec![llm_err(LlmErrorKind::Timeout, "本地超时")]);
+        assert_retryable(
+            handler.run(&job("job-1", "repository", "r1"), db.path()),
+            ErrorKind::Timeout,
+            None,
+            "本地超时",
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn config_failure_pauses_the_queue_and_requeues_the_job() {
+        let db = TempDb::new("pause-queue");
+        let conn = db.open();
+        insert_repo(&conn, "r1", "active");
+        conn.execute(
+            "INSERT INTO ai_jobs(id, account_id, job_type, target_type, target_id, status, attempts)
+             VALUES ('job-r1', 'acct', 'repo_card', 'repository', 'r1', 'queued', 0)",
+            [],
+        )
+        .expect("排队任务应能写入");
+        drop(conn);
+        jobs::set_daily_budget(&jobs::queue_control_path(db.path()), 1_000)
+            .expect("测试预算应能写入");
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_for_handler = Arc::clone(&calls);
+        let handler = RepoCardHandler::new(Arc::new(move || {
+            calls_for_handler.fetch_add(1, Ordering::SeqCst);
+            Err("钥匙串里没有密钥".to_owned())
+        }));
+        let worker = Worker::start(
+            db.path().to_path_buf(),
+            vec![Arc::new(handler)],
+            WorkerConfig {
+                concurrency: 1,
+                idle_poll: Duration::from_millis(20),
+            },
+        );
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let mut control = QueueControl::default();
+        let mut status = String::new();
+        while Instant::now() < deadline {
+            control = jobs::read_control(&jobs::queue_control_path(db.path()));
+            status = cell_string(&db.open(), "SELECT status FROM ai_jobs WHERE id = 'job-r1'");
+            if control.paused && status == "queued" {
+                break;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        worker.stop();
+        assert!(control.paused, "队列应被暂停");
+        let reason = control.pause_reason.expect("应写下暂停原因");
+        assert_eq!(reason.kind, "auth");
+        assert_eq!(reason.message, NOT_CONFIGURED_MESSAGE);
+        assert!(!reason.at.is_empty());
+        assert_eq!(status, "queued");
+        assert_eq!(
+            cell_i64(
+                &db.open(),
+                "SELECT attempts FROM ai_jobs WHERE id = 'job-r1'"
+            ),
+            0
+        );
+        assert!(calls.load(Ordering::SeqCst) >= 1);
+    }
+
+    #[test]
+    fn rate_limit_maps_to_retryable() {
+        let db = TempDb::new("map-rate");
+        prepare_runnable(&db);
+        let (handler, _) = scripted(
+            Ok(ok_config()),
+            vec![llm_err(
+                LlmErrorKind::RateLimit {
+                    retry_after_secs: Some(42),
+                },
+                "太频繁",
+            )],
+        );
+        assert_retryable(
+            handler.run(&job("job-1", "repository", "r1"), db.path()),
+            ErrorKind::RateLimit,
+            Some(42),
+            "太频繁",
+        );
+    }
+
+    #[test]
+    fn timeout_maps_to_retryable() {
+        let db = TempDb::new("map-timeout");
+        prepare_runnable(&db);
+        let (handler, _) = scripted(
+            Ok(ok_config()),
+            vec![llm_err(LlmErrorKind::Timeout, "超时了")],
+        );
+        assert_retryable(
+            handler.run(&job("job-1", "repository", "r1"), db.path()),
+            ErrorKind::Timeout,
+            None,
+            "超时了",
+        );
+    }
+
+    #[test]
+    fn network_maps_to_retryable() {
+        let db = TempDb::new("map-network");
+        prepare_runnable(&db);
+        let (handler, _) = scripted(
+            Ok(ok_config()),
+            vec![llm_err(LlmErrorKind::Network, "网络断了")],
+        );
+        assert_retryable(
+            handler.run(&job("job-1", "repository", "r1"), db.path()),
+            ErrorKind::Network,
+            None,
+            "网络断了",
+        );
+    }
+
+    #[test]
+    fn pipeline_auth_maps_to_pause_queue() {
+        let db = TempDb::new("map-auth");
+        prepare_runnable(&db);
+        let (handler, _) = scripted(
+            Ok(ok_config()),
+            vec![llm_err(LlmErrorKind::Auth, "密钥被拒绝")],
+        );
+        match handler.run(&job("job-1", "repository", "r1"), db.path()) {
+            Err(JobFailure::PauseQueue { kind, message }) => {
+                assert_eq!(kind, ErrorKind::Auth);
+                assert_eq!(message, "密钥被拒绝");
+            }
+            other => panic!("认证失败应暂停队列，实际 {other:?}"),
+        }
+    }
+
+    #[test]
+    fn content_too_large_maps_to_fatal() {
+        let db = TempDb::new("map-large");
+        prepare_runnable(&db);
+        let (handler, _) = scripted(
+            Ok(ok_config()),
+            vec![llm_err(LlmErrorKind::ContentTooLarge, "材料太长")],
+        );
+        match handler.run(&job("job-1", "repository", "r1"), db.path()) {
+            Err(JobFailure::Fatal { kind, message }) => {
+                assert_eq!(kind, ErrorKind::ContentTooLarge);
+                assert_eq!(message, "材料太长");
+            }
+            other => panic!("内容过大应直接失败，实际 {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bad_json_maps_to_retryable() {
+        let db = TempDb::new("map-json");
+        prepare_runnable(&db);
+        let (handler, calls) = scripted(
+            Ok(ok_config()),
+            vec![reply("你好", "m", 1, 1), reply("还是不好", "m", 1, 1)],
+        );
+        assert_retryable(
+            handler.run(&job("job-1", "repository", "r1"), db.path()),
+            ErrorKind::BadJson,
+            None,
+            "JSON",
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn schema_maps_to_retryable() {
+        let db = TempDb::new("map-schema");
+        prepare_runnable(&db);
+        let (handler, _) = scripted(
+            Ok(ok_config()),
+            vec![reply("{}", "m", 1, 1), reply("{}", "m", 1, 1)],
+        );
+        assert_retryable(
+            handler.run(&job("job-1", "repository", "r1"), db.path()),
+            ErrorKind::Schema,
+            None,
+            "校验",
+        );
+    }
+
+    #[test]
+    fn not_found_maps_to_fatal() {
+        let db = TempDb::new("map-missing");
+        let (handler, calls) = scripted(Ok(ok_config()), vec![reply(&valid_json(), "m", 1, 1)]);
+        match handler.run(&job("job-1", "repository", "missing"), db.path()) {
+            Err(JobFailure::Fatal { kind, message }) => {
+                assert_eq!(kind, ErrorKind::Other);
+                assert_eq!(message, "找不到这个仓库");
+            }
+            other => panic!("找不到仓库应直接失败，实际 {other:?}"),
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn database_maps_to_retryable_other() {
+        static SEQ: AtomicUsize = AtomicUsize::new(0);
+        let n = SEQ.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!("fsl-cardh-empty-{n}.sqlite3"));
+        let _ = fs::remove_file(&path);
+        Connection::open(&path).expect("空库应能创建");
+        let (handler, _) = scripted(Ok(ok_config()), vec![reply(&valid_json(), "m", 1, 1)]);
+        assert_retryable(
+            handler.run(&job("job-1", "repository", "r1"), &path),
+            ErrorKind::Other,
+            None,
+            "数据库",
+        );
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn other_maps_to_retryable_other() {
+        let db = TempDb::new("map-other");
+        prepare_runnable(&db);
+        let (handler, _) = scripted(
+            Ok(ok_config()),
+            vec![llm_err(LlmErrorKind::Other, "服务暂时不可用")],
+        );
+        assert_retryable(
+            handler.run(&job("job-1", "repository", "r1"), db.path()),
+            ErrorKind::Other,
+            None,
+            "服务暂时不可用",
+        );
+    }
+
+    #[test]
+    fn non_repository_target_is_fatal() {
+        let db = TempDb::new("target");
+        let (handler, calls) = scripted(Ok(ok_config()), vec![reply(&valid_json(), "m", 1, 1)]);
+        for (target_type, target_id) in [("inbox_item", "x"), ("repository", "  ")] {
+            match handler.run(&job("job-1", target_type, target_id), db.path()) {
+                Err(JobFailure::Fatal { kind, message }) => {
+                    assert_eq!(kind, ErrorKind::Other);
+                    assert_eq!(message, "任务目标不是仓库");
+                }
+                other => panic!("错误目标应直接失败，实际 {other:?}"),
+            }
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn worker_leaves_spending_jobs_queued_until_budget_is_set() {
+        let db = TempDb::new("worker-budget");
+        let conn = db.open();
+        insert_repo(&conn, "fresh", "active");
+        conn.execute(
+            "INSERT INTO ai_jobs(id, account_id, job_type, target_type, target_id, priority, status)
+             VALUES ('canary', 'acct', 'categorize', 'repository', 'canary-repo', 1, 'queued')",
+            [],
+        )
+        .expect("探针任务应能写入");
+        drop(conn);
+        let mut conn = db.open();
+        assert_eq!(
+            enqueue_cards(&mut conn, CardEnqueueScope::Missing, 6).expect("应能入队"),
+            1
+        );
+        drop(conn);
+
+        let canary_hits = Arc::new(AtomicUsize::new(0));
+        let spend_hits = Arc::new(AtomicUsize::new(0));
+        struct Canary(Arc<AtomicUsize>);
+        struct Spender(Arc<AtomicUsize>);
+        impl JobHandler for Canary {
+            fn job_type(&self) -> &'static str {
+                "categorize"
+            }
+            fn spends_tokens(&self) -> bool {
+                false
+            }
+            fn run(&self, _job: &JobRecord, _db_path: &Path) -> Result<JobSuccess, JobFailure> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Ok(JobSuccess {
+                    input_tokens: 0,
+                    output_tokens: 0,
+                    provider: "fake".to_owned(),
+                    model: "fake".to_owned(),
+                    prompt_version: "none".to_owned(),
+                    input_hash: String::new(),
+                    skipped: false,
+                })
+            }
+        }
+        impl JobHandler for Spender {
+            fn job_type(&self) -> &'static str {
+                "repo_card"
+            }
+            fn spends_tokens(&self) -> bool {
+                true
+            }
+            fn run(&self, _job: &JobRecord, _db_path: &Path) -> Result<JobSuccess, JobFailure> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Ok(JobSuccess {
+                    input_tokens: 3,
+                    output_tokens: 4,
+                    provider: "fake".to_owned(),
+                    model: "fake".to_owned(),
+                    prompt_version: "card-v2".to_owned(),
+                    input_hash: "hash".to_owned(),
+                    skipped: false,
+                })
+            }
+        }
+        let worker = Worker::start(
+            db.path().to_path_buf(),
+            vec![
+                Arc::new(Canary(Arc::clone(&canary_hits))),
+                Arc::new(Spender(Arc::clone(&spend_hits))),
+            ],
+            WorkerConfig {
+                concurrency: 1,
+                idle_poll: Duration::from_millis(20),
+            },
+        );
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while canary_hits.load(Ordering::SeqCst) == 0 && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(
+            canary_hits.load(Ordering::SeqCst),
+            1,
+            "不花钱的探针应在预算为 0 时被领走"
+        );
+        thread::sleep(Duration::from_millis(150));
+        assert_eq!(spend_hits.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            cell_string(
+                &db.open(),
+                "SELECT status FROM ai_jobs WHERE target_id = 'fresh'"
+            ),
+            "queued"
+        );
+        assert_eq!(
+            jobs::read_control(&jobs::queue_control_path(db.path())).daily_budget_tokens,
+            0
+        );
+
+        jobs::set_daily_budget(&jobs::queue_control_path(db.path()), 10_000)
+            .expect("测试预算应能写入");
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while spend_hits.load(Ordering::SeqCst) == 0 && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(20));
+        }
+        worker.stop();
+        assert_eq!(spend_hits.load(Ordering::SeqCst), 1);
+        let conn = db.open();
+        assert_eq!(
+            cell_string(
+                &conn,
+                "SELECT status FROM ai_jobs WHERE target_id = 'fresh'"
+            ),
+            "succeeded"
+        );
+        assert_eq!(
+            cell_i64(
+                &conn,
+                "SELECT input_tokens FROM ai_jobs WHERE target_id = 'fresh'"
+            ),
+            3
+        );
+        assert_eq!(
+            cell_i64(
+                &conn,
+                "SELECT output_tokens FROM ai_jobs WHERE target_id = 'fresh'"
+            ),
+            4
+        );
+        assert_eq!(
+            cell_i64(
+                &conn,
+                "SELECT priority FROM ai_jobs WHERE target_id = 'fresh'"
+            ),
+            6
+        );
+    }
+
+    #[test]
+    fn enqueue_missing_skips_confirmed_current_and_duplicates() {
+        let db = TempDb::new("missing");
+        let conn = db.open();
+        insert_repo(&conn, "bare", "active");
+        insert_repo(&conn, "empty", "active");
+        insert_card(&conn, "empty", "", 0, "");
+        insert_repo(&conn, "confirmed", "active");
+        insert_card(
+            &conn,
+            "confirmed",
+            r#"{"review_status":"confirmed"}"#,
+            2,
+            "h",
+        );
+        insert_repo(&conn, "current", "active");
+        insert_card(&conn, "current", r#"{"review_status":"suggested"}"#, 2, "h");
+        insert_repo(&conn, "gone", "removed");
+        insert_repo(&conn, "queued", "active");
+        conn.execute(
+            "INSERT INTO ai_jobs(id, account_id, job_type, target_type, target_id, priority, status)
+             VALUES ('keep', 'acct', 'repo_card', 'repository', 'queued', 1, 'queued')",
+            [],
+        )
+        .expect("已有任务应能写入");
+        drop(conn);
+
+        let mut conn = db.open();
+        assert_eq!(
+            enqueue_cards(&mut conn, CardEnqueueScope::Missing, 6).expect("应能入队"),
+            2
+        );
+        assert_eq!(
+            enqueue_cards(&mut conn, CardEnqueueScope::Missing, 6).expect("重复入队应为 0"),
+            0
+        );
+        drop(conn);
+
+        let conn = db.open();
+        let rows = job_rows(&conn);
+        assert_eq!(priority_of(&rows, "bare"), Some((6, "queued")));
+        assert_eq!(priority_of(&rows, "empty"), Some((6, "queued")));
+        assert_eq!(priority_of(&rows, "queued"), Some((1, "queued")));
+        assert!(priority_of(&rows, "confirmed").is_none());
+        assert!(priority_of(&rows, "current").is_none());
+        assert!(priority_of(&rows, "gone").is_none());
+        assert_eq!(rows.iter().filter(|row| row.0 == "queued").count(), 1);
+    }
+
+    #[test]
+    fn enqueue_outdated_only_old_unconfirmed_cards() {
+        let db = TempDb::new("outdated");
+        let conn = db.open();
+        insert_repo(&conn, "old", "active");
+        insert_card(&conn, "old", r#"{"review_status":"suggested"}"#, 1, "h");
+        insert_repo(&conn, "pretty", "active");
+        insert_card(
+            &conn,
+            "pretty",
+            "{\n  \"review_status\": \"confirmed\",\n  \"one_liner_zh\": \"已确认\"\n}",
+            1,
+            "h",
+        );
+        insert_repo(&conn, "current", "active");
+        insert_card(&conn, "current", r#"{"review_status":"suggested"}"#, 2, "h");
+        insert_repo(&conn, "blank", "active");
+        insert_card(&conn, "blank", "", 0, "");
+        insert_repo(&conn, "gone", "removed");
+        insert_card(&conn, "gone", r#"{"review_status":"suggested"}"#, 1, "h");
+        insert_repo(&conn, "bare", "active");
+        drop(conn);
+
+        let mut conn = db.open();
+        assert_eq!(
+            enqueue_cards(&mut conn, CardEnqueueScope::Outdated, 6).expect("应能入队"),
+            1
+        );
+        drop(conn);
+        let rows = job_rows(&db.open());
+        assert_eq!(rows.len(), 1);
+        assert_eq!(priority_of(&rows, "old"), Some((6, "queued")));
+    }
+
+    #[test]
+    fn enqueue_new_stars_only_listed_repos_at_priority_three() {
+        let db = TempDb::new("new-stars");
+        let conn = db.open();
+        insert_repo(&conn, "fresh", "active");
+        insert_repo(&conn, "has-card", "active");
+        insert_card(
+            &conn,
+            "has-card",
+            r#"{"review_status":"suggested"}"#,
+            2,
+            "h",
+        );
+        insert_repo(&conn, "other", "active");
+        insert_repo(&conn, "gone", "removed");
+        drop(conn);
+
+        assert_eq!(enqueue_new_stars(db.path(), &[]).expect("空列表应为 0"), 0);
+        let ids = vec![
+            "fresh".to_owned(),
+            "has-card".to_owned(),
+            "gone".to_owned(),
+            "missing".to_owned(),
+        ];
+        assert_eq!(enqueue_new_stars(db.path(), &ids).expect("应能入队"), 1);
+        assert_eq!(
+            enqueue_new_stars(db.path(), &ids).expect("重复入队应为 0"),
+            0
+        );
+        let rows = job_rows(&db.open());
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            priority_of(&rows, "fresh"),
+            Some((NEW_STAR_PRIORITY, "queued"))
+        );
+        assert!(priority_of(&rows, "other").is_none());
+        assert!(priority_of(&rows, "has-card").is_none());
+        assert!(priority_of(&rows, "gone").is_none());
+    }
+
+    fn job_rows(conn: &Connection) -> Vec<(String, i64, String)> {
+        let mut statement = conn
+            .prepare("SELECT target_id, priority, status FROM ai_jobs")
+            .expect("任务查询应能准备");
+        let rows = statement
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .expect("任务查询应能执行");
+        rows.collect::<Result<Vec<_>, _>>().expect("任务行应能读出")
+    }
+
+    fn priority_of<'a>(
+        rows: &'a [(String, i64, String)],
+        target_id: &str,
+    ) -> Option<(i64, &'a str)> {
+        rows.iter()
+            .find(|row| row.0 == target_id)
+            .map(|row| (row.1, row.2.as_str()))
+    }
+
+    #[test]
+    fn confirm_card_confirms_review_and_primary_category() {
+        let db = TempDb::new("confirm");
+        let conn = db.open();
+        insert_repo(&conn, "r1", "active");
+        seed_catalog(&conn);
+        conn.execute(
+            "INSERT INTO categories(id, account_id, slug, name_zh) VALUES ('c3', 'acct', 'writing', '写作')",
+            [],
+        )
+        .expect("分类应能写入");
+        let pretty = serde_json::to_string_pretty(&json!({
+            "one_liner_zh": "一行说明",
+            "review_status": "suggested",
+            "confidence": 0.5
+        }))
+        .expect("样例应能序列化");
+        assert!(pretty.contains('\n'));
+        insert_card(&conn, "r1", &pretty, 2, "hash");
+        conn.execute(
+            "INSERT INTO entity_categories(account_id, entity_type, entity_id, category_id, is_primary, confidence, origin, status)
+             VALUES ('acct', 'repository', 'r1', 'c1', 1, 0.8, 'ai', 'suggested'),
+                    ('acct', 'repository', 'r1', 'c2', 0, 0.4, 'ai', 'suggested'),
+                    ('acct', 'repository', 'r1', 'c3', 1, 0.2, 'ai', 'rejected')",
+            [],
+        )
+        .expect("归类应能写入");
+        drop(conn);
+
+        confirm_card(db.path(), "r1").expect("应能确认");
+        let conn = db.open();
+        let stored = cell_string(
+            &conn,
+            "SELECT card_json FROM repo_ai_documents WHERE repo_id = 'r1'",
+        );
+        assert!(!stored.contains('\n'), "{stored}");
+        assert!(
+            stored.contains("\"review_status\":\"confirmed\""),
+            "{stored}"
+        );
+        let parsed: Value = serde_json::from_str(&stored).expect("确认后仍应是 JSON");
+        assert_eq!(parsed["one_liner_zh"], "一行说明");
+        assert_eq!(parsed["confidence"], 0.5);
+        assert_eq!(
+            stored,
+            serde_json::to_string(&parsed).expect("紧凑 JSON 应能序列化")
+        );
+        let (status, origin): (String, String) = conn
+            .query_row(
+                "SELECT status, origin FROM entity_categories WHERE category_id = 'c1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("主分类应还在");
+        assert_eq!(status, "confirmed");
+        assert_eq!(origin, "user");
+        let (status, origin): (String, String) = conn
+            .query_row(
+                "SELECT status, origin FROM entity_categories WHERE category_id = 'c2'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("次分类应还在");
+        assert_eq!(status, "suggested");
+        assert_eq!(origin, "ai");
+        let (status, origin): (String, String) = conn
+            .query_row(
+                "SELECT status, origin FROM entity_categories WHERE category_id = 'c3'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("已拒绝的主分类应还在");
+        assert_eq!(status, "rejected");
+        assert_eq!(origin, "ai");
+    }
+
+    #[test]
+    fn confirm_card_rejects_a_missing_card() {
+        let db = TempDb::new("confirm-missing");
+        let conn = db.open();
+        insert_repo(&conn, "empty", "active");
+        insert_card(&conn, "empty", "   ", 0, "h");
+        insert_repo(&conn, "bad", "active");
+        insert_card(&conn, "bad", "不是 JSON", 0, "h");
+        drop(conn);
+        for repo_id in ["empty", "bad", "missing"] {
+            let error = confirm_card(db.path(), repo_id).expect_err("没有卡应失败");
+            assert_eq!(error, "这个仓库还没有理解卡");
+        }
+    }
+
+    #[test]
+    fn regenerate_resets_hash_and_enqueues_priority_two() {
+        let db = TempDb::new("regen");
+        let conn = db.open();
+        insert_repo(&conn, "r1", "active");
+        insert_card(
+            &conn,
+            "r1",
+            r#"{"review_status":"confirmed","one_liner_zh":"旧的"}"#,
+            2,
+            "abc",
+        );
+        drop(conn);
+        request_regenerate(db.path(), "r1").expect("应能重做");
+        let conn = db.open();
+        let stored = cell_string(
+            &conn,
+            "SELECT card_json FROM repo_ai_documents WHERE repo_id = 'r1'",
+        );
+        let parsed: Value = serde_json::from_str(&stored).expect("重做后仍应是 JSON");
+        assert_eq!(parsed["review_status"], "suggested");
+        assert_eq!(parsed["one_liner_zh"], "旧的");
+        assert!(!stored.contains('\n'));
+        assert_eq!(
+            cell_string(
+                &conn,
+                "SELECT source_hash FROM repo_ai_documents WHERE repo_id = 'r1'"
+            ),
+            ""
+        );
+        let rows = job_rows(&conn);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            priority_of(&rows, "r1"),
+            Some((REGENERATE_PRIORITY, "queued"))
+        );
+    }
+
+    #[test]
+    fn regenerate_keeps_an_existing_active_job() {
+        let db = TempDb::new("regen-dup");
+        let conn = db.open();
+        insert_repo(&conn, "queued", "active");
+        insert_card(
+            &conn,
+            "queued",
+            r#"{"review_status":"suggested","one_liner_zh":"甲"}"#,
+            2,
+            "hash",
+        );
+        insert_repo(&conn, "running", "active");
+        insert_card(
+            &conn,
+            "running",
+            r#"{"review_status":"suggested","one_liner_zh":"乙"}"#,
+            2,
+            "hash",
+        );
+        conn.execute(
+            "INSERT INTO ai_jobs(id, account_id, job_type, target_type, target_id, priority, status)
+             VALUES ('q', 'acct', 'repo_card', 'repository', 'queued', 6, 'queued'),
+                    ('r', 'acct', 'repo_card', 'repository', 'running', 4, 'running')",
+            [],
+        )
+        .expect("已有任务应能写入");
+        drop(conn);
+        request_regenerate(db.path(), "queued").expect("已有排队任务时仍应成功");
+        request_regenerate(db.path(), "running").expect("已有运行任务时仍应成功");
+        let conn = db.open();
+        assert_eq!(
+            cell_string(
+                &conn,
+                "SELECT source_hash FROM repo_ai_documents WHERE repo_id = 'queued'"
+            ),
+            ""
+        );
+        assert_eq!(
+            cell_string(
+                &conn,
+                "SELECT source_hash FROM repo_ai_documents WHERE repo_id = 'running'"
+            ),
+            ""
+        );
+        let queued_card: Value = serde_json::from_str(&cell_string(
+            &conn,
+            "SELECT card_json FROM repo_ai_documents WHERE repo_id = 'queued'",
+        ))
+        .expect("卡片应能解析");
+        assert_eq!(queued_card["review_status"], "suggested");
+        let rows = job_rows(&conn);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(priority_of(&rows, "queued"), Some((6, "queued")));
+        assert_eq!(priority_of(&rows, "running"), Some((4, "running")));
+    }
+
+    #[test]
+    fn regenerate_missing_repo_is_an_error() {
+        let db = TempDb::new("regen-missing");
+        let error = request_regenerate(db.path(), "nope").expect_err("不存在的仓库应失败");
+        assert_eq!(error, "找不到这个仓库");
+        assert_eq!(cell_i64(&db.open(), "SELECT COUNT(*) FROM ai_jobs"), 0);
+    }
+
+    #[test]
+    fn automation_status_reports_queue_budget_and_provider() {
+        let db = TempDb::new("status");
+        let now = now_stamp();
+        let conn = db.open();
+        conn.execute(
+            "INSERT INTO ai_jobs(id, account_id, job_type, target_type, target_id, status, created_at)
+             VALUES ('q1', 'acct', 'repo_card', 'repository', 'q1', 'queued', ?1),
+                    ('q2', 'acct', 'repo_card', 'repository', 'q2', 'queued', ?1),
+                    ('run', 'acct', 'repo_card', 'repository', 'run', 'running', ?1)",
+            [&now],
+        )
+        .expect("任务应能写入");
+        conn.execute(
+            "INSERT INTO ai_jobs(id, account_id, job_type, target_type, target_id, status, input_tokens, output_tokens, finished_at, created_at)
+             VALUES ('ok', 'acct', 'repo_card', 'repository', 'ok', 'succeeded', 10, 5, ?1, ?1),
+                    ('bad', 'acct', 'repo_card', 'repository', 'bad', 'failed', 1, 0, ?1, ?1)",
+            [&now],
+        )
+        .expect("已结束任务应能写入");
+        drop(conn);
+        let control = jobs::queue_control_path(db.path());
+        fs::write(
+            &control,
+            r#"{"paused":false,"dailyBudgetTokens":100,"pauseReason":null}"#,
+        )
+        .expect("控制文件应能写入");
+        let settings = json!({
+            "ai": {"provider": "openai", "model": "fake-model", "apiKey": "sk-SHOULD-NOT-LEAK"}
+        });
+        let status = automation_status(db.path(), &settings).expect("状态应能读出");
+        assert!(status.enabled);
+        assert_eq!(status.daily_budget_tokens, 100);
+        assert!(!status.paused);
+        assert!(status.pause_reason.is_none());
+        assert_eq!(status.tokens_24h, 16);
+        assert_eq!(status.budget_remaining, 84);
+        assert_eq!(status.queued, 2);
+        assert_eq!(status.running, 1);
+        assert_eq!(status.failed, 1);
+        assert!(status.provider_configured);
+        assert_eq!(status.model.as_deref(), Some("fake-model"));
+        let text = serde_json::to_string(&status).expect("状态应能序列化");
+        assert!(!text.contains("sk-SHOULD-NOT-LEAK"));
+        assert!(!text.contains("apiKey"));
+    }
+
+    #[test]
+    fn automation_status_json_keys_match_the_contract() {
+        let db = TempDb::new("keys");
+        let settings = json!({"ai": {"provider": "openai", "model": "m"}});
+        fs::write(
+            jobs::queue_control_path(db.path()),
+            r#"{"paused":true,"dailyBudgetTokens":10,"pauseReason":{"kind":"auth","message":"密钥无效","at":"2026-10-03T00:00:00.000Z"}}"#,
+        )
+        .expect("控制文件应能写入");
+        let with_reason = automation_status(db.path(), &settings).expect("状态应能读出");
+        assert_eq!(json_keys(&with_reason), expected_status_keys());
+        let reason = with_reason.pause_reason.expect("应有暂停原因");
+        let reason_keys = serde_json::to_value(&reason)
+            .expect("暂停原因应能序列化")
+            .as_object()
+            .expect("暂停原因应是对象")
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            reason_keys,
+            BTreeSet::from(["kind".to_owned(), "message".to_owned(), "at".to_owned()])
+        );
+
+        let plain = automation_status(&TempDb::new("keys-empty").path(), &json!({}))
+            .expect("空状态应能读出");
+        let value = serde_json::to_value(&plain).expect("状态应能序列化");
+        assert_eq!(json_keys(&plain), expected_status_keys());
+        assert!(value.get("pauseReason").expect("键应存在").is_null());
+        assert!(value.get("model").expect("键应存在").is_null());
+    }
+
+    fn json_keys(status: &AutomationStatus) -> BTreeSet<String> {
+        serde_json::to_value(status)
+            .expect("状态应能序列化")
+            .as_object()
+            .expect("状态应是对象")
+            .keys()
+            .cloned()
+            .collect()
+    }
+
+    fn expected_status_keys() -> BTreeSet<String> {
+        [
+            "enabled",
+            "dailyBudgetTokens",
+            "paused",
+            "pauseReason",
+            "tokens24h",
+            "budgetRemaining",
+            "queued",
+            "running",
+            "failed",
+            "providerConfigured",
+            "model",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect()
+    }
+
+    #[test]
+    fn provider_configured_reads_settings_only() {
+        let db = TempDb::new("provider");
+        let configured = automation_status(
+            db.path(),
+            &json!({"ai": {"provider": "openai-compatible", "model": " fake-model ", "apiKey": ""}}),
+        )
+        .expect("状态应能读出");
+        assert!(configured.provider_configured);
+        assert_eq!(configured.model.as_deref(), Some("fake-model"));
+
+        let none = automation_status(
+            db.path(),
+            &json!({"ai": {"provider": "none", "model": "fake-model", "apiKey": "sk-secret"}}),
+        )
+        .expect("状态应能读出");
+        assert!(!none.provider_configured);
+        assert_eq!(none.model.as_deref(), Some("fake-model"));
+        assert!(!serde_json::to_string(&none)
+            .expect("应能序列化")
+            .contains("sk-secret"));
+
+        let no_model = automation_status(
+            db.path(),
+            &json!({"ai": {"provider": "openai", "model": "  "}}),
+        )
+        .expect("状态应能读出");
+        assert!(!no_model.provider_configured);
+        assert!(no_model.model.is_none());
+
+        let missing = automation_status(db.path(), &json!({})).expect("状态应能读出");
+        assert!(!missing.provider_configured);
+        assert!(missing.model.is_none());
+    }
+
+    #[test]
+    fn budget_defaults_to_zero() {
+        let db = TempDb::new("budget-zero");
+        assert!(!jobs::queue_control_path(db.path()).exists());
+        let status = automation_status(db.path(), &json!({})).expect("状态应能读出");
+        assert_eq!(status.daily_budget_tokens, 0);
+        assert!(!status.enabled);
+        assert!(!status.paused);
+        assert_eq!(status.budget_remaining, 0);
+        assert_eq!(status.tokens_24h, 0);
+        assert!(status.pause_reason.is_none());
+    }
+
+    #[test]
+    fn set_budget_caps_and_does_not_clear_pause() {
+        let db = TempDb::new("set-budget");
+        let settings = json!({"ai": {"provider": "openai", "model": "m"}});
+        let closed = set_automation_budget(db.path(), &settings, 0).expect("应能写入 0");
+        assert_eq!(closed.daily_budget_tokens, 0);
+        assert!(!closed.enabled);
+        let opened = set_automation_budget(db.path(), &settings, 150).expect("应能写入额度");
+        assert_eq!(opened.daily_budget_tokens, 150);
+        assert!(opened.enabled);
+        assert!(!opened.paused);
+        let capped = set_automation_budget(db.path(), &settings, 9_000_000).expect("超限应被压住");
+        assert_eq!(capped.daily_budget_tokens, 2_000_000);
+
+        fs::write(
+            jobs::queue_control_path(db.path()),
+            r#"{"paused":true,"dailyBudgetTokens":10,"note":"keep","pauseReason":{"kind":"auth","message":"密钥无效","at":"2026-10-03T00:00:00.000Z"}}"#,
+        )
+        .expect("控制文件应能写入");
+        let still = set_automation_budget(db.path(), &settings, 80).expect("改额度不应清掉暂停");
+        assert_eq!(still.daily_budget_tokens, 80);
+        assert!(still.paused);
+        assert!(!still.enabled);
+        assert_eq!(
+            still.pause_reason.expect("暂停原因应保留").message,
+            "密钥无效"
+        );
+        let raw = fs::read_to_string(jobs::queue_control_path(db.path())).expect("控制文件应能读");
+        assert!(raw.contains("keep"));
+    }
+
+    #[test]
+    fn enqueue_scope_does_not_authorize_spending() {
+        let db = TempDb::new("scope-budget");
+        let conn = db.open();
+        insert_repo(&conn, "bare", "active");
+        insert_repo(&conn, "old", "active");
+        insert_card(&conn, "old", r#"{"review_status":"suggested"}"#, 0, "h");
+        drop(conn);
+        assert!(!jobs::queue_control_path(db.path()).exists());
+        assert_eq!(
+            enqueue_cards_for_scope(db.path(), "missing").expect("应能入队"),
+            1
+        );
+        assert_eq!(
+            enqueue_cards_for_scope(db.path(), "outdated").expect("应能入队"),
+            1
+        );
+        assert!(!jobs::queue_control_path(db.path()).exists());
+        jobs::set_daily_budget(&jobs::queue_control_path(db.path()), 77).expect("测试预算应能写入");
+        assert_eq!(
+            enqueue_cards_for_scope(db.path(), "missing").expect("重复入队应为 0"),
+            0
+        );
+        assert_eq!(
+            jobs::read_control(&jobs::queue_control_path(db.path())).daily_budget_tokens,
+            77
+        );
+        let error = enqueue_cards_for_scope(db.path(), "all").expect_err("未知范围应失败");
+        assert_eq!(error, "排队范围只能是 missing 或 outdated");
+        assert_eq!(cell_i64(&db.open(), "SELECT COUNT(*) FROM ai_jobs"), 2);
+        assert_eq!(
+            cell_i64(
+                &db.open(),
+                "SELECT priority FROM ai_jobs WHERE target_id = 'bare'"
+            ),
+            6
+        );
+        assert_eq!(
+            cell_i64(
+                &db.open(),
+                "SELECT priority FROM ai_jobs WHERE target_id = 'old'"
+            ),
+            6
+        );
+    }
+}

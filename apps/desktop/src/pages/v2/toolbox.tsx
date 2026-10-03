@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { relaunch } from '@tauri-apps/plugin-process';
 
@@ -25,6 +25,30 @@ type BackupStatus = {
   nextAutoAt: string;
   lastRestore: RestoreReport | null;
 };
+type PauseReason = { kind: string; message: string; at: string };
+type AutomationStatus = {
+  enabled: boolean;
+  dailyBudgetTokens: number;
+  paused: boolean;
+  pauseReason: PauseReason | null;
+  tokens24h: number;
+  budgetRemaining: number;
+  queued: number;
+  running: number;
+  failed: number;
+  providerConfigured: boolean;
+  model: string | null;
+};
+
+function parseDailyBudget(raw: string): number | string {
+  const text = raw.trim();
+  if (!text) return '请先填写每天额度';
+  if (text.startsWith('-')) return '每天额度不能小于 0';
+  if (!/^\d+$/.test(text)) return '每天额度要填整数';
+  const value = Number(text);
+  if (!Number.isSafeInteger(value)) return '每天额度要填整数';
+  return value;
+}
 
 const KIND_LABEL: Record<BackupKind, string> = {
   auto: '自动',
@@ -68,6 +92,12 @@ export function ToolboxPage() {
   const [confirmName, setConfirmName] = useState<string | null>(null);
   const [restartReady, setRestartReady] = useState(false);
   const [backingUp, setBackingUp] = useState(false);
+  const [automation, setAutomation] = useState<AutomationStatus | null>(null);
+  const [budgetInput, setBudgetInput] = useState('');
+  const [budgetLoaded, setBudgetLoaded] = useState(false);
+  const [pendingBudget, setPendingBudget] = useState<number | null>(null);
+  const [enqueueNote, setEnqueueNote] = useState<string | null>(null);
+  const budgetTouched = useRef(false);
 
   function load() {
     invoke<string>('get_health_summary').then(setHealth).catch((reason: unknown) => setHealth(String(reason)));
@@ -75,6 +105,67 @@ export function ToolboxPage() {
     invoke<ApiStatus>('get_local_api_status').then(setApi).catch((reason: unknown) => setMessage(errorText(reason)));
     invoke<BackupStatus>('get_backup_status').then(setStatus).catch((reason: unknown) => setMessage(errorText(reason)));
     invoke<BackupInfo[]>('list_backups').then(setBackups).catch((reason: unknown) => setMessage(errorText(reason)));
+    invoke<AutomationStatus>('get_ai_automation')
+      .then((next) => {
+        setAutomation(next);
+        setBudgetInput((current) => (budgetTouched.current ? current : String(next.dailyBudgetTokens)));
+        setBudgetLoaded(true);
+      })
+      .catch((reason: unknown) => setMessage(errorText(reason)));
+  }
+
+  function applyAutomation(next: AutomationStatus) {
+    setAutomation(next);
+    budgetTouched.current = false;
+    setBudgetInput(String(next.dailyBudgetTokens));
+    setBudgetLoaded(true);
+  }
+
+  function saveBudget(tokens: number) {
+    setPendingBudget(null);
+    void invoke<AutomationStatus>('set_ai_automation', { dailyBudgetTokens: tokens })
+      .then((next) => {
+        applyAutomation(next);
+        setMessage(next.dailyBudgetTokens === 0 ? '已关闭自动整理' : '已保存每天额度');
+      })
+      .catch((reason: unknown) => setMessage(errorText(reason)));
+  }
+
+  function requestSaveBudget() {
+    const parsed = parseDailyBudget(budgetInput);
+    if (typeof parsed === 'string') {
+      setMessage(parsed);
+      return;
+    }
+    const current = automation?.dailyBudgetTokens ?? 0;
+    if (parsed > 0 && parsed !== current) {
+      setPendingBudget(parsed);
+      return;
+    }
+    if (parsed === current) return;
+    saveBudget(parsed);
+  }
+
+  function enqueueCards(scope: 'missing' | 'outdated') {
+    void invoke<number>('enqueue_cards_now', { scope })
+      .then((count) => {
+        setEnqueueNote(`已排队 ${count} 个；是否开始整理取决于上面的每天额度`);
+        return invoke<AutomationStatus>('get_ai_automation').then((next) => {
+          setAutomation(next);
+          setBudgetLoaded(true);
+        });
+      })
+      .catch((reason: unknown) => setMessage(errorText(reason)));
+  }
+
+  function resumeAutomation() {
+    void invoke('resume_ai_queue')
+      .then(() => invoke<AutomationStatus>('get_ai_automation'))
+      .then((next) => {
+        setAutomation(next);
+        setMessage('队列已继续');
+      })
+      .catch((reason: unknown) => setMessage(errorText(reason)));
   }
 
   useEffect(load, []);
@@ -148,10 +239,55 @@ export function ToolboxPage() {
             <button className="rounded-full border px-4 py-2 text-sm" type="button" onClick={() => void invoke<string>('rotate_local_api_token').then(() => { setMessage('令牌已重置，旧令牌立即失效。'); load(); }).catch((reason: unknown) => setMessage(String(reason)))}>重置令牌</button>
           </>
         ) : null}
-        <button className="rounded-full border px-4 py-2 text-sm" type="button" onClick={() => void invoke('pause_ai_queue').then(() => setMessage('队列已暂停'))}>暂停队列</button>
-        <button className="rounded-full border px-4 py-2 text-sm" type="button" onClick={() => void invoke('resume_ai_queue').then(() => setMessage('队列已继续'))}>继续队列</button>
-        <button className="rounded-full border px-4 py-2 text-sm" type="button" onClick={() => void invoke('set_ai_daily_budget', { tokens: 200000 }).then(() => setMessage('每日预算设为 200000 token'))}>每日预算 20 万</button>
+        <button className="rounded-full border px-4 py-2 text-sm" type="button" onClick={() => void invoke('pause_ai_queue').then(() => invoke<AutomationStatus>('get_ai_automation')).then((next) => { setAutomation(next); setMessage('队列已暂停'); }).catch((reason: unknown) => setMessage(errorText(reason)))}>暂停队列</button>
+        <button className="rounded-full border px-4 py-2 text-sm" type="button" onClick={() => void invoke('resume_ai_queue').then(() => invoke<AutomationStatus>('get_ai_automation')).then((next) => { setAutomation(next); setMessage('队列已继续'); }).catch((reason: unknown) => setMessage(errorText(reason)))}>继续队列</button>
       </div>
+      <section className="flex flex-col gap-3">
+        <h3 className="text-lg font-semibold">AI 自动整理</h3>
+        {automation ? (
+          <p className="text-sm">{automation.enabled ? '已开启' : '未开启'} · 今天已用 {automation.tokens24h}，还剩 {automation.budgetRemaining} · 排队 {automation.queued}，进行中 {automation.running}，失败 {automation.failed}</p>
+        ) : (
+          <p className="text-sm">读取中</p>
+        )}
+        {automation && !automation.providerConfigured ? <p className="text-sm">还没配置 AI 服务，先去设置里配置</p> : null}
+        {automation?.pauseReason ? (
+          <div className="flex flex-wrap items-center gap-2">
+            <p className="text-sm text-error">{automation.pauseReason.message}</p>
+            <button className="rounded-full border px-4 py-2 text-sm" type="button" onClick={resumeAutomation}>继续队列</button>
+          </div>
+        ) : null}
+        <div className="flex flex-wrap items-center gap-2">
+          <label className="text-sm" htmlFor="daily-budget">每天最多用多少 token</label>
+          <input
+            id="daily-budget"
+            className="w-40 rounded-full border bg-transparent px-4 py-2 text-sm"
+            type="number"
+            min={0}
+            step={1}
+            inputMode="numeric"
+            value={budgetInput}
+            onChange={(event) => {
+              budgetTouched.current = true;
+              setBudgetInput(event.target.value);
+            }}
+          />
+          <button className="rounded-full bg-primary px-4 py-2 text-sm text-on-primary disabled:opacity-60" type="button" disabled={!budgetLoaded} onClick={requestSaveBudget}>保存</button>
+        </div>
+        {pendingBudget !== null ? (
+          <div className="rounded-2xl border bg-surface-container-low p-4 text-sm">
+            <p>这会让应用在后台调用你配置的 AI 服务整理仓库，并按你的服务商计费。每天最多使用 {pendingBudget} token（约相当于整理 {Math.floor(pendingBudget / 4000)} 个仓库）。确认开启吗？</p>
+            <div className="mt-3 flex gap-2">
+              <button className="rounded-full border px-4 py-2 text-sm" type="button" onClick={() => saveBudget(pendingBudget)}>确认</button>
+              <button className="rounded-full border px-4 py-2 text-sm" type="button" onClick={() => setPendingBudget(null)}>取消</button>
+            </div>
+          </div>
+        ) : null}
+        <div className="flex flex-wrap gap-2">
+          <button className="rounded-full border px-4 py-2 text-sm" type="button" onClick={() => enqueueCards('missing')}>给没有理解卡的仓库排队</button>
+          <button className="rounded-full border px-4 py-2 text-sm" type="button" onClick={() => enqueueCards('outdated')}>把旧版理解卡排队重做</button>
+        </div>
+        {enqueueNote ? <p className="text-sm">{enqueueNote}</p> : null}
+      </section>
       {message ? <p className="text-sm text-on-surface-variant">{message}</p> : null}
       <ul className="space-y-2 text-sm">
         {jobs.slice(0, 8).map((job) => (

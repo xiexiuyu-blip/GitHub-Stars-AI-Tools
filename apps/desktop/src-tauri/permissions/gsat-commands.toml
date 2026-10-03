@@ -119,4 +119,9 @@ commands.allow = [
   "list_scenarios",
   "reclassify_scenarios",
   "set_repository_scenario",
+  "confirm_library_card",
+  "regenerate_library_card",
+  "get_ai_automation",
+  "set_ai_automation",
+  "enqueue_cards_now",
 ]

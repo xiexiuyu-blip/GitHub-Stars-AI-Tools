@@ -2,6 +2,7 @@ mod ai;
 mod auth;
 mod backup;
 mod capture;
+mod card_handler;
 mod card_pipeline;
 mod card_view;
 mod db;
@@ -1051,6 +1052,43 @@ fn get_ai_queue_status(app_handle: tauri::AppHandle) -> Result<jobs::QueueStatus
 }
 
 #[tauri::command]
+fn confirm_library_card(app_handle: tauri::AppHandle, id: String) -> Result<(), String> {
+    let storage = AppStorage::from_app_handle(&app_handle)?;
+    card_handler::confirm_card(storage.database_path(), &id)
+}
+
+#[tauri::command]
+fn regenerate_library_card(app_handle: tauri::AppHandle, id: String) -> Result<(), String> {
+    let storage = AppStorage::from_app_handle(&app_handle)?;
+    card_handler::request_regenerate(storage.database_path(), &id)
+}
+
+#[tauri::command]
+fn get_ai_automation(
+    app_handle: tauri::AppHandle,
+) -> Result<card_handler::AutomationStatus, String> {
+    let storage = AppStorage::from_app_handle(&app_handle)?;
+    let settings = read_app_settings_value(&app_handle)?;
+    card_handler::automation_status(storage.database_path(), &settings)
+}
+
+#[tauri::command]
+fn set_ai_automation(
+    app_handle: tauri::AppHandle,
+    daily_budget_tokens: u64,
+) -> Result<card_handler::AutomationStatus, String> {
+    let storage = AppStorage::from_app_handle(&app_handle)?;
+    let settings = read_app_settings_value(&app_handle)?;
+    card_handler::set_automation_budget(storage.database_path(), &settings, daily_budget_tokens)
+}
+
+#[tauri::command]
+fn enqueue_cards_now(app_handle: tauri::AppHandle, scope: String) -> Result<usize, String> {
+    let storage = AppStorage::from_app_handle(&app_handle)?;
+    card_handler::enqueue_cards_for_scope(storage.database_path(), &scope)
+}
+
+#[tauri::command]
 fn get_local_api_status(app_handle: tauri::AppHandle) -> Result<local_api::LocalApiStatus, String> {
     let storage = AppStorage::from_app_handle(&app_handle)?;
     Ok(local_api::status(storage.database_path()))
@@ -1989,6 +2027,25 @@ fn merge_ai_request_config(
         }
     }
 
+    Ok(config)
+}
+
+/// 理解卡任务被领走时才调用。启动和同步都不走这里，所以不会在启动时读钥匙串。
+fn load_card_ai_config(app_handle: &tauri::AppHandle) -> Result<ai::AiRequestConfig, String> {
+    let saved = load_saved_ai_request_config(app_handle)?;
+    let mut config = merge_ai_request_config(None, saved.as_ref())?;
+    if config.provider.trim().is_empty() || config.provider.trim().eq_ignore_ascii_case("none") {
+        return Err("请先在设置中配置 AI 服务".to_owned());
+    }
+    if config.model.trim().is_empty() {
+        return Err("请先在设置中配置模型".to_owned());
+    }
+    if config.api_key.trim().is_empty() && !can_use_ai_without_api_key(&config) {
+        match read_ai_api_key_for_provider(&config.provider)? {
+            Some(api_key) if !api_key.trim().is_empty() => config.api_key = api_key,
+            _ => return Err("还没有保存 AI 密钥".to_owned()),
+        }
+    }
     Ok(config)
 }
 
@@ -2963,6 +3020,17 @@ fn app_settings_path(app_handle: &tauri::AppHandle) -> Result<std::path::PathBuf
     Ok(config_dir.join(APP_SETTINGS_FILE))
 }
 
+/// 只读设置文件。给自动整理状态用，不读钥匙串，也不看密钥字段。
+fn read_app_settings_value(app_handle: &tauri::AppHandle) -> Result<serde_json::Value, String> {
+    let settings_path = app_settings_path(app_handle)?;
+    if !settings_path.exists() {
+        return Ok(serde_json::json!({}));
+    }
+    let content =
+        fs::read_to_string(&settings_path).map_err(|error| format!("应用设置读取失败：{error}"))?;
+    serde_json::from_str(&content).map_err(|error| format!("应用设置解析失败：{error}"))
+}
+
 fn display_path(path: &Path) -> String {
     path.to_string_lossy().into_owned()
 }
@@ -3744,10 +3812,12 @@ fn sync_github_stars_worker(app_handle: tauri::AppHandle) -> Result<StarSyncSumm
         .iter()
         .map(|repository| repository.id.as_str())
         .collect::<HashSet<_>>();
-    let created_count = incoming_ids
+    let created_ids = incoming_ids
         .iter()
         .filter(|repository_id| !existing_states.contains_key(**repository_id))
-        .count();
+        .map(|repository_id| (*repository_id).to_owned())
+        .collect::<Vec<_>>();
+    let created_count = created_ids.len();
     let updated_count = incoming_ids.len().saturating_sub(created_count);
     let removed_ids = compute_removed_repository_ids(&existing_states, &incoming_ids);
     storage.mark_repositories_removed(&account_id, &removed_ids)?;
@@ -3765,6 +3835,10 @@ fn sync_github_stars_worker(app_handle: tauri::AppHandle) -> Result<StarSyncSumm
             ),
         ),
     );
+    // 只给这次新出现的仓库排队。失败只记日志，同步结果照常返回。
+    if let Err(error) = card_handler::enqueue_new_stars(storage.database_path(), &created_ids) {
+        eprintln!("新收藏的仓库入队失败：{error}");
+    }
 
     Ok(StarSyncSummary {
         account_login: user.login,
@@ -6900,9 +6974,14 @@ pub fn run() {
             start_embedding_maintenance(app.handle().clone());
             if let Ok(storage) = AppStorage::from_app_handle(app.handle()) {
                 let _ = local_api::start_if_enabled(storage.database_path());
-                if let Some(worker) = jobs::start_default_worker(storage.database_path()) {
-                    app.manage(worker);
-                }
+                let database_path = storage.database_path().to_path_buf();
+                let settings_handle = app.handle().clone();
+                // 闭包只被放进处理器，这里不调用，所以启动时不读钥匙串。
+                let handler = card_handler::RepoCardHandler::new(Arc::new(move || {
+                    load_card_ai_config(&settings_handle)
+                }));
+                let worker = jobs::start_worker(&database_path, vec![Arc::new(handler)]);
+                app.manage(worker);
             }
             start_auto_backup(app.handle().clone());
             Ok(())
@@ -6952,6 +7031,11 @@ pub fn run() {
             merge_knowledge_concepts,
             search_library_semantic,
             enqueue_missing_cards,
+            confirm_library_card,
+            regenerate_library_card,
+            get_ai_automation,
+            set_ai_automation,
+            enqueue_cards_now,
             list_scenarios,
             reclassify_scenarios,
             set_repository_scenario,
