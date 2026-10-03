@@ -170,10 +170,33 @@
     return name.indexOf('list_') === 0 ? [] : null;
   }
 
+  /* 真后端桥：serve.py 带了第三个参数时，页面里会有 window.__FSL_REAL_URL__。
+   * 这些命令先交给真 Rust 代码（跑在开发库的副本上）回答；它回 {missing:true} 或根本连不上，就退回上面的假数据。
+   * 真后端返回的错误是字符串（和 Tauri 一样）：原样 reject，界面会按真实的错误提示显示。 */
+  var REAL_URL = window.__FSL_REAL_URL__ || '';
+  function realInvoke(cmd, args) {
+    return fetch(REAL_URL + '/invoke/' + cmd, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(args || {}) })
+      .then(function (r) { return r.json(); })
+      .then(function (j) {
+        if (j.missing) return { missing: true };
+        if (j.err !== undefined) { throw String(j.err); }
+        return { value: j.ok };
+      });
+  }
+
   var callbackId = 1;
   window.__TAURI_INTERNALS__ = {
     invoke: function (cmd, args) {
       calls.push(String(cmd));
+      if (REAL_URL && String(cmd).indexOf('plugin:') !== 0) {
+        return realInvoke(cmd, args).then(function (res) {
+          return res.missing ? answer(cmd, args) : res.value;
+        }, function (error) {
+          if (typeof error === 'string') { return Promise.reject(error); }
+          console.warn('[mock] 真后端连不上，退回假数据：' + cmd);
+          return answer(cmd, args);
+        });
+      }
       try { return Promise.resolve(answer(cmd, args)); } catch (error) { return Promise.reject(error); }
     },
     transformCallback: function (callback) {
