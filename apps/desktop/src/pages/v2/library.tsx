@@ -500,7 +500,7 @@ export function LibraryPage(props: LibraryPageProps) {
   const totalText = counts && typeof counts.total === 'number' && Number.isFinite(counts.total)
     ? String(counts.total)
     : '…';
-  const subtitle = `你收藏的 ${totalText} 个工具，按你能拿它做什么来找。已整理的有中文说明，其余在排队。`;
+  const subtitle = `你收藏的 ${totalText} 个工具，按你能拿它做什么来找。已整理的有中文说明，其余还没整理。`;
   const showFallbackHint = fallbackHint && !cardStateTouched && ui.cardState === 'all';
   const filtersActive = hasActiveFilters(ui);
   const moreOffset = nextPageOffset(serverItems.length, resultCount ?? 0, LIBRARY_PAGE_SIZE);
