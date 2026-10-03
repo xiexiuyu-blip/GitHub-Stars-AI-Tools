@@ -14,7 +14,8 @@
 //!   程序崩溃时留下的预留行，下次启动由 `jobs::recover_running_jobs` 记成已取消，用量照旧计入窗口；
 //! - 同一次请求里的多次尝试（5xx 后重试、流式失败后回退到普通请求）：每一次可能已经计费的失败尝试，
 //!   按提示词的估计用量记一笔（`account_failed_attempt`），最后结算或收尾时一起算进去；
-//!   肯定没计费的（被 4xx 拒绝、连接没建起来）不记，整笔请求都没计费就把预留整个退回（`release_unbilled`）。
+//!   肯定没计费的（被 4xx 拒绝、连接没建起来、请求没拼成、几秒内就回的 5xx 或断线——网关 / 过载保护在模型开始跑之前挡下的，
+//!   见 `ai.rs` 的 `FAST_FAILURE_SECONDS`）不记，整笔请求都没计费就把预留整个退回（`release_unbilled`）。
 //!
 //! 额度、暂停都用队列的控制文件（工具箱里「AI 自动整理」的设置），所以只有一处开关。
 //! 没装闸（单元测试）时什么都不拦；正式运行时没装上就一律拒绝，宁可旧功能暂时不能用，也不在没有额度保护时花钱。
@@ -925,6 +926,7 @@ mod tests {
         let dir = Dir::new();
         dir.control(BUDGET_100K);
         let permit = begin(Some(dir.path()), &"说".repeat(1000)).expect("应通过");
+        account_failed_attempt();
         // 把预留指向一个打不开的路径，让结算失败（重试 3 次后放弃）
         let bogus = dir
             .path()
@@ -946,8 +948,13 @@ mod tests {
             }
         });
         drop(permit);
-        let (status, _, _) = dir.row(LEGACY_ROW);
+        let (status, input, _) = dir.row(LEGACY_ROW);
         assert_eq!(status, "cancelled", "不能留下一条永远 running 的行");
+        assert_eq!(
+            input,
+            1000 + 1000,
+            "结算失败时，更早失败的那次尝试（1000）也要留着，和最后一次的提示词估计（1000）一起收尾"
+        );
     }
 
     #[test]

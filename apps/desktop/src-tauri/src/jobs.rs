@@ -3058,7 +3058,14 @@ mod tests {
         let permit = crate::spend_guard::check_before_request(&prompt).expect("应通过额度检查");
         let conn = open_db(dir.path()).unwrap();
         recover_running_jobs(&conn, &now_db_time()).unwrap();
-        crate::spend_guard::record_after_request("openai", "m", &prompt, "答", Some((700, 50)));
+        // 真实用量（1.5 万）比预留（4000）还大：恢复动作取消了预留行，之后的记账一定要另记一条，不能丢
+        crate::spend_guard::record_after_request(
+            "openai",
+            "m",
+            &prompt,
+            "答",
+            Some((9_000, 6_000)),
+        );
         drop(permit);
         let open: i64 = conn
             .query_row(
@@ -3072,8 +3079,8 @@ mod tests {
         let status = queue_status(dir.path()).unwrap();
         assert_eq!((status.running, status.queued), (0, 0));
         assert!(
-            status.tokens_24h >= 750,
-            "真实用量 750 一定要在窗口里，实际 {}",
+            status.tokens_24h >= 15_000,
+            "真实用量 1.5 万一定要在窗口里，实际 {}",
             status.tokens_24h
         );
     }

@@ -11,8 +11,8 @@ use rusqlite::{params, params_from_iter, Connection, OptionalExtension, Transact
 use serde::Serialize;
 use serde_json::Value;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 pub const NOT_CONFIGURED_MESSAGE: &str = "还没有配置 AI 服务或密钥，已暂停整理队列";
@@ -48,15 +48,27 @@ impl LlmClient for SizedClient {
 /// 连续这么多个请求都被服务商直接拒绝（HTTP 4xx），整条队列就停下来。
 /// 一个错的参数 / 一个过期的账户会让积压的几百个任务一个个瞬间失败（都不计费），白白把它们全标成失败。
 const CONSECUTIVE_REJECTIONS_BEFORE_PAUSE: u32 = 5;
+/// 同一套配置（服务商、模型、地址）已经成功跑过之后，零星的 4xx 多半是某几个仓库自己的问题
+/// （比如内容被服务商审核拦下），阈值放宽；但连着这么多个还是不对劲（比如 Anthropic 余额没了也回 400）。
+const CONSECUTIVE_REJECTIONS_BEFORE_PAUSE_ONCE_PROVEN: u32 = 20;
+
+/// 「同一套配置」的标识：换了服务商、模型或地址，之前的成功就不再证明什么。
+fn config_fingerprint(config: &AiRequestConfig) -> String {
+    format!(
+        "{}|{}|{}",
+        config.provider.trim(),
+        config.model.trim(),
+        config.base_url.as_deref().unwrap_or("").trim()
+    )
+}
 
 pub struct RepoCardHandler {
     config: ConfigLoader,
     client_factory: Option<ClientFactory>,
     /// 连续被服务商拒绝的次数（线程之间共用）。任何一次成功或别的失败都会清零。
     rejections: AtomicU32,
-    /// 这次运行里已经成功过：引擎、模型、地址都是对的。之后零星的 4xx（比如某个仓库的内容被服务商拒绝）
-    /// 是那一条自己的问题，不数「连续被拒绝」，免得几个特殊仓库把整条队列停掉。
-    proven: AtomicBool,
+    /// 真的调过模型并成功的那套配置（见 `config_fingerprint`）。跳过的（卡已经是最新、没调模型）不算。
+    proven: Mutex<Option<String>>,
 }
 
 impl RepoCardHandler {
@@ -65,7 +77,7 @@ impl RepoCardHandler {
             config,
             client_factory: None,
             rejections: AtomicU32::new(0),
-            proven: AtomicBool::new(false),
+            proven: Mutex::new(None),
         }
     }
 
@@ -76,29 +88,48 @@ impl RepoCardHandler {
             config,
             client_factory: Some(client_factory),
             rejections: AtomicU32::new(0),
-            proven: AtomicBool::new(false),
+            proven: Mutex::new(None),
         }
     }
 
+    fn is_proven(&self, fingerprint: &str) -> bool {
+        self.proven
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .as_deref()
+            == Some(fingerprint)
+    }
+
+    fn mark_proven(&self, fingerprint: String) {
+        *self
+            .proven
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some(fingerprint);
+    }
+
     /// 数「连续被拒绝」：被服务商拒绝（不计费的 4xx）的累加，够数了就把这一次升级成暂停整条队列；别的结果清零。
-    /// 只在还没成功过的时候数：一成功，配置就证明是对的，之后的拒绝不再说明配置有问题。
-    fn track_rejections(&self, failure: JobFailure) -> JobFailure {
-        let rejected = !self.proven.load(Ordering::SeqCst)
-            && matches!(
-                &failure,
-                JobFailure::Fatal {
-                    kind: ErrorKind::ContentTooLarge,
-                    message,
-                } if http_status_in(message).is_some_and(|status| (400..500).contains(&status))
-                    // 真正的「内容超过模型上下文」是这一条自己的问题（一个特别长的 README），不是配置错了
-                    && !message.contains("超过模型上下文")
-            );
+    /// `proven`：这套配置已经真的成功过，阈值放宽（零星的内容被拒绝不该把整条队列停掉）。
+    fn track_rejections(&self, failure: JobFailure, proven: bool) -> JobFailure {
+        let rejected = matches!(
+            &failure,
+            JobFailure::Fatal {
+                kind: ErrorKind::ContentTooLarge,
+                message,
+            } if http_status_in(message).is_some_and(|status| (400..500).contains(&status))
+                // 真正的「内容超过模型上下文」是这一条自己的问题（一个特别长的 README），不是配置错了
+                && !message.contains("超过模型上下文")
+        );
         if !rejected {
             self.rejections.store(0, Ordering::SeqCst);
             return failure;
         }
         let count = self.rejections.fetch_add(1, Ordering::SeqCst) + 1;
-        if count < CONSECUTIVE_REJECTIONS_BEFORE_PAUSE {
+        let limit = if proven {
+            CONSECUTIVE_REJECTIONS_BEFORE_PAUSE_ONCE_PROVEN
+        } else {
+            CONSECUTIVE_REJECTIONS_BEFORE_PAUSE
+        };
+        if count < limit {
             return failure;
         }
         self.rejections.store(0, Ordering::SeqCst);
@@ -151,6 +182,8 @@ impl JobHandler for RepoCardHandler {
             message,
             retry_after_secs: None,
         })?;
+        let fingerprint = config_fingerprint(&config);
+        let proven = self.is_proven(&fingerprint);
         let report = card_pipeline::run_repo_card(
             &mut conn,
             &client,
@@ -166,10 +199,13 @@ impl JobHandler for RepoCardHandler {
             if error.spent_tokens > 0 {
                 let _ = jobs::add_charge(db_path, &job.id, error.spent_tokens);
             }
-            self.track_rejections(map_card_error(error))
+            self.track_rejections(map_card_error(error), proven)
         })?;
         self.rejections.store(0, Ordering::SeqCst);
-        self.proven.store(true, Ordering::SeqCst);
+        // 只有真的调过模型并成功才算证明过这套配置；卡已经是最新、直接跳过的不算
+        if report.input_tokens.saturating_add(report.output_tokens) > 0 {
+            self.mark_proven(fingerprint);
+        }
         if let Err(message) = apply_scenario_tags(&mut conn, &job.account_id, repo_id) {
             return Err(JobFailure::Retryable {
                 kind: ErrorKind::Other,
@@ -909,8 +945,14 @@ mod tests {
             .run(&job("job-r1", "repository", "r1"), db.path())
             .expect("合法卡应成功");
         assert!(
-            handler.proven.load(Ordering::SeqCst),
-            "成功过一次，配置就算证明是对的"
+            handler.is_proven(&config_fingerprint(&ok_config())),
+            "真的调过模型并成功，这套配置就算证明过"
+        );
+        let mut other_model = ok_config();
+        other_model.model = "another-model".to_owned();
+        assert!(
+            !handler.is_proven(&config_fingerprint(&other_model)),
+            "换了模型，之前的成功不再证明什么"
         );
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert_eq!(success.input_tokens, 111);
@@ -1093,6 +1135,10 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 0);
         assert_eq!(success.input_tokens, 0);
         assert_eq!(success.output_tokens, 0);
+        assert!(
+            !handler.is_proven(&config_fingerprint(&ok_config())),
+            "没有调过模型，不能算证明过这套配置"
+        );
     }
 
     #[test]
@@ -2186,27 +2232,30 @@ mod tests {
         // 连着被拒绝：前 4 个只是各自失败
         for _ in 0..4 {
             assert!(matches!(
-                handler.track_rejections(rejected()),
+                handler.track_rejections(rejected(), false),
                 JobFailure::Fatal { .. }
             ));
         }
         // 中间夹一个别的结果（比如超时）：清零，重新数
         assert!(matches!(
-            handler.track_rejections(JobFailure::Retryable {
-                kind: ErrorKind::Timeout,
-                message: "超时".to_owned(),
-                retry_after_secs: None,
-            }),
+            handler.track_rejections(
+                JobFailure::Retryable {
+                    kind: ErrorKind::Timeout,
+                    message: "超时".to_owned(),
+                    retry_after_secs: None,
+                },
+                false
+            ),
             JobFailure::Retryable { .. }
         ));
         for _ in 0..4 {
             assert!(matches!(
-                handler.track_rejections(rejected()),
+                handler.track_rejections(rejected(), false),
                 JobFailure::Fatal { .. }
             ));
         }
         // 第 5 个：升级成暂停整条队列，信息里带着原因
-        match handler.track_rejections(rejected()) {
+        match handler.track_rejections(rejected(), false) {
             JobFailure::PauseQueue { kind, message } => {
                 assert_eq!(kind, ErrorKind::Other);
                 assert!(message.contains("连续 5 个"), "{message}");
@@ -2217,35 +2266,44 @@ mod tests {
         }
         // 暂停之后重新数
         assert!(matches!(
-            handler.track_rejections(rejected()),
+            handler.track_rejections(rejected(), false),
             JobFailure::Fatal { .. }
         ));
         // 「内容超过模型上下文」是这一条自己的问题（一个特别长的 README），不算被拒绝：连着 10 个也不停队列
         for _ in 0..10 {
             assert!(matches!(
-                handler.track_rejections(JobFailure::Fatal {
-                    kind: ErrorKind::ContentTooLarge,
-                    message: "AI 接口请求失败（HTTP 400）：内容超过模型上下文或最大 token 限制，请缩短输入。".to_owned(),
-                }),
+                handler.track_rejections(
+                    JobFailure::Fatal {
+                        kind: ErrorKind::ContentTooLarge,
+                        message: "AI 接口请求失败（HTTP 400）：内容超过模型上下文或最大 token 限制，请缩短输入。".to_owned(),
+                    },
+                    false
+                ),
                 JobFailure::Fatal { .. }
             ));
         }
     }
 
     #[test]
-    fn once_a_card_has_succeeded_scattered_rejections_never_pause_the_queue() {
-        // 配置对不对已经由前面的成功证明了。之后某几个仓库的内容被服务商拒绝（比如内容审核的 400），
-        // 是它们自己的问题：连着 20 个也只是各自失败，不能把整条队列停掉
+    fn once_the_config_has_worked_the_rejection_limit_is_wider_but_still_there() {
+        // 配置已经成功跑过：某几个仓库的内容被服务商拒绝（内容审核的 400）是它们自己的问题，不能 5 个就停整条队列；
+        // 但连着 20 个都被拒绝还是不对劲（比如账户余额没了、Anthropic 也回 400），要停
         let (handler, _) = scripted(Ok(ok_config()), vec![]);
-        handler.proven.store(true, Ordering::SeqCst);
-        for _ in 0..20 {
+        let rejected = || JobFailure::Fatal {
+            kind: ErrorKind::ContentTooLarge,
+            message: "AI 接口请求失败（HTTP 400）：Content Exists Risk".to_owned(),
+        };
+        for _ in 0..19 {
             assert!(matches!(
-                handler.track_rejections(JobFailure::Fatal {
-                    kind: ErrorKind::ContentTooLarge,
-                    message: "AI 接口请求失败（HTTP 400）：Content Exists Risk".to_owned(),
-                }),
+                handler.track_rejections(rejected(), true),
                 JobFailure::Fatal { .. }
             ));
+        }
+        match handler.track_rejections(rejected(), true) {
+            JobFailure::PauseQueue { message, .. } => {
+                assert!(message.contains("连续 20 个"), "{message}");
+            }
+            other => panic!("第 20 个应暂停整条队列，实际 {other:?}"),
         }
     }
 }
