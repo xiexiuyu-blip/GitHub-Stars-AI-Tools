@@ -13,6 +13,7 @@ mod local_api;
 mod packs;
 mod ranking_query;
 mod rankings_live;
+mod scenarios;
 mod storage;
 mod v2_ops;
 mod vector_index;
@@ -1352,6 +1353,32 @@ fn search_library_semantic(
 fn enqueue_missing_cards(app_handle: tauri::AppHandle) -> Result<usize, String> {
     let storage = AppStorage::from_app_handle(&app_handle)?;
     v2_ops::enqueue_missing_cards(storage.database_path())
+}
+
+#[tauri::command]
+fn list_scenarios(app_handle: tauri::AppHandle) -> Result<Vec<scenarios::ScenarioSummary>, String> {
+    let storage = AppStorage::from_app_handle(&app_handle)?;
+    // 只补种子，不在打开列表时做全库归类。
+    scenarios::seed_scenarios(storage.database_path())?;
+    scenarios::list_scenarios_summary(storage.database_path())
+}
+
+#[tauri::command]
+fn reclassify_scenarios(app_handle: tauri::AppHandle) -> Result<scenarios::ClassifyStats, String> {
+    let storage = AppStorage::from_app_handle(&app_handle)?;
+    scenarios::seed_scenarios(storage.database_path())?;
+    scenarios::classify_repositories(storage.database_path(), None)
+}
+
+#[tauri::command]
+fn set_repository_scenario(
+    app_handle: tauri::AppHandle,
+    repo_id: String,
+    scenario_id: String,
+    status: String,
+) -> Result<(), String> {
+    let storage = AppStorage::from_app_handle(&app_handle)?;
+    scenarios::set_repository_scenario(storage.database_path(), &repo_id, &scenario_id, &status)
 }
 
 #[tauri::command]
@@ -6836,6 +6863,9 @@ pub fn run() {
             merge_knowledge_concepts,
             search_library_semantic,
             enqueue_missing_cards,
+            list_scenarios,
+            reclassify_scenarios,
+            set_repository_scenario,
             list_library_cards,
             get_library_item,
             extract_links_from_text,
