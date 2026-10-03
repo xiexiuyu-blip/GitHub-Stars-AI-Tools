@@ -5,8 +5,10 @@ mod capture;
 mod card_handler;
 mod card_pipeline;
 mod card_view;
+mod community;
 mod db;
 mod dev_guard;
+mod discover;
 mod embedding;
 mod embedding_state;
 mod github;
@@ -23,6 +25,7 @@ mod solve;
 mod storage;
 mod v2_ops;
 mod vector_index;
+mod web_fetch;
 
 use serde::{Deserialize, Serialize};
 use std::{
@@ -1501,6 +1504,57 @@ fn set_repository_scenario(
 ) -> Result<(), String> {
     let storage = AppStorage::from_app_handle(&app_handle)?;
     scenarios::set_repository_scenario(storage.database_path(), &repo_id, &scenario_id, &status)
+}
+
+#[tauri::command]
+fn list_discover(
+    app_handle: tauri::AppHandle,
+    scenario_id: Option<String>,
+) -> Result<discover::DiscoverView, String> {
+    let storage = AppStorage::from_app_handle(&app_handle)?;
+    discover::list_discover_view(storage.database_path(), scenario_id.as_deref())
+}
+
+/// 联网刷新。curl 是阻塞的，整段放进 spawn_blocking，避免卡住界面。
+#[tauri::command]
+async fn refresh_discover(
+    app_handle: tauri::AppHandle,
+    scenario_id: String,
+) -> Result<discover::DiscoverRefreshReport, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let storage = AppStorage::from_app_handle(&app_handle)?;
+        let now = time::OffsetDateTime::now_utc().unix_timestamp();
+        discover::refresh_discover_with(
+            &web_fetch::CurlFetcher,
+            storage.database_path(),
+            &scenario_id,
+            now,
+        )
+    })
+    .await
+    .map_err(|_| "发现刷新失败".to_owned())?
+}
+
+/// 社区信息。无论刷不刷新都走 spawn_blocking；不刷新时不会调用 curl。
+#[tauri::command]
+async fn get_repo_community(
+    app_handle: tauri::AppHandle,
+    id: String,
+    refresh: Option<bool>,
+) -> Result<community::RepoCommunity, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let storage = AppStorage::from_app_handle(&app_handle)?;
+        let now = time::OffsetDateTime::now_utc().unix_timestamp();
+        community::get_repo_community_with(
+            &web_fetch::CurlFetcher,
+            storage.database_path(),
+            &id,
+            refresh.unwrap_or(false),
+            now,
+        )
+    })
+    .await
+    .map_err(|_| "社区信息读取失败".to_owned())?
 }
 
 #[tauri::command]
@@ -7057,6 +7111,9 @@ pub fn run() {
             list_scenarios,
             reclassify_scenarios,
             set_repository_scenario,
+            list_discover,
+            refresh_discover,
+            get_repo_community,
             list_library_cards,
             get_library_item,
             list_library_view,
