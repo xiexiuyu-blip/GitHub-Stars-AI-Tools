@@ -191,6 +191,11 @@ const MIGRATIONS: &[Migration] = &[
         name: "public_views",
         sql: include_str!("../../../../../packages/storage/migrations/fox/029_public_views.sql"),
     },
+    Migration {
+        version: "030",
+        name: "scenarios",
+        sql: include_str!("../../../../../packages/storage/migrations/fox/030_scenarios.sql"),
+    },
 ];
 
 pub fn latest_migration() -> &'static Migration {

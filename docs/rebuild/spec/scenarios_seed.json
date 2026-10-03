@@ -1,0 +1,215 @@
+{
+  "version": 1,
+  "grounded_on": "原型 extract.py 的 13 个业务场景与关键词（2026-10-03，492 个仓库试分，见 docs/rebuild/原型/README.md）",
+  "note": "场景是「Fox 用它来做什么」，和 taxonomy_seed.json 的技术分类（它是什么）正交。规则只做第一遍候选（origin=rule，confidence 0.5，status=suggested）；AI 理解卡的 scenario_tags 给出 origin=ai；用户确认或手动加的是 origin=user。关键词一律小写匹配，在仓库名、描述、topics、中文摘要、理解卡的能力与问题文字里做子串匹配。",
+  "thin_threshold": 14,
+  "thin_focus": [
+    "ec",
+    "seo",
+    "data"
+  ],
+  "scenarios": [
+    {
+      "slug": "xhs",
+      "name_zh": "小红书",
+      "sort_order": 1,
+      "keywords": [
+        "小红书",
+        "xiaohongshu",
+        "rednote",
+        "xhs"
+      ]
+    },
+    {
+      "slug": "wx",
+      "name_zh": "公众号·微信",
+      "sort_order": 2,
+      "keywords": [
+        "公众号",
+        "微信",
+        "wechat",
+        "weixin"
+      ]
+    },
+    {
+      "slug": "dy",
+      "name_zh": "抖音·短视频",
+      "sort_order": 3,
+      "keywords": [
+        "抖音",
+        "短视频",
+        "douyin",
+        "tiktok",
+        "shorts",
+        "reels"
+      ]
+    },
+    {
+      "slug": "img",
+      "name_zh": "海报·封面·设计",
+      "sort_order": 4,
+      "keywords": [
+        "海报",
+        "封面",
+        "poster",
+        "logo",
+        "figma",
+        "illustration",
+        "图片生成",
+        "image generation",
+        "图像生成",
+        "text-to-image",
+        "文生图",
+        "设计稿",
+        "视觉设计",
+        "graphic design",
+        "ui design",
+        "图文卡片",
+        "信息图",
+        "infographic"
+      ]
+    },
+    {
+      "slug": "vid",
+      "name_zh": "视频·字幕·语音",
+      "sort_order": 5,
+      "keywords": [
+        "视频",
+        "字幕",
+        "语音",
+        "video",
+        "subtitle",
+        "whisper",
+        "tts",
+        "asr",
+        "transcri",
+        "剪辑",
+        "配音"
+      ]
+    },
+    {
+      "slug": "ppt",
+      "name_zh": "PPT·文档",
+      "sort_order": 6,
+      "keywords": [
+        "ppt",
+        "幻灯",
+        "slides",
+        "presentation",
+        "pptx",
+        "docx",
+        "excel",
+        "pdf",
+        "办公文档",
+        "文档处理",
+        "文档转换"
+      ]
+    },
+    {
+      "slug": "wr",
+      "name_zh": "写作·文案",
+      "sort_order": 7,
+      "keywords": [
+        "写作",
+        "文案",
+        "copywriting",
+        "writing",
+        "博客",
+        "newsletter",
+        "自媒体",
+        "小说",
+        "novel"
+      ]
+    },
+    {
+      "slug": "res",
+      "name_zh": "调研·爬虫",
+      "sort_order": 8,
+      "keywords": [
+        "调研",
+        "爬虫",
+        "scrap",
+        "crawl",
+        "research",
+        "采集",
+        "抓取",
+        "web search",
+        "deep research"
+      ]
+    },
+    {
+      "slug": "data",
+      "name_zh": "数据分析",
+      "sort_order": 9,
+      "keywords": [
+        "数据分析",
+        "analytics",
+        "dashboard",
+        "数据可视",
+        "sql",
+        "报表"
+      ]
+    },
+    {
+      "slug": "kb",
+      "name_zh": "知识库·笔记",
+      "sort_order": 10,
+      "keywords": [
+        "知识库",
+        "obsidian",
+        "notion",
+        "rag",
+        "笔记",
+        "knowledge base",
+        "second brain",
+        "wiki"
+      ]
+    },
+    {
+      "slug": "auto",
+      "name_zh": "自动化·工作流",
+      "sort_order": 11,
+      "keywords": [
+        "自动化",
+        "automation",
+        "workflow",
+        "n8n",
+        "zapier",
+        "工作流",
+        "rpa"
+      ]
+    },
+    {
+      "slug": "ec",
+      "name_zh": "电商",
+      "sort_order": 12,
+      "keywords": [
+        "电商",
+        "ecommerce",
+        "e-commerce",
+        "shopify",
+        "淘宝",
+        "天猫",
+        "京东",
+        "带货",
+        "商品"
+      ]
+    },
+    {
+      "slug": "seo",
+      "name_zh": "SEO·增长",
+      "sort_order": 13,
+      "keywords": [
+        "seo",
+        "增长",
+        "growth hack",
+        "营销",
+        "marketing",
+        "广告",
+        "投放",
+        "获客",
+        "私域"
+      ]
+    }
+  ]
+}
