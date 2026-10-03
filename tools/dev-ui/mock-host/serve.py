@@ -38,6 +38,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):
+        if self.path.split("?")[0] == "/__mock__/data.json":
+            data_path = os.path.normpath(os.path.join(HERE, "..", "..", "..", "docs", "rebuild", "原型", "data.json"))
+            with open(data_path, "rb") as handle:
+                return self._send(200, [("Content-Type", "application/json; charset=utf-8")], handle.read())
         if self.path.split("?")[0] == SHIM_URL:
             with open(os.path.join(HERE, "shim.js"), "rb") as handle:
                 body = handle.read()
