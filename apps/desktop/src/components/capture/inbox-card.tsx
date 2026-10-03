@@ -72,7 +72,7 @@ export function InboxCard(props: {
       />
       {props.filter === 'pending' && props.page && props.page.items.length > 0 ? (
         <p className="m-0 border-b border-muted bg-surface-container-low px-4 py-2 text-xs leading-[1.6] text-on-surface-variant">
-          这些链接还没有进你的资料库。想留的，在 GitHub 上点 Star，再点顶部「同步」，就会自动进资料库并整理；不想要的点「归档」。
+          收进来的链接先放在这里，还没进你的资料库。GitHub 项目：想留的，在 GitHub 上点 Star，再点顶部「同步」，就会自动进资料库并整理。文章、帖子：里面提到的 GitHub 项目会列出来，可以一键收进来；没用的点「归档」。
         </p>
       ) : null}
       {renderBody()}

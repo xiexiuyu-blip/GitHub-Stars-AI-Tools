@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { DiscoverCandidate, DiscoverRefreshReport, DiscoverScenario } from './contracts';
-import { buildEvaluatePrompt, candidateStatus, refreshNotice, scenarioLead, sortScenarios } from './discover-view';
+import { buildEvaluatePrompt, candidateStatus, refreshNotice, scenarioLead, sortCandidates, sortScenarios } from './discover-view';
 
 function scenario(overrides: Partial<DiscoverScenario> = {}): DiscoverScenario {
   return {
@@ -133,5 +133,43 @@ describe('buildEvaluatePrompt', () => {
     const text = buildEvaluatePrompt({ fullName: 'a/b', htmlUrl: '' }, ' ');
     expect(text).toContain('https://github.com/a/b');
     expect(text).not.toContain('我想用它做');
+  });
+});
+
+describe('sortCandidates', () => {
+  const make = (fullName: string, flags: Partial<DiscoverCandidate> = {}): DiscoverCandidate => ({
+    fullName,
+    htmlUrl: `https://github.com/${fullName}`,
+    description: null,
+    language: null,
+    starsCount: 1,
+    pushedAt: null,
+    topics: [],
+    mine: false,
+    inInbox: false,
+    fetchedAt: '2026-10-04T00:00:00Z',
+    ...flags,
+  });
+
+  it('没收的在前，已在收集箱的其次，已在 Stars 里的沉底；同一档保持原来的顺序', () => {
+    const list = [
+      make('a/mine1', { mine: true }),
+      make('b/new1'),
+      make('c/inbox1', { inInbox: true }),
+      make('d/mine2', { mine: true }),
+      make('e/new2'),
+    ];
+    expect(sortCandidates(list, new Set()).map((item) => item.fullName)).toEqual(['b/new1', 'e/new2', 'c/inbox1', 'a/mine1', 'd/mine2']);
+  });
+
+  it('这次刚收进收集箱的也算「已在收集箱」', () => {
+    const list = [make('a/new1'), make('b/new2')];
+    expect(sortCandidates(list, new Set(['a/new1'])).map((item) => item.fullName)).toEqual(['b/new2', 'a/new1']);
+  });
+
+  it('不改原数组', () => {
+    const list = [make('a/mine', { mine: true }), make('b/new')];
+    sortCandidates(list, new Set());
+    expect(list.map((item) => item.fullName)).toEqual(['a/mine', 'b/new']);
   });
 });

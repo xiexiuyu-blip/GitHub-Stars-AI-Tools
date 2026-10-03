@@ -14,6 +14,7 @@ import {
   parseDailyBudget,
   type AutomationStatus,
 } from '@/lib/automation-view';
+import { describeInvokeError } from '@/lib/api';
 import { cn } from '@/lib/utils';
 
 type Job = { id: string; jobType: string; status: string; errorKind: string | null };
@@ -47,9 +48,7 @@ const KIND_LABEL: Record<BackupKind, string> = {
 };
 
 function errorText(reason: unknown): string {
-  if (typeof reason === 'string' && reason.trim()) return reason;
-  if (reason instanceof Error && reason.message.trim()) return reason.message;
-  return String(reason);
+  return describeInvokeError(reason);
 }
 
 function restoreBanner(report: RestoreReport): string {
@@ -353,8 +352,8 @@ export function ToolboxPage() {
 
         {automation ? (
           <div className="mt-4 grid grid-cols-3 gap-2.5 max-[699px]:grid-cols-1">
-            <Metric label="今天已用" value={`${formatTokens(automation.tokens24h)} token`} sub={`约整理了 ${approxRepos(automation.tokens24h)} 个`} />
-            <Metric label="今天还剩" value={current > 0 ? `${formatTokens(automation.budgetRemaining)} token` : '—'} sub={current > 0 ? `约还能整理 ${approxRepos(automation.budgetRemaining)} 个` : '没有开启额度'} />
+            <Metric label="24 小时内已用" value={`${formatTokens(automation.tokens24h)} token`} sub={`约整理了 ${approxRepos(automation.tokens24h)} 个`} />
+            <Metric label="24 小时内还剩" value={current > 0 ? `${formatTokens(automation.budgetRemaining)} token` : '—'} sub={current > 0 ? `约还能整理 ${approxRepos(automation.budgetRemaining)} 个` : '没有开启额度'} />
             <Metric label="排队中" value={`${automation.queued} 个`} sub={`进行中 ${automation.running} · 失败 ${automation.failed}${automation.model ? ` · 模型 ${automation.model}` : ''}`} />
           </div>
         ) : (
@@ -423,12 +422,21 @@ export function ToolboxPage() {
               onCopy={() => void invoke<string>('get_local_api_capture_token').then((token) => navigator.clipboard.writeText(token)).then(() => say('收集专用令牌已复制')).catch((reason: unknown) => say(errorText(reason)))}
               onReset={() => void invoke<string>('rotate_local_api_capture_token').then(() => say('收集专用令牌已重置，旧的立即失效，要把新的粘回微信工作台')).catch((reason: unknown) => say(errorText(reason)))}
             />
-            <TokenRow
-              title="完整令牌（高级）"
-              hint="能读你的资料库，只给你信得过的本机工具。调用时加请求头 Authorization: Bearer 令牌。"
-              onCopy={() => void invoke<string>('get_local_api_token').then((token) => navigator.clipboard.writeText(token)).then(() => say('完整令牌已复制')).catch((reason: unknown) => say(errorText(reason)))}
-              onReset={() => void invoke<string>('rotate_local_api_token').then(() => { say('完整令牌已重置，旧的立即失效'); load(); }).catch((reason: unknown) => say(errorText(reason)))}
-            />
+            {/* 完整令牌是给懂行的人用的，默认收起，别和「微信工作台用的令牌」摆在同一个分量上 */}
+            <details className="group">
+              <summary className="flex cursor-pointer list-none items-center gap-1 text-xs text-on-surface-variant [&::-webkit-details-marker]:hidden">
+                <Icon name="chevron_right" size={16} className="transition-transform group-open:rotate-90" />
+                高级：能读你资料库的完整令牌
+              </summary>
+              <div className="mt-2">
+                <TokenRow
+                  title="完整令牌"
+                  hint="能读你的资料库，只给你信得过的本机工具。调用时加请求头 Authorization: Bearer 令牌。"
+                  onCopy={() => void invoke<string>('get_local_api_token').then((token) => navigator.clipboard.writeText(token)).then(() => say('完整令牌已复制')).catch((reason: unknown) => say(errorText(reason)))}
+                  onReset={() => void invoke<string>('rotate_local_api_token').then(() => { say('完整令牌已重置，旧的立即失效'); load(); }).catch((reason: unknown) => say(errorText(reason)))}
+                />
+              </div>
+            </details>
           </div>
         ) : null}
       </Section>

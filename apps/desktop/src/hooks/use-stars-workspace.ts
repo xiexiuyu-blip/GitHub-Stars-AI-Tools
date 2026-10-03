@@ -2,6 +2,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { FormEvent, useEffect, useMemo, useRef, useState } from 'react';
 import { getAiConfigMessage, toBackendAiRequestConfig } from '@/lib/ai-config';
+import { plainTechnicalError } from '@/lib/api';
 import { emptyRepositoryFilters, getRepositoryStats } from '@/lib/repository';
 import { optionalRequestText } from '@/lib/format';
 import type {
@@ -1572,7 +1573,8 @@ export function useStarsWorkspace() {
 }
 
 function toErrorMessage(reason: unknown) {
-  return reason instanceof Error ? reason.message : String(reason);
+  const raw = reason instanceof Error ? reason.message : String(reason);
+  return plainTechnicalError(raw) ?? raw;
 }
 
 function isGitHubConnectionUnavailableError(message: string) {

@@ -5,6 +5,7 @@ import { commitCaptureBatch, describeInvokeError, isMissingCommandError, listDis
 import {
   buildEvaluatePrompt,
   candidateStatus,
+  sortCandidates,
   refreshNotice,
   scenarioLead,
   sortScenarios,
@@ -63,7 +64,7 @@ export function DiscoverPage(props: { initialScenarioId?: string | null; onOpenC
 
   const scenarios = useMemo(() => sortScenarios(view?.scenarios ?? []), [view]);
   const current = scenarios.find((item) => item.id === (view?.selected ?? selected)) ?? null;
-  const candidates = view?.candidates ?? [];
+  const candidates = useMemo(() => sortCandidates(view?.candidates ?? [], added), [view, added]);
   const lead = scenarioLead(current, now);
 
   function choose(id: string) {

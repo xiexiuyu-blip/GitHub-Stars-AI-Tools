@@ -206,7 +206,7 @@ export function SolvePage(props: {
   );
 
   return (
-    <section className="flex h-full min-h-0 flex-col gap-3 overflow-auto px-5 pt-4 pb-5 min-[900px]:overflow-hidden max-[899px]:px-4 max-[899px]:pt-3 max-[899px]:pb-4">
+    <section className="flex h-full min-h-0 flex-col gap-3 overflow-auto px-5 pt-4 pb-5 max-[899px]:px-4 max-[899px]:pt-3 max-[899px]:pb-4">
       <PageHeader
         title="找方案"
         subtitle="说一句你想做的事，从你收藏的里面挑出能用的，再整理成给 Codex 的参考包。"
@@ -248,10 +248,10 @@ export function SolvePage(props: {
           ))}
         </div>
       </Card>
-      <div className="grid min-h-0 flex-1 grid-cols-1 grid-rows-[minmax(240px,1fr)_minmax(280px,1fr)] gap-3 min-[900px]:grid-cols-[minmax(0,1fr)_minmax(340px,460px)] min-[900px]:grid-rows-[minmax(0,1fr)]">
+      <div className="grid min-h-[420px] flex-1 grid-cols-1 grid-rows-[minmax(240px,1fr)_minmax(280px,1fr)] gap-3 min-[900px]:grid-cols-[minmax(0,1fr)_minmax(340px,460px)] min-[900px]:grid-rows-[minmax(0,1fr)]">
         <Card className="flex min-h-0 flex-col overflow-hidden">
           <CardHeader
-            title="你已经有的"
+            title="你收藏里最相关的"
             count={result ? result.hits.length : undefined}
             actions={result && result.hits.length > 0 ? (
               <span className="text-xs text-on-surface-variant">勾选的会放进参考包；点一行看详情</span>
@@ -362,6 +362,7 @@ function PackPreview(props: { content: string; format: PackFormat; raw: boolean 
           repositoryFullName=""
           sourcePath="参考包.md"
           className="readme-rendered min-w-0 text-sm text-foreground"
+          singleTilde={false}
         />
       </Suspense>
     </div>

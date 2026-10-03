@@ -63,9 +63,9 @@ export function gapNote(result: SolveResult): string | null {
 }
 
 export function matchBadge(hit: SolveHit, intents: readonly string[]): MatchBadge | null {
-  if (hit.fullMatch && (intents?.length ?? 0) > 1) {
-    return { tone: 'blue', text: '都对上了' };
-  }
+  // 全都对上是默认情况：八条里六七条都是，每条都标「都对上了」就等于没标，反而把真正有区别的「只对上…」淹没了。
+  // 所以只标「只对上了一部分」的。
+  void intents;
   const matched = hit.matched ?? [];
   if (!hit.fullMatch && matched.length > 0) {
     return { tone: 'gray', text: `只对上${matched.map((item) => `「${item}」`).join('')}` };
@@ -123,7 +123,7 @@ const LOCAL_SYNONYMS: Record<string, readonly string[]> = {
   视频: ['video'],
   短视频: ['video', 'shorts', '剪辑'],
   剪辑: ['video', 'editing'],
-  字幕: ['subtitle', 'caption', 'srt', 'whisper', '转写', '逐字稿', '妙记'],
+  字幕: ['subtitle', 'caption', 'srt', 'whisper', '转写'],
   配音: ['voiceover', 'speech', 'tts'],
   ppt: ['pptx', 'slides', '幻灯片', '演示'],
   文档: ['docx', 'document', 'word', 'pdf'],

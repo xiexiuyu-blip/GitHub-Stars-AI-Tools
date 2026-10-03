@@ -27,6 +27,19 @@ export function candidateStatus(candidate: DiscoverCandidate, addedNow: Readonly
   return 'new';
 }
 
+const STATUS_RANK: Record<CandidateStatus, number> = { new: 0, inbox: 1, mine: 2 };
+
+/**
+ * 还没收的排前面，已在收集箱的其次，已经在 Stars 里的沉到最后：「发现」是用来找没见过的，
+ * 头两张就是「已在你的 Stars」会让人以为这页没东西。同一档里保持后台给的顺序。
+ */
+export function sortCandidates(candidates: readonly DiscoverCandidate[], addedNow: ReadonlySet<string>): DiscoverCandidate[] {
+  return candidates
+    .map((candidate, index) => ({ candidate, index, rank: STATUS_RANK[candidateStatus(candidate, addedNow)] }))
+    .sort((left, right) => left.rank - right.rank || left.index - right.index)
+    .map((entry) => entry.candidate);
+}
+
 export type RefreshNotice = { tone: 'info' | 'warn'; text: string };
 
 /** 联网刷新完以后给 Fox 看的一句话。限流 / 部分失败用 warn，其余是 info。 */

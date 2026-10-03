@@ -19,7 +19,7 @@
   /* --- 前景色 --- */
   --color-on-surface: #1F2329;
   --color-on-surface-variant: #646A73;
-  --color-subtle: #8F959E; /* 三级文字：时间、次要数字、占位 */
+  --color-subtle: #6E7580; /* 三级文字：时间、次要数字、占位。原来的 #8F959E 在白底上只有 3.0:1，达不到 4.5:1（2026-10-04 复审） */
   --color-inverse-surface: #1F2329;
   --color-inverse-on-surface: #F2F3F5;
 
@@ -384,6 +384,19 @@ body {
   padding-left: 1.4rem;
 }
 
+/* 全局样式把列表的符号和编号重置掉了：参考包里「工作约定」的 1–7 条、README 里的要点都变成了一段一段的话 */
+.readme-rendered ul {
+  list-style: disc;
+}
+
+.readme-rendered ul ul {
+  list-style: circle;
+}
+
+.readme-rendered ol {
+  list-style: decimal;
+}
+
 .readme-rendered li + li {
   margin-top: 0.25rem;
 }
@@ -442,6 +455,10 @@ body {
 .readme-rendered td {
   border: 1px solid var(--color-outline-variant);
   padding: 0.45rem 0.65rem;
+  /* 外层用的是 overflow-wrap: anywhere，会让表格把每一列压到一个字宽、把「owner/name」断成两截；
+     单元格里改回 break-word：列不会窄过最长的词，放不下就整张表横向滚动。 */
+  overflow-wrap: break-word;
+  min-width: 4.5em;
 }
 
 .readme-rendered th {
