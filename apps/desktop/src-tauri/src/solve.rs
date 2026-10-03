@@ -236,7 +236,8 @@ pub fn solve_query(db_path: &Path, query: &str) -> Result<SolveResult, String> {
         .take(HIT_LIMIT)
     {
         let repo = &repos[index];
-        let full_match = main.is_empty() || parts.missing.is_empty();
+        // 没有意图词时不知道用户要什么，不能说「全部对上」。
+        let full_match = !main.is_empty() && parts.missing.is_empty();
         hits.push(SolveHit {
             id: repo.id.clone(),
             full_name: repo.full_name.clone(),
@@ -457,7 +458,10 @@ fn load_repos(
             keywords_json,
             card_json,
         ) = row.map_err(|error| format!("找方案仓库行读取失败：{error}"))?;
-        let card = parse_card(&card_json);
+        let parsed = read_card_json(&card_json);
+        let shown = crate::card_view::display_one_liner(Some(one_liner.as_str()), &parsed)
+            .unwrap_or_default();
+        let card = parse_card(&parsed);
         let keywords = parse_json_strings(&keywords_json);
         let links = grouped.get(&id).cloned().unwrap_or_default();
         let scenario_ids = links
@@ -484,7 +488,7 @@ fn load_repos(
             has_card,
             blocks: TextBlocks {
                 name: full_name.to_lowercase(),
-                one_liner: one_liner.to_lowercase(),
+                one_liner: shown.to_lowercase(),
                 capabilities: join_lower(&card.capabilities),
                 problems: join_lower(&card.problems),
                 keywords: join_lower(&keywords),
@@ -493,7 +497,7 @@ fn load_repos(
                 description: description.to_lowercase(),
             },
             full_name,
-            one_liner,
+            one_liner: shown,
         });
     }
     Ok(repos)
@@ -519,12 +523,28 @@ fn score_repo(
             missing.push(intent.clone());
         }
     }
+    let mut extra_hits = 0usize;
     for term in extra {
         let weight = cached_idf(cache, term, repos);
-        score += 0.3 * field_score(&repo.blocks, term, weight);
+        let gained = field_score(&repo.blocks, term, weight);
+        if gained > 0.0 {
+            extra_hits += 1;
+            score += 0.3 * gained;
+        }
     }
     if matched.len() > 1 {
         score *= 1.0 + 0.6 * (matched.len() as f64 - 1.0);
+    }
+    // 有意图词时至少对上一个；没有意图词时至少对上一半额外词，避免两个字的碎片硬凑。
+    if !main.is_empty() {
+        if matched.is_empty() {
+            return None;
+        }
+    } else if !extra.is_empty() {
+        let needed = extra.len().div_ceil(2);
+        if extra_hits < needed {
+            return None;
+        }
     }
     if score > 0.0 {
         Some(ScoreParts {
@@ -797,23 +817,17 @@ fn parse_json_strings(raw: &str) -> Vec<String> {
         .collect()
 }
 
-fn parse_card(raw: &str) -> CardBits {
+fn read_card_json(raw: &str) -> Value {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
-        return CardBits {
-            problems: Vec::new(),
-            capabilities: Vec::new(),
-            form: None,
-        };
+        return Value::Null;
     }
-    let Ok(value) = serde_json::from_str::<Value>(trimmed) else {
-        return CardBits {
-            problems: Vec::new(),
-            capabilities: Vec::new(),
-            form: None,
-        };
-    };
-    let Some(obj) = value.as_object() else {
+    serde_json::from_str(trimmed).unwrap_or(Value::Null)
+}
+
+fn parse_card(value: &Value) -> CardBits {
+    let clean = crate::card_view::sanitize(value);
+    let Some(obj) = clean.as_ref().as_object() else {
         return CardBits {
             problems: Vec::new(),
             capabilities: Vec::new(),
@@ -2148,7 +2162,7 @@ mod tests {
     }
 
     #[test]
-    fn no_intent_still_marks_full_match() {
+    fn no_intent_does_not_claim_full_match() {
         let db = prepare("nointent", |conn| {
             insert_repo(
                 conn,
@@ -2169,9 +2183,9 @@ mod tests {
         assert!(result.intents.is_empty());
         assert_eq!(result.extras, vec!["zzqq".to_owned()]);
         assert_eq!(result.hits.len(), 1);
-        assert!(result.hits[0].full_match);
-        assert_eq!(result.full_match_count, 1);
-        assert_eq!(result.preselected, vec!["zz".to_owned()]);
+        assert!(!result.hits[0].full_match);
+        assert_eq!(result.full_match_count, 0);
+        assert!(result.preselected.is_empty());
         assert_eq!(result.pending_matches, 0);
         assert!(result.suggested_scenario_id.is_none());
         let weight = (1.0_f64 + 1.0 / 2.0).ln();
@@ -2400,5 +2414,268 @@ mod tests {
             elapsed.as_millis()
         );
         assert_eq!(result.hits.len(), 8);
+    }
+
+    #[test]
+    fn imported_placeholder_cards_are_clean_in_solve() {
+        const SUMMARY_AWESOME: &str = "Awesome LLM Apps 是一个可运行的 LLM 应用模板集合，包含100+ AI Agent和RAG应用。每个模板均为原创、自包含的完整源代码，支持3条命令即可运行。覆盖AI Agents、多智能体团队、MCP、语音AI、RAG、微调等现代AI栈，支持Claude、Gemini、GPT、Llama等多种模型提供商。采用Apache-2.0许可证，可自由商用。";
+        const SUMMARY_CHATCUT: &str = "ChatCut Agent Plugin 是一个连接 Codex 与 ChatCut 的插件，支持通过 AI 辅助编辑 ChatCut 视频项目，具体功能包括导入媒体、修改时间线、创建动态图形、生成素材、音频转录、添加字幕、导出视频以及验证编辑可见性。";
+        const LINE_AWESOME: &str =
+            "Awesome LLM Apps 是一个可运行的 LLM 应用模板集合，包含100+ AI Agent和RAG应用。";
+        const LINE_CHATCUT: &str = "ChatCut Agent Plugin 是一个连接 Codex 与 ChatCut 的插件…";
+        let db = prepare("legacy-card", |conn| {
+            insert_repo(
+                conn,
+                &NewRepo {
+                    id: "awesome",
+                    full_name: "lab/awesome-llm-apps",
+                    description: "",
+                    stars: 20,
+                    status: "active",
+                    one_liner: Some(""),
+                    summary: SUMMARY_AWESOME,
+                    keywords_json: "[]",
+                    card_json: None,
+                },
+            );
+            insert_repo(
+                conn,
+                &NewRepo {
+                    id: "chatcut",
+                    full_name: "lab/chatcut-plugin",
+                    description: "",
+                    stars: 8,
+                    status: "active",
+                    one_liner: Some(""),
+                    summary: SUMMARY_CHATCUT,
+                    keywords_json: "[]",
+                    card_json: None,
+                },
+            );
+        });
+        assert_eq!(
+            crate::v2_ops::import_summary_cards(&db.path).expect("应能导入占位卡"),
+            2
+        );
+
+        let awesome = run(&db, "模板");
+        assert!(awesome.intents.is_empty());
+        assert_eq!(awesome.hits.len(), 1);
+        assert_eq!(awesome.hits[0].id, "awesome");
+        assert_eq!(awesome.hits[0].one_liner.as_deref(), Some(LINE_AWESOME));
+        assert_eq!(awesome.hits[0].why, LINE_AWESOME);
+        assert!(!awesome.hits[0].full_match);
+        assert!(awesome.preselected.is_empty());
+        assert_eq!(awesome.full_match_count, 0);
+
+        let chatcut = run(&db, "chatcut");
+        assert!(chatcut.intents.is_empty());
+        assert_eq!(chatcut.hits.len(), 1);
+        assert_eq!(chatcut.hits[0].id, "chatcut");
+        assert_eq!(chatcut.hits[0].one_liner.as_deref(), Some(LINE_CHATCUT));
+        assert_eq!(chatcut.hits[0].why, LINE_CHATCUT);
+        assert!(!chatcut.hits[0].full_match);
+        assert!(chatcut.preselected.is_empty());
+
+        let junk = run(&db, "xyzzy不存在的东西");
+        assert!(
+            junk.intents.is_empty(),
+            "乱输入不该抽出意图词：{:?}",
+            junk.intents
+        );
+        assert!(
+            junk.hits.is_empty(),
+            "乱输入不该硬凑结果：{:?}",
+            junk.hits
+                .iter()
+                .map(|hit| hit.id.as_str())
+                .collect::<Vec<_>>()
+        );
+        assert!(junk.preselected.is_empty());
+        assert_eq!(junk.full_match_count, 0);
+
+        for result in [&awesome, &chatcut, &junk] {
+            let json = serde_json::to_string(result).expect("结果应能序列化");
+            assert_no_legacy_phrases(&json);
+        }
+        let evidence = format!(
+            "query=模板\noneLiner={}\nwhy={}\nfullMatch={}\npreselected={:?}\nfullMatchCount={}\n\nquery=chatcut\noneLiner={}\nwhy={}\nfullMatch={}\npreselected={:?}\n\nquery=xyzzy不存在的东西\nhits={}\npreselected={:?}\nfullMatchCount={}\n",
+            awesome.hits[0].one_liner.as_deref().unwrap_or(""),
+            awesome.hits[0].why,
+            awesome.hits[0].full_match,
+            awesome.preselected,
+            awesome.full_match_count,
+            chatcut.hits[0].one_liner.as_deref().unwrap_or(""),
+            chatcut.hits[0].why,
+            chatcut.hits[0].full_match,
+            chatcut.preselected,
+            junk.hits.len(),
+            junk.preselected,
+            junk.full_match_count,
+        );
+        fs::write("/tmp/fsl-15-solve.txt", evidence).expect("应能写下核对文本");
+    }
+
+    #[test]
+    fn no_intent_needs_half_of_six_extra_words() {
+        let db = prepare("half6", |conn| {
+            insert_repo(
+                conn,
+                &NewRepo {
+                    id: "few",
+                    full_name: "lab/few",
+                    description: "alpha",
+                    stars: 1,
+                    status: "active",
+                    one_liner: Some("有卡"),
+                    summary: "",
+                    keywords_json: "[]",
+                    card_json: None,
+                },
+            );
+            insert_repo(
+                conn,
+                &NewRepo {
+                    id: "enough",
+                    full_name: "lab/enough",
+                    description: "alpha bravo charlie",
+                    stars: 3,
+                    status: "active",
+                    one_liner: Some("有卡"),
+                    summary: "",
+                    keywords_json: "[]",
+                    card_json: None,
+                },
+            );
+        });
+        let result = run(&db, "alpha bravo charlie delta echo foxtrot");
+        assert!(result.intents.is_empty());
+        assert_eq!(
+            result.extras,
+            vec![
+                "alpha".to_owned(),
+                "bravo".to_owned(),
+                "charlie".to_owned(),
+                "delta".to_owned(),
+                "echo".to_owned(),
+                "foxtrot".to_owned(),
+            ]
+        );
+        assert_eq!(
+            result
+                .hits
+                .iter()
+                .map(|hit| hit.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["enough"]
+        );
+        assert!(result.hits.iter().all(|hit| !hit.full_match));
+        assert!(result.preselected.is_empty());
+        assert_eq!(result.full_match_count, 0);
+    }
+
+    #[test]
+    fn no_intent_odd_extra_count_uses_ceil() {
+        let db = prepare("half5", |conn| {
+            insert_repo(
+                conn,
+                &NewRepo {
+                    id: "two",
+                    full_name: "lab/two",
+                    description: "alpha bravo",
+                    stars: 1,
+                    status: "active",
+                    one_liner: Some("有卡"),
+                    summary: "",
+                    keywords_json: "[]",
+                    card_json: None,
+                },
+            );
+            insert_repo(
+                conn,
+                &NewRepo {
+                    id: "three",
+                    full_name: "lab/three",
+                    description: "alpha bravo charlie",
+                    stars: 2,
+                    status: "active",
+                    one_liner: Some("有卡"),
+                    summary: "",
+                    keywords_json: "[]",
+                    card_json: None,
+                },
+            );
+        });
+        let result = run(&db, "alpha bravo charlie delta echo");
+        assert!(result.intents.is_empty());
+        assert_eq!(result.extras.len(), 5);
+        assert_eq!(
+            result
+                .hits
+                .iter()
+                .map(|hit| hit.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["three"]
+        );
+        assert!(result.hits.iter().all(|hit| !hit.full_match));
+        assert!(result.preselected.is_empty());
+        assert_eq!(result.full_match_count, 0);
+    }
+
+    #[test]
+    fn extra_only_repo_is_excluded_when_intent_is_present() {
+        let db = prepare("extra-only", |conn| {
+            insert_repo(
+                conn,
+                &NewRepo {
+                    id: "extra",
+                    full_name: "lab/zzqqonly",
+                    description: "",
+                    stars: 9,
+                    status: "active",
+                    one_liner: Some("有卡"),
+                    summary: "",
+                    keywords_json: "[]",
+                    card_json: None,
+                },
+            );
+            insert_repo(
+                conn,
+                &NewRepo {
+                    id: "intent",
+                    full_name: "lab/cover",
+                    description: "封面素材",
+                    stars: 2,
+                    status: "active",
+                    one_liner: Some("有卡"),
+                    summary: "",
+                    keywords_json: "[]",
+                    card_json: None,
+                },
+            );
+        });
+        let result = run(&db, "封面 zzqqonly");
+        assert_eq!(result.intents, vec!["封面".to_owned()]);
+        assert_eq!(result.extras, vec!["zzqqonly".to_owned()]);
+        assert_eq!(
+            result
+                .hits
+                .iter()
+                .map(|hit| hit.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["intent"]
+        );
+        assert!(result.hits[0].full_match);
+        assert_eq!(result.preselected, vec!["intent".to_owned()]);
+    }
+
+    fn assert_no_legacy_phrases(json: &str) {
+        for phrase in [
+            crate::card_view::LEGACY_PROBLEM,
+            crate::card_view::LEGACY_CAPABILITY,
+            crate::card_view::LEGACY_HOW_TO_TRY,
+        ] {
+            assert!(!json.contains(phrase), "不该出现「{phrase}」");
+        }
     }
 }

@@ -4,6 +4,7 @@ mod backup;
 mod capture;
 mod card_handler;
 mod card_pipeline;
+mod card_view;
 mod db;
 mod dev_guard;
 mod embedding;
@@ -12,6 +13,7 @@ mod github;
 mod inbox_view;
 mod jobs;
 mod library;
+mod library_view;
 mod local_api;
 mod packs;
 mod ranking_query;
@@ -918,6 +920,43 @@ fn get_library_item(
     let storage = AppStorage::from_app_handle(&app_handle)?;
     library::get_library_item(storage.database_path(), &id)?
         .ok_or_else(|| "没有找到这个条目".to_owned())
+}
+
+#[tauri::command]
+fn list_library_view(
+    app_handle: tauri::AppHandle,
+    filters: library_view::LibraryFilters,
+) -> Result<library_view::LibraryPage, String> {
+    let storage = AppStorage::from_app_handle(&app_handle)?;
+    library_view::list_library_view(storage.database_path(), &filters)
+}
+
+#[tauri::command]
+fn get_library_detail(
+    app_handle: tauri::AppHandle,
+    id: String,
+) -> Result<library_view::LibraryDetail, String> {
+    let storage = AppStorage::from_app_handle(&app_handle)?;
+    library_view::get_library_detail(storage.database_path(), &id)
+}
+
+#[tauri::command]
+fn set_library_reading(
+    app_handle: tauri::AppHandle,
+    ids: Vec<String>,
+    group: String,
+) -> Result<usize, String> {
+    let storage = AppStorage::from_app_handle(&app_handle)?;
+    library_view::set_library_reading(storage.database_path(), &ids, &group)
+}
+
+#[tauri::command]
+fn get_today_view(app_handle: tauri::AppHandle) -> Result<library_view::TodayView, String> {
+    let storage = AppStorage::from_app_handle(&app_handle)?;
+    let now = time::OffsetDateTime::now_utc()
+        .format(&time::format_description::well_known::Rfc3339)
+        .map_err(|_| "当前时间格式化失败".to_owned())?;
+    library_view::get_today_view(storage.database_path(), &now)
 }
 
 #[tauri::command]
@@ -7002,6 +7041,10 @@ pub fn run() {
             set_repository_scenario,
             list_library_cards,
             get_library_item,
+            list_library_view,
+            get_library_detail,
+            set_library_reading,
+            get_today_view,
             extract_links_from_text,
             get_app_identity,
             get_github_auth_state,

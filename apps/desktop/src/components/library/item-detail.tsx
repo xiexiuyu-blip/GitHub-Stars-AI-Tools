@@ -1,6 +1,6 @@
 import type { LibraryDetail, ReadingGroup, ScenarioSummary } from '@/lib/contracts';
 import { cleanHowToTry, clipText, firstSentences, formatStars, monthDay, relativeDays, splitRepoName } from '@/lib/item-format';
-import { Button, EmptyState, RepoAvatar, Spinner, Tag } from '@/components/kit';
+import { Button, EmptyState, RepoAvatar, Tag } from '@/components/kit';
 import { Icon } from '@/components/ui/icon';
 import { ReadingSegmented } from './reading-segmented';
 
@@ -103,10 +103,9 @@ export function ItemDetail(props: {
         ) : (
           <div className="mt-4 rounded-lg bg-accent px-3.5 py-3">
             <div className="flex items-center gap-1.5 text-xs font-medium text-accent-foreground">
-              <Spinner />
-              AI 正在整理这个仓库
+              还没有中文说明
             </div>
-            <p className="mt-1.5 text-sm text-on-surface-variant">通常几分钟内完成，完成后这里会出现中文说明、能做什么、怎么试。现在先看 GitHub 上的原文：</p>
+            <p className="mt-1.5 text-sm text-on-surface-variant">整理好之后，这里会出现中文说明、能做什么、怎么试。现在先看 GitHub 上的原文：</p>
             <p className="mt-1.5 text-sm leading-[1.75] text-foreground">{detail.description?.trim() || '—'}</p>
           </div>
         )}

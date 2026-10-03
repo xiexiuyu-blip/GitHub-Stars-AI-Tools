@@ -1,7 +1,7 @@
 import type { MouseEvent } from 'react';
 import type { LibraryItem, ReadingGroup } from '@/lib/contracts';
 import { formatStars, readingGroupLabel, splitRepoName } from '@/lib/item-format';
-import { RepoAvatar, Spinner, Tag } from '@/components/kit';
+import { RepoAvatar, Tag } from '@/components/kit';
 import { Icon } from '@/components/ui/icon';
 import { cn } from '@/lib/utils';
 
@@ -18,8 +18,8 @@ export function ItemRow(props: {
     .filter((part) => part && part.trim())
     .join(' · ');
   const pendingText = props.item.description?.trim()
-    ? `AI 正在整理 · ${props.item.description.trim()}`
-    : 'AI 正在整理';
+    ? `待整理 · ${props.item.description.trim()}`
+    : '待整理';
 
   return (
     <div
@@ -42,7 +42,6 @@ export function ItemRow(props: {
           <div className="mt-0.5 truncate text-sm text-foreground">{props.item.oneLiner}</div>
         ) : (
           <div className="mt-0.5 flex min-w-0 items-center gap-1.5">
-            <Spinner />
             <span className="truncate text-sm text-on-surface-variant">{pendingText}</span>
           </div>
         )}

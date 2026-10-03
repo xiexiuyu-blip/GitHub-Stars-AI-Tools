@@ -1,0 +1,232 @@
+import type { CaptureCommit } from '@/lib/api';
+import type { CapturePreview, CapturePreviewRow, InboxItem, InboxPage } from '@/lib/contracts';
+
+/**
+ * 收集页的展示规则。不依赖 React。
+ * 字数按 Unicode 码位计（与后端 `chars()` 一致），粘贴长度按 UTF-8 字节计（64KiB，与入库前预览一致）。
+ */
+
+export const CAPTURE_SOURCES = ['微信群', 'X', '论坛', '其他'] as const;
+export type CaptureSource = (typeof CAPTURE_SOURCES)[number];
+
+export const SOURCE_CONTEXT_LIMIT = 200;
+export const NOTE_LIMIT = 500;
+export const TEXT_LIMIT_BYTES = 64 * 1024;
+export const PREVIEW_MIN_CHARS = 8;
+export const TOO_LONG_MESSAGE = '这段文字太长，请分几次粘贴';
+
+export type InboxFilter = 'pending' | 'ready' | 'failed' | 'archived';
+export type PreviewDecision = 'too-long' | 'skip' | 'fetch';
+export type StatusTone = 'blue' | 'gray' | 'red';
+
+export type RowStatusTag = {
+  tone: StatusTone;
+  text: string;
+  reason?: string;
+};
+
+export type InboxStatusTag = {
+  tone: StatusTone;
+  text: string;
+  spinning: boolean;
+};
+
+const REPO_KINDS = new Set(['github_repo', 'github_repository', 'repo']);
+const X_KINDS = new Set(['x', 'x_post', 'xpost']);
+const WEB_KINDS = new Set(['web', 'webpage']);
+
+function charLength(value: string): number {
+  return Array.from(value).length;
+}
+
+function clipChars(value: string, limit: number): string {
+  const chars = Array.from(value);
+  if (chars.length <= limit) return value;
+  return chars.slice(0, limit).join('');
+}
+
+/** 去掉协议和结尾斜杠，供网页链接和没有标题的收集条目显示。 */
+export function displayLink(url: string): string {
+  return url.trim().replace(/^https?:\/\//i, '').replace(/\/+$/, '');
+}
+
+export function describeCommit(commit: CaptureCommit): string {
+  if (commit.linksFound === 0) return '没有找到链接。';
+  if (commit.duplicateBatch) return '这段已经收过，没有重复写入。';
+  const parts = [`新收 ${commit.created} 条`];
+  if (commit.alreadyStarred) parts.push(`${commit.alreadyStarred} 条已在你的 Stars 里`);
+  if (commit.alreadyInInbox) parts.push(`${commit.alreadyInInbox} 条已在收集箱`);
+  if (commit.blocked) parts.push(`${commit.blocked} 条是本机或内网地址，已拦下`);
+  return `${parts.join('，')}。`;
+}
+
+export function buildSourceContext(source: string, note: string): string {
+  const trimmedSource = source.trim();
+  const allowed = (CAPTURE_SOURCES as readonly string[]).includes(trimmedSource) ? trimmedSource : '其他';
+  const trimmedNote = note.trim();
+  const combined = trimmedNote ? `${allowed} · ${trimmedNote}` : allowed;
+  return clipChars(combined, SOURCE_CONTEXT_LIMIT);
+}
+
+export function previewSummary(preview: CapturePreview): string | null {
+  const fresh = preview.counts.new;
+  const starred = preview.counts.starred;
+  const inbox = preview.counts.inbox;
+  const blocked = preview.counts.blocked;
+  const total = fresh + starred + inbox + blocked;
+  if (total <= 0) return null;
+  return `识别到 ${total} 个链接：新 ${fresh} · 已在 Stars ${starred} · 已在收集箱 ${inbox} · 将被拦下 ${blocked}`;
+}
+
+export function canCommit(preview: CapturePreview): boolean {
+  return preview.counts.new > 0;
+}
+
+export function commitButtonLabel(newCount: number): string {
+  if (newCount > 0) return `加入收集箱（${newCount}）`;
+  return '加入收集箱';
+}
+
+export function rowLabel(row: Pick<CapturePreviewRow, 'kind' | 'owner' | 'name' | 'normalizedUrl'>): string {
+  const owner = row.owner?.trim() ?? '';
+  const name = row.name?.trim() ?? '';
+  if (REPO_KINDS.has(row.kind) && owner && name) return `${owner}/${name}`;
+  return displayLink(row.normalizedUrl);
+}
+
+export function rowStatusTag(row: Pick<CapturePreviewRow, 'status' | 'blockedReason'>): RowStatusTag {
+  if (row.status === 'new') return { tone: 'blue', text: '新' };
+  if (row.status === 'starred') return { tone: 'gray', text: '已在你的 Stars' };
+  if (row.status === 'inbox') return { tone: 'gray', text: '已在收集箱' };
+  const reason = row.blockedReason?.trim();
+  return reason ? { tone: 'red', text: '将被拦下', reason } : { tone: 'red', text: '将被拦下' };
+}
+
+export function kindIcon(kind: string): string {
+  if (REPO_KINDS.has(kind)) return 'inventory_2';
+  if (X_KINDS.has(kind)) return 'forum';
+  if (WEB_KINDS.has(kind)) return 'language';
+  return 'link';
+}
+
+export function inboxFilterOptions(counts: InboxPage['counts']): { value: InboxFilter; label: string }[] {
+  return [
+    { value: 'pending', label: `待处理 ${counts.pending}` },
+    { value: 'ready', label: `已整理 ${counts.ready}` },
+    { value: 'failed', label: `失败 ${counts.failed}` },
+    { value: 'archived', label: `已归档 ${counts.archived}` },
+  ];
+}
+
+export function inboxStatusTag(status: InboxItem['status']): InboxStatusTag {
+  if (status === 'ready') return { tone: 'blue', text: '已整理', spinning: false };
+  if (status === 'failed') return { tone: 'red', text: '失败', spinning: false };
+  if (status === 'archived') return { tone: 'gray', text: '已归档', spinning: false };
+  // 不转圈：目前没有后台会自动处理收集箱，转圈会让人以为它正在忙。以后接上自动整理再按真实状态转。
+  return { tone: 'gray', text: '待处理', spinning: false };
+}
+
+export function archiveAction(status: InboxItem['status']): { label: string; target: 'pending' | 'archived' } {
+  if (status === 'archived') return { label: '恢复', target: 'pending' };
+  return { label: '归档', target: 'archived' };
+}
+
+/** 失败状态只能由系统写入，撤销时不能把它设回去。 */
+export function undoTarget(status: InboxItem['status']): 'pending' | 'ready' | 'archived' | null {
+  if (status === 'pending' || status === 'ready' || status === 'archived') return status;
+  return null;
+}
+
+export function noteError(note: string): string | null {
+  if (charLength(note) > NOTE_LIMIT) return '备注最多 500 个字';
+  return null;
+}
+
+export function shouldPreview(text: string): boolean {
+  return charLength(text.trim()) >= PREVIEW_MIN_CHARS;
+}
+
+export function utf8ByteLength(text: string): number {
+  return new TextEncoder().encode(text).length;
+}
+
+export function isTooLong(text: string): boolean {
+  return utf8ByteLength(text) > TEXT_LIMIT_BYTES;
+}
+
+export function previewDecision(text: string): PreviewDecision {
+  if (isTooLong(text)) return 'too-long';
+  if (!shouldPreview(text)) return 'skip';
+  return 'fetch';
+}
+
+export function inboxHeading(title: string, normalizedUrl: string): string {
+  const trimmed = title.trim();
+  if (trimmed) return trimmed;
+  return displayLink(normalizedUrl);
+}
+
+export function inboxContext(sourceContext: string, platform: string): string {
+  const source = sourceContext.trim();
+  if (source) return source;
+  return platform.trim();
+}
+
+export function inboxMeta(context: string, relativeTime: string): string {
+  const when = relativeTime.trim();
+  if (context && when) return `${context} · ${when}`;
+  return context || when;
+}
+
+export function emptyInboxCopy(filter: InboxFilter): { title: string; description?: string } {
+  if (filter === 'pending') {
+    return {
+      title: '收集箱是空的',
+      description: '上面粘贴后点「加入收集箱」，新链接会进来',
+    };
+  }
+  return { title: '这个分类下没有内容' };
+}
+
+export function canOpenUrl(url: string): boolean {
+  return /^https?:\/\//i.test(url.trim());
+}
+
+export function appendInboxItems(current: InboxPage, next: InboxPage): InboxPage {
+  const seen = new Set(current.items.map((item) => item.id));
+  const items = current.items.slice();
+  for (const item of next.items) {
+    if (seen.has(item.id)) continue;
+    seen.add(item.id);
+    items.push(item);
+  }
+  return {
+    items,
+    totalCount: next.totalCount,
+    counts: next.counts,
+  };
+}
+
+export function shiftInboxCounts(
+  counts: InboxPage['counts'],
+  from: InboxItem['status'],
+  to: InboxItem['status'],
+): InboxPage['counts'] {
+  if (from === to) return counts;
+  const next: InboxPage['counts'] = { ...counts, [from]: Math.max(0, counts[from] - 1) };
+  next[to] = counts[to] + 1;
+  return next;
+}
+
+export function removeInboxItem(
+  page: InboxPage,
+  id: string,
+  from: InboxItem['status'],
+  to: InboxItem['status'],
+): InboxPage {
+  return {
+    items: page.items.filter((item) => item.id !== id),
+    totalCount: Math.max(0, page.totalCount - 1),
+    counts: shiftInboxCounts(page.counts, from, to),
+  };
+}
