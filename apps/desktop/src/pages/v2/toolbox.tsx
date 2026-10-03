@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type { CSSProperties, ReactNode } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { downloadDir, join } from '@tauri-apps/api/path';
 import { relaunch } from '@tauri-apps/plugin-process';
 import { Button, Card, PageHeader, Spinner, useToast } from '@/components/kit';
 import { Icon } from '@/components/ui/icon';
@@ -140,6 +141,17 @@ export function ToolboxPage() {
 
   function say(title: string) {
     toast.show({ title });
+  }
+
+  /** 导到「下载」文件夹（原来写死在 /tmp，普通人找不到、重启就没了）。 */
+  async function exportLibrary(command: 'export_library_markdown' | 'export_library_csv', fileName: string, label: string) {
+    try {
+      const destination = await join(await downloadDir(), fileName);
+      await invoke(command, { destination });
+      say(`${label} 已导出到「下载」文件夹：${fileName}`);
+    } catch (reason: unknown) {
+      say(errorText(reason));
+    }
   }
 
   function load() {
@@ -442,10 +454,10 @@ export function ToolboxPage() {
       </Section>
 
       {/* ───────── 导出 ───────── */}
-      <Section icon="ios_share" hue={28} title="导出资料库" hint="把资料库导成文件，方便存档或给别的工具读。文件会保存在这台电脑的 /tmp 文件夹里。">
+      <Section icon="ios_share" hue={28} title="导出资料库" hint="把资料库导成文件，方便存档或给别的工具读。文件会保存在「下载」文件夹里，同名的会被覆盖。">
         <div className="flex flex-wrap gap-2">
-          <Button onClick={() => void invoke('export_library_markdown', { destination: '/tmp/fox-stars-lab-library.md' }).then(() => say('Markdown 已导出到 /tmp/fox-stars-lab-library.md')).catch((reason: unknown) => say(errorText(reason)))}>导出 Markdown</Button>
-          <Button onClick={() => void invoke('export_library_csv', { destination: '/tmp/fox-stars-lab-library.csv' }).then(() => say('CSV 已导出到 /tmp/fox-stars-lab-library.csv')).catch((reason: unknown) => say(errorText(reason)))}>导出 CSV</Button>
+          <Button onClick={() => void exportLibrary('export_library_markdown', 'fox-stars-lab-library.md', 'Markdown')}>导出 Markdown</Button>
+          <Button onClick={() => void exportLibrary('export_library_csv', 'fox-stars-lab-library.csv', 'CSV')}>导出 CSV</Button>
         </div>
       </Section>
 
