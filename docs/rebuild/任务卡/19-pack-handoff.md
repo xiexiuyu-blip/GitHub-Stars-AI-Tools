@@ -27,7 +27,8 @@
 ## 背景与先读什么
 - 现状：`packs.rs`——`build_pack`（第 123 行）、`render_project`（第 284 行）、`render_markdown` / `push_markdown_project` / `render_agents` / `render_codex` / `render_json`（第 320–550 行）、卡片字段解析 `string_names` / `resolve_how_to_try` / `resolve_one_liner`（第 620–735 行）。常量在文件开头（第 10–26 行）。
 - 数据形状（总控查了开发库）：真卡的 `capabilities` 有三种——字符串数组（80 张）、对象数组 `[{"name_zh": ...}]`（92 张，占位卡）、一整个字符串（6 张）；`how_to_try` 是字符串（169 张）或字符串数组（9 张）。**现在只认对象数组，所以真卡的能力一条都出不来**。旧版卡没有 `license`、`risks`、`not_for`、`use_when` 键（新流水线的卡有）。占位卡由 `card_view::sanitize` 清洗（`card_value` 已经在调用）。
-- 卡 18 提供的东西（**这张卡要等 18 合并后才能做**）：`repositories.license_spdx` / `license_name` 两列；`repo_facts::license_label`、`repo_facts::infer_form`。
+- 卡 18 提供的东西（**已合并**）：`repositories.license_spdx` / `license_name` 两列（NULL = 还没同步过；空串 = GitHub 明确说没有声明许可证）；`repo_facts::license_label`、`repo_facts::infer_form`。
+- **新流水线（card-v2）生成的真卡长什么样**（总控 2026-10-04 凌晨用真模型试跑了几个仓库，Fox 的开发库里已有）：`one_liner_zh`、`what_it_is` 完整；`form` 是 `app` / `service` / `library` / `skill` / `mcp` / `cli`；`capabilities` 是对象数组 `[{"name_zh": "…", "evidence_line": 1}, …]`（`evidence_line` 可有可无，只取 `name_zh`）；`problems_solved`、`use_when`、`not_for`、`risks` 都是字符串数组；`how_to_try` 是字符串（有时是空串）；`license` 常是 `""` 或 `null`（**空串、纯空白都当没有**，以仓库列为准）；`maturity` 是英文词（`usable` 等，**不要写进参考包**）；`confidence` 0–1。这些字段 `risks` / `not_for` / `use_when` 正是 Codex 要的「注意什么」，一定要输出（解析要容错，字段缺失就整行不输出）。
 - 契约文档：`docs/rebuild/命令契约.md`（你要在里面补「参考包 JSON v2 的字段说明」）。`PackRequest` / `PackOutput` 的形状**不变**（前端不改），`title` 字段仍会传来，但不再用它做标题。
 - 前端也有同样的话术（`apps/desktop/src/lib/codex-prompts.ts`，只读，**不许改**）。「关于我」和「七条工作约定」两处必须逐字一致，改一处要同步改另一处。
 
@@ -132,7 +133,7 @@ const UNKNOWN_CHECK: &str = "未知（先核实）";
 ## 工作约定
 1. {WORK_RULES 七条，带编号}
 ```
-- 「何时用」：`main` → `默认首选`；`alternative` → `首选做不到时换用`；`inspiration` → `只借思路，不直接用`。
+- 「何时用」：卡里有 `use_when`（字符串数组）时取第一条（整句规则，上限 30 个字符）；没有就按角色：`main` → `默认首选`；`alternative` → `首选做不到时换用`；`inspiration` → `只借思路，不直接用`。
 - 「本机状态」：`local_capabilities` 为空 → `未确认是否已装`；非空且有一项的 `name`（不分大小写）等于这个仓库的名字（`/` 后面那段）或 full_name → `本机已装`；否则 `本机没有`。
 - 只有 1 个工具时仍输出「怎么选」表（一行）。
 - 保留现有的 `neutralize_block` / `flatten` / `strip_markers` 对用户可控文本的处理（防止卡片或问题里的内容伪造小标题 / 代码围栏）。
