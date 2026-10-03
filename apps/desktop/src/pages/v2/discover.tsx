@@ -46,7 +46,6 @@ export function DiscoverPage(props: { initialScenarioId?: string | null; onOpenC
         setView(next);
         setPhase('ready');
         setError(null);
-        if (selected === null && next.selected) setSelected(next.selected);
       })
       .catch((reason: unknown) => {
         if (cancelled) return;
@@ -68,7 +67,7 @@ export function DiscoverPage(props: { initialScenarioId?: string | null; onOpenC
   const lead = scenarioLead(current, now);
 
   function choose(id: string) {
-    if (id === selected) return;
+    if (id === (view?.selected ?? selected)) return;
     setNotice(null);
     setSelected(id);
   }
