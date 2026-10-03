@@ -1,0 +1,91 @@
+/** 工具箱里「AI 自动整理」那一块用到的纯函数：额度档位、状态文案、数字格式。不碰网络、不碰界面，方便单测。 */
+
+export type PauseReason = { kind: string; message: string; at: string };
+
+export type AutomationStatus = {
+  enabled: boolean;
+  dailyBudgetTokens: number;
+  paused: boolean;
+  pauseReason: PauseReason | null;
+  tokens24h: number;
+  budgetRemaining: number;
+  queued: number;
+  running: number;
+  failed: number;
+  providerConfigured: boolean;
+  model: string | null;
+};
+
+/** 整理一个仓库大约用多少 token（输入约 3000 + 输出约 600，取整到 4000）。只用来估「约整理多少个」。 */
+export const TOKENS_PER_REPO = 4000;
+
+/** 额度档位：名字 + 每天约整理多少个。0 是关闭。 */
+export const BUDGET_PRESETS: ReadonlyArray<{ tokens: number; title: string; hint: string }> = [
+  { tokens: 0, title: '关闭', hint: '不自动整理，一分钱不花' },
+  { tokens: 100_000, title: '试跑', hint: '每天约 25 个，先看看效果' },
+  { tokens: 200_000, title: '日常', hint: '每天约 50 个' },
+  { tokens: 600_000, title: '集中补齐', hint: '每天约 150 个，尽快补完旧收藏' },
+];
+
+/** 把输入框里的文字变成额度。合法返回数字，不合法返回给人看的错误提示。 */
+export function parseDailyBudget(raw: string): number | string {
+  const text = raw.trim();
+  if (!text) return '请先填写每天额度';
+  if (text.startsWith('-')) return '每天额度不能小于 0';
+  if (!/^\d+$/.test(text)) return '每天额度要填整数';
+  const value = Number(text);
+  if (!Number.isSafeInteger(value)) return '每天额度要填整数';
+  return value;
+}
+
+/** 这些 token 大约够整理多少个仓库。 */
+export function approxRepos(tokens: number): number {
+  if (!Number.isFinite(tokens)) return 0;
+  return Math.floor(Math.max(0, tokens) / TOKENS_PER_REPO);
+}
+
+/** 1 万以上写成「10 万」「1.5 万」，以下原样。 */
+export function formatTokens(value: number): string {
+  if (!Number.isFinite(value) || value < 0) return '0';
+  if (value >= 10_000) return `${(value / 10_000).toFixed(value % 10_000 === 0 ? 0 : 1)} 万`;
+  return String(Math.floor(value));
+}
+
+export type AutomationState = {
+  label: string;
+  /** 状态点和徽章的色相：蓝 220 = 平静，绿 148 = 在工作，黄 36 = 需要你看一眼，红 4 = 被暂停。 */
+  hue: number;
+  detail: string;
+};
+
+/** 自动整理现在处在什么状态：一个标签 + 一句人话。按「最需要你知道的」排优先级。 */
+export function automationState(status: AutomationStatus | null): AutomationState {
+  if (!status) return { label: '读取中', hue: 220, detail: '' };
+  if (!status.providerConfigured) {
+    return { label: '还没配置 AI 服务', hue: 36, detail: '先到「设置 → 引擎」里选好服务商和模型，并保存密钥。' };
+  }
+  if (status.paused) {
+    return { label: '已暂停', hue: 4, detail: status.pauseReason?.message ?? '整理被暂停了，点「继续整理」才会接着做。' };
+  }
+  if (!status.enabled) {
+    return { label: '未开启', hue: 220, detail: '没有授权额度时，应用不会调用 AI，也不会花钱。' };
+  }
+  if (status.budgetRemaining <= 0) {
+    return { label: '今天的额度用完了', hue: 36, detail: '明天会自动继续，也可以在下面调高每天的额度。' };
+  }
+  if (status.queued + status.running > 0) {
+    return { label: '整理中', hue: 148, detail: '在后台一个个整理，整理好的会出现在「今日」和「资料库」里。' };
+  }
+  return { label: '已开启，暂时没有要整理的', hue: 148, detail: '有新收藏，或者你点了「排队」，就会自动开始。' };
+}
+
+export function formatMinute(iso: string): string {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return iso;
+  const pad = (value: number) => String(value).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+export function formatSize(bytes: number): string {
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
