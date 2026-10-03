@@ -221,3 +221,81 @@ export type SetInboxStatusRequest = { id: string; status: 'pending' | 'ready' | 
  *  命令 `regenerate_library_card({ id })`：Fox 说「不对，重新整理」——把这个仓库排进整理队列重做一遍；
  *  排队不等于马上花钱，是否真的执行受「每天额度」控制。两个命令成功都返回 null。 */
 export type CardReviewVerdict = 'confirmed' | 'regenerate';
+
+/* ───────────── 发现（按场景缺口去 GitHub 找还没收藏的） ───────────── */
+
+/** 命令 `list_discover({ scenarioId })` → DiscoverView。只读本地缓存，不联网，所以瞬间返回。
+ *  `scenarioId` 为空时取「偏少」里排第一的场景（都不偏少就取排序第一的场景）。 */
+export type DiscoverScenario = {
+  id: string;
+  slug: string;
+  nameZh: string;
+  sortOrder: number;
+  /** Fox 在这个场景下已经收藏的个数（和 `list_scenarios` 的 count 同一口径） */
+  myCount: number;
+  thin: boolean;
+  /** 缓存里这个场景的候选个数（不含已经在 Stars 里的） */
+  candidateCount: number;
+  /** 上次联网刷新的时间（ISO）；从没刷新过为 null */
+  lastFetchedAt: string | null;
+};
+
+export type DiscoverCandidate = {
+  fullName: string;
+  htmlUrl: string;
+  /** GitHub 原文描述（英文居多） */
+  description: string | null;
+  language: string | null;
+  starsCount: number;
+  pushedAt: string | null;
+  topics: string[];
+  /** 已经在 Fox 的 Stars 里（界面标「已在你的 Stars」，不给「收进收集箱」） */
+  mine: boolean;
+  /** 已经在收集箱里（待处理 / 已整理，不含已归档） */
+  inInbox: boolean;
+  fetchedAt: string;
+};
+
+export type DiscoverView = {
+  scenarios: DiscoverScenario[];
+  selected: string | null;
+  candidates: DiscoverCandidate[];
+};
+
+/** 命令 `refresh_discover({ scenarioId })` → DiscoverRefreshReport。**联网**（GitHub 搜索接口，不登录，一分钟限 10 次），
+ *  可能要几秒到十几秒；成功后把候选写进缓存。限流时 `rateLimitResetAt` 有值，`message` 说人话，已拿到的部分照样写入。 */
+export type DiscoverRefreshReport = {
+  scenarioId: string;
+  queries: number;
+  failedQueries: number;
+  /** 这次新写入或更新的候选个数（不含已在 Stars 里的） */
+  fetched: number;
+  skippedMine: number;
+  message: string | null;
+  rateLimitResetAt: string | null;
+};
+
+/* ───────────── 社区：别人怎么用 ───────────── */
+
+/** 命令 `get_repo_community({ id, refresh })` → RepoCommunity。`refresh` 为 false（默认）只读缓存，不联网；
+ *  缓存里没有或已过期（24 小时）时 `stale` 为 true，`items` 可能为空。`refresh` 为 true 才联网
+ *  （Hacker News 搜索 + GitHub 上评论最多的 Issues），失败写进 `errors`，不抛错。 */
+export type CommunityItem = {
+  source: 'hn' | 'github_issue';
+  title: string;
+  url: string;
+  /** HN 的分数；GitHub issue 没有为 null */
+  points: number | null;
+  comments: number | null;
+  createdAt: string | null;
+  /** issue 的状态 open / closed；HN 为 null */
+  state: string | null;
+};
+
+export type RepoCommunity = {
+  repoId: string;
+  fetchedAt: string | null;
+  stale: boolean;
+  items: CommunityItem[];
+  errors: Array<{ source: 'hn' | 'github_issue'; message: string }>;
+};
