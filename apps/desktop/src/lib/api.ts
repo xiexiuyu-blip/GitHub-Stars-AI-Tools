@@ -150,6 +150,19 @@ export function commitCaptureBatch(text: string, sourceContext: string): Promise
   return call<CaptureCommit>('commit_capture_batch', { text, sourceContext });
 }
 
+export type RepositoryReadmeText = { rawMarkdown: string; sourcePath: string };
+
+/** 读仓库缓存的 README 原文（现有命令 get_repository_detail）。没有缓存返回 null。账号 id 就是仓库 id 冒号前面那段。 */
+export async function getRepositoryReadme(repositoryId: string): Promise<RepositoryReadmeText | null> {
+  const accountId = repositoryId.split(':')[0] ?? '';
+  const view = await call<{ readme?: { rawMarkdown?: string; sourcePath?: string } | null } | null>('get_repository_detail', {
+    request: { repositoryId, accountId },
+  });
+  const raw = view?.readme?.rawMarkdown;
+  if (typeof raw !== 'string' || !raw.trim()) return null;
+  return { rawMarkdown: raw, sourcePath: view?.readme?.sourcePath ?? 'README.md' };
+}
+
 export function getGithubAuthState(): Promise<GitHubAuthState> {
   return call<GitHubAuthState>('get_github_auth_state');
 }

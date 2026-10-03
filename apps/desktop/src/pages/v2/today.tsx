@@ -24,7 +24,7 @@ import {
 } from '@/lib/api';
 import { useListKeys } from '@/hooks/use-list-keys';
 import { Button, Card, EmptyState, Kbd, PageHeader, StatCard, useToast } from '@/components/kit';
-import { ItemDetail, ItemRow } from '@/components/library';
+import { ItemDetail, ItemRow, PickCard } from '@/components/library';
 import { cn } from '@/lib/utils';
 
 type TodayPageProps = {
@@ -369,10 +369,10 @@ export function TodayPage(props: TodayPageProps) {
     <section className="flex h-full min-h-0 flex-col gap-3 overflow-hidden px-5 pt-4 pb-5 max-[899px]:px-4 max-[899px]:pt-3 max-[899px]:pb-4">
       <PageHeader title={`${greetingFor(new Date().getHours())}，${name}`} subtitle={subtitle} />
       <div className="grid shrink-0 grid-cols-2 gap-3 min-[900px]:grid-cols-4">
-        <StatCard label="本周新收藏" value={today ? (today.counts?.weekNew ?? 0) : '…'} active={filter === 'week'} onClick={() => choose('week')} />
-        <StatCard label="待整理" value={today ? (today.counts?.cardsPending ?? 0) : '…'} active={filter === 'pending'} onClick={() => choose('pending')} />
-        <StatCard label="想试" value={readingCounts ? readingCounts.want : '…'} active={filter === 'want'} onClick={() => choose('want')} />
-        <StatCard label="在用" value={readingCounts ? readingCounts.inUse : '…'} active={filter === 'in_use'} onClick={() => choose('in_use')} />
+        <StatCard label="本周新收藏" value={today ? (today.counts?.weekNew ?? 0) : '…'} icon="auto_awesome" tone="blue" active={filter === 'week'} onClick={() => choose('week')} />
+        <StatCard label="待整理" value={today ? (today.counts?.cardsPending ?? 0) : '…'} icon="hourglass_top" tone="amber" active={filter === 'pending'} onClick={() => choose('pending')} />
+        <StatCard label="想试" value={readingCounts ? readingCounts.want : '…'} icon="bookmark" tone="violet" active={filter === 'want'} onClick={() => choose('want')} />
+        <StatCard label="在用" value={readingCounts ? readingCounts.inUse : '…'} icon="task_alt" tone="green" active={filter === 'in_use'} onClick={() => choose('in_use')} />
       </div>
       <div className="grid min-h-0 flex-1 grid-cols-1 gap-3 min-[900px]:grid-cols-[minmax(340px,460px)_minmax(0,1fr)]">
         <Card className={cn('flex min-h-0 flex-col overflow-hidden', hideList && 'hidden')}>
@@ -401,6 +401,11 @@ export function TodayPage(props: TodayPageProps) {
             onCopyHow={(text) => {
               void writeClipboard(text).then((copied) => {
                 if (copied) toast.show({ title: '已复制' });
+              });
+            }}
+            onCopyPrompt={(text) => {
+              void writeClipboard(text).then((copied) => {
+                if (copied) toast.show({ title: '已复制，去 Codex 里粘贴' });
               });
             }}
           />
@@ -434,11 +439,12 @@ export function TodayPage(props: TodayPageProps) {
           <>
             <GroupHeader title="今天值得先看" count={picks.length} hint="从你还没看过的里，按你常做的事挑的" />
             {picks.map((item) => (
-              <ItemRow
+              <PickCard
                 key={item.id}
                 item={item}
                 selected={item.id === selectedId}
                 why={pickWhyLine(item)}
+                scenarios={scenarios}
                 onSelect={() => pickRow(item.id)}
                 onWant={() => void changeReading(item.id, 'want')}
                 onDrop={() => void changeReading(item.id, 'dropped')}
@@ -454,6 +460,7 @@ export function TodayPage(props: TodayPageProps) {
                 key={item.id}
                 item={item}
                 selected={item.id === selectedId}
+                scenarios={scenarios}
                 onSelect={() => pickRow(item.id)}
                 onWant={() => void changeReading(item.id, 'want')}
                 onDrop={() => void changeReading(item.id, 'dropped')}

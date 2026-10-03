@@ -606,6 +606,11 @@ export function LibraryPage(props: LibraryPageProps) {
                 if (copied) toast.show({ title: '已复制' });
               });
             }}
+            onCopyPrompt={(text) => {
+              void writeClipboard(text).then((copied) => {
+                if (copied) toast.show({ title: '已复制，去 Codex 里粘贴' });
+              });
+            }}
           />
         </Card>
       </div>
@@ -663,6 +668,7 @@ export function LibraryPage(props: LibraryPageProps) {
             key={item.id}
             item={item}
             selected={item.id === selectedId}
+            scenarios={scenarios}
             onSelect={() => pickRow(item.id)}
             onWant={() => void changeReading(item.id, 'want')}
             onDrop={() => void changeReading(item.id, 'dropped')}

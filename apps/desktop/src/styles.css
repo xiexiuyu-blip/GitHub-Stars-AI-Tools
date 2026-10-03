@@ -28,6 +28,7 @@
 
   /* --- 主色 --- */
   --color-primary: #2E6BF0;
+  --color-star: #F5A524; /* 星数的黄星 */
   --color-on-primary: #FFFFFF;
   --color-primary-container: #2558D8;
   --color-on-primary-container: #FFFFFF;

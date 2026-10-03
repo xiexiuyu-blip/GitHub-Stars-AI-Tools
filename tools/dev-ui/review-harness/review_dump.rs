@@ -201,6 +201,32 @@ fn call(work: &Path, cmd: &str, args: &serde_json::Value) -> Result<serde_json::
             crate::card_handler::request_regenerate(work, &arg_str(args, "id")?)?;
             Ok(Value::Null)
         }
+        "get_repository_detail" => {
+            // 现有命令：详情页读 README 原文。返回形状同 storage::RepositoryDetailView。
+            let request = args.get("request").cloned().unwrap_or(Value::Null);
+            let repository_id = request
+                .get("repositoryId")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| "缺少 repositoryId".to_owned())?
+                .to_owned();
+            let connection = Connection::open(work).map_err(|e| e.to_string())?;
+            let readme: Option<(String, String, String, String)> = connection
+                .query_row(
+                    "SELECT raw_markdown, content_hash, source_path, fetched_at FROM repo_readmes WHERE repo_id = ?1",
+                    [&repository_id],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                )
+                .ok();
+            Ok(serde_json::json!({
+                "repositoryId": repository_id,
+                "accountId": request.get("accountId").cloned().unwrap_or(Value::Null),
+                "readme": readme.map(|(raw, hash, path, at)| serde_json::json!({
+                    "rawMarkdown": raw, "contentHash": hash, "sourcePath": path, "fetchedAt": at
+                })),
+                "aiDocument": Value::Null,
+            }))
+        }
+        "open_external_url" => Ok(Value::Null),
         "solve_v2" => ser(to_value(solve::solve_query(work, &arg_str(args, "query")?)?)),
         "preview_capture" => ser(to_value(inbox_view::preview_capture(
             work,

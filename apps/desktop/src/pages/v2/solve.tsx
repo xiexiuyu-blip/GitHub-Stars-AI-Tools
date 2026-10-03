@@ -153,9 +153,9 @@ export function SolvePage(props: {
 
   // 没有结果时「找」是唯一的主按钮；有结果后改成次要，主按钮只留给「复制给 Codex」。
   const findButton = hasResult ? (
-    <Button type="submit" variant="default" className="h-10" disabled={!query.trim()}>找</Button>
+    <Button type="submit" variant="default" className="h-12 rounded-xl px-6 text-base" disabled={!query.trim()}>找</Button>
   ) : (
-    <Button type="submit" variant="primary" className="h-10" disabled={!query.trim()}>找</Button>
+    <Button type="submit" variant="primary" className="h-12 rounded-xl px-6 text-base" disabled={!query.trim()}>找</Button>
   );
 
   const copyButton = hasResult ? (
@@ -178,15 +178,18 @@ export function SolvePage(props: {
       />
       <Card className="flex shrink-0 flex-col gap-3 p-4">
         <form className="flex gap-2" onSubmit={onSubmit}>
-          <input
-            className="h-10 min-w-0 flex-1 rounded-md border border-input bg-card px-3 text-sm text-foreground outline-none placeholder:text-on-surface-variant focus:border-primary"
-            value={query}
-            placeholder="你想解决什么？比如：做小红书封面"
-            aria-label="你想解决什么"
-            autoComplete="off"
-            autoFocus={!openingQuery}
-            onChange={(event) => setQuery(event.target.value)}
-          />
+          <div className="relative min-w-0 flex-1">
+            <Icon name="search" size={22} className="pointer-events-none absolute top-1/2 left-3.5 -translate-y-1/2 text-on-surface-variant" />
+            <input
+              className="h-12 w-full min-w-0 rounded-xl border border-input bg-card pr-3 pl-11 text-base text-foreground shadow-[0_1px_2px_rgba(31,35,41,0.05)] outline-none placeholder:text-on-surface-variant focus:border-primary focus:shadow-[0_0_0_3px_rgba(46,107,240,0.14)]"
+              value={query}
+              placeholder="你想解决什么？比如：做小红书封面"
+              aria-label="你想解决什么"
+              autoComplete="off"
+              autoFocus={!openingQuery}
+              onChange={(event) => setQuery(event.target.value)}
+            />
+          </div>
           {findButton}
         </form>
         <div className="flex flex-wrap gap-2">
@@ -218,6 +221,7 @@ export function SolvePage(props: {
           {result ? <NoIntentBanner result={result} /> : null}
           <div className="min-h-0 flex-1 overflow-auto">
             <ResultBody
+              scenarios={scenarios}
               phase={phase}
               error={error}
               result={result}
@@ -323,6 +327,7 @@ function ResultNotes(props: {
 }
 
 function ResultBody(props: {
+  scenarios: ScenarioSummary[];
   phase: 'idle' | 'loading' | 'error' | 'ready';
   error: string | null;
   result: SolveResult | null;
@@ -375,6 +380,7 @@ function ResultBody(props: {
           key={hit.id}
           hit={hit}
           intents={props.result?.intents ?? []}
+          scenarios={props.scenarios}
           pressed={picked.has(hit.id)}
           onToggle={() => props.onToggle(hit.id)}
         />

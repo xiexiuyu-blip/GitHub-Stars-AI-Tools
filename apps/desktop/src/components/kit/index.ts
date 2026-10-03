@@ -6,6 +6,8 @@ export { StatCard } from './stat-card';
 export { Segmented } from './segmented';
 export { EmptyState } from './empty-state';
 export { RepoAvatar } from './repo-avatar';
+export { CoverImage } from './cover-image';
+export { ScenarioChip, LangDot, StarCount } from './chips';
 export { Spinner } from './spinner';
 export { Kbd } from './kbd';
 export { ToastProvider, useToast } from './toast';

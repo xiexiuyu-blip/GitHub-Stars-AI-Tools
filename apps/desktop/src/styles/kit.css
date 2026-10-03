@@ -20,3 +20,50 @@
     animation: none;
   }
 }
+
+/* 业务场景标签：--h 是色相（0–359），底色浅、字色深，前面一个同色小圆点 */
+.scn-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 20px;
+  padding: 0 8px 0 7px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1;
+  white-space: nowrap;
+  background: hsl(var(--h) 85% 95%);
+  color: hsl(var(--h) 55% 30%);
+}
+
+.scn-chip::before {
+  content: '';
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: hsl(var(--h) 70% 52%);
+  flex: none;
+}
+
+/* 带色相的小块（统计卡的图标底、场景筛选前的圆点等） */
+.hue-tile {
+  background: hsl(var(--h) 85% 94%);
+  color: hsl(var(--h) 60% 40%);
+}
+
+/* 「适合：…」那一行：暖色，和蓝色的主操作区分开 */
+.why-line {
+  color: hsl(30 70% 30%);
+}
+
+.why-line .material-symbols-outlined {
+  color: hsl(36 92% 50%);
+}
+
+/* 命令行代码块：深色底，一眼和正文分开 */
+.code-block {
+  background: hsl(222 16% 14%);
+  color: hsl(210 25% 92%);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}

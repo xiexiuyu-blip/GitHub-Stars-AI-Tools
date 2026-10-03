@@ -2,6 +2,7 @@ import type { ReactNode } from 'react';
 import type { ReadingGroup } from '@/lib/contracts';
 import type { FormFilterRow, ScenarioFilterRow } from '@/lib/library-filters';
 import { readingGroupLabel } from '@/lib/item-format';
+import { scenarioHue } from '@/lib/repo-assets';
 import { Button, Tag } from '@/components/kit';
 import { cn } from '@/lib/utils';
 
@@ -36,6 +37,7 @@ export function FilterPanel(props: {
         <FilterButton
           key={row.id}
           label={row.nameZh}
+          dotHue={scenarioHue(row.id)}
           count={row.count}
           countsKnown={props.countsKnown}
           selected={props.scenario === row.id}
@@ -82,6 +84,8 @@ function Hint(props: { children: string }) {
 
 function FilterButton(props: {
   label: string;
+  /** 场景前面的小圆点（色相），和列表里的场景标签同一种颜色 */
+  dotHue?: number;
   count: number;
   countsKnown: boolean;
   selected: boolean;
@@ -99,6 +103,9 @@ function FilterButton(props: {
         props.selected && 'bg-accent text-accent-foreground hover:bg-accent hover:text-accent-foreground',
       )}
     >
+      {props.dotHue !== undefined ? (
+        <span className="size-2 shrink-0 rounded-full" style={{ background: `hsl(${props.dotHue} 70% 52%)` }} aria-hidden="true" />
+      ) : null}
       <span className="min-w-0 flex-1 truncate">{props.label}</span>
       {props.extra}
       <span className={cn('shrink-0 text-xs font-medium', props.selected ? 'text-accent-foreground' : 'text-on-surface-variant')}>

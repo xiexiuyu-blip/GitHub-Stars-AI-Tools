@@ -1,10 +1,20 @@
+import { useMemo, useState } from 'react';
 import type { LibraryDetail, ReadingGroup, ScenarioSummary } from '@/lib/contracts';
-import { cleanHowToTry, clipText, firstSentences, formatStars, monthDay, relativeDays, splitRepoName } from '@/lib/item-format';
-import { Button, EmptyState, RepoAvatar, Tag } from '@/components/kit';
+import { cleanHowToTry, clipText, firstSentences, monthDay, relativeDays, splitRepoName } from '@/lib/item-format';
+import { extractInstallSteps, extractPreviewImages, hasDownloadHint } from '@/lib/repo-assets';
+import { useRepoReadme } from '@/hooks/use-repo-readme';
+import { Button, CoverImage, EmptyState, LangDot, RepoAvatar, ScenarioChip, StarCount, Tag } from '@/components/kit';
 import { Icon } from '@/components/ui/icon';
+import { cn } from '@/lib/utils';
+import { CommunityPanel, InstallPanel, PreviewPanel, ReadmePanel, SectionTitle, SoftCard } from './detail-panels';
 import { ReadingSegmented } from './reading-segmented';
 
 const HOW_EMPTY = 'README 里没有现成的安装步骤。点「打开 GitHub」看 Releases 或文档；也可以直接复制给 Codex，让它去读 README。';
+
+type TabKey = 'overview' | 'install' | 'preview' | 'readme' | 'community';
+
+/** 记住上次停在哪一页：在「预览」里用 J/K 连着翻几个项目时，不用每次再点一遍。 */
+let lastTab: TabKey = 'overview';
 
 export function ItemDetail(props: {
   detail: LibraryDetail | null;
@@ -18,6 +28,8 @@ export function ItemDetail(props: {
   onRegenerate: () => void;
   onCopyCodex: () => void;
   onCopyHow: (text: string) => void;
+  /** 复制一段「给 Codex 的话」（安装请求、查别人怎么用）。不传就用 onCopyHow。 */
+  onCopyPrompt?: (text: string) => void;
 }) {
   if (!props.detail) {
     if (props.loading) return <DetailSkeleton />;
@@ -38,147 +50,232 @@ export function ItemDetail(props: {
         <EmptyState
           icon="ads_click"
           title="选一个工具"
-          description="右边会出现它的中文说明、怎么试，和复制给 Codex 的按钮"
+          description="右边会出现它的中文说明、怎么装、截图预览，和复制给 Codex 的按钮"
         />
       </div>
     );
   }
+  // key：换一个仓库就重新开始（重新读 README；停在哪一页会记住）
+  return <DetailBody key={props.detail.id} {...props} detail={props.detail} />;
+}
 
-  const detail = props.detail;
+function DetailBody(props: Parameters<typeof ItemDetail>[0] & { detail: LibraryDetail }) {
+  const { detail } = props;
+  const [tab, setTabState] = useState<TabKey>(lastTab);
+  const setTab = (next: TabKey) => {
+    lastTab = next;
+    setTabState(next);
+  };
+  const readme = useRepoReadme(detail.id);
+  const markdown = readme.state === 'ready' ? readme.readme?.rawMarkdown ?? '' : '';
+  const images = useMemo(() => extractPreviewImages(markdown, detail.fullName, 12), [markdown, detail.fullName]);
+  const steps = useMemo(() => extractInstallSteps(markdown, 3), [markdown]);
+  const downloadHint = useMemo(() => hasDownloadHint(markdown), [markdown]);
+  const cover = images[0]?.url ?? null;
+
   const { owner, repo } = splitRepoName(detail.fullName);
   const how = cleanHowToTry(detail.howToTry);
   const summarySource = detail.whatItIs?.trim() ? detail.whatItIs : detail.oneLiner;
   const capabilities = detail.capabilities.slice(0, 4).map((item) => clipText(item, 46));
-  const scenarioNames = detail.scenarioIds
-    .map((id) => props.scenarios?.find((scenario) => scenario.id === id)?.nameZh?.trim())
-    .filter((name): name is string => Boolean(name));
+  const scenarioList = detail.scenarioIds
+    .map((id) => props.scenarios?.find((scenario) => scenario.id === id))
+    .filter((scenario): scenario is ScenarioSummary => Boolean(scenario));
   const topics = detail.topics.map((topic) => topic.trim()).filter(Boolean);
   const now = new Date();
+  const copyPrompt = props.onCopyPrompt ?? props.onCopyHow;
+
+  const tabs: Array<{ key: TabKey; label: string; icon: string; count?: number }> = [
+    { key: 'overview', label: '概览', icon: 'dashboard' },
+    { key: 'install', label: '安装', icon: 'terminal', count: steps.length || undefined },
+    { key: 'preview', label: '预览', icon: 'image', count: images.length || undefined },
+    { key: 'readme', label: 'README', icon: 'description' },
+    { key: 'community', label: '社区', icon: 'forum' },
+  ];
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <div className="min-h-0 flex-1 overflow-auto px-6 py-5">
-        <div className="flex items-start gap-3">
-          <RepoAvatar name={detail.fullName} size="lg" />
-          <div className="min-w-0">
-            <h2 className="m-0 text-[20px] leading-[1.4] font-semibold break-words text-foreground">{repo || detail.fullName}</h2>
-            <div className="mt-1 flex flex-wrap items-center gap-x-1.5 gap-y-1 text-xs text-on-surface-variant">
-              {owner ? <span>{owner}</span> : null}
-              <span>{owner ? '· ' : ''}★ {formatStars(detail.starsCount)}</span>
-              {detail.language ? <span>· {detail.language}</span> : null}
-              <span>· 最近更新 {relativeDays(detail.pushedAt, now)}</span>
-              <span>· 收藏于 {monthDay(detail.starredAt)}</span>
-              {detail.form ? <Tag>{detail.form}</Tag> : null}
-              {detail.maturity ? <Tag>{detail.maturity}</Tag> : null}
-              {detail.zhFriendly === true ? <Tag>中文友好</Tag> : null}
+      <div className="min-h-0 flex-1 overflow-auto">
+        {/* 封面：README 里的第一张截图；没有就是按名字上色的渐变 */}
+        <CoverImage src={cover} seed={detail.fullName} className="h-[150px] w-full shrink-0 border-b border-border" />
+
+        <div className="px-6 pb-6">
+          {/* 头像压在封面下沿上（只有头像重叠，标题完整落在封面下面） */}
+          <div className="relative z-10 grid grid-cols-[56px_minmax(0,1fr)] items-start gap-3.5">
+            <RepoAvatar name={detail.fullName} size="lg" className="-mt-7 shadow-[0_2px_8px_rgba(31,35,41,0.18)] ring-4 ring-card" />
+            <div className="min-w-0 pt-2.5">
+              <h2 className="m-0 text-[22px] leading-[1.25] font-bold tracking-tight break-words text-foreground">{repo || detail.fullName}</h2>
+              {owner ? <div className="mt-0.5 text-[13px] text-on-surface-variant">{owner}</div> : null}
             </div>
+          </div>
+
+          <div className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-1.5">
+            <StarCount value={detail.starsCount} className="text-[13px]" />
+            <LangDot language={detail.language} className="text-[13px]" />
+            <span className="text-xs text-on-surface-variant">最近更新 {relativeDays(detail.pushedAt, now)}</span>
+            <span className="text-xs text-on-surface-variant">收藏于 {monthDay(detail.starredAt)}</span>
+          </div>
+          <div className="mt-2.5 flex flex-wrap items-center gap-1.5">
+            {scenarioList.map((scenario) => (
+              <ScenarioChip key={scenario.id} name={scenario.nameZh} scenarioKey={scenario.slug || scenario.id} />
+            ))}
+            {detail.form ? <Tag>{detail.form}</Tag> : null}
+            {detail.maturity ? <Tag>{detail.maturity}</Tag> : null}
+            {detail.zhFriendly === true ? <Tag tone="blue">中文友好</Tag> : null}
+          </div>
+
+          <ReadingSegmented className="mt-4" value={detail.readingGroup} onChange={props.onReadingChange} />
+
+          {detail.hasCard ? (
+            <div className="mt-4 rounded-xl bg-accent px-4 py-3.5">
+              <div className="flex items-center gap-1.5 text-xs font-medium text-accent-foreground">
+                <Icon name="auto_awesome" size={14} fill />
+                AI 说明
+                <span className="ml-auto font-normal text-on-surface-variant">依据 README</span>
+              </div>
+              <p className="mt-1.5 text-[15px] leading-[1.75] text-foreground">{firstSentences(summarySource, 3)}</p>
+              <div className="mt-2 flex flex-wrap items-center gap-0.5 text-xs text-on-surface-variant">
+                {detail.cardReview === 'confirmed' ? (
+                  <span className="inline-flex items-center gap-1">
+                    <Icon name="check" size={14} />
+                    你确认过了
+                  </span>
+                ) : (
+                  <>
+                    说得对吗？
+                    <Button variant="text" size="sm" className="h-6 px-1 text-xs" onClick={props.onConfirm}>对</Button>
+                    <Button variant="text" size="sm" className="h-6 px-1 text-xs" onClick={props.onRegenerate}>不对，重新整理</Button>
+                  </>
+                )}
+              </div>
+            </div>
+          ) : (
+            <div className="mt-4 rounded-xl bg-accent px-4 py-3.5">
+              <div className="flex items-center gap-1.5 text-xs font-medium text-accent-foreground">还没有中文说明</div>
+              <p className="mt-1.5 text-sm text-on-surface-variant">整理好之后，这里会出现中文说明、能做什么、怎么试。现在先看 GitHub 上的原文：</p>
+              <p className="mt-1.5 text-[15px] leading-[1.75] text-foreground">{detail.description?.trim() || '—'}</p>
+            </div>
+          )}
+
+          <div role="tablist" aria-label="项目详情" className="mt-5 flex gap-1 border-b border-border">
+            {tabs.map((item) => (
+              <button
+                key={item.key}
+                type="button"
+                role="tab"
+                aria-selected={tab === item.key}
+                onClick={() => setTab(item.key)}
+                className={cn(
+                  '-mb-px inline-flex h-9 items-center gap-1.5 border-b-2 px-2.5 text-[13px] whitespace-nowrap transition-colors',
+                  tab === item.key
+                    ? 'border-primary font-semibold text-primary'
+                    : 'border-transparent text-on-surface-variant hover:text-foreground',
+                )}
+              >
+                <Icon name={item.icon} size={16} fill={tab === item.key} />
+                {item.label}
+                {item.count ? (
+                  <span className={cn('rounded-full px-1.5 text-[11px] leading-[16px] tabular-nums', tab === item.key ? 'bg-accent text-accent-foreground' : 'bg-muted text-on-surface-variant')}>{item.count}</span>
+                ) : null}
+              </button>
+            ))}
+          </div>
+
+          <div className="mt-4" role="tabpanel">
+            {tab === 'overview' ? (
+              <div className="flex flex-col gap-3">
+                {capabilities.length > 0 ? (
+                  <SoftCard>
+                    <SectionTitle icon="bolt" hue={222}>它能做</SectionTitle>
+                    <ul className="m-0 flex list-none flex-col gap-1.5 p-0">
+                      {capabilities.map((item, index) => (
+                        <li key={`${index}-${item}`} className="flex items-start gap-2 text-sm leading-[1.6] text-foreground">
+                          <Icon name="check_circle" size={16} fill className="mt-[3px] shrink-0 text-[hsl(148_55%_42%)]" />
+                          <span className="min-w-0">{item}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  </SoftCard>
+                ) : null}
+
+                {detail.problemsSolved.length > 0 ? (
+                  <SoftCard>
+                    <SectionTitle icon="flag" hue={28}>适合解决</SectionTitle>
+                    <ul className="m-0 flex list-none flex-col gap-1.5 p-0">
+                      {detail.problemsSolved.map((item, index) => (
+                        <li key={`${index}-${item}`} className="flex items-start gap-2 text-sm leading-[1.6] text-foreground">
+                          <Icon name="arrow_right" size={18} className="mt-0.5 shrink-0 text-[hsl(28_85%_50%)]" />
+                          <span className="min-w-0">{item}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  </SoftCard>
+                ) : null}
+
+                {detail.hasCard ? (
+                  <SoftCard>
+                    <SectionTitle icon="play_circle" hue={148}>怎么试</SectionTitle>
+                    {how ? (
+                      <pre className="code-block relative m-0 rounded-lg px-3 py-2.5 pr-11 text-xs leading-[1.7] break-words whitespace-pre-wrap">
+                        {how}
+                        <button
+                          type="button"
+                          className="absolute top-1.5 right-1.5 inline-grid size-7 place-items-center rounded-md text-white/70 hover:bg-white/10 hover:text-white"
+                          title="复制"
+                          aria-label="复制安装步骤"
+                          onClick={() => props.onCopyHow(how)}
+                        >
+                          <Icon name="content_copy" size={16} />
+                        </button>
+                      </pre>
+                    ) : (
+                      <p className="m-0 text-sm leading-[1.6] text-on-surface-variant">{HOW_EMPTY}</p>
+                    )}
+                    <button type="button" className="mt-2 text-xs text-accent-foreground hover:underline" onClick={() => setTab('install')}>
+                      看完整的安装步骤 →
+                    </button>
+                  </SoftCard>
+                ) : null}
+
+                <details className="group">
+                  <summary className="flex cursor-pointer list-none items-center gap-1 text-xs text-on-surface-variant [&::-webkit-details-marker]:hidden">
+                    <Icon name="chevron_right" size={16} className="transition-transform group-open:rotate-90" />
+                    更多信息
+                  </summary>
+                  <section className="mt-2">
+                    <h3 className="mb-1.5 text-xs text-on-surface-variant">GitHub 原文描述</h3>
+                    <p className="text-sm text-on-surface-variant">{detail.description?.trim() || '—'}</p>
+                  </section>
+                  {topics.length > 0 ? (
+                    <section className="mt-4">
+                      <h3 className="mb-1.5 text-xs text-on-surface-variant">话题标签</h3>
+                      <div className="flex flex-wrap gap-1.5">
+                        {topics.map((topic) => <Tag key={topic}>{topic}</Tag>)}
+                      </div>
+                    </section>
+                  ) : null}
+                </details>
+              </div>
+            ) : null}
+
+            {tab === 'install' ? (
+              <InstallPanel
+                detail={detail}
+                readme={readme}
+                steps={steps}
+                howFallback={how}
+                hasDownload={downloadHint}
+                onCopyText={props.onCopyHow}
+                onCopyPrompt={copyPrompt}
+              />
+            ) : null}
+            {tab === 'preview' ? <PreviewPanel detail={detail} readme={readme} images={images} /> : null}
+            {tab === 'readme' ? <ReadmePanel detail={detail} readme={readme} /> : null}
+            {tab === 'community' ? <CommunityPanel detail={detail} onCopyPrompt={copyPrompt} /> : null}
           </div>
         </div>
-
-        <ReadingSegmented className="mt-3.5" value={detail.readingGroup} onChange={props.onReadingChange} />
-
-        {detail.hasCard ? (
-          <div className="mt-4 rounded-lg bg-accent px-3.5 py-3">
-            <div className="flex items-center gap-1.5 text-xs font-medium text-accent-foreground">
-              <Icon name="auto_awesome" size={14} />
-              AI 说明
-              <span className="ml-auto font-normal text-on-surface-variant">依据 README</span>
-            </div>
-            <p className="mt-1.5 text-sm leading-[1.75] text-foreground">{firstSentences(summarySource, 3)}</p>
-            <div className="mt-2 flex flex-wrap items-center gap-0.5 text-xs text-on-surface-variant">
-              {detail.cardReview === 'confirmed' ? (
-                <span className="inline-flex items-center gap-1">
-                  <Icon name="check" size={14} />
-                  你确认过了
-                </span>
-              ) : (
-                <>
-                  说得对吗？
-                  <Button variant="text" size="sm" className="h-6 px-1 text-xs" onClick={props.onConfirm}>对</Button>
-                  <Button variant="text" size="sm" className="h-6 px-1 text-xs" onClick={props.onRegenerate}>不对，重新整理</Button>
-                </>
-              )}
-            </div>
-          </div>
-        ) : (
-          <div className="mt-4 rounded-lg bg-accent px-3.5 py-3">
-            <div className="flex items-center gap-1.5 text-xs font-medium text-accent-foreground">
-              还没有中文说明
-            </div>
-            <p className="mt-1.5 text-sm text-on-surface-variant">整理好之后，这里会出现中文说明、能做什么、怎么试。现在先看 GitHub 上的原文：</p>
-            <p className="mt-1.5 text-sm leading-[1.75] text-foreground">{detail.description?.trim() || '—'}</p>
-          </div>
-        )}
-
-        {capabilities.length > 0 ? (
-          <section className="mt-5">
-            <h3 className="mb-1.5 text-xs text-on-surface-variant">它能做</h3>
-            <ul className="mt-1.5 list-disc pl-[18px] text-sm leading-[1.75] text-foreground">
-              {capabilities.map((item, index) => <li key={`${index}-${item}`}>{item}</li>)}
-            </ul>
-          </section>
-        ) : null}
-
-        {detail.problemsSolved.length > 0 ? (
-          <section className="mt-5">
-            <h3 className="mb-1.5 text-xs text-on-surface-variant">适合解决</h3>
-            <ul className="mt-1.5 list-disc pl-[18px] text-sm leading-[1.75] text-foreground">
-              {detail.problemsSolved.map((item, index) => <li key={`${index}-${item}`}>{item}</li>)}
-            </ul>
-          </section>
-        ) : null}
-
-        {detail.hasCard ? (
-          <section className="mt-5">
-            <h3 className="mb-1.5 text-xs text-on-surface-variant">怎么试</h3>
-            {how ? (
-              <pre className="relative mt-0.5 rounded-lg border border-border bg-background px-3 py-2.5 pr-10 font-mono text-xs leading-[1.7] break-words whitespace-pre-wrap text-foreground">
-                {how}
-                <button
-                  type="button"
-                  className="absolute top-1.5 right-1.5 inline-grid size-7 place-items-center rounded-md text-on-surface-variant hover:bg-surface-container-low hover:text-foreground"
-                  title="复制"
-                  aria-label="复制安装步骤"
-                  onClick={() => props.onCopyHow(how)}
-                >
-                  <Icon name="content_copy" size={16} />
-                </button>
-              </pre>
-            ) : (
-              <p className="text-sm text-on-surface-variant">{HOW_EMPTY}</p>
-            )}
-          </section>
-        ) : null}
-
-        <details className="group mt-5">
-          <summary className="flex cursor-pointer list-none items-center gap-1 text-xs text-on-surface-variant [&::-webkit-details-marker]:hidden">
-            <Icon name="chevron_right" size={16} className="transition-transform group-open:rotate-90" />
-            更多信息
-          </summary>
-          <section className="mt-2">
-            <h3 className="mb-1.5 text-xs text-on-surface-variant">GitHub 原文描述</h3>
-            <p className="text-sm text-on-surface-variant">{detail.description?.trim() || '—'}</p>
-          </section>
-          {topics.length > 0 ? (
-            <section className="mt-5">
-              <h3 className="mb-1.5 text-xs text-on-surface-variant">话题标签</h3>
-              <div className="flex flex-wrap gap-1.5">
-                {topics.map((topic) => <Tag key={topic}>{topic}</Tag>)}
-              </div>
-            </section>
-          ) : null}
-          {scenarioNames.length > 0 ? (
-            <section className="mt-5">
-              <h3 className="mb-1.5 text-xs text-on-surface-variant">适合的场景</h3>
-              <div className="flex flex-wrap gap-1.5">
-                {scenarioNames.map((name) => <Tag key={name} tone="blue">{name}</Tag>)}
-              </div>
-            </section>
-          ) : null}
-        </details>
       </div>
 
-      <div className="flex shrink-0 flex-wrap items-center gap-2 border-t border-muted px-4 py-3">
+      <div className="flex shrink-0 flex-wrap items-center gap-2 border-t border-border bg-card px-4 py-3">
         {props.onBack ? (
           <Button variant="text" onClick={props.onBack}>
             <Icon name="arrow_back" size={16} />
@@ -187,7 +284,7 @@ export function ItemDetail(props: {
         ) : null}
         {detail.htmlUrl ? (
           <a
-            className="inline-flex h-7 items-center gap-1 px-1 text-sm text-accent-foreground hover:underline hover:underline-offset-[3px]"
+            className="inline-flex h-8 items-center gap-1 rounded-md border border-input bg-card px-3 text-sm text-foreground hover:bg-surface-container-low"
             href={detail.htmlUrl}
             target="_blank"
             rel="noopener noreferrer"
@@ -209,12 +306,15 @@ export function ItemDetail(props: {
 
 function DetailSkeleton() {
   return (
-    <div className="flex flex-1 flex-col gap-3 p-6" aria-hidden="true">
-      <div className="h-10 w-2/3 animate-pulse rounded-md bg-muted" />
-      <div className="h-4 w-1/2 animate-pulse rounded-md bg-muted" />
-      <div className="mt-2 h-24 animate-pulse rounded-lg bg-muted" />
-      <div className="h-4 w-full animate-pulse rounded-md bg-muted" />
-      <div className="h-4 w-5/6 animate-pulse rounded-md bg-muted" />
+    <div className="flex flex-1 flex-col" aria-hidden="true">
+      <div className="h-[150px] animate-pulse bg-muted" />
+      <div className="flex flex-col gap-3 p-6">
+        <div className="h-8 w-2/3 animate-pulse rounded-md bg-muted" />
+        <div className="h-4 w-1/2 animate-pulse rounded-md bg-muted" />
+        <div className="mt-2 h-24 animate-pulse rounded-lg bg-muted" />
+        <div className="h-4 w-full animate-pulse rounded-md bg-muted" />
+        <div className="h-4 w-5/6 animate-pulse rounded-md bg-muted" />
+      </div>
     </div>
   );
 }
