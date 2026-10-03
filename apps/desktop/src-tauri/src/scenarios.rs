@@ -527,10 +527,41 @@ pub fn classify_repositories(
     })
 }
 
+/// 启动时调用：补种子；如果库里还没有任何规则归类（第一次用），给全部有效仓库做一次规则归类。
+/// 已经归类过的库不重做（新收藏同步后单独归类），所以不会每次启动都写库。返回 `None` 表示这次没有重做。
+/// 规则归类不联网、不读钥匙串、不花钱。
+pub fn ensure_initial_classification(path: &Path) -> Result<Option<ClassifyStats>, String> {
+    seed_scenarios(path)?;
+    let existing: i64 = {
+        let connection = open_db(path)?;
+        connection
+            .query_row(
+                "SELECT COUNT(*) FROM entity_scenarios WHERE entity_type = 'repository' AND origin = 'rule'",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|error| format!("规则归类计数失败：{error}"))?
+    };
+    if existing > 0 {
+        return Ok(None);
+    }
+    classify_repositories(path, None).map(Some)
+}
+
+/// 同步之后给新出现的仓库补种子并做规则归类。没有新仓库时什么都不做。
+pub fn classify_new_repositories(
+    path: &Path,
+    repo_ids: &[String],
+) -> Result<ClassifyStats, String> {
+    if repo_ids.is_empty() {
+        return Ok(ClassifyStats::default());
+    }
+    seed_scenarios(path)?;
+    classify_repositories(path, Some(repo_ids))
+}
+
 /// 替换这个仓库上 `origin='ai'` 且 `status='suggested'` 的建议。
 /// 已确认、已拒绝，以及 `origin='user'` 的场景跳过；不认识或已归档的 slug 丢掉。
-/// 理解卡流水线还没接上，所以现在只有测试调用。
-#[allow(dead_code)]
 pub fn apply_ai_scenarios(
     connection: &mut Connection,
     account_id: &str,
@@ -1691,5 +1722,71 @@ mod tests {
                 "{command} 应登记到 generate_handler"
             );
         }
+    }
+
+    #[test]
+    fn initial_classification_runs_once_and_keeps_user_choices() {
+        let db = temp_db("initial-classify");
+        insert_account(&db.0);
+        insert_repo(&db.0, "xhs", "fox/xhs-tool", "小红书 封面", "[]", "active");
+        insert_repo(
+            &db.0,
+            "plain",
+            "fox/plain",
+            "nothing relevant here",
+            "[]",
+            "active",
+        );
+        // 用户先手工放了一条（没有任何规则归类）：这条必须原样保留。
+        seed_scenarios(&db.0).expect("种子");
+        {
+            let connection = open_db(&db.0).expect("打开");
+            connection
+                .execute(
+                    "INSERT INTO entity_scenarios(account_id, entity_type, entity_id, scenario_id, origin, confidence, status) VALUES ('acct', 'repository', 'plain', 'scn-wx', 'user', 1.0, 'confirmed')",
+                    [],
+                )
+                .expect("手工归类");
+        }
+        let first = ensure_initial_classification(&db.0)
+            .expect("第一次应成功")
+            .expect("第一次应做归类");
+        assert_eq!(first.repositories, 2);
+        assert!(link_of(&db.0, "xhs", "scn-xhs").is_some());
+        let user = link_of(&db.0, "plain", "scn-wx").expect("用户的归类还在");
+        assert_eq!(user.0, "user");
+        let before = count_sql(&db.0, "SELECT COUNT(*) FROM entity_scenarios");
+        // 第二次：已经有规则归类，不重做、不写库。
+        assert!(ensure_initial_classification(&db.0)
+            .expect("第二次应成功")
+            .is_none());
+        assert_eq!(
+            count_sql(&db.0, "SELECT COUNT(*) FROM entity_scenarios"),
+            before
+        );
+    }
+
+    #[test]
+    fn initial_classification_without_account_is_an_error_not_a_panic() {
+        let db = temp_db("initial-classify-noacct");
+        assert!(ensure_initial_classification(&db.0).is_err());
+    }
+
+    #[test]
+    fn classify_new_repositories_only_touches_the_given_ids() {
+        let db = temp_db("classify-new");
+        insert_account(&db.0);
+        insert_repo(&db.0, "old", "fox/old", "小红书 封面", "[]", "active");
+        insert_repo(&db.0, "new", "fox/new", "小红书 封面", "[]", "active");
+        assert_eq!(
+            classify_new_repositories(&db.0, &[])
+                .expect("空名单")
+                .repositories,
+            0
+        );
+        let stats = classify_new_repositories(&db.0, &["new".to_owned()]).expect("新仓库归类");
+        assert_eq!(stats.repositories, 1);
+        assert!(link_of(&db.0, "new", "scn-xhs").is_some());
+        assert!(link_of(&db.0, "old", "scn-xhs").is_none());
     }
 }
