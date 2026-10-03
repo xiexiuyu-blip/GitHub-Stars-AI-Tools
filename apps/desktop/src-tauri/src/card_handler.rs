@@ -683,6 +683,7 @@ mod tests {
             attempts: 1,
             max_attempts: 3,
             input_hash: None,
+            reserved: 0,
         }
     }
 
@@ -1072,7 +1073,8 @@ mod tests {
         )
         .expect("排队任务应能写入");
         drop(conn);
-        jobs::set_daily_budget(&jobs::queue_control_path(db.path()), 1_000)
+        // 预算要放得下一条任务的预留（jobs::CLAIM_RESERVE_TOKENS），否则一条也领不到
+        jobs::set_daily_budget(&jobs::queue_control_path(db.path()), 50_000)
             .expect("测试预算应能写入");
         let calls = Arc::new(AtomicUsize::new(0));
         let calls_for_handler = Arc::clone(&calls);
@@ -1396,7 +1398,7 @@ mod tests {
             0
         );
 
-        jobs::set_daily_budget(&jobs::queue_control_path(db.path()), 10_000)
+        jobs::set_daily_budget(&jobs::queue_control_path(db.path()), 50_000)
             .expect("测试预算应能写入");
         let deadline = Instant::now() + Duration::from_secs(3);
         while spend_hits.load(Ordering::SeqCst) == 0 && Instant::now() < deadline {

@@ -712,7 +712,11 @@ impl AppStorage {
 
     pub fn clear_local_database(app_handle: &tauri::AppHandle) -> Result<(), String> {
         let database_path = Self::database_path_from_app_handle(app_handle)?;
-        remove_sqlite_database_files(&database_path)
+        remove_sqlite_database_files(&database_path)?;
+        // 用量记在数据库里，清空后「最近 24 小时已用」归零，而额度写在数据库外的控制文件里还留着：
+        // 下一次同步会把所有仓库重新排队，不重新授权就又开始花钱。清空时把额度一并归零。
+        let _ = crate::jobs::set_daily_budget(&crate::jobs::queue_control_path(&database_path), 0);
+        Ok(())
     }
 
     fn database_path_from_app_handle(app_handle: &tauri::AppHandle) -> Result<PathBuf, String> {

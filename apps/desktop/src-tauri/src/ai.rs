@@ -192,6 +192,30 @@ struct AiSearchPlanJson {
 #[derive(Deserialize)]
 struct OpenAiChatResponse {
     choices: Vec<OpenAiChoice>,
+    #[serde(default)]
+    usage: Option<OpenAiUsage>,
+}
+
+/// 服务商回的真实用量。旧功能的额度闸门（`spend_guard`）用它记账，没有就按文字估。
+#[derive(Deserialize)]
+struct OpenAiUsage {
+    prompt_tokens: Option<u64>,
+    completion_tokens: Option<u64>,
+}
+
+impl OpenAiUsage {
+    fn pair(&self) -> Option<(u64, u64)> {
+        usage_pair(self.prompt_tokens, self.completion_tokens)
+    }
+}
+
+fn usage_pair(input: Option<u64>, output: Option<u64>) -> Option<(u64, u64)> {
+    let pair = (input.unwrap_or(0), output.unwrap_or(0));
+    if pair.0 + pair.1 > 0 {
+        Some(pair)
+    } else {
+        None
+    }
 }
 
 #[derive(Deserialize)]
@@ -219,6 +243,20 @@ struct OpenAiMessageContentPart {
 #[derive(Deserialize)]
 struct AnthropicMessageResponse {
     content: Vec<AnthropicContentBlock>,
+    #[serde(default)]
+    usage: Option<AnthropicUsage>,
+}
+
+#[derive(Deserialize)]
+struct AnthropicUsage {
+    input_tokens: Option<u64>,
+    output_tokens: Option<u64>,
+}
+
+impl AnthropicUsage {
+    fn pair(&self) -> Option<(u64, u64)> {
+        usage_pair(self.input_tokens, self.output_tokens)
+    }
 }
 
 #[derive(Deserialize)]
@@ -874,6 +912,8 @@ fn is_private_network_ai_host(host: &str) -> bool {
 }
 
 fn request_openai(config: &AiRequestConfig, prompt: &str) -> Result<String, String> {
+    // 旧功能不走队列，和队列共用每日额度：发请求前问一句，成功后记账（见 spend_guard.rs）。
+    crate::spend_guard::check_before_request(prompt)?;
     let request = build_openai_chat_request(config, prompt, false);
     let response = execute_json_post(&request.endpoint, &request.headers, &request.body)?;
 
@@ -885,14 +925,34 @@ fn request_openai(config: &AiRequestConfig, prompt: &str) -> Result<String, Stri
         ));
     }
 
-    let parsed = serde_json::from_str::<OpenAiChatResponse>(&response.body)
-        .map_err(|error| format!("OpenAI 响应解析失败：{error}"))?;
-    parsed
+    let parsed = match serde_json::from_str::<OpenAiChatResponse>(&response.body) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            // 请求已经成功，服务商可能已经计费，读不懂回复也要记一笔
+            crate::spend_guard::record_after_request(
+                &config.provider,
+                &config.model,
+                prompt,
+                "",
+                None,
+            );
+            return Err(format!("OpenAI 响应解析失败：{error}"));
+        }
+    };
+    let usage = parsed.usage.as_ref().and_then(OpenAiUsage::pair);
+    let content = parsed
         .choices
         .into_iter()
         .filter_map(|choice| choice.message.content.and_then(openai_content_to_text))
-        .find(|content| !content.trim().is_empty())
-        .ok_or_else(|| "OpenAI 响应中没有摘要内容".to_owned())
+        .find(|content| !content.trim().is_empty());
+    crate::spend_guard::record_after_request(
+        &config.provider,
+        &config.model,
+        prompt,
+        content.as_deref().unwrap_or(""),
+        usage,
+    );
+    content.ok_or_else(|| "OpenAI 响应中没有摘要内容".to_owned())
 }
 
 fn request_openai_streaming(
@@ -901,6 +961,7 @@ fn request_openai_streaming(
     stage: &str,
     emit: &mut AiStreamCallback<'_>,
 ) -> Result<String, String> {
+    crate::spend_guard::check_before_request(prompt)?;
     let request = build_openai_chat_request(config, prompt, true);
     match execute_sse_post(
         &request.endpoint,
@@ -914,8 +975,27 @@ fn request_openai_streaming(
             Ok(())
         },
     ) {
-        Ok(content) if !content.trim().is_empty() => Ok(content),
-        Ok(_) => Err("OpenAI 流式响应中没有摘要内容".to_owned()),
+        Ok(content) if !content.trim().is_empty() => {
+            // 流式回复里没有用量，按文字估
+            crate::spend_guard::record_after_request(
+                &config.provider,
+                &config.model,
+                prompt,
+                &content,
+                None,
+            );
+            Ok(content)
+        }
+        Ok(_) => {
+            crate::spend_guard::record_after_request(
+                &config.provider,
+                &config.model,
+                prompt,
+                "",
+                None,
+            );
+            Err("OpenAI 流式响应中没有摘要内容".to_owned())
+        }
         Err(stream_error) => {
             emit(
                 stage,
@@ -936,6 +1016,7 @@ fn request_anthropic(
     prompt: &str,
     max_tokens: u16,
 ) -> Result<String, String> {
+    crate::spend_guard::check_before_request(prompt)?;
     let request = build_anthropic_message_request(config, prompt, max_tokens, false);
     let response = execute_json_post(&request.endpoint, &request.headers, &request.body)?;
 
@@ -947,16 +1028,35 @@ fn request_anthropic(
         ));
     }
 
-    let parsed = serde_json::from_str::<AnthropicMessageResponse>(&response.body)
-        .map_err(|error| format!("Anthropic 响应解析失败：{error}"))?;
+    let parsed = match serde_json::from_str::<AnthropicMessageResponse>(&response.body) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            crate::spend_guard::record_after_request(
+                &config.provider,
+                &config.model,
+                prompt,
+                "",
+                None,
+            );
+            return Err(format!("Anthropic 响应解析失败：{error}"));
+        }
+    };
+    let usage = parsed.usage.as_ref().and_then(AnthropicUsage::pair);
     let content = parsed
         .content
         .into_iter()
         .filter_map(|block| normalize_text(block.text.as_deref()))
         .collect::<Vec<_>>()
         .join("\n");
-
-    normalize_text(Some(&content)).ok_or_else(|| "Anthropic 响应中没有摘要内容".to_owned())
+    let content = normalize_text(Some(&content));
+    crate::spend_guard::record_after_request(
+        &config.provider,
+        &config.model,
+        prompt,
+        content.as_deref().unwrap_or(""),
+        usage,
+    );
+    content.ok_or_else(|| "Anthropic 响应中没有摘要内容".to_owned())
 }
 
 fn request_anthropic_streaming(
@@ -966,6 +1066,7 @@ fn request_anthropic_streaming(
     stage: &str,
     emit: &mut AiStreamCallback<'_>,
 ) -> Result<String, String> {
+    crate::spend_guard::check_before_request(prompt)?;
     let request = build_anthropic_message_request(config, prompt, max_tokens, true);
     match execute_sse_post(
         &request.endpoint,
@@ -979,8 +1080,26 @@ fn request_anthropic_streaming(
             Ok(())
         },
     ) {
-        Ok(content) if !content.trim().is_empty() => Ok(content),
-        Ok(_) => Err("Anthropic 流式响应中没有摘要内容".to_owned()),
+        Ok(content) if !content.trim().is_empty() => {
+            crate::spend_guard::record_after_request(
+                &config.provider,
+                &config.model,
+                prompt,
+                &content,
+                None,
+            );
+            Ok(content)
+        }
+        Ok(_) => {
+            crate::spend_guard::record_after_request(
+                &config.provider,
+                &config.model,
+                prompt,
+                "",
+                None,
+            );
+            Err("Anthropic 流式响应中没有摘要内容".to_owned())
+        }
         Err(stream_error) => {
             emit(
                 stage,

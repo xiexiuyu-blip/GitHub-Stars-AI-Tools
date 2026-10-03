@@ -25,6 +25,7 @@ mod rankings_live;
 mod repo_facts;
 mod scenarios;
 mod solve;
+mod spend_guard;
 mod storage;
 mod v2_ops;
 mod vector_index;
@@ -973,7 +974,7 @@ fn extract_links_from_text(text: String) -> Vec<capture::ExtractedLink> {
 #[tauri::command]
 fn get_today_actions(app_handle: tauri::AppHandle) -> Result<v2_ops::TodayActions, String> {
     let storage = AppStorage::from_app_handle(&app_handle)?;
-    v2_ops::recover_interrupted_jobs(storage.database_path())?;
+    // 启动时的恢复在 jobs::Worker::start 里做。这里不能再做：它会把正在跑的任务也放回队列。
     v2_ops::today_actions(storage.database_path())
 }
 
@@ -1435,6 +1436,11 @@ fn apply_pending_restore_at_startup(
     if let Some(report) = backup::apply_pending_restore(&data_dir, &backups_dir) {
         if let Some(error) = &report.error {
             eprintln!("启动恢复没有完成：{error}");
+        } else {
+            // 恢复会把整个数据库换回旧的，旧库里的用量记录比现在少，「最近 24 小时已用」会倒退，
+            // 而额度在数据库外的控制文件里。恢复后额度归零，要继续花钱得在工具箱里重新开启。
+            let database_path = data_dir.join(storage::SQLITE_DATABASE_FILE_NAME);
+            let _ = jobs::set_daily_budget(&jobs::queue_control_path(&database_path), 0);
         }
     }
     Ok(())
@@ -3274,44 +3280,47 @@ fn run_ai_connection_probe(
     let stream_app_handle = app_handle.clone();
     let stream_request_id = request_id.to_owned();
     let mut latest_stream_text = String::new();
-    let result = ai::summarize_readme_streaming(
-        ai_config,
-        "xiexiuyu-blip/GitHub-Stars-AI-Tools",
-        Some("用于验证 AI 服务配置是否可以正常请求的测试仓库。"),
-        r#"# Fox Stars Lab
+    // 一次很小的探测：不看额度、不被暂停拦住，但用量照样记账
+    let result = spend_guard::probe(|| {
+        ai::summarize_readme_streaming(
+            ai_config,
+            "xiexiuyu-blip/GitHub-Stars-AI-Tools",
+            Some("用于验证 AI 服务配置是否可以正常请求的测试仓库。"),
+            r#"# Fox Stars Lab
 
 Fox Stars Lab 是一个本地优先的桌面客户端，用于同步 GitHub Stars、缓存 README、生成中文摘要、维护标签网络，并通过自然语言检索个人开源知识库。
 "#,
-        &mut |stage, status, delta, text, message| {
-            if let Some(next_text) = text {
-                latest_stream_text = next_text.to_owned();
-            }
-            match status {
-                "delta" => {
-                    let delta = delta.unwrap_or_default();
-                    let text = text.unwrap_or(latest_stream_text.as_str());
-                    emit_ai_stream_delta(
+            &mut |stage, status, delta, text, message| {
+                if let Some(next_text) = text {
+                    latest_stream_text = next_text.to_owned();
+                }
+                match status {
+                    "delta" => {
+                        let delta = delta.unwrap_or_default();
+                        let text = text.unwrap_or(latest_stream_text.as_str());
+                        emit_ai_stream_delta(
+                            &stream_app_handle,
+                            &stream_request_id,
+                            "ai-config-test",
+                            stage,
+                            delta,
+                            text,
+                            None,
+                        );
+                    }
+                    _ => emit_ai_stream_status(
                         &stream_app_handle,
                         &stream_request_id,
                         "ai-config-test",
                         stage,
-                        delta,
-                        text,
+                        status,
+                        message.unwrap_or("AI 测试状态已更新"),
                         None,
-                    );
+                    ),
                 }
-                _ => emit_ai_stream_status(
-                    &stream_app_handle,
-                    &stream_request_id,
-                    "ai-config-test",
-                    stage,
-                    status,
-                    message.unwrap_or("AI 测试状态已更新"),
-                    None,
-                ),
-            }
-        },
-    );
+            },
+        )
+    });
 
     match result {
         Ok(document) => {
@@ -3517,7 +3526,9 @@ fn check_runtime_readiness_worker(
         hydrated_ai_config.as_ref(),
     ) {
         (Some(token), Some(account_id), Some(ai_config)) => match storage.as_ref() {
-            Some(storage) => check_runtime_recommendation(storage, token, account_id, ai_config),
+            Some(storage) => spend_guard::probe(|| {
+                check_runtime_recommendation(storage, token, account_id, ai_config)
+            }),
             None => runtime_check_skipped_with_action(
                 "相似推荐未检测".to_owned(),
                 Some("需要先修复本地数据库。".to_owned()),
@@ -5063,6 +5074,7 @@ fn batch_generate_repository_ai_documents_worker(
     let mut skipped_count = 0_usize;
     let mut missing_readme_count = 0_usize;
     let mut failures = Vec::new();
+    let mut stopped_by_budget: Option<String> = None;
 
     emit_task_progress(
         &app_handle,
@@ -5196,6 +5208,11 @@ fn batch_generate_repository_ai_documents_worker(
             Ok(BatchItemOutcome::Generated) => generated_count += 1,
             Ok(BatchItemOutcome::Skipped) => skipped_count += 1,
             Ok(BatchItemOutcome::MissingReadme) => missing_readme_count += 1,
+            // 额度用完（或被暂停）：后面的每一个都会被同样拒绝，不要把整批都记成失败，到这里停下。
+            Err(error) if spend_guard::is_refusal(&error) => {
+                stopped_by_budget = Some(error);
+                break;
+            }
             Err(error) => failures.push(BatchAiDocumentFailure {
                 repository_id: repository.id,
                 full_name: repository.full_name,
@@ -5216,7 +5233,9 @@ fn batch_generate_repository_ai_documents_worker(
             ),
         );
     }
-    let completion_message = if only_missing && progress_total == 0 {
+    let completion_message = if let Some(reason) = stopped_by_budget.as_deref() {
+        format!("已停止：已生成 {generated_count} 个，跳过 {skipped_count} 个。{reason}")
+    } else if only_missing && progress_total == 0 {
         "AI 解析已是最新，无需重复处理。".to_owned()
     } else {
         format!(
@@ -5224,7 +5243,7 @@ fn batch_generate_repository_ai_documents_worker(
             failures.len(),
         )
     };
-    let completion_progress = if failures.is_empty() {
+    let completion_progress = if failures.is_empty() && stopped_by_budget.is_none() {
         TaskProgressEvent::succeeded(
             "batch-generate-ai-documents",
             "ai",
@@ -7116,6 +7135,8 @@ pub fn run() {
             if let Ok(storage) = AppStorage::from_app_handle(app.handle()) {
                 let _ = local_api::start_if_enabled(storage.database_path());
                 let database_path = storage.database_path().to_path_buf();
+                // 旧版 AI 功能（整批解析、标签网络、AI 搜索……）和队列共用同一个每日额度：必须在任何 AI 请求之前装上。
+                spend_guard::install(&database_path);
                 let settings_handle = app.handle().clone();
                 // 闭包只被放进处理器，这里不调用，所以启动时不读钥匙串。
                 let handler = card_handler::RepoCardHandler::new(Arc::new(move || {

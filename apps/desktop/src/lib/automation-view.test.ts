@@ -48,6 +48,13 @@ describe('parseDailyBudget', () => {
   it('大到不是安全整数的也拦住', () => {
     expect(parseDailyBudget('99999999999999999999')).toBe('每天额度要填整数');
   });
+
+  it('大于 0 又小于 1.2 万的拦住：连一个仓库的预留都放不下，等于什么都不会整理', () => {
+    expect(parseDailyBudget('1000')).toContain('至少要 12000 token');
+    expect(parseDailyBudget('11999')).toContain('至少要 12000 token');
+    expect(parseDailyBudget('12000')).toBe(12_000);
+    expect(parseDailyBudget('0')).toBe(0);
+  });
 });
 
 describe('approxRepos / formatTokens', () => {

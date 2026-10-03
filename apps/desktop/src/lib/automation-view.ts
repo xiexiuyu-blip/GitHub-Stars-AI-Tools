@@ -27,6 +27,9 @@ export const BUDGET_PRESETS: ReadonlyArray<{ tokens: number; title: string; hint
   { tokens: 600_000, title: '集中补齐', hint: '每天约 150 个，尽快补完旧收藏' },
 ];
 
+/** 开始整理一个仓库前，先按「两次调用都用满」预留的量（Rust 的 `CLAIM_RESERVE_TOKENS`）。额度比它小，一个仓库也领不到。 */
+export const MIN_DAILY_BUDGET = 12_000;
+
 /** 把输入框里的文字变成额度。合法返回数字，不合法返回给人看的错误提示。 */
 export function parseDailyBudget(raw: string): number | string {
   const text = raw.trim();
@@ -35,6 +38,7 @@ export function parseDailyBudget(raw: string): number | string {
   if (!/^\d+$/.test(text)) return '每天额度要填整数';
   const value = Number(text);
   if (!Number.isSafeInteger(value)) return '每天额度要填整数';
+  if (value > 0 && value < MIN_DAILY_BUDGET) return `每天额度至少要 ${MIN_DAILY_BUDGET} token，再少连一个仓库都整理不了（要关闭就填 0）`;
   return value;
 }
 

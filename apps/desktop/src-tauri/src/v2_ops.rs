@@ -331,6 +331,9 @@ LIMIT 8
     Ok(hits)
 }
 
+/// 只给测试用。运行中不能调：它会把正在跑的任务也放回队列，而且不记那次请求的用量。
+/// 启动时的恢复在 `jobs::Worker::start` 里做（保留预留、隔一会儿再认领）。
+#[cfg(test)]
 pub fn recover_interrupted_jobs(path: &Path) -> Result<usize, String> {
     let connection = open_db(path)?;
     let changed = connection
@@ -414,14 +417,38 @@ pub fn daily_budget(database_path: &Path) -> u64 {
     crate::jobs::read_control(&queue_control_path(database_path)).daily_budget_tokens
 }
 
+/// 把失败的任务重新排队。确定性的失败不跟着重试：内容太大、模型回了空内容，再试一百次也一样，只会白花 token。
+/// 一条一条改，`OR IGNORE`：这个仓库已经有一条新的排队 / 在跑的任务时（唯一索引），旧的失败那条留着不动，
+/// 不让整批重试因为一条冲突全部回滚。
 pub fn retry_failed_jobs(path: &Path) -> Result<usize, String> {
     let connection = open_db(path)?;
-    let changed = connection
-        .execute(
-            "UPDATE ai_jobs SET status = 'queued', attempts = 0, error_message = NULL, finished_at = NULL, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE status = 'failed'",
-            [],
-        )
-        .map_err(|error| format!("失败任务重试失败：{error}"))?;
+    let ids: Vec<String> = {
+        let mut statement = connection
+            .prepare(
+                "SELECT id FROM ai_jobs
+                 WHERE status = 'failed'
+                   AND IFNULL(error_kind, '') <> 'content_too_large'
+                   AND IFNULL(error_message, '') NOT LIKE '%没有可用内容%'",
+            )
+            .map_err(|error| format!("失败任务读取失败：{error}"))?;
+        let rows = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(|error| format!("失败任务读取失败：{error}"))?;
+        let mut ids = Vec::new();
+        for row in rows {
+            ids.push(row.map_err(|error| format!("失败任务行读取失败：{error}"))?);
+        }
+        ids
+    };
+    let mut changed = 0;
+    for id in ids {
+        changed += connection
+            .execute(
+                "UPDATE OR IGNORE ai_jobs SET status = 'queued', attempts = 0, error_message = NULL, finished_at = NULL, not_before = NULL, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ?1 AND status = 'failed'",
+                params![id],
+            )
+            .map_err(|error| format!("失败任务重试失败：{error}"))?;
+    }
     Ok(changed)
 }
 
@@ -1571,5 +1598,46 @@ mod tests {
         assert_eq!(excerpt.chars().count(), 2000);
         assert_eq!(excerpt, "字".repeat(2000));
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn retry_failed_jobs_skips_deterministic_failures_and_survives_conflicts() {
+        let path = temp_db();
+        with_account(&path);
+        let connection = open_db(&path).unwrap();
+        connection
+            .execute_batch(
+                "INSERT INTO ai_jobs(id, account_id, job_type, target_type, target_id, status, attempts, error_kind, error_message, finished_at) VALUES
+                   ('retry-me', 'acct', 'repo_card', 'repository', 'r1', 'failed', 3, 'bad_json', '模型两次都没有返回可解析的 JSON', '2026-10-03T00:00:00.000Z'),
+                   ('too-big', 'acct', 'repo_card', 'repository', 'r2', 'failed', 1, 'content_too_large', '内容超过模型上下文', '2026-10-03T00:00:00.000Z'),
+                   ('empty', 'acct', 'repo_card', 'repository', 'r3', 'failed', 1, 'other', 'OpenAI 响应中没有可用内容', '2026-10-03T00:00:00.000Z'),
+                   ('conflict-old', 'acct', 'repo_card', 'repository', 'r4', 'failed', 3, 'timeout', '超时', '2026-10-03T00:00:00.000Z');
+                 INSERT INTO ai_jobs(id, account_id, job_type, target_type, target_id, status) VALUES
+                   ('conflict-new', 'acct', 'repo_card', 'repository', 'r4', 'queued');",
+            )
+            .unwrap();
+        drop(connection);
+        // 这个仓库已经有新的排队任务（唯一索引）：旧的失败那条留着，不能让整批重试因此一条都不成
+        assert_eq!(retry_failed_jobs(&path).unwrap(), 1);
+        let connection = open_db(&path).unwrap();
+        let status = |id: &str| -> (String, i64) {
+            connection
+                .query_row(
+                    "SELECT status, attempts FROM ai_jobs WHERE id = ?1",
+                    [id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap()
+        };
+        assert_eq!(status("retry-me"), ("queued".to_owned(), 0));
+        assert_eq!(status("too-big").0, "failed", "内容太大再试也一样");
+        assert_eq!(
+            status("empty").0,
+            "failed",
+            "模型回空内容是确定性的，再试只会白花 token"
+        );
+        assert_eq!(status("conflict-old").0, "failed");
+        assert_eq!(status("conflict-new").0, "queued");
+        let _ = std::fs::remove_file(&path);
     }
 }
