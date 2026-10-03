@@ -1,6 +1,6 @@
 import { FormEvent, Suspense, lazy, useCallback, useEffect, useRef, useState } from 'react';
-import type { PackFormat, PackOutput } from '@/lib/api';
-import { buildReferencePack, describeInvokeError, listScenarios, solveV2 } from '@/lib/api';
+import type { LocalCapabilityInput, PackFormat, PackOutput } from '@/lib/api';
+import { buildReferencePack, describeInvokeError, listScenarios, scanLocalCapabilities, solveV2 } from '@/lib/api';
 import type { ScenarioSummary, SolveResult } from '@/lib/contracts';
 import {
   buildPackRequest,
@@ -10,6 +10,7 @@ import {
   initialPicks,
   makeMain,
   noIntentNote,
+  pickLocalCapabilities,
   orderedPicks,
   packPlaceholder,
   pendingNote,
@@ -57,6 +58,7 @@ export function SolvePage(props: {
   const [scenarios, setScenarios] = useState<ScenarioSummary[]>([]);
   const [format, setFormat] = useState<PackFormat>(draft?.format ?? 'markdown');
   const [openedId, setOpenedId] = useState<string | null>(null);
+  const [localCapabilities, setLocalCapabilities] = useState<LocalCapabilityInput[]>([]);
   const [showRaw, setShowRaw] = useState(false);
   const lastPack = useRef<PackOutput | null>(null);
   const [packState, setPackState] = useState<PackState | null>(null);
@@ -110,6 +112,17 @@ export function SolvePage(props: {
     };
   }, []);
 
+  // 本机已经装了哪些 Skill / MCP（只读名字）：参考包里要标「本机已装」，Codex 才不会重复装
+  useEffect(() => {
+    let cancelled = false;
+    void scanLocalCapabilities().then((items) => {
+      if (!cancelled) setLocalCapabilities(items);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   useEffect(() => {
     if (result) saveSolveDraft({ query, activeQuery, result, picked, format });
   }, [query, activeQuery, result, picked, format]);
@@ -129,7 +142,11 @@ export function SolvePage(props: {
     const hits = orderedPicks(result.hits, picked);
     if (hits.length === 0) return;
     const key = packKey;
-    const request = buildPackRequest(result.query.trim() || activeQuery, hits);
+    const request = buildPackRequest(
+      result.query.trim() || activeQuery,
+      hits,
+      pickLocalCapabilities(localCapabilities, hits, result.intents),
+    );
     let cancelled = false;
     const timer = window.setTimeout(() => {
       if (cancelled) return;
@@ -145,7 +162,7 @@ export function SolvePage(props: {
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [packKey, result, picked, format, packAttempt, activeQuery]);
+  }, [packKey, result, picked, format, packAttempt, activeQuery, localCapabilities]);
 
   // 复制成功后按钮上显示一会儿「已复制」
   useEffect(() => {

@@ -1,6 +1,6 @@
 /** 「找方案」页的纯视图规则：勾选、提示文案、参考包请求。不碰 React，方便在 node 里测。 */
 
-import type { PackFormat, PackRequest } from '@/lib/api';
+import type { LocalCapabilityInput, PackFormat, PackRequest } from '@/lib/api';
 import type { ScenarioSummary, SolveHit, SolveResult } from '@/lib/contracts';
 
 export type MatchBadge = { tone: 'blue' | 'gray'; text: string };
@@ -107,8 +107,48 @@ export function noIntentNote(result: SolveResult): string | null {
   return null;
 }
 
-/** 第一个是主参考，其余是备选。why 原样带上。 */
-export function buildPackRequest(query: string, hits: readonly SolveHit[]): PackRequest {
+/**
+ * 从本机已装的 Skill / MCP 里挑出该写进参考包的：
+ * 1. 名字和选中的项目对得上的（说明这个工具本机已经装了，Codex 不用再装）；
+ * 2. 名字或一句话里含任务词的，最多 5 个（「本机已有的相关能力」）。
+ * 全部本机能力有几十上百个，整个塞进去只会淹没重点。
+ */
+export function pickLocalCapabilities(
+  all: readonly LocalCapabilityInput[],
+  hits: readonly Pick<SolveHit, 'fullName'>[],
+  intents: readonly string[],
+  limit = 5,
+): LocalCapabilityInput[] {
+  const repoNames = new Set<string>();
+  for (const hit of hits) {
+    const full = hit.fullName.trim().toLowerCase();
+    if (!full) continue;
+    repoNames.add(full);
+    const short = full.split('/').pop();
+    if (short) repoNames.add(short);
+  }
+  const words = intents.map((intent) => intent.trim().toLowerCase()).filter(Boolean);
+  const installed: LocalCapabilityInput[] = [];
+  const related: LocalCapabilityInput[] = [];
+  for (const item of all) {
+    const name = item.name.trim().toLowerCase();
+    if (!name) continue;
+    if (repoNames.has(name)) {
+      installed.push(item);
+      continue;
+    }
+    const text = `${name} ${item.oneLiner.toLowerCase()}`;
+    if (related.length < limit && words.some((word) => text.includes(word))) related.push(item);
+  }
+  return [...installed, ...related];
+}
+
+/** 第一个是主参考，其余是备选。why 原样带上。local 是本机已装的相关能力（见 pickLocalCapabilities）。 */
+export function buildPackRequest(
+  query: string,
+  hits: readonly SolveHit[],
+  local: readonly LocalCapabilityInput[] = [],
+): PackRequest {
   return {
     title: `参考包：${query}`,
     problem: query,
@@ -117,7 +157,7 @@ export function buildPackRequest(query: string, hits: readonly SolveHit[]): Pack
       role: index === 0 ? 'main' : 'alternative',
       why: hit.why ?? '',
     })),
-    localCapabilities: [],
+    localCapabilities: [...local],
   };
 }
 

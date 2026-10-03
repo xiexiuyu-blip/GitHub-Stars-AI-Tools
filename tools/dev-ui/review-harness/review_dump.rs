@@ -228,6 +228,8 @@ fn call(work: &Path, cmd: &str, args: &serde_json::Value) -> Result<serde_json::
         }
         "open_external_url" => Ok(Value::Null),
         "solve_v2" => ser(to_value(solve::solve_query(work, &arg_str(args, "query")?)?)),
+        // 本机已装的 Skill / MCP：读真实的 HOME（只读名字和一句话）
+        "scan_local_capabilities" => ser(to_value(crate::local_scan::scan_local_capabilities()?)),
         // 发现 / 社区：这两个会真的联网（GitHub 搜索、Hacker News），不登录；结果写进副本库里的缓存表
         "list_discover" => ser(to_value(crate::discover::list_discover_view(
             work,
