@@ -7,6 +7,7 @@ mod dev_guard;
 mod embedding;
 mod embedding_state;
 mod github;
+mod jobs;
 mod library;
 mod local_api;
 mod packs;
@@ -1001,6 +1002,12 @@ fn set_ai_daily_budget(app_handle: tauri::AppHandle, tokens: u64) -> Result<u64,
 }
 
 #[tauri::command]
+fn get_ai_queue_status(app_handle: tauri::AppHandle) -> Result<jobs::QueueStatus, String> {
+    let storage = AppStorage::from_app_handle(&app_handle)?;
+    jobs::queue_status(storage.database_path())
+}
+
+#[tauri::command]
 fn get_local_api_status(app_handle: tauri::AppHandle) -> Result<local_api::LocalApiStatus, String> {
     let storage = AppStorage::from_app_handle(&app_handle)?;
     Ok(local_api::status(storage.database_path()))
@@ -1344,7 +1351,6 @@ fn search_library_semantic(
 #[tauri::command]
 fn enqueue_missing_cards(app_handle: tauri::AppHandle) -> Result<usize, String> {
     let storage = AppStorage::from_app_handle(&app_handle)?;
-    v2_ops::set_daily_budget(storage.database_path(), 200_000)?;
     v2_ops::enqueue_missing_cards(storage.database_path())
 }
 
@@ -6783,6 +6789,9 @@ pub fn run() {
             start_embedding_maintenance(app.handle().clone());
             if let Ok(storage) = AppStorage::from_app_handle(app.handle()) {
                 let _ = local_api::start_if_enabled(storage.database_path());
+                if let Some(worker) = jobs::start_default_worker(storage.database_path()) {
+                    app.manage(worker);
+                }
             }
             start_auto_backup(app.handle().clone());
             Ok(())
@@ -6800,6 +6809,7 @@ pub fn run() {
             retry_failed_ai_jobs,
             cancel_ai_job,
             set_ai_daily_budget,
+            get_ai_queue_status,
             get_local_api_status,
             set_local_api_enabled,
             get_local_api_token,

@@ -1,0 +1,2296 @@
+//! AI 任务队列的消费者。不依赖 Tauri，也不调用任何会花钱的接口。
+//!
+//! 默认预算是 0：控制文件不存在，或没有 `dailyBudgetTokens` 时，花钱的任务不会被认领。
+//! 用量按滚动 24 小时计算（避开时区）。检查发生在认领之前，正在跑的任务可以把总量撑过预算，
+//! 结束后才停；并发时每个工作线程都可能再领走一个，因为用量要等任务写完才入账。
+//!
+//! 处理器要到下一张卡才注册，`cargo check` 又不编译测试，所以认领、收尾、工作线程
+//! 这些公开接口在本卡里看起来像没人用。先关掉 dead_code，避免把基线警告数抬高。
+#![allow(dead_code)]
+
+use rusqlite::{params, params_from_iter, Connection, OptionalExtension, TransactionBehavior};
+use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
+use std::fs;
+use std::panic::AssertUnwindSafe;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
+use std::thread::{self, JoinHandle};
+use std::time::Duration;
+
+const MAX_DAILY_BUDGET: u64 = 2_000_000;
+const DAY_SECS: i64 = 24 * 60 * 60;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ErrorKind {
+    Interrupted,
+    Timeout,
+    RateLimit,
+    Auth,
+    BadJson,
+    Schema,
+    Network,
+    ContentTooLarge,
+    Other,
+}
+
+impl ErrorKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Interrupted => "interrupted",
+            Self::Timeout => "timeout",
+            Self::RateLimit => "rate_limit",
+            Self::Auth => "auth",
+            Self::BadJson => "bad_json",
+            Self::Schema => "schema",
+            Self::Network => "network",
+            Self::ContentTooLarge => "content_too_large",
+            Self::Other => "other",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JobRecord {
+    pub id: String,
+    pub account_id: String,
+    pub job_type: String,
+    pub target_type: String,
+    pub target_id: String,
+    pub attempts: i64,
+    pub max_attempts: i64,
+    pub input_hash: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum JobFailure {
+    /// 还有次数就按延迟重新排队，用尽次数则失败。
+    Retryable {
+        kind: ErrorKind,
+        message: String,
+        retry_after_secs: Option<u64>,
+    },
+    /// 直接失败，不再重试。
+    Fatal { kind: ErrorKind, message: String },
+    /// 整条队列停下。这个任务回到 queued，且本次不计入 attempts。
+    PauseQueue { kind: ErrorKind, message: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JobSuccess {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub provider: String,
+    pub model: String,
+    pub prompt_version: String,
+    pub input_hash: String,
+    pub skipped: bool,
+}
+
+pub trait JobHandler: Send + Sync {
+    fn job_type(&self) -> &'static str;
+    fn spends_tokens(&self) -> bool;
+    fn run(&self, job: &JobRecord, db_path: &Path) -> Result<JobSuccess, JobFailure>;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClaimCandidate {
+    pub job_type: String,
+    pub spends_tokens: bool,
+}
+
+/// 认领时用的预算门闩。用量不在这里，认领时从库里现算。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BudgetGate {
+    pub paused: bool,
+    pub daily_budget_tokens: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct QueueControl {
+    pub paused: bool,
+    pub daily_budget_tokens: u64,
+    pub pause_reason: Option<PauseReason>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PauseReason {
+    pub kind: String,
+    pub message: String,
+    pub at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QueueStatus {
+    /// `running` / `idle` / `paused` / `budget_reached` / `stopped`。
+    pub state: String,
+    pub pause_reason: Option<PauseReason>,
+    pub queued: i64,
+    pub running: i64,
+    pub succeeded_24h: i64,
+    pub failed: i64,
+    pub tokens_24h: i64,
+    pub daily_budget: u64,
+    pub budget_remaining: u64,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct WorkerConfig {
+    /// 同时跑几条。小于 1 按 1，大于 4 按 4。默认 2。
+    pub concurrency: usize,
+    /// 没有任务时隔多久再看一眼。传 0 会改用默认的 2 秒，避免空转。
+    pub idle_poll: Duration,
+}
+
+impl Default for WorkerConfig {
+    fn default() -> Self {
+        Self {
+            concurrency: 2,
+            idle_poll: Duration::from_secs(2),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WorkerStatus {
+    pub stopped: bool,
+    pub inflight: usize,
+}
+
+struct WorkerInner {
+    stop: AtomicBool,
+    recovered: AtomicBool,
+    inflight: AtomicUsize,
+    recover_lock: Mutex<()>,
+    wake_lock: Mutex<()>,
+    wake: Condvar,
+}
+
+pub struct Worker {
+    inner: Arc<WorkerInner>,
+    joins: Vec<JoinHandle<()>>,
+}
+
+pub fn queue_control_path(database_path: &Path) -> PathBuf {
+    database_path.with_file_name("fox-stars-lab.queue.json")
+}
+
+pub fn read_control(path: &Path) -> QueueControl {
+    match load_object(path) {
+        Ok(map) => control_from_map(&map),
+        Err(_) => QueueControl::default(),
+    }
+}
+
+/// 只改 `paused`。恢复（`paused == false`）时清掉 `pauseReason`，其它字段原样保留。
+pub fn set_paused(path: &Path, paused: bool) -> Result<(), String> {
+    with_control_file(path, |map| {
+        map.insert("paused".to_owned(), Value::Bool(paused));
+        if !paused {
+            map.remove("pauseReason");
+        }
+        Ok(())
+    })
+}
+
+/// 允许 0。超过 2_000_000 的值会被压到上限，并返回实际写入的数字。没有 1000 的下限。
+pub fn set_daily_budget(path: &Path, tokens: u64) -> Result<u64, String> {
+    let tokens = tokens.min(MAX_DAILY_BUDGET);
+    with_control_file(path, |map| {
+        map.insert("dailyBudgetTokens".to_owned(), Value::from(tokens));
+        Ok(tokens)
+    })
+}
+
+/// 在一个 `BEGIN IMMEDIATE` 里认领下一条任务，两个连接不会领到同一条。
+///
+/// 暂停时一条都不领，包括不花钱的任务。花钱的任务还要预算大于 0，且最近 24 小时
+/// 已结束任务的 token 之和小于预算。窗口含正好 24 小时前的那一刻（`finished_at >= now-24h`），
+/// 更早的不计入。
+pub fn claim_next(
+    conn: &mut Connection,
+    now: &str,
+    handled_types: &[ClaimCandidate],
+    budget_gate: &BudgetGate,
+) -> Result<Option<JobRecord>, String> {
+    if budget_gate.paused {
+        return Ok(None);
+    }
+    let cutoff = shift_db_time(now, -DAY_SECS)?;
+    let tx = conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|error| format!("任务认领失败：{error}"))?;
+    let used = tokens_used_since(&tx, &cutoff)?.max(0);
+    let spending_open =
+        budget_gate.daily_budget_tokens > 0 && (used as u64) < budget_gate.daily_budget_tokens;
+    let mut eligible: Vec<&str> = Vec::new();
+    for candidate in handled_types {
+        if candidate.job_type.is_empty() {
+            continue;
+        }
+        if candidate.spends_tokens && !spending_open {
+            continue;
+        }
+        if !eligible.contains(&candidate.job_type.as_str()) {
+            eligible.push(candidate.job_type.as_str());
+        }
+    }
+    if eligible.is_empty() {
+        tx.commit()
+            .map_err(|error| format!("任务认领失败：{error}"))?;
+        return Ok(None);
+    }
+
+    let mut sql = String::from(
+        "SELECT id, account_id, job_type, target_type, target_id, attempts, max_attempts, input_hash
+         FROM ai_jobs
+         WHERE status = 'queued'
+           AND (not_before IS NULL OR not_before <= ?)
+           AND job_type IN (",
+    );
+    sql.push_str(
+        &std::iter::repeat("?")
+            .take(eligible.len())
+            .collect::<Vec<_>>()
+            .join(", "),
+    );
+    sql.push_str(") ORDER BY priority ASC, created_at ASC, id ASC LIMIT 1");
+
+    let mut bound: Vec<String> = Vec::with_capacity(1 + eligible.len());
+    bound.push(now.to_owned());
+    for job_type in &eligible {
+        bound.push((*job_type).to_owned());
+    }
+    let selected = {
+        let mut statement = tx
+            .prepare(&sql)
+            .map_err(|error| format!("任务认领失败：{error}"))?;
+        statement
+            .query_row(params_from_iter(bound.iter()), |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, i64>(5)?,
+                    row.get::<_, i64>(6)?,
+                    row.get::<_, Option<String>>(7)?,
+                ))
+            })
+            .optional()
+            .map_err(|error| format!("任务认领失败：{error}"))?
+    };
+    let Some((
+        id,
+        account_id,
+        job_type,
+        target_type,
+        target_id,
+        attempts,
+        max_attempts,
+        input_hash,
+    )) = selected
+    else {
+        tx.commit()
+            .map_err(|error| format!("任务认领失败：{error}"))?;
+        return Ok(None);
+    };
+    let changed = tx
+        .execute(
+            "UPDATE ai_jobs
+             SET status = 'running', attempts = attempts + 1, started_at = ?1, updated_at = ?1
+             WHERE id = ?2 AND status = 'queued'",
+            params![now, id],
+        )
+        .map_err(|error| format!("任务认领失败：{error}"))?;
+    if changed == 0 {
+        tx.commit()
+            .map_err(|error| format!("任务认领失败：{error}"))?;
+        return Ok(None);
+    }
+    tx.commit()
+        .map_err(|error| format!("任务认领失败：{error}"))?;
+    Ok(Some(JobRecord {
+        id,
+        account_id,
+        job_type,
+        target_type,
+        target_id,
+        attempts: attempts + 1,
+        max_attempts,
+        input_hash,
+    }))
+}
+
+/// 把处理器的结果写回。更新都带 `status = 'running'`：跑的过程中被取消的任务不会被盖掉。
+/// 返回 `false` 表示这条任务已经不在 running（通常是被取消了）。
+///
+/// `jitter` 取 -1.0 到 1.0，只作用在默认退避上，表示最多 ±10%。`retry_after_secs` 不加抖动，
+/// 只夹到 5 到 3600 秒。工作线程传 0。
+pub fn finish_job(
+    db_path: &Path,
+    job: &JobRecord,
+    now: &str,
+    result: Result<JobSuccess, JobFailure>,
+    jitter: f64,
+) -> Result<bool, String> {
+    let _ = parse_db_time(now)?;
+    match result {
+        Ok(success) => write_success(db_path, &job.id, now, &success),
+        Err(JobFailure::PauseQueue { kind, message }) => {
+            pause_queue(db_path, &job.id, now, kind, message)
+        }
+        Err(JobFailure::Fatal { kind, message }) => {
+            write_failure(db_path, &job.id, now, kind, &message)
+        }
+        Err(JobFailure::Retryable {
+            kind,
+            message,
+            retry_after_secs,
+        }) => {
+            if job.attempts >= job.max_attempts {
+                return write_failure(db_path, &job.id, now, kind, &message);
+            }
+            let delay = retry_delay_secs(job.attempts, retry_after_secs, jitter);
+            let delay_i64 = i64::try_from(delay).map_err(|_| "延迟太长")?;
+            let not_before = shift_db_time(now, delay_i64)?;
+            requeue_job(db_path, &job.id, now, kind, &message, &not_before)
+        }
+    }
+}
+
+fn pause_queue(
+    db_path: &Path,
+    id: &str,
+    now: &str,
+    kind: ErrorKind,
+    message: String,
+) -> Result<bool, String> {
+    // 先把队列停住，再把任务放回去，避免别的线程在窗口里又领走它。
+    let reason = PauseReason {
+        kind: kind.as_str().to_owned(),
+        message,
+        at: now.to_owned(),
+    };
+    set_pause_reason(&queue_control_path(db_path), &reason)?;
+    let conn = open_db(db_path)?;
+    let changed = conn
+        .execute(
+            "UPDATE ai_jobs
+             SET status = 'queued',
+                 attempts = CASE WHEN attempts > 0 THEN attempts - 1 ELSE 0 END,
+                 started_at = NULL,
+                 not_before = NULL,
+                 updated_at = ?1
+             WHERE id = ?2 AND status = 'running'",
+            params![now, id],
+        )
+        .map_err(|error| format!("任务收尾失败：{error}"))?;
+    Ok(changed > 0)
+}
+
+fn requeue_job(
+    db_path: &Path,
+    id: &str,
+    now: &str,
+    kind: ErrorKind,
+    message: &str,
+    not_before: &str,
+) -> Result<bool, String> {
+    let conn = open_db(db_path)?;
+    let changed = conn
+        .execute(
+            "UPDATE ai_jobs
+             SET status = 'queued',
+                 error_kind = ?1,
+                 error_message = ?2,
+                 not_before = ?3,
+                 started_at = NULL,
+                 finished_at = NULL,
+                 updated_at = ?4
+             WHERE id = ?5 AND status = 'running'",
+            params![kind.as_str(), message, not_before, now, id],
+        )
+        .map_err(|error| format!("任务收尾失败：{error}"))?;
+    Ok(changed > 0)
+}
+
+pub fn queue_status(db_path: &Path) -> Result<QueueStatus, String> {
+    let control = read_control(&queue_control_path(db_path));
+    let conn = open_db(db_path)?;
+    let cutoff = shift_db_time(&now_db_time(), -DAY_SECS)?;
+    let queued = count_status(&conn, "queued")?;
+    let running = count_status(&conn, "running")?;
+    let failed = count_status(&conn, "failed")?;
+    let succeeded_24h: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM ai_jobs WHERE status = 'succeeded' AND finished_at IS NOT NULL AND finished_at >= ?1",
+            [&cutoff],
+            |row| row.get(0),
+        )
+        .map_err(|error| format!("任务计数失败：{error}"))?;
+    let tokens_24h = tokens_used_since(&conn, &cutoff)?.max(0);
+    let state = queue_state(
+        control.paused,
+        control.pause_reason.is_some(),
+        running,
+        control.daily_budget_tokens,
+        tokens_24h,
+    );
+    Ok(QueueStatus {
+        state: state.to_owned(),
+        pause_reason: control.pause_reason,
+        queued,
+        running,
+        succeeded_24h,
+        failed,
+        tokens_24h,
+        daily_budget: control.daily_budget_tokens,
+        budget_remaining: budget_remaining(control.daily_budget_tokens, tokens_24h),
+    })
+}
+
+impl Worker {
+    pub fn start(
+        db_path: PathBuf,
+        handlers: Vec<Arc<dyn JobHandler>>,
+        config: WorkerConfig,
+    ) -> Self {
+        let concurrency = config.concurrency.clamp(1, 4);
+        let idle_poll = if config.idle_poll.is_zero() {
+            Duration::from_secs(2)
+        } else {
+            config.idle_poll
+        };
+        let recovered = match open_db(&db_path) {
+            Ok(conn) => recover_running_jobs(&conn, &now_db_time()).is_ok(),
+            Err(_) => false,
+        };
+        let inner = Arc::new(WorkerInner {
+            stop: AtomicBool::new(false),
+            recovered: AtomicBool::new(recovered),
+            inflight: AtomicUsize::new(0),
+            recover_lock: Mutex::new(()),
+            wake_lock: Mutex::new(()),
+            wake: Condvar::new(),
+        });
+        let handlers = Arc::new(handlers);
+        let mut joins = Vec::with_capacity(concurrency);
+        for index in 0..concurrency {
+            let db_path = db_path.clone();
+            let handlers = Arc::clone(&handlers);
+            let inner = Arc::clone(&inner);
+            match thread::Builder::new()
+                .name(format!("ai-job-{index}"))
+                .spawn(move || worker_loop(db_path, handlers, idle_poll, inner))
+            {
+                Ok(handle) => joins.push(handle),
+                Err(_) => break,
+            }
+        }
+        Self { inner, joins }
+    }
+
+    /// 不再认领新任务，并等正在跑的任务自己结束。处理器的网络超时由处理器自己管。
+    pub fn stop(mut self) {
+        self.signal_and_join();
+    }
+
+    pub fn status(&self) -> WorkerStatus {
+        WorkerStatus {
+            stopped: self.inner.stop.load(Ordering::SeqCst),
+            inflight: self.inner.inflight.load(Ordering::SeqCst),
+        }
+    }
+
+    fn signal_and_join(&mut self) {
+        self.inner.stop.store(true, Ordering::SeqCst);
+        self.inner.wake.notify_all();
+        for handle in self.joins.drain(..) {
+            let _ = handle.join();
+        }
+    }
+}
+
+impl Drop for Worker {
+    fn drop(&mut self) {
+        self.signal_and_join();
+    }
+}
+
+/// 目前没有处理器，所以不启动线程，也不可能花钱。下一张卡在这里注册处理器。
+pub fn start_default_worker(_db_path: &Path) -> Option<Worker> {
+    None
+}
+
+fn recover_running_jobs(conn: &Connection, now: &str) -> Result<usize, String> {
+    let changed = conn
+        .execute(
+            "UPDATE ai_jobs
+             SET status = 'queued', error_kind = ?1, started_at = NULL, updated_at = ?2
+             WHERE status = 'running'",
+            params![ErrorKind::Interrupted.as_str(), now],
+        )
+        .map_err(|error| format!("中断任务恢复失败：{error}"))?;
+    Ok(changed)
+}
+
+fn worker_loop(
+    db_path: PathBuf,
+    handlers: Arc<Vec<Arc<dyn JobHandler>>>,
+    idle_poll: Duration,
+    inner: Arc<WorkerInner>,
+) {
+    while !inner.stop.load(Ordering::SeqCst) {
+        if !ensure_recovered(&db_path, &inner) {
+            if inner.stop.load(Ordering::SeqCst) {
+                break;
+            }
+            wait_idle(&inner, idle_poll);
+            continue;
+        }
+        if inner.stop.load(Ordering::SeqCst) {
+            break;
+        }
+        match claim_for_worker(&db_path, handlers.as_slice()) {
+            Ok(Some(job)) => {
+                inner.inflight.fetch_add(1, Ordering::SeqCst);
+                let outcome = run_handler(handlers.as_slice(), &job, &db_path);
+                let now = now_db_time();
+                // 抖动固定为 0：重试时间可预期。测试要覆盖抖动时，直接把固定值传给 finish_job。
+                let _ = finish_job(&db_path, &job, &now, outcome, 0.0);
+                inner.inflight.fetch_sub(1, Ordering::SeqCst);
+            }
+            Ok(None) | Err(_) => {
+                if inner.stop.load(Ordering::SeqCst) {
+                    break;
+                }
+                wait_idle(&inner, idle_poll);
+            }
+        }
+    }
+}
+
+fn ensure_recovered(db_path: &Path, inner: &WorkerInner) -> bool {
+    if inner.recovered.load(Ordering::SeqCst) {
+        return true;
+    }
+    let _guard = inner
+        .recover_lock
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    if inner.recovered.load(Ordering::SeqCst) {
+        return true;
+    }
+    let Ok(conn) = open_db(db_path) else {
+        return false;
+    };
+    if recover_running_jobs(&conn, &now_db_time()).is_ok() {
+        inner.recovered.store(true, Ordering::SeqCst);
+        true
+    } else {
+        false
+    }
+}
+
+fn wait_idle(inner: &WorkerInner, idle_poll: Duration) {
+    let guard = inner
+        .wake_lock
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    if inner.stop.load(Ordering::SeqCst) {
+        return;
+    }
+    let _ = inner.wake.wait_timeout(guard, idle_poll);
+}
+
+fn claim_for_worker(
+    db_path: &Path,
+    handlers: &[Arc<dyn JobHandler>],
+) -> Result<Option<JobRecord>, String> {
+    let control = read_control(&queue_control_path(db_path));
+    let gate = BudgetGate {
+        paused: control.paused,
+        daily_budget_tokens: control.daily_budget_tokens,
+    };
+    let handled = handlers
+        .iter()
+        .map(|handler| ClaimCandidate {
+            job_type: handler.job_type().to_owned(),
+            spends_tokens: handler.spends_tokens(),
+        })
+        .collect::<Vec<_>>();
+    let mut conn = open_db(db_path)?;
+    claim_next(&mut conn, &now_db_time(), &handled, &gate)
+}
+
+fn run_handler(
+    handlers: &[Arc<dyn JobHandler>],
+    job: &JobRecord,
+    db_path: &Path,
+) -> Result<JobSuccess, JobFailure> {
+    let Some(handler) = handlers.iter().find(|item| item.job_type() == job.job_type) else {
+        return Err(JobFailure::Fatal {
+            kind: ErrorKind::Other,
+            message: "没有找到任务处理器".to_owned(),
+        });
+    };
+    match std::panic::catch_unwind(AssertUnwindSafe(|| handler.run(job, db_path))) {
+        Ok(outcome) => outcome,
+        Err(payload) => Err(JobFailure::Fatal {
+            kind: ErrorKind::Other,
+            message: panic_message(payload),
+        }),
+    }
+}
+
+fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
+    let detail = payload
+        .downcast_ref::<&str>()
+        .map(|text| (*text).to_owned())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "未知错误".to_owned());
+    format!("任务内部出错：{detail}")
+}
+
+fn write_success(
+    db_path: &Path,
+    id: &str,
+    now: &str,
+    success: &JobSuccess,
+) -> Result<bool, String> {
+    let input_tokens = i64::try_from(success.input_tokens).map_err(|_| "token 数量超出范围")?;
+    let output_tokens = i64::try_from(success.output_tokens).map_err(|_| "token 数量超出范围")?;
+    let status = if success.skipped {
+        "skipped"
+    } else {
+        "succeeded"
+    };
+    let conn = open_db(db_path)?;
+    let changed = conn
+        .execute(
+            "UPDATE ai_jobs
+             SET status = ?1,
+                 input_tokens = ?2,
+                 output_tokens = ?3,
+                 provider = ?4,
+                 model = ?5,
+                 prompt_version = ?6,
+                 input_hash = ?7,
+                 finished_at = ?8,
+                 error_kind = NULL,
+                 error_message = NULL,
+                 updated_at = ?8
+             WHERE id = ?9 AND status = 'running'",
+            params![
+                status,
+                input_tokens,
+                output_tokens,
+                success.provider,
+                success.model,
+                success.prompt_version,
+                success.input_hash,
+                now,
+                id,
+            ],
+        )
+        .map_err(|error| format!("任务收尾失败：{error}"))?;
+    Ok(changed > 0)
+}
+
+fn write_failure(
+    db_path: &Path,
+    id: &str,
+    now: &str,
+    kind: ErrorKind,
+    message: &str,
+) -> Result<bool, String> {
+    let conn = open_db(db_path)?;
+    let changed = conn
+        .execute(
+            "UPDATE ai_jobs
+             SET status = 'failed',
+                 error_kind = ?1,
+                 error_message = ?2,
+                 finished_at = ?3,
+                 updated_at = ?3
+             WHERE id = ?4 AND status = 'running'",
+            params![kind.as_str(), message, now, id],
+        )
+        .map_err(|error| format!("任务收尾失败：{error}"))?;
+    Ok(changed > 0)
+}
+
+fn retry_delay_secs(attempt: i64, retry_after_secs: Option<u64>, jitter: f64) -> u64 {
+    if let Some(given) = retry_after_secs {
+        return given.clamp(5, 3600);
+    }
+    let base: u64 = if attempt <= 1 {
+        30
+    } else if attempt == 2 {
+        120
+    } else {
+        600
+    };
+    let factor = 1.0 + 0.1 * jitter.clamp(-1.0, 1.0);
+    let scaled = (base as f64) * factor;
+    if !scaled.is_finite() {
+        return base;
+    }
+    scaled.round().max(0.0) as u64
+}
+
+fn tokens_used_since(conn: &Connection, cutoff: &str) -> Result<i64, String> {
+    conn.query_row(
+        "SELECT COALESCE(SUM(input_tokens + output_tokens), 0)
+         FROM ai_jobs
+         WHERE status IN ('succeeded', 'skipped', 'failed')
+           AND finished_at IS NOT NULL
+           AND finished_at >= ?1",
+        [cutoff],
+        |row| row.get(0),
+    )
+    .map_err(|error| format!("用量读取失败：{error}"))
+}
+
+fn count_status(conn: &Connection, status: &str) -> Result<i64, String> {
+    conn.query_row(
+        "SELECT COUNT(*) FROM ai_jobs WHERE status = ?1",
+        [status],
+        |row| row.get(0),
+    )
+    .map_err(|error| format!("任务计数失败：{error}"))
+}
+
+/// 预算为 0 表示还没授权花钱，不是额度用完。
+/// `stopped` 是系统停的（写了 pauseReason，例如认证失败）；`paused` 是用户暂停。
+fn queue_state(
+    paused: bool,
+    has_reason: bool,
+    running: i64,
+    budget: u64,
+    tokens_24h: i64,
+) -> &'static str {
+    if paused && has_reason {
+        "stopped"
+    } else if paused {
+        "paused"
+    } else if running > 0 {
+        "running"
+    } else if budget > 0 && tokens_24h >= i64::try_from(budget).unwrap_or(i64::MAX) {
+        "budget_reached"
+    } else {
+        "idle"
+    }
+}
+
+fn budget_remaining(budget: u64, tokens_24h: i64) -> u64 {
+    let Ok(budget_i64) = i64::try_from(budget) else {
+        return 0;
+    };
+    if budget_i64 == 0 || tokens_24h >= budget_i64 {
+        0
+    } else {
+        (budget_i64 - tokens_24h.max(0)) as u64
+    }
+}
+
+fn set_pause_reason(path: &Path, reason: &PauseReason) -> Result<(), String> {
+    let value =
+        serde_json::to_value(reason).map_err(|error| format!("暂停原因序列化失败：{error}"))?;
+    with_control_file(path, |map| {
+        map.insert("paused".to_owned(), Value::Bool(true));
+        map.insert("pauseReason".to_owned(), value.clone());
+        Ok(())
+    })
+}
+
+fn with_control_file<T>(
+    path: &Path,
+    update: impl FnOnce(&mut Map<String, Value>) -> Result<T, String>,
+) -> Result<T, String> {
+    static LOCK: Mutex<()> = Mutex::new(());
+    let _guard = LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    let mut map = load_object(path)?;
+    let result = update(&mut map)?;
+    write_object(path, &map)?;
+    Ok(result)
+}
+
+fn load_object(path: &Path) -> Result<Map<String, Value>, String> {
+    let text = match fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Map::new()),
+        Err(error) => return Err(format!("队列控制文件读取失败：{error}")),
+    };
+    if text.trim().is_empty() {
+        return Ok(Map::new());
+    }
+    let value: Value =
+        serde_json::from_str(&text).map_err(|error| format!("队列控制文件解析失败：{error}"))?;
+    match value {
+        Value::Object(map) => Ok(map),
+        _ => Err("队列控制文件格式不对".to_owned()),
+    }
+}
+
+fn control_from_map(map: &Map<String, Value>) -> QueueControl {
+    let paused = map.get("paused").and_then(Value::as_bool).unwrap_or(false);
+    let daily_budget_tokens = map
+        .get("dailyBudgetTokens")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let pause_reason = map.get("pauseReason").and_then(|value| {
+        if value.is_null() {
+            None
+        } else {
+            serde_json::from_value(value.clone()).ok()
+        }
+    });
+    QueueControl {
+        paused,
+        daily_budget_tokens,
+        pause_reason,
+    }
+}
+
+fn write_object(path: &Path, map: &Map<String, Value>) -> Result<(), String> {
+    let text = serde_json::to_string(&Value::Object(map.clone()))
+        .map_err(|error| format!("队列控制文件序列化失败：{error}"))?;
+    let mut tmp_name = path
+        .file_name()
+        .map(|name| name.to_os_string())
+        .unwrap_or_else(|| "queue.json".into());
+    tmp_name.push(format!(
+        ".{}.{}.tmp",
+        std::process::id(),
+        NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
+    ));
+    let tmp = path.with_file_name(tmp_name);
+    if let Err(error) = fs::write(&tmp, text) {
+        let _ = fs::remove_file(&tmp);
+        return Err(format!("队列控制文件写入失败：{error}"));
+    }
+    if let Err(error) = fs::rename(&tmp, path) {
+        let _ = fs::remove_file(&tmp);
+        return Err(format!("队列控制文件写入失败：{error}"));
+    }
+    Ok(())
+}
+
+static NEXT_TEMP: AtomicUsize = AtomicUsize::new(0);
+
+fn open_db(path: &Path) -> Result<Connection, String> {
+    let connection = Connection::open(path).map_err(|error| format!("数据库打开失败：{error}"))?;
+    connection
+        .busy_timeout(Duration::from_millis(5000))
+        .map_err(|error| format!("数据库参数设置失败：{error}"))?;
+    connection
+        .execute_batch("PRAGMA foreign_keys = ON;")
+        .map_err(|error| format!("数据库参数设置失败：{error}"))?;
+    Ok(connection)
+}
+
+fn now_db_time() -> String {
+    format_db_time(time::OffsetDateTime::now_utc())
+}
+
+fn format_db_time(value: time::OffsetDateTime) -> String {
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z",
+        value.year(),
+        u8::from(value.month()),
+        value.day(),
+        value.hour(),
+        value.minute(),
+        value.second(),
+        value.millisecond()
+    )
+}
+
+fn parse_db_time(text: &str) -> Result<time::OffsetDateTime, String> {
+    let bytes = text.as_bytes();
+    if bytes.len() != 24
+        || bytes[4] != b'-'
+        || bytes[7] != b'-'
+        || bytes[10] != b'T'
+        || bytes[13] != b':'
+        || bytes[16] != b':'
+        || bytes[19] != b'.'
+        || bytes[23] != b'Z'
+    {
+        return Err("时间格式不对".to_owned());
+    }
+    let year: i32 = text[0..4].parse().map_err(|_| "时间格式不对")?;
+    let month_num: u8 = text[5..7].parse().map_err(|_| "时间格式不对")?;
+    let day: u8 = text[8..10].parse().map_err(|_| "时间格式不对")?;
+    let hour: u8 = text[11..13].parse().map_err(|_| "时间格式不对")?;
+    let minute: u8 = text[14..16].parse().map_err(|_| "时间格式不对")?;
+    let second: u8 = text[17..19].parse().map_err(|_| "时间格式不对")?;
+    let millis: u16 = text[20..23].parse().map_err(|_| "时间格式不对")?;
+    let month = time::Month::try_from(month_num).map_err(|_| "时间格式不对")?;
+    let date = time::Date::from_calendar_date(year, month, day).map_err(|_| "时间格式不对")?;
+    let clock =
+        time::Time::from_hms_milli(hour, minute, second, millis).map_err(|_| "时间格式不对")?;
+    Ok(time::PrimitiveDateTime::new(date, clock).assume_utc())
+}
+
+fn shift_db_time(now: &str, seconds: i64) -> Result<String, String> {
+    let parsed = parse_db_time(now)?;
+    let next = parsed
+        .checked_add(time::Duration::seconds(seconds))
+        .ok_or_else(|| "时间超出范围".to_owned())?;
+    Ok(format_db_time(next))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rusqlite::{params, Connection};
+    use serde_json::Value;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+    use std::sync::{Arc, Condvar, Mutex};
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    const NOW: &str = "2026-10-03T12:00:00.000Z";
+
+    struct TestDb {
+        path: PathBuf,
+    }
+
+    impl TestDb {
+        fn new(label: &str) -> Self {
+            static SEQ: AtomicU64 = AtomicU64::new(0);
+            let n = SEQ.fetch_add(1, Ordering::Relaxed);
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let dir = std::env::temp_dir().join(format!("fsl-jobs-{label}-{nanos}-{n}"));
+            fs::create_dir_all(&dir).unwrap();
+            let path = dir.join("fox-stars-lab.sqlite3");
+            crate::db::migrations::migrate_database(&path).unwrap();
+            let conn = open_db(&path).unwrap();
+            conn.execute(
+                "INSERT INTO github_accounts(id, login, token_ref) VALUES ('acct', 'fox', 'test')",
+                [],
+            )
+            .unwrap();
+            drop(conn);
+            Self { path }
+        }
+
+        fn path(&self) -> &Path {
+            &self.path
+        }
+
+        fn conn(&self) -> Connection {
+            open_db(&self.path).unwrap()
+        }
+    }
+
+    impl Drop for TestDb {
+        fn drop(&mut self) {
+            let Some(parent) = self.path.parent() else {
+                return;
+            };
+            let Some(name) = parent.file_name().and_then(|name| name.to_str()) else {
+                return;
+            };
+            if name.starts_with("fsl-jobs-") {
+                let _ = fs::remove_dir_all(parent);
+            }
+        }
+    }
+
+    struct JobSnap {
+        status: String,
+        attempts: i64,
+        error_kind: Option<String>,
+        error_message: Option<String>,
+        not_before: Option<String>,
+        started_at: Option<String>,
+        finished_at: Option<String>,
+        input_tokens: i64,
+        output_tokens: i64,
+        provider: Option<String>,
+        model: Option<String>,
+        prompt_version: Option<String>,
+        input_hash: Option<String>,
+    }
+
+    fn insert_job(
+        conn: &Connection,
+        id: &str,
+        job_type: &str,
+        priority: i64,
+        created_at: &str,
+        not_before: Option<&str>,
+        status: &str,
+    ) {
+        conn.execute(
+            "INSERT INTO ai_jobs(id, account_id, job_type, target_type, target_id, priority, status, attempts, max_attempts, created_at, not_before)
+             VALUES (?1, 'acct', ?2, 'repository', ?1, ?3, ?4, 0, 3, ?5, ?6)",
+            params![id, job_type, priority, status, created_at, not_before],
+        )
+        .unwrap();
+    }
+
+    fn insert_running(conn: &Connection, id: &str, attempts: i64, max_attempts: i64) {
+        conn.execute(
+            "INSERT INTO ai_jobs(id, account_id, job_type, target_type, target_id, status, attempts, max_attempts, error_kind, error_message, started_at, created_at)
+             VALUES (?1, 'acct', 'repo_card', 'repository', ?1, 'running', ?2, ?3, 'timeout', '旧错误', '2026-10-03T11:00:00.000Z', '2026-10-03T10:00:00.000Z')",
+            params![id, attempts, max_attempts],
+        )
+        .unwrap();
+    }
+
+    fn snap(conn: &Connection, id: &str) -> JobSnap {
+        conn.query_row(
+            "SELECT status, attempts, error_kind, error_message, not_before, started_at, finished_at, input_tokens, output_tokens, provider, model, prompt_version, input_hash
+             FROM ai_jobs WHERE id = ?1",
+            [id],
+            |row| {
+                Ok(JobSnap {
+                    status: row.get(0)?,
+                    attempts: row.get(1)?,
+                    error_kind: row.get(2)?,
+                    error_message: row.get(3)?,
+                    not_before: row.get(4)?,
+                    started_at: row.get(5)?,
+                    finished_at: row.get(6)?,
+                    input_tokens: row.get(7)?,
+                    output_tokens: row.get(8)?,
+                    provider: row.get(9)?,
+                    model: row.get(10)?,
+                    prompt_version: row.get(11)?,
+                    input_hash: row.get(12)?,
+                })
+            },
+        )
+        .unwrap()
+    }
+
+    fn record(id: &str, attempts: i64, max_attempts: i64) -> JobRecord {
+        JobRecord {
+            id: id.to_owned(),
+            account_id: "acct".to_owned(),
+            job_type: "repo_card".to_owned(),
+            target_type: "repository".to_owned(),
+            target_id: id.to_owned(),
+            attempts,
+            max_attempts,
+            input_hash: None,
+        }
+    }
+
+    fn ok_success(skipped: bool) -> JobSuccess {
+        JobSuccess {
+            input_tokens: 11,
+            output_tokens: 7,
+            provider: "fake".to_owned(),
+            model: "fake-model".to_owned(),
+            prompt_version: "card-v1".to_owned(),
+            input_hash: "hash-1".to_owned(),
+            skipped,
+        }
+    }
+
+    fn free_and_spend() -> Vec<ClaimCandidate> {
+        vec![
+            ClaimCandidate {
+                job_type: "repo_card".to_owned(),
+                spends_tokens: true,
+            },
+            ClaimCandidate {
+                job_type: "categorize".to_owned(),
+                spends_tokens: false,
+            },
+        ]
+    }
+
+    fn gate(paused: bool, budget: u64) -> BudgetGate {
+        BudgetGate {
+            paused,
+            daily_budget_tokens: budget,
+        }
+    }
+
+    fn claim_one(
+        conn: &mut Connection,
+        handled: &[ClaimCandidate],
+        budget_gate: &BudgetGate,
+    ) -> Option<JobRecord> {
+        claim_next(conn, NOW, handled, budget_gate).unwrap()
+    }
+
+    struct ReleaseOnDrop(Arc<(Mutex<bool>, Condvar)>);
+
+    impl ReleaseOnDrop {
+        fn notify(flag: &Arc<(Mutex<bool>, Condvar)>) {
+            let (lock, condvar) = flag.as_ref();
+            let mut go = lock.lock().unwrap();
+            *go = true;
+            condvar.notify_all();
+        }
+    }
+
+    impl Drop for ReleaseOnDrop {
+        fn drop(&mut self) {
+            Self::notify(&self.0);
+        }
+    }
+
+    #[test]
+    fn error_kind_strings_match_the_check_constraint() {
+        let pairs = [
+            (ErrorKind::Interrupted, "interrupted"),
+            (ErrorKind::Timeout, "timeout"),
+            (ErrorKind::RateLimit, "rate_limit"),
+            (ErrorKind::Auth, "auth"),
+            (ErrorKind::BadJson, "bad_json"),
+            (ErrorKind::Schema, "schema"),
+            (ErrorKind::Network, "network"),
+            (ErrorKind::ContentTooLarge, "content_too_large"),
+            (ErrorKind::Other, "other"),
+        ];
+        for (kind, text) in pairs {
+            assert_eq!(kind.as_str(), text);
+        }
+    }
+
+    #[test]
+    fn claim_orders_by_priority_then_created_at() {
+        let db = TestDb::new("order");
+        let conn = db.conn();
+        insert_job(
+            &conn,
+            "late-high",
+            "repo_card",
+            5,
+            "2026-10-03T09:00:00.000Z",
+            None,
+            "queued",
+        );
+        insert_job(
+            &conn,
+            "early-low",
+            "repo_card",
+            1,
+            "2026-10-03T08:00:00.000Z",
+            None,
+            "queued",
+        );
+        insert_job(
+            &conn,
+            "later-low",
+            "repo_card",
+            1,
+            "2026-10-03T08:30:00.000Z",
+            None,
+            "queued",
+        );
+        drop(conn);
+        let handled = vec![ClaimCandidate {
+            job_type: "repo_card".to_owned(),
+            spends_tokens: false,
+        }];
+        let mut conn = db.conn();
+        let first = claim_one(&mut conn, &handled, &gate(false, 0)).unwrap();
+        let second = claim_one(&mut conn, &handled, &gate(false, 0)).unwrap();
+        let third = claim_one(&mut conn, &handled, &gate(false, 0)).unwrap();
+        assert!(claim_one(&mut conn, &handled, &gate(false, 0)).is_none());
+        assert_eq!(first.id, "early-low");
+        assert_eq!(second.id, "later-low");
+        assert_eq!(third.id, "late-high");
+        assert_eq!(first.attempts, 1);
+        let row = snap(&conn, "early-low");
+        assert_eq!(row.status, "running");
+        assert_eq!(row.started_at.as_deref(), Some(NOW));
+        assert_eq!(row.attempts, 1);
+    }
+
+    #[test]
+    fn claim_skips_not_before_in_the_future() {
+        let db = TestDb::new("not-before");
+        let conn = db.conn();
+        insert_job(
+            &conn,
+            "future",
+            "repo_card",
+            0,
+            "2026-10-03T08:00:00.000Z",
+            Some("2026-10-03T12:00:00.001Z"),
+            "queued",
+        );
+        insert_job(
+            &conn,
+            "exact",
+            "repo_card",
+            2,
+            "2026-10-03T08:00:00.000Z",
+            Some(NOW),
+            "queued",
+        );
+        insert_job(
+            &conn,
+            "past",
+            "repo_card",
+            3,
+            "2026-10-03T07:00:00.000Z",
+            Some("2026-10-03T11:00:00.000Z"),
+            "queued",
+        );
+        insert_job(
+            &conn,
+            "empty",
+            "repo_card",
+            4,
+            "2026-10-03T06:00:00.000Z",
+            None,
+            "queued",
+        );
+        drop(conn);
+        let handled = vec![ClaimCandidate {
+            job_type: "repo_card".to_owned(),
+            spends_tokens: false,
+        }];
+        let mut conn = db.conn();
+        let ids = [
+            claim_one(&mut conn, &handled, &gate(false, 0)).unwrap().id,
+            claim_one(&mut conn, &handled, &gate(false, 0)).unwrap().id,
+            claim_one(&mut conn, &handled, &gate(false, 0)).unwrap().id,
+        ];
+        assert!(claim_one(&mut conn, &handled, &gate(false, 0)).is_none());
+        assert_eq!(ids, ["exact", "past", "empty"]);
+        assert_eq!(snap(&conn, "future").status, "queued");
+        let later = claim_next(
+            &mut conn,
+            "2026-10-03T12:00:00.001Z",
+            &handled,
+            &gate(false, 0),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(later.id, "future");
+    }
+
+    #[test]
+    fn claim_skips_job_types_without_a_handler() {
+        let db = TestDb::new("type");
+        let conn = db.conn();
+        insert_job(
+            &conn,
+            "other",
+            "translate_readme",
+            0,
+            "2026-10-03T08:00:00.000Z",
+            None,
+            "queued",
+        );
+        insert_job(
+            &conn,
+            "known",
+            "repo_card",
+            5,
+            "2026-10-03T09:00:00.000Z",
+            None,
+            "queued",
+        );
+        drop(conn);
+        let handled = vec![ClaimCandidate {
+            job_type: "repo_card".to_owned(),
+            spends_tokens: false,
+        }];
+        let mut conn = db.conn();
+        let claimed = claim_one(&mut conn, &handled, &gate(false, 0)).unwrap();
+        assert_eq!(claimed.id, "known");
+        assert!(claim_one(&mut conn, &handled, &gate(false, 0)).is_none());
+        assert_eq!(snap(&conn, "other").status, "queued");
+    }
+
+    #[test]
+    fn four_threads_do_not_claim_the_same_job_twice() {
+        let db = TestDb::new("race");
+        let conn = db.conn();
+        for index in 0..50 {
+            insert_job(
+                &conn,
+                &format!("job-{index:02}"),
+                "categorize",
+                5,
+                "2026-10-03T08:00:00.000Z",
+                None,
+                "queued",
+            );
+        }
+        drop(conn);
+        let claimed = Arc::new(Mutex::new(Vec::new()));
+        let mut handles = Vec::new();
+        for _ in 0..4 {
+            let path = db.path().to_path_buf();
+            let claimed = Arc::clone(&claimed);
+            handles.push(thread::spawn(move || {
+                let mut conn = open_db(&path).unwrap();
+                let handled = vec![ClaimCandidate {
+                    job_type: "categorize".to_owned(),
+                    spends_tokens: false,
+                }];
+                loop {
+                    match claim_next(&mut conn, NOW, &handled, &gate(false, 0)).unwrap() {
+                        Some(job) => claimed.lock().unwrap().push(job.id),
+                        None => break,
+                    }
+                }
+            }));
+        }
+        for handle in handles {
+            handle.join().unwrap();
+        }
+        let mut ids = claimed.lock().unwrap().clone();
+        ids.sort();
+        ids.dedup();
+        assert_eq!(ids.len(), 50, "有重复认领或漏领");
+        let conn = db.conn();
+        let running: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM ai_jobs WHERE status = 'running'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let queued: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM ai_jobs WHERE status = 'queued'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!((running, queued), (50, 0));
+    }
+
+    #[test]
+    fn zero_budget_claims_free_jobs_and_skips_spending_jobs() {
+        let db = TestDb::new("zero-budget");
+        let conn = db.conn();
+        insert_job(
+            &conn,
+            "spend",
+            "repo_card",
+            0,
+            "2026-10-03T08:00:00.000Z",
+            None,
+            "queued",
+        );
+        insert_job(
+            &conn,
+            "free",
+            "categorize",
+            5,
+            "2026-10-03T09:00:00.000Z",
+            None,
+            "queued",
+        );
+        drop(conn);
+        let handled = free_and_spend();
+        let mut conn = db.conn();
+        let first = claim_one(&mut conn, &handled, &gate(false, 0)).unwrap();
+        assert_eq!(first.id, "free");
+        assert!(claim_one(&mut conn, &handled, &gate(false, 0)).is_none());
+        assert_eq!(snap(&conn, "spend").status, "queued");
+        let spend = claim_one(&mut conn, &handled, &gate(false, 10)).unwrap();
+        assert_eq!(spend.id, "spend");
+    }
+
+    #[test]
+    fn rolling_24h_usage_stops_spending_claims() {
+        let db = TestDb::new("budget-window");
+        let handled = free_and_spend();
+        let conn = db.conn();
+        conn.execute(
+            "INSERT INTO ai_jobs(id, account_id, job_type, target_type, target_id, status, input_tokens, output_tokens, finished_at, created_at)
+             VALUES ('old', 'acct', 'repo_card', 'repository', 'old', 'succeeded', 5000, 0, '2020-01-01T00:00:00.000Z', '2020-01-01T00:00:00.000Z')",
+            [],
+        )
+        .unwrap();
+        insert_job(
+            &conn,
+            "spend-old",
+            "repo_card",
+            1,
+            "2026-10-03T08:00:00.000Z",
+            None,
+            "queued",
+        );
+        drop(conn);
+        let mut conn = db.conn();
+        // 24 小时前结束的用量不计入，预算 100 仍然可以领花钱任务。
+        assert_eq!(
+            claim_one(&mut conn, &handled, &gate(false, 100))
+                .unwrap()
+                .id,
+            "spend-old"
+        );
+        conn.execute("DELETE FROM ai_jobs WHERE id = 'spend-old'", [])
+            .unwrap();
+        conn.execute(
+            "INSERT INTO ai_jobs(id, account_id, job_type, target_type, target_id, status, input_tokens, output_tokens, finished_at, created_at)
+             VALUES ('recent', 'acct', 'repo_card', 'repository', 'recent', 'succeeded', 80, 20, '2026-10-03T11:00:00.000Z', '2026-10-03T11:00:00.000Z')",
+            [],
+        )
+        .unwrap();
+        insert_job(
+            &conn,
+            "spend-full",
+            "repo_card",
+            1,
+            "2026-10-03T08:00:00.000Z",
+            None,
+            "queued",
+        );
+        insert_job(
+            &conn,
+            "free-full",
+            "categorize",
+            2,
+            "2026-10-03T08:00:00.000Z",
+            None,
+            "queued",
+        );
+        assert!(
+            claim_one(&mut conn, &handled, &gate(false, 100))
+                .unwrap()
+                .id
+                == "free-full"
+        );
+        assert!(claim_one(&mut conn, &handled, &gate(false, 100)).is_none());
+        assert_eq!(snap(&conn, "spend-full").status, "queued");
+        // 差 1 个 token 时仍可再领一条，允许这一条把总量撑过预算。
+        conn.execute(
+            "UPDATE ai_jobs SET output_tokens = 19 WHERE id = 'recent'",
+            [],
+        )
+        .unwrap();
+        let slipped = claim_one(&mut conn, &handled, &gate(false, 100)).unwrap();
+        assert_eq!(slipped.id, "spend-full");
+    }
+
+    #[test]
+    fn paused_gate_claims_nothing() {
+        let db = TestDb::new("paused");
+        let conn = db.conn();
+        insert_job(
+            &conn,
+            "spend",
+            "repo_card",
+            0,
+            "2026-10-03T08:00:00.000Z",
+            None,
+            "queued",
+        );
+        insert_job(
+            &conn,
+            "free",
+            "categorize",
+            0,
+            "2026-10-03T08:00:00.000Z",
+            None,
+            "queued",
+        );
+        drop(conn);
+        let mut conn = db.conn();
+        assert!(claim_one(&mut conn, &free_and_spend(), &gate(true, 1_000_000)).is_none());
+        assert_eq!(snap(&conn, "spend").status, "queued");
+        assert_eq!(snap(&conn, "free").status, "queued");
+    }
+
+    #[test]
+    fn success_writes_result_fields_and_clears_errors() {
+        let db = TestDb::new("success");
+        let conn = db.conn();
+        insert_running(&conn, "job", 1, 3);
+        drop(conn);
+        let updated = finish_job(
+            db.path(),
+            &record("job", 1, 3),
+            NOW,
+            Ok(ok_success(false)),
+            0.0,
+        )
+        .unwrap();
+        assert!(updated);
+        let row = snap(&db.conn(), "job");
+        assert_eq!(row.status, "succeeded");
+        assert_eq!((row.input_tokens, row.output_tokens), (11, 7));
+        assert_eq!(row.provider.as_deref(), Some("fake"));
+        assert_eq!(row.model.as_deref(), Some("fake-model"));
+        assert_eq!(row.prompt_version.as_deref(), Some("card-v1"));
+        assert_eq!(row.input_hash.as_deref(), Some("hash-1"));
+        assert_eq!(row.finished_at.as_deref(), Some(NOW));
+        assert!(row.error_kind.is_none());
+        assert!(row.error_message.is_none());
+        assert_eq!(row.attempts, 1);
+    }
+
+    #[test]
+    fn skipped_marks_skipped_status() {
+        let db = TestDb::new("skipped");
+        let conn = db.conn();
+        insert_running(&conn, "job", 1, 3);
+        drop(conn);
+        assert!(finish_job(
+            db.path(),
+            &record("job", 1, 3),
+            NOW,
+            Ok(ok_success(true)),
+            0.0
+        )
+        .unwrap());
+        let row = snap(&db.conn(), "job");
+        assert_eq!(row.status, "skipped");
+        assert_eq!((row.input_tokens, row.output_tokens), (11, 7));
+        assert!(row.error_kind.is_none());
+        assert_eq!(row.finished_at.as_deref(), Some(NOW));
+    }
+
+    #[test]
+    fn retryable_uses_backoff_table_clamp_and_jitter() {
+        assert_eq!(shift_db_time(NOW, 30).unwrap(), "2026-10-03T12:00:30.000Z");
+        assert_eq!(shift_db_time(NOW, 27).unwrap(), "2026-10-03T12:00:27.000Z");
+        assert_eq!(shift_db_time(NOW, 33).unwrap(), "2026-10-03T12:00:33.000Z");
+        assert_eq!(shift_db_time(NOW, 120).unwrap(), "2026-10-03T12:02:00.000Z");
+        assert_eq!(shift_db_time(NOW, 126).unwrap(), "2026-10-03T12:02:06.000Z");
+        assert_eq!(shift_db_time(NOW, 600).unwrap(), "2026-10-03T12:10:00.000Z");
+        assert_eq!(shift_db_time(NOW, 660).unwrap(), "2026-10-03T12:11:00.000Z");
+        assert_eq!(shift_db_time(NOW, 5).unwrap(), "2026-10-03T12:00:05.000Z");
+        assert_eq!(
+            shift_db_time(NOW, 3600).unwrap(),
+            "2026-10-03T13:00:00.000Z"
+        );
+        assert_eq!(
+            shift_db_time("2026-10-03T23:59:50.000Z", 30).unwrap(),
+            "2026-10-04T00:00:20.000Z"
+        );
+
+        let cases = [
+            (1, None, 0.0, "2026-10-03T12:00:30.000Z"),
+            (2, None, 0.0, "2026-10-03T12:02:00.000Z"),
+            (3, None, 0.0, "2026-10-03T12:10:00.000Z"),
+            (1, None, 1.0, "2026-10-03T12:00:33.000Z"),
+            (1, None, -1.0, "2026-10-03T12:00:27.000Z"),
+            (2, None, 0.5, "2026-10-03T12:02:06.000Z"),
+            (4, None, 1.0, "2026-10-03T12:11:00.000Z"),
+            (1, Some(1), 1.0, "2026-10-03T12:00:05.000Z"),
+            (1, Some(10), -1.0, "2026-10-03T12:00:10.000Z"),
+            (1, Some(9_000), 0.0, "2026-10-03T13:00:00.000Z"),
+        ];
+        for (index, (attempt, retry_after, jitter, expect)) in cases.iter().enumerate() {
+            let db = TestDb::new(&format!("backoff-{index}"));
+            let conn = db.conn();
+            insert_running(&conn, "job", *attempt, 9);
+            drop(conn);
+            let failure = JobFailure::Retryable {
+                kind: ErrorKind::RateLimit,
+                message: "稍后重试".to_owned(),
+                retry_after_secs: *retry_after,
+            };
+            assert!(finish_job(
+                db.path(),
+                &record("job", *attempt, 9),
+                NOW,
+                Err(failure),
+                *jitter
+            )
+            .unwrap());
+            let row = snap(&db.conn(), "job");
+            assert_eq!(row.status, "queued", "attempt {attempt}");
+            assert_eq!(row.error_kind.as_deref(), Some("rate_limit"));
+            assert_eq!(row.error_message.as_deref(), Some("稍后重试"));
+            assert_eq!(
+                row.not_before.as_deref(),
+                Some(*expect),
+                "attempt {attempt} jitter {jitter}"
+            );
+            assert!(row.started_at.is_none());
+            assert!(row.finished_at.is_none());
+            assert_eq!(row.attempts, *attempt);
+        }
+    }
+
+    #[test]
+    fn retryable_fails_when_attempts_are_exhausted() {
+        let db = TestDb::new("exhausted");
+        let conn = db.conn();
+        insert_running(&conn, "job", 3, 3);
+        drop(conn);
+        let failure = JobFailure::Retryable {
+            kind: ErrorKind::Network,
+            message: "网络断了".to_owned(),
+            retry_after_secs: Some(10),
+        };
+        assert!(finish_job(db.path(), &record("job", 3, 3), NOW, Err(failure), 0.0).unwrap());
+        let row = snap(&db.conn(), "job");
+        assert_eq!(row.status, "failed");
+        assert_eq!(row.error_kind.as_deref(), Some("network"));
+        assert_eq!(row.error_message.as_deref(), Some("网络断了"));
+        assert_eq!(row.finished_at.as_deref(), Some(NOW));
+        assert_eq!(row.attempts, 3);
+    }
+
+    #[test]
+    fn fatal_fails_immediately() {
+        let db = TestDb::new("fatal");
+        let conn = db.conn();
+        insert_running(&conn, "job", 1, 3);
+        drop(conn);
+        let failure = JobFailure::Fatal {
+            kind: ErrorKind::Schema,
+            message: "字段不对".to_owned(),
+        };
+        assert!(finish_job(db.path(), &record("job", 1, 3), NOW, Err(failure), 0.0).unwrap());
+        let row = snap(&db.conn(), "job");
+        assert_eq!(row.status, "failed");
+        assert_eq!(row.error_kind.as_deref(), Some("schema"));
+        assert_eq!(row.error_message.as_deref(), Some("字段不对"));
+        assert_eq!(row.finished_at.as_deref(), Some(NOW));
+        assert_eq!(row.attempts, 1);
+    }
+
+    #[test]
+    fn pause_queue_requeues_without_counting_the_attempt() {
+        let db = TestDb::new("pause-queue");
+        let control = queue_control_path(db.path());
+        set_daily_budget(&control, 321).unwrap();
+        let conn = db.conn();
+        insert_job(
+            &conn,
+            "job",
+            "repo_card",
+            1,
+            "2026-10-03T08:00:00.000Z",
+            None,
+            "queued",
+        );
+        insert_job(
+            &conn,
+            "next",
+            "categorize",
+            2,
+            "2026-10-03T08:00:00.000Z",
+            None,
+            "queued",
+        );
+        drop(conn);
+        let mut conn = db.conn();
+        let claimed = claim_one(&mut conn, &free_and_spend(), &gate(false, 321)).unwrap();
+        assert_eq!(claimed.attempts, 1);
+        drop(conn);
+        let failure = JobFailure::PauseQueue {
+            kind: ErrorKind::Auth,
+            message: "密钥无效".to_owned(),
+        };
+        assert!(finish_job(db.path(), &claimed, NOW, Err(failure), 0.0).unwrap());
+        let row = snap(&db.conn(), "job");
+        assert_eq!(row.status, "queued");
+        assert_eq!(row.attempts, 0, "这次认证失败不应计入 attempts");
+        assert!(row.started_at.is_none());
+        let stored = read_control(&control);
+        assert!(stored.paused);
+        assert_eq!(stored.daily_budget_tokens, 321);
+        let reason = stored.pause_reason.expect("应写入暂停原因");
+        assert_eq!(reason.kind, "auth");
+        assert_eq!(reason.message, "密钥无效");
+        assert_eq!(reason.at, NOW);
+        let mut conn = db.conn();
+        let file_gate = gate(
+            read_control(&control).paused,
+            read_control(&control).daily_budget_tokens,
+        );
+        assert!(claim_one(&mut conn, &free_and_spend(), &file_gate).is_none());
+        set_paused(&control, false).unwrap();
+        let resumed = read_control(&control);
+        assert!(!resumed.paused);
+        assert!(resumed.pause_reason.is_none());
+        assert_eq!(resumed.daily_budget_tokens, 321);
+        let again = claim_one(&mut conn, &free_and_spend(), &gate(false, 321)).unwrap();
+        assert_eq!(again.id, "job");
+    }
+
+    struct PanicHandler {
+        calls: AtomicUsize,
+    }
+
+    impl JobHandler for PanicHandler {
+        fn job_type(&self) -> &'static str {
+            "categorize"
+        }
+        fn spends_tokens(&self) -> bool {
+            false
+        }
+        fn run(&self, job: &JobRecord, _db_path: &Path) -> Result<JobSuccess, JobFailure> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            if job.target_id == "boom" {
+                panic!("故意崩溃");
+            }
+            Ok(ok_success(false))
+        }
+    }
+
+    #[test]
+    fn handler_panic_fails_the_job_and_the_worker_continues() {
+        let db = TestDb::new("panic");
+        let conn = db.conn();
+        insert_job(
+            &conn,
+            "boom",
+            "categorize",
+            1,
+            "2026-10-03T08:00:00.000Z",
+            None,
+            "queued",
+        );
+        insert_job(
+            &conn,
+            "ok",
+            "categorize",
+            2,
+            "2026-10-03T08:00:01.000Z",
+            None,
+            "queued",
+        );
+        drop(conn);
+        let handler = Arc::new(PanicHandler {
+            calls: AtomicUsize::new(0),
+        });
+        let worker = Worker::start(
+            db.path().to_path_buf(),
+            vec![handler.clone()],
+            WorkerConfig {
+                concurrency: 1,
+                idle_poll: Duration::from_millis(20),
+            },
+        );
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while Instant::now() < deadline {
+            let conn = db.conn();
+            let boom = snap(&conn, "boom");
+            let ok = snap(&conn, "ok");
+            if boom.status == "failed" && ok.status == "succeeded" {
+                break;
+            }
+            drop(conn);
+            thread::sleep(Duration::from_millis(20));
+        }
+        worker.stop();
+        let boom = snap(&db.conn(), "boom");
+        let ok = snap(&db.conn(), "ok");
+        assert_eq!(boom.status, "failed");
+        assert_eq!(boom.error_kind.as_deref(), Some("other"));
+        assert_eq!(
+            boom.error_message.as_deref(),
+            Some("任务内部出错：故意崩溃")
+        );
+        assert_eq!(ok.status, "succeeded");
+        assert_eq!(handler.calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn cancelled_job_is_not_overwritten() {
+        let db = TestDb::new("cancel");
+        let conn = db.conn();
+        insert_running(&conn, "ok-path", 1, 3);
+        insert_running(&conn, "err-path", 1, 3);
+        conn.execute(
+            "UPDATE ai_jobs SET status = 'cancelled', input_tokens = 0, output_tokens = 0 WHERE id IN ('ok-path', 'err-path')",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+        let success = finish_job(
+            db.path(),
+            &record("ok-path", 1, 3),
+            NOW,
+            Ok(ok_success(false)),
+            0.0,
+        )
+        .unwrap();
+        let failure = finish_job(
+            db.path(),
+            &record("err-path", 1, 3),
+            NOW,
+            Err(JobFailure::Fatal {
+                kind: ErrorKind::Other,
+                message: "不应写上".to_owned(),
+            }),
+            0.0,
+        )
+        .unwrap();
+        assert!(!success);
+        assert!(!failure);
+        let ok_row = snap(&db.conn(), "ok-path");
+        let err_row = snap(&db.conn(), "err-path");
+        assert_eq!(ok_row.status, "cancelled");
+        assert_eq!((ok_row.input_tokens, ok_row.output_tokens), (0, 0));
+        assert_eq!(ok_row.error_kind.as_deref(), Some("timeout"));
+        assert_eq!(err_row.status, "cancelled");
+        assert_eq!(err_row.error_message.as_deref(), Some("旧错误"));
+        assert_ne!(err_row.error_message.as_deref(), Some("不应写上"));
+    }
+
+    #[test]
+    fn recover_running_jobs_marks_them_interrupted() {
+        let db = TestDb::new("recover-direct");
+        let conn = db.conn();
+        conn.execute(
+            "INSERT INTO ai_jobs(id, account_id, job_type, target_type, target_id, status, attempts, started_at)
+             VALUES ('run-a', 'acct', 'repo_card', 'repository', 'run-a', 'running', 2, '2026-10-03T11:00:00.000Z'),
+                    ('run-b', 'acct', 'categorize', 'repository', 'run-b', 'running', 0, '2026-10-03T11:00:00.000Z')",
+            [],
+        )
+        .unwrap();
+        let changed = recover_running_jobs(&conn, NOW).unwrap();
+        assert_eq!(changed, 2);
+        assert_eq!(recover_running_jobs(&conn, NOW).unwrap(), 0);
+        for id in ["run-a", "run-b"] {
+            let row = snap(&conn, id);
+            assert_eq!(row.status, "queued");
+            assert_eq!(row.error_kind.as_deref(), Some("interrupted"));
+            assert!(row.started_at.is_none());
+        }
+        assert_eq!(snap(&conn, "run-a").attempts, 2);
+    }
+
+    struct ObserveHandler {
+        attempts: Mutex<Option<i64>>,
+        kind: Mutex<Option<String>>,
+    }
+
+    impl JobHandler for ObserveHandler {
+        fn job_type(&self) -> &'static str {
+            "repo_card"
+        }
+        fn spends_tokens(&self) -> bool {
+            false
+        }
+        fn run(&self, job: &JobRecord, db_path: &Path) -> Result<JobSuccess, JobFailure> {
+            let conn = open_db(db_path).map_err(|error| JobFailure::Fatal {
+                kind: ErrorKind::Other,
+                message: error,
+            })?;
+            let kind: Option<String> = conn
+                .query_row(
+                    "SELECT error_kind FROM ai_jobs WHERE id = ?1",
+                    [&job.id],
+                    |row| row.get(0),
+                )
+                .map_err(|error| JobFailure::Fatal {
+                    kind: ErrorKind::Other,
+                    message: error.to_string(),
+                })?;
+            *self.attempts.lock().unwrap() = Some(job.attempts);
+            *self.kind.lock().unwrap() = kind;
+            Ok(ok_success(false))
+        }
+    }
+
+    #[test]
+    fn worker_start_returns_running_jobs_to_queue_before_claim() {
+        let db = TestDb::new("recover-worker");
+        let conn = db.conn();
+        conn.execute(
+            "INSERT INTO ai_jobs(id, account_id, job_type, target_type, target_id, status, attempts, max_attempts, started_at)
+             VALUES ('legacy', 'acct', 'repo_card', 'repository', 'legacy', 'running', 4, 6, '2026-10-03T11:00:00.000Z')",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+        let handler = Arc::new(ObserveHandler {
+            attempts: Mutex::new(None),
+            kind: Mutex::new(None),
+        });
+        let worker = Worker::start(
+            db.path().to_path_buf(),
+            vec![handler.clone()],
+            WorkerConfig {
+                concurrency: 1,
+                idle_poll: Duration::from_millis(20),
+            },
+        );
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while Instant::now() < deadline {
+            if snap(&db.conn(), "legacy").status == "succeeded" {
+                break;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        worker.stop();
+        assert_eq!(snap(&db.conn(), "legacy").status, "succeeded");
+        assert_eq!(*handler.attempts.lock().unwrap(), Some(5));
+        assert_eq!(handler.kind.lock().unwrap().as_deref(), Some("interrupted"));
+    }
+
+    #[test]
+    fn control_file_defaults_to_zero_and_pause_keeps_budget() {
+        let db = TestDb::new("control");
+        let path = db.path();
+        assert_eq!(crate::v2_ops::daily_budget(path), 0);
+        assert!(!crate::v2_ops::queue_is_paused(path));
+        assert!(!crate::v2_ops::queue_control_path(path).exists());
+
+        let control = queue_control_path(path);
+        fs::write(
+            &control,
+            r#"{"paused":true,"note":"keep","pauseReason":{"kind":"auth","message":"x","at":"2026-10-03T00:00:00.000Z"}}"#,
+        )
+        .unwrap();
+        let missing_budget = read_control(&control);
+        assert!(missing_budget.paused);
+        assert_eq!(
+            missing_budget.daily_budget_tokens, 0,
+            "没有预算字段时必须是 0，不能是 200000"
+        );
+
+        assert_eq!(
+            crate::v2_ops::set_daily_budget(path, 80_000).unwrap(),
+            80_000
+        );
+        crate::v2_ops::set_queue_paused(path, true).unwrap();
+        let paused = serde_json::from_str::<Value>(&fs::read_to_string(&control).unwrap()).unwrap();
+        assert_eq!(paused["dailyBudgetTokens"], 80_000);
+        assert_eq!(paused["paused"], true);
+        assert_eq!(paused["note"], "keep");
+        assert!(!paused.to_string().contains("200000"));
+        crate::v2_ops::set_queue_paused(path, false).unwrap();
+        let resumed =
+            serde_json::from_str::<Value>(&fs::read_to_string(&control).unwrap()).unwrap();
+        assert_eq!(resumed["dailyBudgetTokens"], 80_000);
+        assert_eq!(resumed["paused"], false);
+        assert_eq!(resumed["note"], "keep");
+        assert!(resumed.get("pauseReason").is_none());
+        assert_eq!(crate::v2_ops::daily_budget(path), 80_000);
+        assert!(!crate::v2_ops::queue_is_paused(path));
+    }
+
+    #[test]
+    fn set_daily_budget_accepts_zero_and_enforces_cap() {
+        let db = TestDb::new("cap");
+        let control = queue_control_path(db.path());
+        fs::write(&control, r#"{"paused":true,"note":"keep"}"#).unwrap();
+        assert_eq!(set_daily_budget(&control, 0).unwrap(), 0);
+        assert_eq!(read_control(&control).daily_budget_tokens, 0);
+        assert!(read_control(&control).paused);
+        let text = fs::read_to_string(&control).unwrap();
+        assert!(text.contains("keep"));
+        assert_eq!(set_daily_budget(&control, 2_000_000).unwrap(), 2_000_000);
+        assert_eq!(set_daily_budget(&control, 2_000_001).unwrap(), 2_000_000);
+        assert_eq!(read_control(&control).daily_budget_tokens, 2_000_000);
+        assert_eq!(
+            crate::v2_ops::set_daily_budget(db.path(), 9_000_000).unwrap(),
+            2_000_000
+        );
+    }
+
+    struct GateHandler {
+        current: Arc<AtomicUsize>,
+        max_seen: Arc<AtomicUsize>,
+        release: Arc<(Mutex<bool>, Condvar)>,
+    }
+
+    impl JobHandler for GateHandler {
+        fn job_type(&self) -> &'static str {
+            "categorize"
+        }
+        fn spends_tokens(&self) -> bool {
+            false
+        }
+        fn run(&self, _job: &JobRecord, _db_path: &Path) -> Result<JobSuccess, JobFailure> {
+            let now = self.current.fetch_add(1, Ordering::SeqCst) + 1;
+            self.max_seen.fetch_max(now, Ordering::SeqCst);
+            let (lock, condvar) = self.release.as_ref();
+            let guard = lock.lock().unwrap();
+            let _ = condvar.wait_timeout_while(guard, Duration::from_secs(3), |go| !*go);
+            self.current.fetch_sub(1, Ordering::SeqCst);
+            if self.max_seen.load(Ordering::SeqCst) >= 2 {
+                Ok(ok_success(false))
+            } else {
+                Err(JobFailure::Fatal {
+                    kind: ErrorKind::Other,
+                    message: "没有并行".to_owned(),
+                })
+            }
+        }
+    }
+
+    #[test]
+    fn two_workers_run_jobs_at_the_same_time() {
+        let db = TestDb::new("parallel");
+        let conn = db.conn();
+        insert_job(
+            &conn,
+            "a",
+            "categorize",
+            1,
+            "2026-10-03T08:00:00.000Z",
+            None,
+            "queued",
+        );
+        insert_job(
+            &conn,
+            "b",
+            "categorize",
+            1,
+            "2026-10-03T08:00:01.000Z",
+            None,
+            "queued",
+        );
+        drop(conn);
+        let release = Arc::new((Mutex::new(false), Condvar::new()));
+        let max_seen = Arc::new(AtomicUsize::new(0));
+        let handler = Arc::new(GateHandler {
+            current: Arc::new(AtomicUsize::new(0)),
+            max_seen: Arc::clone(&max_seen),
+            release: Arc::clone(&release),
+        });
+        let worker = Worker::start(
+            db.path().to_path_buf(),
+            vec![handler],
+            WorkerConfig {
+                concurrency: 2,
+                idle_poll: Duration::from_millis(20),
+            },
+        );
+        let _guard = ReleaseOnDrop(Arc::clone(&release));
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while max_seen.load(Ordering::SeqCst) < 2 && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            max_seen.load(Ordering::SeqCst) >= 2,
+            "两条任务没有同时处于处理器里"
+        );
+        ReleaseOnDrop::notify(&release);
+        worker.stop();
+        assert_eq!(snap(&db.conn(), "a").status, "succeeded");
+        assert_eq!(snap(&db.conn(), "b").status, "succeeded");
+    }
+
+    struct BlockHandler {
+        entered: Arc<(Mutex<usize>, Condvar)>,
+        release: Arc<(Mutex<bool>, Condvar)>,
+    }
+
+    impl JobHandler for BlockHandler {
+        fn job_type(&self) -> &'static str {
+            "categorize"
+        }
+        fn spends_tokens(&self) -> bool {
+            false
+        }
+        fn run(&self, _job: &JobRecord, _db_path: &Path) -> Result<JobSuccess, JobFailure> {
+            {
+                let (lock, condvar) = self.entered.as_ref();
+                let mut count = lock.lock().unwrap();
+                *count += 1;
+                condvar.notify_all();
+            }
+            let (lock, condvar) = self.release.as_ref();
+            let guard = lock.lock().unwrap();
+            let _ = condvar.wait_timeout_while(guard, Duration::from_secs(3), |go| !*go);
+            Ok(ok_success(false))
+        }
+    }
+
+    #[test]
+    fn stop_waits_for_the_running_job_and_claims_nothing_else() {
+        let db = TestDb::new("stop");
+        let conn = db.conn();
+        insert_job(
+            &conn,
+            "first",
+            "categorize",
+            1,
+            "2026-10-03T08:00:00.000Z",
+            None,
+            "queued",
+        );
+        insert_job(
+            &conn,
+            "second",
+            "categorize",
+            2,
+            "2026-10-03T08:00:01.000Z",
+            None,
+            "queued",
+        );
+        drop(conn);
+        let entered = Arc::new((Mutex::new(0_usize), Condvar::new()));
+        let release = Arc::new((Mutex::new(false), Condvar::new()));
+        let handler = Arc::new(BlockHandler {
+            entered: Arc::clone(&entered),
+            release: Arc::clone(&release),
+        });
+        let worker = Worker::start(
+            db.path().to_path_buf(),
+            vec![handler],
+            WorkerConfig {
+                concurrency: 1,
+                idle_poll: Duration::from_millis(20),
+            },
+        );
+        assert!(!worker.status().stopped);
+        let _guard = ReleaseOnDrop(Arc::clone(&release));
+        let (lock, condvar) = entered.as_ref();
+        let guard = lock.lock().unwrap();
+        let (guard, timeout) = condvar
+            .wait_timeout_while(guard, Duration::from_secs(3), |count| *count == 0)
+            .unwrap();
+        assert!(!timeout.timed_out());
+        assert_eq!(*guard, 1);
+        drop(guard);
+        let release_later = Arc::clone(&release);
+        thread::spawn(move || {
+            thread::sleep(Duration::from_millis(250));
+            ReleaseOnDrop::notify(&release_later);
+        });
+        let started = Instant::now();
+        worker.stop();
+        assert!(started.elapsed() >= Duration::from_millis(200));
+        assert_eq!(snap(&db.conn(), "first").status, "succeeded");
+        assert_eq!(snap(&db.conn(), "second").status, "queued");
+        assert_eq!(*entered.as_ref().0.lock().unwrap(), 1);
+    }
+
+    #[test]
+    fn queue_status_counts_match_the_rows() {
+        let db = TestDb::new("status");
+        let now = now_db_time();
+        let recent = shift_db_time(&now, -3600).unwrap();
+        let old = shift_db_time(&now, -48 * 3600).unwrap();
+        let conn = db.conn();
+        insert_job(&conn, "q1", "repo_card", 1, &old, None, "queued");
+        insert_job(&conn, "q2", "repo_card", 1, &old, None, "queued");
+        conn.execute(
+            "INSERT INTO ai_jobs(id, account_id, job_type, target_type, target_id, status, created_at)
+             VALUES ('running-1', 'acct', 'repo_card', 'repository', 'running-1', 'running', ?1)",
+            [&old],
+        )
+        .unwrap();
+        for (id, input, output) in [("s1", 10, 5), ("s2", 20, 0)] {
+            conn.execute(
+                "INSERT INTO ai_jobs(id, account_id, job_type, target_type, target_id, status, input_tokens, output_tokens, finished_at, created_at)
+                 VALUES (?1, 'acct', 'repo_card', 'repository', ?1, 'succeeded', ?2, ?3, ?4, ?4)",
+                params![id, input, output, recent],
+            )
+            .unwrap();
+        }
+        conn.execute(
+            "INSERT INTO ai_jobs(id, account_id, job_type, target_type, target_id, status, input_tokens, output_tokens, finished_at, created_at)
+             VALUES ('old-ok', 'acct', 'repo_card', 'repository', 'old-ok', 'succeeded', 999, 0, ?1, ?1)",
+            [&old],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO ai_jobs(id, account_id, job_type, target_type, target_id, status, input_tokens, output_tokens, finished_at, created_at)
+             VALUES ('skip', 'acct', 'repo_card', 'repository', 'skip', 'skipped', 3, 4, ?1, ?1)",
+            [&recent],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO ai_jobs(id, account_id, job_type, target_type, target_id, status, input_tokens, output_tokens, finished_at, created_at)
+             VALUES ('fail-new', 'acct', 'repo_card', 'repository', 'fail-new', 'failed', 7, 1, ?1, ?1),
+                    ('fail-old', 'acct', 'categorize', 'repository', 'fail-old', 'failed', 50, 0, ?2, ?2)",
+            params![recent, old],
+        )
+        .unwrap();
+        drop(conn);
+        set_daily_budget(&queue_control_path(db.path()), 100).unwrap();
+        let status = queue_status(db.path()).unwrap();
+        assert_eq!(status.queued, 2);
+        assert_eq!(status.running, 1);
+        assert_eq!(status.succeeded_24h, 2);
+        assert_eq!(status.failed, 2);
+        // 15 + 20 + skipped 7 + 最近失败 8 = 50。24 小时前的 999 和 50 不计入。
+        assert_eq!(status.tokens_24h, 50);
+        assert_eq!(status.daily_budget, 100);
+        assert_eq!(status.budget_remaining, 50);
+        assert_eq!(status.state, "running");
+        assert!(status.pause_reason.is_none());
+
+        let conn = db.conn();
+        conn.execute(
+            "UPDATE ai_jobs SET status = 'cancelled' WHERE id = 'running-1'",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+        assert_eq!(queue_status(db.path()).unwrap().state, "idle");
+
+        set_daily_budget(&queue_control_path(db.path()), 50).unwrap();
+        let reached = queue_status(db.path()).unwrap();
+        assert_eq!(reached.state, "budget_reached");
+        assert_eq!(reached.budget_remaining, 0);
+        assert_eq!(reached.tokens_24h, 50);
+
+        set_paused(&queue_control_path(db.path()), true).unwrap();
+        assert_eq!(queue_status(db.path()).unwrap().state, "paused");
+        set_pause_reason(
+            &queue_control_path(db.path()),
+            &PauseReason {
+                kind: "auth".to_owned(),
+                message: "密钥无效".to_owned(),
+                at: now,
+            },
+        )
+        .unwrap();
+        let stopped = queue_status(db.path()).unwrap();
+        assert_eq!(stopped.state, "stopped");
+        assert_eq!(stopped.pause_reason.unwrap().kind, "auth");
+
+        set_paused(&queue_control_path(db.path()), false).unwrap();
+        set_daily_budget(&queue_control_path(db.path()), 0).unwrap();
+        let idle = queue_status(db.path()).unwrap();
+        assert_eq!(idle.state, "idle");
+        assert_eq!(idle.daily_budget, 0);
+        assert_eq!(idle.budget_remaining, 0);
+    }
+
+    #[test]
+    fn enqueue_missing_cards_does_not_change_the_budget() {
+        let db = TestDb::new("enqueue");
+        let conn = db.conn();
+        conn.execute(
+            "INSERT INTO repositories(id, account_id, owner, name, full_name, html_url, starred_at, sync_status)
+             VALUES ('repo-missing', 'acct', 'fox', 'tool', 'fox/tool', 'https://github.com/fox/tool', '2026-10-01T00:00:00.000Z', 'active')",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+        assert_eq!(
+            crate::v2_ops::set_daily_budget(db.path(), 777).unwrap(),
+            777
+        );
+        let queued = crate::v2_ops::enqueue_missing_cards(db.path()).unwrap();
+        assert!(queued >= 1);
+        assert_eq!(crate::v2_ops::daily_budget(db.path()), 777);
+        assert_eq!(
+            read_control(&queue_control_path(db.path())).daily_budget_tokens,
+            777
+        );
+        let again = crate::v2_ops::enqueue_missing_cards(db.path()).unwrap();
+        assert_eq!(again, 0);
+        assert_eq!(crate::v2_ops::daily_budget(db.path()), 777);
+    }
+
+    #[test]
+    fn start_default_worker_does_nothing_without_handlers() {
+        let db = TestDb::new("default-worker");
+        assert!(start_default_worker(db.path()).is_none());
+    }
+}
