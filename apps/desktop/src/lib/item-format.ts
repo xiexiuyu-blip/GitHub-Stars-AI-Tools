@@ -76,16 +76,15 @@ export function greetingFor(hour: number): string {
   return '晚上好';
 }
 
-/** 今日页问候下面那一句。数字按非负整数用；没有推荐时换一句说明。 */
-export function buildTodayLead(weekNew: number, cardsPending: number, pickCount: number): string {
+/** 今日页问候下面那一句。数字按非负整数用；没有推荐时换一句说明。
+ *  「AI 正在整理」的全库数量已经在统计卡片里，这里不再重复（它是全库口径，放进「这周」那句里会对不上）。 */
+export function buildTodayLead(weekNew: number, pickCount: number): string {
   const week = clampCount(weekNew);
-  const pending = clampCount(cardsPending);
   const picks = clampCount(pickCount);
-  const pendingText = pending > 0 ? `，其中 ${pending} 个正在等 AI 整理` : '';
   const tail = picks > 0
     ? `先从下面 ${picks} 个你可能用得上的看起。`
     : 'AI 整理好之后，这里会按你常做的事挑出值得先看的。';
-  return `这周你收藏了 ${week} 个新工具${pendingText}。${tail}`;
+  return `这周你收藏了 ${week} 个新工具。${tail}`;
 }
 
 export type CodexFallbackInput = {
@@ -128,11 +127,12 @@ export function clipText(text: string, max: number): string {
   return `${chars.slice(0, max).join('')}…`;
 }
 
-/** 「今天值得先看」列表行的补充说明。列表项没有详情字段，只用一句话。 */
-export function pickWhyLine(oneLiner: string | null | undefined): string | null {
-  const text = oneLiner?.trim();
-  if (!text) return null;
-  return `适合：${text}`;
+/** 「今天值得先看」列表行第三行。只在有 `highlight` 且和一句话不同时才显示，否则整行不出现（不要把一句话重复一遍）。 */
+export function pickWhyLine(item: { oneLiner?: string | null; highlight?: string | null }): string | null {
+  const highlight = item.highlight?.trim();
+  if (!highlight) return null;
+  if (highlight === item.oneLiner?.trim()) return null;
+  return `适合：${highlight}`;
 }
 
 export function applyReadingOverrides<T extends { id: string; readingGroup: string }>(
