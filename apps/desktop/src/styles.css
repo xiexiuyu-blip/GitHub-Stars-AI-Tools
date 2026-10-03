@@ -226,12 +226,16 @@ body {
   background-image: none;
 }
 
-button,
-a,
-input,
-select,
-textarea {
-  font: inherit;
+/* 放进 base 层：不在任何层里的规则会压过所有 Tailwind 工具类，
+   结果是按钮、输入框、链接上写的 text-sm / font-medium 全部失效，统统变成 16px 常规字重。 */
+@layer base {
+  button,
+  a,
+  input,
+  select,
+  textarea {
+    font: inherit;
+  }
 }
 
 :focus-visible {
