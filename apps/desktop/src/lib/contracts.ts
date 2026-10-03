@@ -49,6 +49,9 @@ export type LibraryItem = {
   pushedAt: string | null;
   /** 理解卡的一句话；还没有卡就是 null */
   oneLiner: string | null;
+  /** 列表行第三行「适合：…」用的一句：理解卡里第一条 problems_solved，没有就第一条能力名，再没有就是 null。
+   *  后端暂时可能不返回这个字段（所以是可选的）；界面只在它非空且和 oneLiner 不同时才显示这一行。 */
+  highlight?: string | null;
   form: string | null;
   scenarioIds: string[];
   /** 库里存的原始状态值（unread / want_to_try / tried / in_use / watching / deprecated / later / read） */
@@ -213,3 +216,8 @@ export type InboxPage = {
 
 /** 命令 `set_inbox_status({ id, status })`：归档、恢复等；`set_inbox_note({ id, note })`：写备注（最多 500 字） */
 export type SetInboxStatusRequest = { id: string; status: 'pending' | 'ready' | 'archived' };
+
+/** 命令 `confirm_library_card({ id })`：Fox 说「说得对」——把理解卡标为已确认（以后重新整理也不会覆盖）。
+ *  命令 `regenerate_library_card({ id })`：Fox 说「不对，重新整理」——把这个仓库排进整理队列重做一遍；
+ *  排队不等于马上花钱，是否真的执行受「每天额度」控制。两个命令成功都返回 null。 */
+export type CardReviewVerdict = 'confirmed' | 'regenerate';

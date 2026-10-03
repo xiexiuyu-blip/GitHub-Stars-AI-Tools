@@ -2,11 +2,13 @@ mod ai;
 mod auth;
 mod backup;
 mod capture;
+mod card_pipeline;
 mod db;
 mod dev_guard;
 mod embedding;
 mod embedding_state;
 mod github;
+mod inbox_view;
 mod jobs;
 mod library;
 mod library_view;
@@ -14,6 +16,8 @@ mod local_api;
 mod packs;
 mod ranking_query;
 mod rankings_live;
+mod scenarios;
+mod solve;
 mod storage;
 mod v2_ops;
 mod vector_index;
@@ -1106,6 +1110,42 @@ fn commit_capture_batch(
 }
 
 #[tauri::command]
+fn preview_capture(
+    app_handle: tauri::AppHandle,
+    text: String,
+) -> Result<inbox_view::CapturePreview, String> {
+    let storage = AppStorage::from_app_handle(&app_handle)?;
+    inbox_view::preview_capture(storage.database_path(), &text)
+}
+
+#[tauri::command]
+fn list_inbox(
+    app_handle: tauri::AppHandle,
+    status: Option<String>,
+    limit: Option<i64>,
+    offset: Option<i64>,
+) -> Result<inbox_view::InboxPage, String> {
+    let storage = AppStorage::from_app_handle(&app_handle)?;
+    inbox_view::list_inbox(storage.database_path(), status.as_deref(), limit, offset)
+}
+
+#[tauri::command]
+fn set_inbox_status(
+    app_handle: tauri::AppHandle,
+    id: String,
+    status: String,
+) -> Result<(), String> {
+    let storage = AppStorage::from_app_handle(&app_handle)?;
+    inbox_view::set_inbox_status(storage.database_path(), &id, &status)
+}
+
+#[tauri::command]
+fn set_inbox_note(app_handle: tauri::AppHandle, id: String, note: String) -> Result<(), String> {
+    let storage = AppStorage::from_app_handle(&app_handle)?;
+    inbox_view::set_inbox_note(storage.database_path(), &id, &note)
+}
+
+#[tauri::command]
 fn get_graph_overview(app_handle: tauri::AppHandle) -> Result<Vec<v2_ops::CategoryBlock>, String> {
     let storage = AppStorage::from_app_handle(&app_handle)?;
     v2_ops::seed_taxonomy(storage.database_path())?;
@@ -1120,6 +1160,12 @@ fn solve_problem(
 ) -> Result<v2_ops::SolveAnswer, String> {
     let storage = AppStorage::from_app_handle(&app_handle)?;
     v2_ops::solve_problem(storage.database_path(), &question)
+}
+
+#[tauri::command]
+fn solve_v2(app_handle: tauri::AppHandle, query: String) -> Result<solve::SolveResult, String> {
+    let storage = AppStorage::from_app_handle(&app_handle)?;
+    solve::solve_query(storage.database_path(), &query)
 }
 
 #[tauri::command]
@@ -1390,6 +1436,32 @@ fn search_library_semantic(
 fn enqueue_missing_cards(app_handle: tauri::AppHandle) -> Result<usize, String> {
     let storage = AppStorage::from_app_handle(&app_handle)?;
     v2_ops::enqueue_missing_cards(storage.database_path())
+}
+
+#[tauri::command]
+fn list_scenarios(app_handle: tauri::AppHandle) -> Result<Vec<scenarios::ScenarioSummary>, String> {
+    let storage = AppStorage::from_app_handle(&app_handle)?;
+    // 只补种子，不在打开列表时做全库归类。
+    scenarios::seed_scenarios(storage.database_path())?;
+    scenarios::list_scenarios_summary(storage.database_path())
+}
+
+#[tauri::command]
+fn reclassify_scenarios(app_handle: tauri::AppHandle) -> Result<scenarios::ClassifyStats, String> {
+    let storage = AppStorage::from_app_handle(&app_handle)?;
+    scenarios::seed_scenarios(storage.database_path())?;
+    scenarios::classify_repositories(storage.database_path(), None)
+}
+
+#[tauri::command]
+fn set_repository_scenario(
+    app_handle: tauri::AppHandle,
+    repo_id: String,
+    scenario_id: String,
+    status: String,
+) -> Result<(), String> {
+    let storage = AppStorage::from_app_handle(&app_handle)?;
+    scenarios::set_repository_scenario(storage.database_path(), &repo_id, &scenario_id, &status)
 }
 
 #[tauri::command]
@@ -6855,8 +6927,13 @@ pub fn run() {
             export_library_csv,
             prepare_knowledge,
             commit_capture_batch,
+            preview_capture,
+            list_inbox,
+            set_inbox_status,
+            set_inbox_note,
             get_graph_overview,
             solve_problem,
+            solve_v2,
             create_reference_pack,
             build_reference_pack_v2,
             copy_item_for_codex,
@@ -6874,6 +6951,9 @@ pub fn run() {
             merge_knowledge_concepts,
             search_library_semantic,
             enqueue_missing_cards,
+            list_scenarios,
+            reclassify_scenarios,
+            set_repository_scenario,
             list_library_cards,
             get_library_item,
             list_library_view,
