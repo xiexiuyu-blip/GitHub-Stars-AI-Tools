@@ -51,9 +51,10 @@ pub struct LibraryItem {
 
 pub fn today_overview(database_path: &Path) -> Result<TodayOverview, String> {
     let connection = open_read(database_path)?;
-    let (active_repositories, readmes, ai_documents, citations, inbox_items, tools, schema_version) = connection
-        .query_row(
-            r#"
+    let (active_repositories, readmes, ai_documents, citations, inbox_items, tools, schema_version) =
+        connection
+            .query_row(
+                r#"
 SELECT
   (SELECT COUNT(*) FROM repositories WHERE sync_status = 'active'),
   (SELECT COUNT(*) FROM repo_readmes),
@@ -63,20 +64,20 @@ SELECT
   (SELECT COUNT(*) FROM tools),
   (SELECT COALESCE(MAX(version), '') FROM schema_migrations)
 "#,
-            [],
-            |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                    row.get(5)?,
-                    row.get(6)?,
-                ))
-            },
-        )
-        .map_err(|error| format!("今日概览读取失败：{error}"))?;
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                    ))
+                },
+            )
+            .map_err(|error| format!("今日概览读取失败：{error}"))?;
     Ok(TodayOverview {
         active_repositories,
         readmes,
@@ -201,8 +202,8 @@ WHERE repositories.id = ?1
 }
 
 fn open_read(database_path: &Path) -> Result<Connection, String> {
-    let connection = Connection::open(database_path)
-        .map_err(|error| format!("资料库打开失败：{error}"))?;
+    let connection =
+        Connection::open(database_path).map_err(|error| format!("资料库打开失败：{error}"))?;
     connection
         .execute_batch("PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;")
         .map_err(|error| format!("资料库参数设置失败：{error}"))?;

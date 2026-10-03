@@ -13,17 +13,33 @@ pub struct RankItem {
 }
 
 pub fn parse_github_search(body: &str) -> Result<Vec<RankItem>, String> {
-    let value: Value = serde_json::from_str(body).map_err(|error| format!("GitHub 榜单解析失败：{error}"))?;
-    let items = value.get("items").and_then(Value::as_array).cloned().unwrap_or_default();
+    let value: Value =
+        serde_json::from_str(body).map_err(|error| format!("GitHub 榜单解析失败：{error}"))?;
+    let items = value
+        .get("items")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
     Ok(items
         .into_iter()
         .filter_map(|item| {
             let full_name = item.get("full_name")?.as_str()?.to_owned();
             Some(RankItem {
                 full_name,
-                description: item.get("description").and_then(Value::as_str).unwrap_or("").to_owned(),
-                html_url: item.get("html_url").and_then(Value::as_str).unwrap_or("").to_owned(),
-                stars: item.get("stargazers_count").and_then(Value::as_i64).unwrap_or(0),
+                description: item
+                    .get("description")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_owned(),
+                html_url: item
+                    .get("html_url")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_owned(),
+                stars: item
+                    .get("stargazers_count")
+                    .and_then(Value::as_i64)
+                    .unwrap_or(0),
             })
         })
         .take(15)
@@ -31,16 +47,28 @@ pub fn parse_github_search(body: &str) -> Result<Vec<RankItem>, String> {
 }
 
 pub fn parse_hn_show(body: &str) -> Result<Vec<RankItem>, String> {
-    let value: Value = serde_json::from_str(body).map_err(|error| format!("HN 榜单解析失败：{error}"))?;
-    let hits = value.get("hits").and_then(Value::as_array).cloned().unwrap_or_default();
+    let value: Value =
+        serde_json::from_str(body).map_err(|error| format!("HN 榜单解析失败：{error}"))?;
+    let hits = value
+        .get("hits")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
     Ok(hits
         .into_iter()
         .filter_map(|hit| {
-            let title = hit.get("title").and_then(Value::as_str).unwrap_or("").to_owned();
+            let title = hit
+                .get("title")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_owned();
             let story_url = hit.get("url").and_then(Value::as_str).unwrap_or("");
             let object_id = hit.get("objectID").and_then(Value::as_str).unwrap_or("0");
             let (full_name, html_url) = github_repo(story_url).unwrap_or_else(|| {
-                (format!("show-hn/{object_id}"), format!("https://news.ycombinator.com/item?id={object_id}"))
+                (
+                    format!("show-hn/{object_id}"),
+                    format!("https://news.ycombinator.com/item?id={object_id}"),
+                )
             });
             if title.is_empty() && full_name.starts_with("show-hn/") {
                 return None;
@@ -57,7 +85,8 @@ pub fn parse_hn_show(body: &str) -> Result<Vec<RankItem>, String> {
 }
 
 pub fn parse_ossinsight(body: &str) -> Result<Vec<RankItem>, String> {
-    let value: Value = serde_json::from_str(body).map_err(|error| format!("OSS Insight 解析失败：{error}"))?;
+    let value: Value =
+        serde_json::from_str(body).map_err(|error| format!("OSS Insight 解析失败：{error}"))?;
     if value
         .pointer("/data_quality/status")
         .and_then(Value::as_str)
@@ -77,11 +106,23 @@ pub fn parse_ossinsight(body: &str) -> Result<Vec<RankItem>, String> {
     let items = rows
         .into_iter()
         .filter_map(|row| {
-            let full_name = row.get("repo_name").or_else(|| row.get("full_name"))?.as_str()?.to_owned();
+            let full_name = row
+                .get("repo_name")
+                .or_else(|| row.get("full_name"))?
+                .as_str()?
+                .to_owned();
             Some(RankItem {
                 full_name,
-                description: row.get("description").and_then(Value::as_str).unwrap_or("").to_owned(),
-                html_url: row.get("html_url").and_then(Value::as_str).unwrap_or("").to_owned(),
+                description: row
+                    .get("description")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_owned(),
+                html_url: row
+                    .get("html_url")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_owned(),
                 stars: row.get("stars").and_then(Value::as_i64).unwrap_or(0),
             })
         })
@@ -103,11 +144,16 @@ fn github_repo(url: &str) -> Option<(String, String)> {
     if owner.is_empty() || name.is_empty() || owner.eq_ignore_ascii_case("topics") {
         return None;
     }
-    Some((format!("{owner}/{name}"), format!("https://github.com/{owner}/{name}")))
+    Some((
+        format!("{owner}/{name}"),
+        format!("https://github.com/{owner}/{name}"),
+    ))
 }
 
 pub fn refresh_default_sources(path: &Path) -> Result<String, String> {
-    if path.to_string_lossy().contains("/com.foxwork.fox-stars-lab/")
+    if path
+        .to_string_lossy()
+        .contains("/com.foxwork.fox-stars-lab/")
         && !path.to_string_lossy().contains(".dev")
     {
         return Err("拒绝刷新正式库榜单".to_owned());
@@ -147,7 +193,11 @@ pub fn refresh_default_sources(path: &Path) -> Result<String, String> {
 }
 
 fn http_get(client: &reqwest::blocking::Client, url: &str) -> Result<String, String> {
-    if let Ok(response) = client.get(url).header("Accept", "application/vnd.github+json").send() {
+    if let Ok(response) = client
+        .get(url)
+        .header("Accept", "application/vnd.github+json")
+        .send()
+    {
         if let Ok(response) = response.error_for_status() {
             if let Ok(body) = response.text() {
                 return Ok(body);
@@ -155,11 +205,23 @@ fn http_get(client: &reqwest::blocking::Client, url: &str) -> Result<String, Str
         }
     }
     let output = std::process::Command::new("curl")
-        .args(["-fsS", "-A", "fox-stars-lab-dev", "-H", "Accept: application/vnd.github+json", "--max-time", "20", url])
+        .args([
+            "-fsS",
+            "-A",
+            "fox-stars-lab-dev",
+            "-H",
+            "Accept: application/vnd.github+json",
+            "--max-time",
+            "20",
+            url,
+        ])
         .output()
         .map_err(|error| format!("curl 启动失败：{error}"))?;
     if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).chars().take(240).collect());
+        return Err(String::from_utf8_lossy(&output.stderr)
+            .chars()
+            .take(240)
+            .collect());
     }
     String::from_utf8(output.stdout).map_err(|_| "榜单响应不是 UTF-8".to_owned())
 }
@@ -195,7 +257,10 @@ fn fetch_into(
 
 #[allow(dead_code)]
 pub fn snapshot_id(source_id: &str, stamp: &str) -> String {
-    format!("{:x}", Sha256::digest(format!("{source_id}:{stamp}").as_bytes()))
+    format!(
+        "{:x}",
+        Sha256::digest(format!("{source_id}:{stamp}").as_bytes())
+    )
 }
 
 #[cfg(test)]
@@ -208,7 +273,10 @@ mod tests {
         assert_eq!(github[0].full_name, "fox/tool");
         let hn = parse_hn_show(r#"{"hits":[{"title":"Show HN: 工具","url":"https://github.com/fox/tool","objectID":"9","points":4}]}"#).unwrap();
         assert_eq!(hn[0].full_name, "fox/tool");
-        let error = parse_ossinsight(r#"{"data_quality":{"status":"unavailable","reason":"事件源不可用"}}"#).unwrap_err();
+        let error = parse_ossinsight(
+            r#"{"data_quality":{"status":"unavailable","reason":"事件源不可用"}}"#,
+        )
+        .unwrap_err();
         assert!(error.contains("不可用"));
     }
 }

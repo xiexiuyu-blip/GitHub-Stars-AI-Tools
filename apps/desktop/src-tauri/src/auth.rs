@@ -11,11 +11,14 @@ pub fn configure_credential_service(identifier: &str) {
 }
 
 pub fn credential_service() -> &'static str {
-    CREDENTIAL_SERVICE.get().copied().unwrap_or(if cfg!(debug_assertions) {
-        crate::dev_guard::DEV_CREDENTIAL_SERVICE
-    } else {
-        crate::dev_guard::PRODUCTION_CREDENTIAL_SERVICE
-    })
+    CREDENTIAL_SERVICE
+        .get()
+        .copied()
+        .unwrap_or(if cfg!(debug_assertions) {
+            crate::dev_guard::DEV_CREDENTIAL_SERVICE
+        } else {
+            crate::dev_guard::PRODUCTION_CREDENTIAL_SERVICE
+        })
 }
 const GITHUB_USER_API: &str = "https://api.github.com/user";
 const GITHUB_API_VERSION: &str = "2022-11-28";

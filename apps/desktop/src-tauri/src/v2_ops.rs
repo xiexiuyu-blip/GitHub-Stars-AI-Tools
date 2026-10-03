@@ -413,7 +413,8 @@ pub fn set_daily_budget(database_path: &Path, tokens: u64) -> Result<u64, String
     let tokens = tokens.clamp(1_000, 2_000_000);
     let paused = queue_is_paused(database_path);
     let payload = json!({ "paused": paused, "dailyBudgetTokens": tokens });
-    fs::write(queue_control_path(database_path), payload.to_string()).map_err(|error| format!("每日预算写入失败：{error}"))?;
+    fs::write(queue_control_path(database_path), payload.to_string())
+        .map_err(|error| format!("每日预算写入失败：{error}"))?;
     Ok(tokens)
 }
 
@@ -453,7 +454,8 @@ const TAXONOMY_SEED: &str = include_str!("../../../../docs/rebuild/spec/taxonomy
 pub fn seed_taxonomy(path: &Path) -> Result<usize, String> {
     let connection = open_db(path)?;
     let account = account_id(&connection)?;
-    let seed: SeedFile = serde_json::from_str(TAXONOMY_SEED).map_err(|error| format!("分类种子解析失败：{error}"))?;
+    let seed: SeedFile = serde_json::from_str(TAXONOMY_SEED)
+        .map_err(|error| format!("分类种子解析失败：{error}"))?;
     let mut inserted = 0;
     for (index, category) in seed.categories.iter().enumerate() {
         let id = format!("seed-{}", category.slug);
@@ -472,18 +474,32 @@ pub fn rule_classify(path: &Path) -> Result<usize, String> {
     seed_taxonomy(path)?;
     let connection = open_db(path)?;
     let account = account_id(&connection)?;
-    let seed: SeedFile = serde_json::from_str(TAXONOMY_SEED).map_err(|error| format!("分类种子解析失败：{error}"))?;
+    let seed: SeedFile = serde_json::from_str(TAXONOMY_SEED)
+        .map_err(|error| format!("分类种子解析失败：{error}"))?;
     let mut repos = connection
         .prepare("SELECT id, full_name, IFNULL(description,''), IFNULL(topics_json,'[]') FROM repositories WHERE sync_status = 'active'")
         .map_err(|error| format!("分类候选读取失败：{error}"))?;
     let rows = repos
-        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?)))
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })
         .map_err(|error| format!("分类候选查询失败：{error}"))?;
-    let collected = rows.collect::<Result<Vec<_>, _>>().map_err(|error| format!("分类候选解析失败：{error}"))?;
+    let collected = rows
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("分类候选解析失败：{error}"))?;
     let mut linked = 0;
     for (id, full_name, description, topics) in collected {
         let haystack = format!("{full_name} {description} {topics}").to_lowercase();
-        let Some(category) = seed.categories.iter().find(|category| rule_matches(&category.rx, &haystack)) else {
+        let Some(category) = seed
+            .categories
+            .iter()
+            .find(|category| rule_matches(&category.rx, &haystack))
+        else {
             continue;
         };
         let category_id = format!("seed-{}", category.slug);
@@ -510,9 +526,13 @@ pub fn import_summary_cards(path: &Path) -> Result<usize, String> {
         .prepare("SELECT repo_id, summary_zh FROM repo_ai_documents WHERE IFNULL(card_json, '') = '' AND IFNULL(summary_zh, '') <> ''")
         .map_err(|error| format!("旧摘要读取失败：{error}"))?;
     let rows = statement
-        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
         .map_err(|error| format!("旧摘要查询失败：{error}"))?;
-    let collected = rows.collect::<Result<Vec<_>, _>>().map_err(|error| format!("旧摘要解析失败：{error}"))?;
+    let collected = rows
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("旧摘要解析失败：{error}"))?;
     let mut updated = 0;
     for (repo_id, summary) in collected {
         let one_liner = summary.chars().take(60).collect::<String>();
@@ -539,8 +559,21 @@ pub fn import_summary_cards(path: &Path) -> Result<usize, String> {
 }
 
 pub fn validate_card(value: &Value) -> Result<(), String> {
-    let object = value.as_object().ok_or_else(|| "理解卡必须是对象".to_owned())?;
-    for key in ["one_liner_zh", "what_it_is", "form", "primary_category", "capabilities", "problems_solved", "how_to_try", "maturity", "zh_friendly", "confidence"] {
+    let object = value
+        .as_object()
+        .ok_or_else(|| "理解卡必须是对象".to_owned())?;
+    for key in [
+        "one_liner_zh",
+        "what_it_is",
+        "form",
+        "primary_category",
+        "capabilities",
+        "problems_solved",
+        "how_to_try",
+        "maturity",
+        "zh_friendly",
+        "confidence",
+    ] {
         if !object.contains_key(key) {
             return Err(format!("理解卡缺少 {key}"));
         }
@@ -559,9 +592,14 @@ pub fn repair_model_json(raw: &str) -> Result<Value, String> {
         .trim_start_matches("```")
         .trim_end_matches("```")
         .trim();
-    let start = fenced.find('{').ok_or_else(|| "模型输出里没有 JSON 对象".to_owned())?;
-    let end = fenced.rfind('}').ok_or_else(|| "模型输出里没有 JSON 结束".to_owned())?;
-    let mut value: Value = serde_json::from_str(&fenced[start..=end]).map_err(|error| format!("JSON 解析失败：{error}"))?;
+    let start = fenced
+        .find('{')
+        .ok_or_else(|| "模型输出里没有 JSON 对象".to_owned())?;
+    let end = fenced
+        .rfind('}')
+        .ok_or_else(|| "模型输出里没有 JSON 结束".to_owned())?;
+    let mut value: Value = serde_json::from_str(&fenced[start..=end])
+        .map_err(|error| format!("JSON 解析失败：{error}"))?;
     if let Some(object) = value.as_object_mut() {
         if let Some(text) = object.get("one_liner_zh").and_then(Value::as_str) {
             let shortened = text.chars().take(60).collect::<String>();
@@ -592,9 +630,16 @@ fn short_hash(value: &str) -> String {
     format!("{:x}", Sha256::digest(value.as_bytes()))[..24].to_owned()
 }
 
-pub fn commit_capture(path: &Path, text: &str, source_context: &str) -> Result<CaptureCommit, String> {
+pub fn commit_capture(
+    path: &Path,
+    text: &str,
+    source_context: &str,
+) -> Result<CaptureCommit, String> {
     let links = extract_links_from_text(text);
-    let mut result = CaptureCommit { links_found: links.len(), ..CaptureCommit::default() };
+    let mut result = CaptureCommit {
+        links_found: links.len(),
+        ..CaptureCommit::default()
+    };
     if links.is_empty() {
         // 没有链接就不留批次记录，用户补上链接后还能再贴一次。
         return Ok(result);
@@ -669,7 +714,10 @@ pub fn commit_capture(path: &Path, text: &str, source_context: &str) -> Result<C
             (Some(owner), Some(name)) => format!("{owner}/{name}"),
             _ => link.normalized_url.clone(),
         };
-        let id = format!("cap-{}", short_hash(&format!("{batch_id}|{}", link.normalized_url)));
+        let id = format!(
+            "cap-{}",
+            short_hash(&format!("{batch_id}|{}", link.normalized_url))
+        );
         tx.execute(
             "INSERT INTO inbox_items(id, account_id, original_url, normalized_url, title, item_type, source_platform, source_context, captured_via, capture_batch_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'paste_batch', ?9)",
             params![id, account, link.url, link.normalized_url, title, item_type, link.platform, context, batch_id],
@@ -677,7 +725,8 @@ pub fn commit_capture(path: &Path, text: &str, source_context: &str) -> Result<C
         .map_err(|error| format!("收集条目写入失败：{error}"))?;
         result.created += 1;
     }
-    tx.commit().map_err(|error| format!("收集提交失败：{error}"))?;
+    tx.commit()
+        .map_err(|error| format!("收集提交失败：{error}"))?;
     result.skipped = result.already_starred + result.already_in_inbox + result.blocked;
     Ok(result)
 }
@@ -701,8 +750,17 @@ GROUP BY categories.id
 ORDER BY COUNT(entity_categories.entity_id) DESC, categories.sort_order
 "#
     ).map_err(|error| format!("地图读取失败：{error}"))?;
-    let rows = statement.query_map([], |row| Ok(CategoryBlock { slug: row.get(0)?, name_zh: row.get(1)?, count: row.get(2)? })).map_err(|error| format!("地图查询失败：{error}"))?;
-    rows.collect::<Result<Vec<_>, _>>().map_err(|error| format!("地图行读取失败：{error}"))
+    let rows = statement
+        .query_map([], |row| {
+            Ok(CategoryBlock {
+                slug: row.get(0)?,
+                name_zh: row.get(1)?,
+                count: row.get(2)?,
+            })
+        })
+        .map_err(|error| format!("地图查询失败：{error}"))?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("地图行读取失败：{error}"))
 }
 
 #[derive(Debug, Serialize)]
@@ -728,8 +786,15 @@ pub fn solve_problem(path: &Path, question: &str) -> Result<SolveAnswer, String>
         .filter(|token| token.chars().count() >= 2)
         .map(|token| token.to_lowercase())
         .collect::<Vec<_>>();
-    if tokens.iter().any(|token| token.chars().any(|ch| ('\u{4e00}'..='\u{9fff}').contains(&ch))) {
-        let chars = question.chars().filter(|ch| ('\u{4e00}'..='\u{9fff}').contains(ch)).collect::<Vec<_>>();
+    if tokens.iter().any(|token| {
+        token
+            .chars()
+            .any(|ch| ('\u{4e00}'..='\u{9fff}').contains(&ch))
+    }) {
+        let chars = question
+            .chars()
+            .filter(|ch| ('\u{4e00}'..='\u{9fff}').contains(ch))
+            .collect::<Vec<_>>();
         for window in chars.windows(2) {
             tokens.push(window.iter().collect());
         }
@@ -737,12 +802,23 @@ pub fn solve_problem(path: &Path, question: &str) -> Result<SolveAnswer, String>
     let mut statement = connection.prepare(
         "SELECT repositories.id, repositories.full_name, IFNULL(repo_ai_documents.summary_zh, IFNULL(repositories.description, '')) FROM repositories LEFT JOIN repo_ai_documents ON repo_ai_documents.repo_id = repositories.id WHERE repositories.sync_status = 'active'"
     ).map_err(|error| format!("找方案读取失败：{error}"))?;
-    let rows = statement.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?))).map_err(|error| format!("找方案查询失败：{error}"))?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })
+        .map_err(|error| format!("找方案查询失败：{error}"))?;
     let mut scored = Vec::new();
     for row in rows {
         let (id, full_name, evidence) = row.map_err(|error| format!("找方案行失败：{error}"))?;
         let lower = evidence.to_lowercase();
-        let hits = tokens.iter().filter(|token| lower.contains(token.as_str())).count();
+        let hits = tokens
+            .iter()
+            .filter(|token| lower.contains(token.as_str()))
+            .count();
         if hits == 0 {
             continue;
         }
@@ -750,17 +826,31 @@ pub fn solve_problem(path: &Path, question: &str) -> Result<SolveAnswer, String>
         scored.push((hits, SolveHit { id, full_name, why }));
     }
     scored.sort_by(|left, right| right.0.cmp(&left.0));
-    let owned = scored.into_iter().take(5).map(|(_, hit)| hit).collect::<Vec<_>>();
+    let owned = scored
+        .into_iter()
+        .take(5)
+        .map(|(_, hit)| hit)
+        .collect::<Vec<_>>();
     let gaps = if owned.len() < 3 {
         vec!["本机收藏里直接证据不足，不要把未出现的用法当成已有能力。".to_owned()]
     } else {
         Vec::new()
     };
-    Ok(SolveAnswer { owned, gaps, external: Vec::new() })
+    Ok(SolveAnswer {
+        owned,
+        gaps,
+        external: Vec::new(),
+    })
 }
 
 pub fn render_pack(title: &str, problem: &str, hits: &[SolveHit]) -> String {
-    let mut lines = vec![format!("# {title}"), String::new(), problem.to_owned(), String::new(), "## 你已经有的".to_owned()];
+    let mut lines = vec![
+        format!("# {title}"),
+        String::new(),
+        problem.to_owned(),
+        String::new(),
+        "## 你已经有的".to_owned(),
+    ];
     for hit in hits {
         lines.push(format!("- {}：{}", hit.full_name, hit.why));
     }
@@ -786,9 +876,13 @@ pub fn backup_database_file(database_path: &Path, backup_dir: &Path) -> Result<P
     let destination = backup_dir.join(format!("manual-{}.sqlite3", chrono_stamp()));
     let connection = open_db(database_path)?;
     let escaped = destination.to_string_lossy().replace('\'', "''");
-    connection.execute_batch(&format!("VACUUM INTO '{escaped}'")).map_err(|error| format!("备份失败：{error}"))?;
+    connection
+        .execute_batch(&format!("VACUUM INTO '{escaped}'"))
+        .map_err(|error| format!("备份失败：{error}"))?;
     let check = Connection::open(&destination).map_err(|error| format!("备份打开失败：{error}"))?;
-    let result: String = check.query_row("PRAGMA integrity_check", [], |row| row.get(0)).map_err(|error| format!("备份校验失败：{error}"))?;
+    let result: String = check
+        .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+        .map_err(|error| format!("备份校验失败：{error}"))?;
     if result != "ok" {
         return Err(format!("备份完整性不是 ok：{result}"));
     }
@@ -799,13 +893,23 @@ pub fn export_markdown(path: &Path, destination: &Path) -> Result<usize, String>
     let page = list_workspace(path, "", "", "", 50, 0)?;
     let mut lines = vec!["# Fox Stars Lab 资料库".to_owned(), String::new()];
     for item in &page.items {
-        lines.push(format!("- {}：{}", item.full_name, item.one_liner.clone().unwrap_or_default()));
+        lines.push(format!(
+            "- {}：{}",
+            item.full_name,
+            item.one_liner.clone().unwrap_or_default()
+        ));
     }
     fs::write(destination, lines.join("\n")).map_err(|error| format!("导出失败：{error}"))?;
     Ok(page.items.len())
 }
 
-pub fn log_usage(path: &Path, entity_id: &str, verdict: &str, note: &str, via: &str) -> Result<(), String> {
+pub fn log_usage(
+    path: &Path,
+    entity_id: &str,
+    verdict: &str,
+    note: &str,
+    via: &str,
+) -> Result<(), String> {
     if !matches!(verdict, "useful" | "meh" | "useless") {
         return Err("使用反馈只能是 useful、meh 或 useless".to_owned());
     }
@@ -817,7 +921,10 @@ pub fn log_usage(path: &Path, entity_id: &str, verdict: &str, note: &str, via: &
     }
     let connection = open_db(path)?;
     let account = account_id(&connection)?;
-    let id = format!("use-{:x}", Sha256::digest(format!("{entity_id}{verdict}{note}{via}").as_bytes()));
+    let id = format!(
+        "use-{:x}",
+        Sha256::digest(format!("{entity_id}{verdict}{note}{via}").as_bytes())
+    );
     connection.execute(
         "INSERT OR IGNORE INTO usage_log(id, account_id, entity_type, entity_id, verdict, note, via) VALUES (?1, ?2, 'repository', ?3, ?4, ?5, ?6)",
         params![id, account, entity_id, verdict, note, via],
@@ -859,19 +966,22 @@ LEFT JOIN ranking_entries ON ranking_entries.snapshot_id = (
 ORDER BY ranking_sources.id, ranking_entries.rank
 "#
     ).map_err(|error| format!("榜单读取失败：{error}"))?;
-    let rows = statement.query_map([], |row| {
-        Ok(RankingRow {
-            source_id: row.get(0)?,
-            source_name: row.get(1)?,
-            enabled: row.get::<_, i64>(2)? == 1,
-            last_error: row.get(3)?,
-            full_name: row.get(4)?,
-            description: row.get(5)?,
-            already_starred: row.get::<_, i64>(6)? == 1,
-            relevance: if row.get::<_, i64>(6)? == 1 { 1.0 } else { 0.0 },
+    let rows = statement
+        .query_map([], |row| {
+            Ok(RankingRow {
+                source_id: row.get(0)?,
+                source_name: row.get(1)?,
+                enabled: row.get::<_, i64>(2)? == 1,
+                last_error: row.get(3)?,
+                full_name: row.get(4)?,
+                description: row.get(5)?,
+                already_starred: row.get::<_, i64>(6)? == 1,
+                relevance: if row.get::<_, i64>(6)? == 1 { 1.0 } else { 0.0 },
+            })
         })
-    }).map_err(|error| format!("榜单查询失败：{error}"))?;
-    rows.collect::<Result<Vec<_>, _>>().map_err(|error| format!("榜单行读取失败：{error}"))
+        .map_err(|error| format!("榜单查询失败：{error}"))?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("榜单行读取失败：{error}"))
 }
 
 #[derive(Debug, Serialize)]
@@ -910,7 +1020,11 @@ pub fn mark_ranking_error(path: &Path, source_id: &str, error: &str) -> Result<(
     Ok(())
 }
 
-pub fn replace_ranking_snapshot(path: &Path, source_id: &str, items: &[crate::rankings_live::RankItem]) -> Result<usize, String> {
+pub fn replace_ranking_snapshot(
+    path: &Path,
+    source_id: &str,
+    items: &[crate::rankings_live::RankItem],
+) -> Result<usize, String> {
     if source_id == "github_trending_html" {
         return Err("GitHub Trending 网页抓取保持关闭，不写入快照".to_owned());
     }
@@ -941,7 +1055,11 @@ pub fn set_reading_statuses(path: &Path, ids: &[String], status: &str) -> Result
         "deprecated" => "deprecated",
         _ => return Err("阅读状态只能是没看、想试、试过、在用或不要了".to_owned()),
     };
-    let stored = if stored == "dropped" { "deprecated" } else { stored };
+    let stored = if stored == "dropped" {
+        "deprecated"
+    } else {
+        stored
+    };
     let connection = open_db(path)?;
     let account = account_id(&connection)?;
     let mut changed = 0;
@@ -954,7 +1072,11 @@ pub fn set_reading_statuses(path: &Path, ids: &[String], status: &str) -> Result
     Ok(changed)
 }
 
-pub fn merge_named_concepts(path: &Path, source_name: &str, target_name: &str) -> Result<(), String> {
+pub fn merge_named_concepts(
+    path: &Path,
+    source_name: &str,
+    target_name: &str,
+) -> Result<(), String> {
     let connection = open_db(path)?;
     let account = account_id(&connection)?;
     for name in [source_name, target_name] {
@@ -965,7 +1087,11 @@ pub fn merge_named_concepts(path: &Path, source_name: &str, target_name: &str) -
         ).map_err(|error| format!("概念准备失败：{error}"))?;
     }
     drop(connection);
-    merge_concepts(path, &format!("concept-{source_name}"), &format!("concept-{target_name}"))
+    merge_concepts(
+        path,
+        &format!("concept-{source_name}"),
+        &format!("concept-{target_name}"),
+    )
 }
 
 pub fn merge_concepts(path: &Path, source_id: &str, target_id: &str) -> Result<(), String> {
@@ -980,10 +1106,12 @@ pub fn merge_concepts(path: &Path, source_id: &str, target_id: &str) -> Result<(
     if changed == 0 {
         return Err("没有可合并的概念".to_owned());
     }
-    connection.execute(
-        "UPDATE kg_edges SET dst_id = ?1 WHERE dst_type = 'concept' AND dst_id = ?2",
-        params![target_id, source_id],
-    ).ok();
+    connection
+        .execute(
+            "UPDATE kg_edges SET dst_id = ?1 WHERE dst_type = 'concept' AND dst_id = ?2",
+            params![target_id, source_id],
+        )
+        .ok();
     Ok(())
 }
 
@@ -995,8 +1123,9 @@ pub fn semantic_search(path: &Path, query: &str) -> Result<Vec<SolveHit>, String
 pub fn enqueue_missing_cards(path: &Path) -> Result<usize, String> {
     let connection = open_db(path)?;
     let account = account_id(&connection)?;
-    let changed = connection.execute(
-        r#"
+    let changed = connection
+        .execute(
+            r#"
 INSERT OR IGNORE INTO ai_jobs(id, account_id, job_type, target_type, target_id, status)
 SELECT 'card-' || repositories.id, ?1, 'repo_card', 'repository', repositories.id, 'queued'
 FROM repositories
@@ -1005,8 +1134,9 @@ WHERE repositories.sync_status = 'active'
   AND (repo_ai_documents.repo_id IS NULL OR IFNULL(repo_ai_documents.card_json, '') = '')
   AND IFNULL(repo_ai_documents.card_json, '') NOT LIKE '%"review_status":"confirmed"%'
 "#,
-        params![account],
-    ).map_err(|error| format!("缺摘要任务入队失败：{error}"))?;
+            params![account],
+        )
+        .map_err(|error| format!("缺摘要任务入队失败：{error}"))?;
     Ok(changed)
 }
 
@@ -1015,7 +1145,9 @@ pub fn restore_database_file(database_path: &Path, backup_path: &Path) -> Result
         return Err("备份文件不存在".to_owned());
     }
     let backup = Connection::open(backup_path).map_err(|error| format!("备份打开失败：{error}"))?;
-    let integrity: String = backup.query_row("PRAGMA integrity_check", [], |row| row.get(0)).map_err(|error| format!("备份校验失败：{error}"))?;
+    let integrity: String = backup
+        .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+        .map_err(|error| format!("备份校验失败：{error}"))?;
     if integrity != "ok" {
         return Err(format!("备份已损坏，拒绝恢复：{integrity}"));
     }
@@ -1025,8 +1157,16 @@ pub fn restore_database_file(database_path: &Path, backup_path: &Path) -> Result
 
 pub fn health_summary(path: &Path) -> Result<String, String> {
     let connection = open_db(path)?;
-    let integrity: String = connection.query_row("PRAGMA integrity_check", [], |row| row.get(0)).map_err(|error| format!("健康检查失败：{error}"))?;
-    let version: String = connection.query_row("SELECT COALESCE(MAX(version), '') FROM schema_migrations", [], |row| row.get(0)).map_err(|error| format!("版本读取失败：{error}"))?;
+    let integrity: String = connection
+        .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+        .map_err(|error| format!("健康检查失败：{error}"))?;
+    let version: String = connection
+        .query_row(
+            "SELECT COALESCE(MAX(version), '') FROM schema_migrations",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|error| format!("版本读取失败：{error}"))?;
     let budget = daily_budget(path);
     Ok(format!("完整性 {integrity}，迁移版本 {version}，每日预算 {budget} token，本地 API 默认关闭，只允许 127.0.0.1"))
 }
@@ -1036,12 +1176,21 @@ fn like_pattern(keyword: &str) -> String {
     if trimmed.is_empty() {
         return String::new();
     }
-    format!("%{}%", trimmed.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_"))
+    format!(
+        "%{}%",
+        trimmed
+            .replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_")
+    )
 }
 
 fn chrono_stamp() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|value| value.as_millis().to_string()).unwrap_or_else(|_| "backup".to_owned())
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|value| value.as_millis().to_string())
+        .unwrap_or_else(|_| "backup".to_owned())
 }
 
 #[cfg(test)]
@@ -1051,14 +1200,22 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn temp_db() -> PathBuf {
-        let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
         std::env::temp_dir().join(format!("fsl-v2-{nanos}.sqlite3"))
     }
 
     fn with_account(path: &Path) {
         ensure_ready(path).unwrap();
         let connection = open_db(path).unwrap();
-        connection.execute("INSERT INTO github_accounts(id, login, token_ref) VALUES ('acct', 'fox', 'test')", []).unwrap();
+        connection
+            .execute(
+                "INSERT INTO github_accounts(id, login, token_ref) VALUES ('acct', 'fox', 'test')",
+                [],
+            )
+            .unwrap();
         connection.execute("INSERT INTO repositories(id, account_id, owner, name, full_name, description, language, topics_json, html_url, sync_status, starred_at) VALUES ('repo1', 'acct', 'fox', 'tool', 'fox/tool', '批量整理群聊链接', 'TypeScript', '[]', 'https://github.com/fox/tool', 'active', '2026-10-01T00:00:00Z')", []).unwrap();
         connection.execute("INSERT INTO repo_ai_documents(repo_id, summary_zh, readme_zh, keywords_json, suggested_tags_json, model, prompt_version, source_hash, generated_at) VALUES ('repo1', '这个工具可以批量整理群聊里的链接', '', '[]', '[]', 'test', 'v1', 'hash', '2026-10-01T00:00:00Z')", []).unwrap();
     }
@@ -1132,7 +1289,11 @@ mod tests {
         assert!(!first.duplicate_batch);
         let connection = open_db(&path).unwrap();
         let stored: i64 = connection
-            .query_row("SELECT COUNT(*) FROM inbox_items WHERE capture_batch_id IS NOT NULL", [], |row| row.get(0))
+            .query_row(
+                "SELECT COUNT(*) FROM inbox_items WHERE capture_batch_id IS NOT NULL",
+                [],
+                |row| row.get(0),
+            )
             .unwrap();
         assert_eq!(stored, 2);
         let platform: String = connection
@@ -1142,9 +1303,18 @@ mod tests {
         drop(connection);
 
         // 同一段再贴：整批重复
-        assert!(commit_capture(&path, text, "测试群").unwrap().duplicate_batch);
+        assert!(
+            commit_capture(&path, text, "测试群")
+                .unwrap()
+                .duplicate_batch
+        );
         // 换一段文字，但里面是同一个仓库的另一种写法（大小写 + 跟踪参数）：不会再新建
-        let again = commit_capture(&path, "再发一次 https://github.com/ACME/Widget?utm_source=wechat", "测试群").unwrap();
+        let again = commit_capture(
+            &path,
+            "再发一次 https://github.com/ACME/Widget?utm_source=wechat",
+            "测试群",
+        )
+        .unwrap();
         assert_eq!(again.created, 0);
         assert_eq!(again.already_in_inbox, 1);
         let _ = fs::remove_file(path);
@@ -1158,11 +1328,18 @@ mod tests {
         assert_eq!(empty.links_found, 0);
         assert_eq!(empty.created, 0);
         let connection = open_db(&path).unwrap();
-        let batches: i64 = connection.query_row("SELECT COUNT(*) FROM capture_batches", [], |row| row.get(0)).unwrap();
+        let batches: i64 = connection
+            .query_row("SELECT COUNT(*) FROM capture_batches", [], |row| row.get(0))
+            .unwrap();
         assert_eq!(batches, 0);
         drop(connection);
         // 补上链接后还能正常收
-        assert_eq!(commit_capture(&path, "只有文字，没有链接。https://example.com/a", "测试群").unwrap().created, 1);
+        assert_eq!(
+            commit_capture(&path, "只有文字，没有链接。https://example.com/a", "测试群")
+                .unwrap()
+                .created,
+            1
+        );
         let _ = fs::remove_file(path);
     }
 
@@ -1179,9 +1356,21 @@ mod tests {
         let text = "先 https://example.com/ok 后 https://example.com/boom";
         assert!(commit_capture(&path, text, "测试群").is_err());
         let connection = open_db(&path).unwrap();
-        let items: i64 = connection.query_row("SELECT COUNT(*) FROM inbox_items WHERE capture_batch_id IS NOT NULL", [], |row| row.get(0)).unwrap();
-        let batches: i64 = connection.query_row("SELECT COUNT(*) FROM capture_batches", [], |row| row.get(0)).unwrap();
-        assert_eq!((items, batches), (0, 0), "出错时不能留下半批数据，也不能把这段文字记成已收过");
+        let items: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM inbox_items WHERE capture_batch_id IS NOT NULL",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let batches: i64 = connection
+            .query_row("SELECT COUNT(*) FROM capture_batches", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(
+            (items, batches),
+            (0, 0),
+            "出错时不能留下半批数据，也不能把这段文字记成已收过"
+        );
         let _ = fs::remove_file(path);
     }
 
@@ -1191,7 +1380,13 @@ mod tests {
         with_account(&path);
         let connection = open_db(&path).unwrap();
         connection.execute("INSERT INTO ai_jobs(id, account_id, job_type, target_type, target_id, status) VALUES ('job-cancel', 'acct', 'repo_card', 'repository', 'repo1', 'queued')", []).unwrap();
-        let trending: i64 = connection.query_row("SELECT enabled FROM ranking_sources WHERE id = 'github_trending_html'", [], |row| row.get(0)).unwrap();
+        let trending: i64 = connection
+            .query_row(
+                "SELECT enabled FROM ranking_sources WHERE id = 'github_trending_html'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
         drop(connection);
         assert_eq!(trending, 0);
         cancel_job(&path, "job-cancel").unwrap();
@@ -1219,7 +1414,10 @@ mod tests {
         ).unwrap();
         drop(connection);
         assert_eq!(recover_interrupted_jobs(&path).unwrap(), 5);
-        assert!(list_jobs(&path, 10).unwrap().iter().all(|job| job.status == "queued" && job.error_kind.as_deref() == Some("interrupted")));
+        assert!(list_jobs(&path, 10)
+            .unwrap()
+            .iter()
+            .all(|job| job.status == "queued" && job.error_kind.as_deref() == Some("interrupted")));
         merge_concepts(&path, "cap-a", "cap-b").unwrap();
         set_reading_statuses(&path, &["repo1".to_owned()], "want_to_try").unwrap();
         let backup_dir = std::env::temp_dir();

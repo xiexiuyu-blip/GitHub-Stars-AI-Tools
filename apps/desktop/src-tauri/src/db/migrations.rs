@@ -272,7 +272,9 @@ fn read_applied(connection: &Connection) -> Result<Vec<(String, String)>, String
         .prepare("SELECT version, name FROM schema_migrations ORDER BY version")
         .map_err(|error| format!("SQLite 迁移记录读取失败：{error}"))?;
     let rows = statement
-        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
         .map_err(|error| format!("SQLite 迁移记录遍历失败：{error}"))?;
     let mut applied = Vec::new();
     for row in rows {
@@ -283,7 +285,10 @@ fn read_applied(connection: &Connection) -> Result<Vec<(String, String)>, String
 
 fn refuse_name_mismatch(applied: &[(String, String)]) -> Result<(), String> {
     for (version, name) in applied {
-        if let Some(expected) = MIGRATIONS.iter().find(|migration| migration.version == version) {
+        if let Some(expected) = MIGRATIONS
+            .iter()
+            .find(|migration| migration.version == version)
+        {
             if expected.name != name {
                 return Err(format!(
                     "迁移 {version} 的名称是 {name}，期望 {}。已拒绝启动，避免编号撞车被静默跳过。",
@@ -360,8 +365,7 @@ fn backup_database(connection: &Connection, database_path: &Path) -> Result<Path
         .parent()
         .ok_or_else(|| "数据库路径没有父目录，无法备份".to_owned())?;
     let backup_dir = parent.join("backups");
-    fs::create_dir_all(&backup_dir)
-        .map_err(|error| format!("迁移备份目录创建失败：{error}"))?;
+    fs::create_dir_all(&backup_dir).map_err(|error| format!("迁移备份目录创建失败：{error}"))?;
     let stamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|error| format!("备份时间获取失败：{error}"))?
@@ -375,8 +379,8 @@ fn backup_database(connection: &Connection, database_path: &Path) -> Result<Path
     connection
         .execute_batch(&format!("VACUUM INTO '{escaped}'"))
         .map_err(|error| format!("迁移前备份失败：{error}"))?;
-    let backup = Connection::open(&backup_path)
-        .map_err(|error| format!("迁移备份打开失败：{error}"))?;
+    let backup =
+        Connection::open(&backup_path).map_err(|error| format!("迁移备份打开失败：{error}"))?;
     integrity_check(&backup, "迁移备份")?;
     Ok(backup_path)
 }
@@ -555,7 +559,10 @@ INSERT INTO ai_task_items(id, run_id, repository_id, full_name, status, reason) 
             1
         );
         assert_eq!(
-            count_query(&path, "SELECT COUNT(*) FROM ai_jobs WHERE error_kind = 'bad_json'"),
+            count_query(
+                &path,
+                "SELECT COUNT(*) FROM ai_jobs WHERE error_kind = 'bad_json'"
+            ),
             1
         );
 
@@ -585,7 +592,10 @@ INSERT INTO ai_task_items(id, run_id, repository_id, full_name, status, reason) 
             .and_then(|name| name.to_str())
             .is_some_and(|name| name == "com.foxwork.fox-stars-lab"));
         let before = (
-            count_query(&path, "SELECT COUNT(*) FROM repositories WHERE sync_status = 'active'"),
+            count_query(
+                &path,
+                "SELECT COUNT(*) FROM repositories WHERE sync_status = 'active'",
+            ),
             count_query(&path, "SELECT COUNT(*) FROM repo_readmes"),
             count_query(&path, "SELECT COUNT(*) FROM repo_ai_documents"),
             count_query(&path, "SELECT COUNT(*) FROM repo_ai_citations"),
@@ -594,7 +604,10 @@ INSERT INTO ai_task_items(id, run_id, repository_id, full_name, status, reason) 
         );
         let report = migrate_database(&path).expect("dev 库应能追加迁移");
         let after = (
-            count_query(&path, "SELECT COUNT(*) FROM repositories WHERE sync_status = 'active'"),
+            count_query(
+                &path,
+                "SELECT COUNT(*) FROM repositories WHERE sync_status = 'active'",
+            ),
             count_query(&path, "SELECT COUNT(*) FROM repo_readmes"),
             count_query(&path, "SELECT COUNT(*) FROM repo_ai_documents"),
             count_query(&path, "SELECT COUNT(*) FROM repo_ai_citations"),
@@ -602,8 +615,14 @@ INSERT INTO ai_task_items(id, run_id, repository_id, full_name, status, reason) 
             count_query(&path, "SELECT COUNT(*) FROM tools"),
         );
         assert_eq!(before, after);
-        assert!(report.backup_path.as_ref().is_some_and(|backup| backup.exists()));
-        let version = count_query(&path, "SELECT MAX(CAST(version AS INTEGER)) FROM schema_migrations");
+        assert!(report
+            .backup_path
+            .as_ref()
+            .is_some_and(|backup| backup.exists()));
+        let version = count_query(
+            &path,
+            "SELECT MAX(CAST(version AS INTEGER)) FROM schema_migrations",
+        );
         assert_eq!(version, 29);
     }
 

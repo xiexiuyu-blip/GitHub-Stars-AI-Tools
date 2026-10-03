@@ -945,13 +945,19 @@ fn list_workspace_cards(
 }
 
 #[tauri::command]
-fn get_workspace_detail(app_handle: tauri::AppHandle, id: String) -> Result<v2_ops::WorkspaceDetail, String> {
+fn get_workspace_detail(
+    app_handle: tauri::AppHandle,
+    id: String,
+) -> Result<v2_ops::WorkspaceDetail, String> {
     let storage = AppStorage::from_app_handle(&app_handle)?;
     v2_ops::workspace_detail(storage.database_path(), &id)
 }
 
 #[tauri::command]
-fn search_command_palette(app_handle: tauri::AppHandle, query: String) -> Result<Vec<v2_ops::PaletteHit>, String> {
+fn search_command_palette(
+    app_handle: tauri::AppHandle,
+    query: String,
+) -> Result<Vec<v2_ops::PaletteHit>, String> {
     let storage = AppStorage::from_app_handle(&app_handle)?;
     v2_ops::palette_search(storage.database_path(), &query)
 }
@@ -999,7 +1005,10 @@ fn get_local_api_status(app_handle: tauri::AppHandle) -> Result<local_api::Local
 }
 
 #[tauri::command]
-fn set_local_api_enabled(app_handle: tauri::AppHandle, enabled: bool) -> Result<local_api::LocalApiStatus, String> {
+fn set_local_api_enabled(
+    app_handle: tauri::AppHandle,
+    enabled: bool,
+) -> Result<local_api::LocalApiStatus, String> {
     let storage = AppStorage::from_app_handle(&app_handle)?;
     local_api::set_enabled(storage.database_path(), enabled)
 }
@@ -1007,7 +1016,8 @@ fn set_local_api_enabled(app_handle: tauri::AppHandle, enabled: bool) -> Result<
 #[tauri::command]
 fn get_local_api_token(app_handle: tauri::AppHandle) -> Result<String, String> {
     let storage = AppStorage::from_app_handle(&app_handle)?;
-    local_api::token(storage.database_path()).ok_or_else(|| "还没有令牌，请先开启本地 API".to_owned())
+    local_api::token(storage.database_path())
+        .ok_or_else(|| "还没有令牌，请先开启本地 API".to_owned())
 }
 
 #[tauri::command]
@@ -1029,13 +1039,23 @@ fn prepare_knowledge(app_handle: tauri::AppHandle) -> Result<String, String> {
     let seeded = v2_ops::seed_taxonomy(path)?;
     let classified = v2_ops::rule_classify(path)?;
     let cards = v2_ops::import_summary_cards(path)?;
-    Ok(format!("分类种子 {seeded}，规则归类 {classified}，旧摘要转理解卡 {cards}"))
+    Ok(format!(
+        "分类种子 {seeded}，规则归类 {classified}，旧摘要转理解卡 {cards}"
+    ))
 }
 
 #[tauri::command]
-fn commit_capture_batch(app_handle: tauri::AppHandle, text: String, source_context: Option<String>) -> Result<v2_ops::CaptureCommit, String> {
+fn commit_capture_batch(
+    app_handle: tauri::AppHandle,
+    text: String,
+    source_context: Option<String>,
+) -> Result<v2_ops::CaptureCommit, String> {
     let storage = AppStorage::from_app_handle(&app_handle)?;
-    v2_ops::commit_capture(storage.database_path(), &text, source_context.as_deref().unwrap_or(""))
+    v2_ops::commit_capture(
+        storage.database_path(),
+        &text,
+        source_context.as_deref().unwrap_or(""),
+    )
 }
 
 #[tauri::command]
@@ -1047,7 +1067,10 @@ fn get_graph_overview(app_handle: tauri::AppHandle) -> Result<Vec<v2_ops::Catego
 }
 
 #[tauri::command]
-fn solve_problem(app_handle: tauri::AppHandle, question: String) -> Result<v2_ops::SolveAnswer, String> {
+fn solve_problem(
+    app_handle: tauri::AppHandle,
+    question: String,
+) -> Result<v2_ops::SolveAnswer, String> {
     let storage = AppStorage::from_app_handle(&app_handle)?;
     v2_ops::solve_problem(storage.database_path(), &question)
 }
@@ -1081,21 +1104,39 @@ fn create_reference_pack(
 #[tauri::command]
 fn create_dev_backup(app_handle: tauri::AppHandle) -> Result<String, String> {
     let storage = AppStorage::from_app_handle(&app_handle)?;
-    let backup_dir = storage.database_path().parent().unwrap_or(storage.database_path()).join("backups");
+    let backup_dir = storage
+        .database_path()
+        .parent()
+        .unwrap_or(storage.database_path())
+        .join("backups");
     let path = v2_ops::backup_database_file(storage.database_path(), &backup_dir)?;
     Ok(path.display().to_string())
 }
 
 #[tauri::command]
-fn export_library_markdown(app_handle: tauri::AppHandle, destination: String) -> Result<usize, String> {
+fn export_library_markdown(
+    app_handle: tauri::AppHandle,
+    destination: String,
+) -> Result<usize, String> {
     let storage = AppStorage::from_app_handle(&app_handle)?;
     v2_ops::export_markdown(storage.database_path(), std::path::Path::new(&destination))
 }
 
 #[tauri::command]
-fn log_repository_usage(app_handle: tauri::AppHandle, entity_id: String, verdict: String, note: Option<String>) -> Result<(), String> {
+fn log_repository_usage(
+    app_handle: tauri::AppHandle,
+    entity_id: String,
+    verdict: String,
+    note: Option<String>,
+) -> Result<(), String> {
     let storage = AppStorage::from_app_handle(&app_handle)?;
-    v2_ops::log_usage(storage.database_path(), &entity_id, &verdict, note.as_deref().unwrap_or(""), "ui")
+    v2_ops::log_usage(
+        storage.database_path(),
+        &entity_id,
+        &verdict,
+        note.as_deref().unwrap_or(""),
+        "ui",
+    )
 }
 
 #[tauri::command]
@@ -1117,19 +1158,30 @@ fn refresh_ranking_sources(app_handle: tauri::AppHandle) -> Result<String, Strin
 }
 
 #[tauri::command]
-fn set_repository_reading_status(app_handle: tauri::AppHandle, ids: Vec<String>, status: String) -> Result<usize, String> {
+fn set_repository_reading_status(
+    app_handle: tauri::AppHandle,
+    ids: Vec<String>,
+    status: String,
+) -> Result<usize, String> {
     let storage = AppStorage::from_app_handle(&app_handle)?;
     v2_ops::set_reading_statuses(storage.database_path(), &ids, &status)
 }
 
 #[tauri::command]
-fn merge_knowledge_concepts(app_handle: tauri::AppHandle, source_id: String, target_id: String) -> Result<(), String> {
+fn merge_knowledge_concepts(
+    app_handle: tauri::AppHandle,
+    source_id: String,
+    target_id: String,
+) -> Result<(), String> {
     let storage = AppStorage::from_app_handle(&app_handle)?;
     v2_ops::merge_named_concepts(storage.database_path(), &source_id, &target_id)
 }
 
 #[tauri::command]
-fn search_library_semantic(app_handle: tauri::AppHandle, query: String) -> Result<Vec<v2_ops::SolveHit>, String> {
+fn search_library_semantic(
+    app_handle: tauri::AppHandle,
+    query: String,
+) -> Result<Vec<v2_ops::SolveHit>, String> {
     let storage = AppStorage::from_app_handle(&app_handle)?;
     v2_ops::semantic_search(storage.database_path(), &query)
 }
@@ -1403,9 +1455,11 @@ fn has_ai_api_key(provider: String) -> Result<bool, String> {
         return Ok(false);
     }
     let account = ai_api_key_account(&provider)?;
-    Ok(auth::read_secure_password(auth::credential_service(), &account)?
-        .as_deref()
-        .is_some_and(|api_key| !api_key.trim().is_empty()))
+    Ok(
+        auth::read_secure_password(auth::credential_service(), &account)?
+            .as_deref()
+            .is_some_and(|api_key| !api_key.trim().is_empty()),
+    )
 }
 
 #[tauri::command]
@@ -1435,7 +1489,11 @@ fn save_embedding_api_key(
     };
     let serialized = serde_json::to_string(&credential)
         .map_err(|error| format!("Embedding Key 安全记录序列化失败：{error}"))?;
-    auth::save_secure_password(auth::credential_service(), EMBEDDING_API_KEY_ACCOUNT, &serialized)
+    auth::save_secure_password(
+        auth::credential_service(),
+        EMBEDDING_API_KEY_ACCOUNT,
+        &serialized,
+    )
 }
 
 #[tauri::command]
@@ -6543,9 +6601,10 @@ fn import_repository_library_gist_worker(
 fn enforce_dev_data_isolation(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error::Error>> {
     let identifier = app.config().identifier.clone();
     auth::configure_credential_service(&identifier);
-    let data_dir = app.path().app_data_dir().map_err(|error| {
-        format!("应用数据目录解析失败，已停止启动，避免误开正式库：{error}")
-    })?;
+    let data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("应用数据目录解析失败，已停止启动，避免误开正式库：{error}"))?;
     if dev_guard::must_refuse_production_data_dir(cfg!(debug_assertions), &identifier, &data_dir) {
         return Err(dev_guard::production_data_dir_refusal_message().into());
     }
