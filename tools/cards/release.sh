@@ -23,7 +23,9 @@ cd "$REPO"
 git diff --quiet HEAD || { echo "主工作区有未提交的改动，不发布" >&2; exit 1; }
 BACK_CHANGED="$(git diff --name-only HEAD fox-integration -- apps/desktop/src-tauri | grep -vE '(gen/schemas|Cargo.lock)' | head -1 || true)"
 echo "== 2/3 将发布的改动："
-git log --oneline HEAD..fox-integration | head -30
+# 用 -n 限制条数，不要接 `| head`：提交多于 30 条时 head 提前关管道，git 收到 SIGPIPE，pipefail 会让整个脚本在这里悄悄退出
+git log --oneline -n 30 HEAD..fox-integration
+echo "（共 $(git rev-list --count HEAD..fox-integration) 个提交，最多列出 30 个）"
 if [ -n "$BACK_CHANGED" ]; then
   echo "!! 本次包含后台（Rust）改动：开发版会重新编译，之后会弹一次钥匙串授权（只有 Fox 能点）。"
 fi
