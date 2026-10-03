@@ -2069,18 +2069,57 @@ fn scan_tag_at(html: &str, start: usize) -> TagScan {
     }
     let name = rest[name_start..index].to_ascii_lowercase();
     let attr_start = index;
-    let mut quote: Option<u8> = None;
+    // 按 HTML 规范，引号只在「属性值的开头」才算引号：`=` 后面（可以隔着空白）紧跟的 `"` 或 `'`。
+    // 别处的引号（属性名里、没加引号的值里、`app-argument="" />` 这种多出来的）都只是普通字符。
+    // 以前遇到任何引号都翻转「在引号里」，一个多出来的引号就让后面每个 `>` 都被当成在引号里，
+    // 一路扫到文末，这个标签和后面一大片都读不出来（少数派首页的摘要因此变成了一堆标签源码）。
+    #[derive(Clone, Copy, PartialEq)]
+    enum Scan {
+        Plain,
+        AfterEquals,
+        DoubleQuoted,
+        SingleQuoted,
+    }
+    let mut state = Scan::Plain;
     while index < bytes.len() {
         let byte = bytes[index];
-        if let Some(current) = quote {
-            if byte == current {
-                quote = None;
+        match state {
+            Scan::DoubleQuoted => {
+                if byte == b'"' {
+                    state = Scan::Plain;
+                }
+                index += 1;
+                continue;
             }
-            index += 1;
-            continue;
+            Scan::SingleQuoted => {
+                if byte == b'\'' {
+                    state = Scan::Plain;
+                }
+                index += 1;
+                continue;
+            }
+            Scan::AfterEquals => {
+                if byte.is_ascii_whitespace() {
+                    index += 1;
+                    continue;
+                }
+                if byte == b'"' {
+                    state = Scan::DoubleQuoted;
+                    index += 1;
+                    continue;
+                }
+                if byte == b'\'' {
+                    state = Scan::SingleQuoted;
+                    index += 1;
+                    continue;
+                }
+                // 没加引号的值（或者 `<a href=>`）：这个字符交给下面按普通字符处理
+                state = Scan::Plain;
+            }
+            Scan::Plain => {}
         }
-        if byte == b'"' || byte == b'\'' {
-            quote = Some(byte);
+        if byte == b'=' {
+            state = Scan::AfterEquals;
             index += 1;
             continue;
         }
@@ -4651,5 +4690,40 @@ https://github.com/real/repo
             run_bounded(Duration::from_secs(2), || -> i32 { panic!("故意崩溃") }),
             None
         );
+    }
+
+    #[test]
+    fn a_stray_quote_inside_a_tag_does_not_swallow_the_rest_of_the_page() {
+        // 少数派首页真实写法：content="…app-argument="" /> 里多出一个引号。
+        // 修复前整页被当成引号里的内容，摘要变成一堆标签源码。
+        let html = concat!(
+            "<!DOCTYPE html><html><head><title>少数派</title>",
+            "<meta name=\"apple-itunes-app\" content=\"app-id=1191720421, app-argument=\"\" />",
+            "<meta name=\"description\" content=\"高效工作，品质生活\" />",
+            "</head><body><article><p>正文第一段</p></article></body></html>",
+        );
+        let page = extract_web(html, "https://sspai.example/");
+        assert_eq!(page.title, "少数派");
+        assert!(page.excerpt.contains("高效工作"), "{}", page.excerpt);
+        assert!(!page.excerpt.contains("<meta"), "{}", page.excerpt);
+        // 没加引号的值里的撇号（it's）也不能开一个引号
+        let apostrophe = "<a title=it's href=\"https://github.com/o/n\">x</a><p>后面的正文</p>";
+        assert_eq!(
+            github_repos_in(apostrophe, "https://blog.example/q"),
+            vec!["o/n".to_owned()]
+        );
+        let text = html_fragment_to_text(apostrophe, false);
+        assert!(text.contains("后面的正文"), "{text}");
+        assert!(!text.contains('<'), "标签不能漏成文字：{text}");
+    }
+
+    #[test]
+    fn a_really_unterminated_quoted_value_still_ends_the_scan_once() {
+        // 引号值开了头却一直没有结束：和浏览器一样，剩下的都算这个标签的内容，扫一次就停
+        let html = format!("<p>前文</p><a href=\"{}", "x".repeat(200_000));
+        elapsed_under(5, || {
+            let text = html_fragment_to_text(&html, false);
+            assert!(text.starts_with("前文"), "{}", &text[..text.len().min(80)]);
+        });
     }
 }
