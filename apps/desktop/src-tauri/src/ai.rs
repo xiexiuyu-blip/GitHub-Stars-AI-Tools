@@ -2270,6 +2270,435 @@ fn estimate_tokens(value: &str) -> u64 {
     char_count.div_ceil(4).max(1)
 }
 
+/// 理解卡流水线用的对话调用。不改旧的摘要函数；下一张卡才会从队列走到这里。
+#[allow(dead_code)]
+mod card_chat {
+    use super::{
+        build_endpoint, validate_request_config, AiRequestConfig, AI_CONNECT_TIMEOUT_SECONDS,
+        AI_REQUEST_TIMEOUT_SECONDS, DEFAULT_ANTHROPIC_BASE_URL, DEFAULT_OPENAI_BASE_URL,
+    };
+    use serde_json::Value;
+    use std::time::Duration;
+
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct ChatReply {
+        pub content: String,
+        pub input_tokens: Option<u64>,
+        pub output_tokens: Option<u64>,
+        pub model: Option<String>,
+    }
+
+    #[derive(Debug, Clone, PartialEq)]
+    pub enum ChatErrorKind {
+        RateLimit { retry_after_secs: Option<u64> },
+        Auth,
+        Timeout,
+        Network,
+        ContentTooLarge,
+        Other,
+    }
+
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct ChatError {
+        pub kind: ChatErrorKind,
+        pub message: String,
+    }
+
+    pub fn chat_json(
+        config: &AiRequestConfig,
+        system: &str,
+        user: &str,
+        max_output_tokens: u32,
+    ) -> Result<ChatReply, ChatError> {
+        let provider = validate_request_config(config).map_err(|message| ChatError {
+            kind: ChatErrorKind::Other,
+            message: redact_api_key(&message, &config.api_key),
+        })?;
+        match provider.as_str() {
+            "openai" => post_openai(config, system, user, max_output_tokens),
+            "anthropic" => post_anthropic(config, system, user, max_output_tokens),
+            _ => Err(ChatError {
+                kind: ChatErrorKind::Other,
+                message: "当前仅支持 OpenAI、OpenAI 兼容接口或 Anthropic AI 服务".to_owned(),
+            }),
+        }
+    }
+
+    pub fn parse_openai_chat_reply(body: &str) -> Result<ChatReply, ChatError> {
+        let value: Value = serde_json::from_str(body).map_err(|_| ChatError {
+            kind: ChatErrorKind::Other,
+            message: "OpenAI 响应不是合法 JSON".to_owned(),
+        })?;
+        let content = value
+            .get("choices")
+            .and_then(Value::as_array)
+            .and_then(|choices| {
+                choices.iter().find_map(|choice| {
+                    choice
+                        .get("message")
+                        .and_then(openai_message_text)
+                        .filter(|text| !text.trim().is_empty())
+                })
+            })
+            .ok_or_else(|| ChatError {
+                kind: ChatErrorKind::Other,
+                message: "OpenAI 响应中没有可用内容".to_owned(),
+            })?;
+        let usage = value.get("usage");
+        Ok(ChatReply {
+            content,
+            input_tokens: usage.and_then(|item| read_u64(item, "prompt_tokens")),
+            output_tokens: usage.and_then(|item| read_u64(item, "completion_tokens")),
+            model: string_field(&value, "model"),
+        })
+    }
+
+    pub fn parse_anthropic_reply(body: &str) -> Result<ChatReply, ChatError> {
+        let value: Value = serde_json::from_str(body).map_err(|_| ChatError {
+            kind: ChatErrorKind::Other,
+            message: "Anthropic 响应不是合法 JSON".to_owned(),
+        })?;
+        let mut blocks = Vec::new();
+        if let Some(content) = value.get("content").and_then(Value::as_array) {
+            for block in content {
+                if let Some(text) = block.get("text").and_then(Value::as_str) {
+                    if !text.trim().is_empty() {
+                        blocks.push(text.to_owned());
+                    }
+                } else if let Some(text) = block.as_str() {
+                    if !text.trim().is_empty() {
+                        blocks.push(text.to_owned());
+                    }
+                }
+            }
+        }
+        if blocks.is_empty() {
+            return Err(ChatError {
+                kind: ChatErrorKind::Other,
+                message: "Anthropic 响应中没有可用内容".to_owned(),
+            });
+        }
+        let usage = value.get("usage");
+        Ok(ChatReply {
+            content: blocks.join("\n"),
+            input_tokens: usage.and_then(|item| read_u64(item, "input_tokens")),
+            output_tokens: usage.and_then(|item| read_u64(item, "output_tokens")),
+            model: string_field(&value, "model"),
+        })
+    }
+
+    /// `status == 0` 表示没有 HTTP 状态的连接失败。错误文案不回显响应体，避免带上密钥。
+    pub fn classify_http_failure(status: u16, body: &str, retry_after: Option<&str>) -> ChatError {
+        if status == 429 {
+            return ChatError {
+                kind: ChatErrorKind::RateLimit {
+                    retry_after_secs: parse_retry_after(retry_after),
+                },
+                message: "AI 接口请求失败（HTTP 429）：请求过于频繁或额度不足，请稍后重试。"
+                    .to_owned(),
+            };
+        }
+        if status == 401 || status == 403 {
+            return ChatError {
+                kind: ChatErrorKind::Auth,
+                message: format!(
+                    "AI 接口请求失败（HTTP {status}）：API Key 无效或权限不足，请检查密钥、账号额度和模型权限。"
+                ),
+            };
+        }
+        if status == 400 && looks_like_context_overflow(body) {
+            return ChatError {
+                kind: ChatErrorKind::ContentTooLarge,
+                message:
+                    "AI 接口请求失败（HTTP 400）：内容超过模型上下文或最大 token 限制，请缩短输入。"
+                        .to_owned(),
+            };
+        }
+        if status == 408 {
+            return ChatError {
+                kind: ChatErrorKind::Timeout,
+                message: "AI 接口请求失败（HTTP 408）：请求超时，请稍后重试。".to_owned(),
+            };
+        }
+        if (500..600).contains(&status) {
+            return ChatError {
+                kind: ChatErrorKind::Network,
+                message: format!(
+                    "AI 接口请求失败（HTTP {status}）：AI 服务暂时不可用，请稍后重试。"
+                ),
+            };
+        }
+        if status == 0 {
+            return ChatError {
+                kind: ChatErrorKind::Network,
+                message: "AI 接口连接失败，请检查网络或请求地址。".to_owned(),
+            };
+        }
+        if looks_like_timeout(body) {
+            return ChatError {
+                kind: ChatErrorKind::Timeout,
+                message: format!("AI 接口请求失败（HTTP {status}）：请求超时，请稍后重试。"),
+            };
+        }
+        ChatError {
+            kind: ChatErrorKind::Other,
+            message: format!(
+                "AI 接口请求失败（HTTP {status}）：请检查请求地址、模型或服务商状态。"
+            ),
+        }
+    }
+
+    fn post_openai(
+        config: &AiRequestConfig,
+        system: &str,
+        user: &str,
+        max_output_tokens: u32,
+    ) -> Result<ChatReply, ChatError> {
+        let mut headers = vec![("Content-Type", "application/json".to_owned())];
+        let api_key = config.api_key.trim();
+        if !api_key.is_empty() {
+            headers.insert(0, ("Authorization", format!("Bearer {api_key}")));
+        }
+        let body = serde_json::json!({
+            "model": config.model.trim(),
+            "temperature": 0.2,
+            "max_tokens": max_output_tokens,
+            "stream": false,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user}
+            ]
+        })
+        .to_string();
+        post_json(
+            &build_endpoint(
+                config.base_url.as_deref(),
+                DEFAULT_OPENAI_BASE_URL,
+                "chat/completions",
+            ),
+            &headers,
+            &body,
+            api_key,
+            parse_openai_chat_reply,
+        )
+    }
+
+    fn post_anthropic(
+        config: &AiRequestConfig,
+        system: &str,
+        user: &str,
+        max_output_tokens: u32,
+    ) -> Result<ChatReply, ChatError> {
+        let headers = vec![
+            ("x-api-key", config.api_key.trim().to_owned()),
+            ("anthropic-version", "2023-06-01".to_owned()),
+            ("Content-Type", "application/json".to_owned()),
+        ];
+        let body = serde_json::json!({
+            "model": config.model.trim(),
+            "max_tokens": max_output_tokens,
+            "temperature": 0.2,
+            "stream": false,
+            "system": system,
+            "messages": [
+                {"role": "user", "content": user}
+            ]
+        })
+        .to_string();
+        post_json(
+            &build_endpoint(
+                config.base_url.as_deref(),
+                DEFAULT_ANTHROPIC_BASE_URL,
+                "messages",
+            ),
+            &headers,
+            &body,
+            config.api_key.trim(),
+            parse_anthropic_reply,
+        )
+    }
+
+    fn post_json(
+        endpoint: &str,
+        headers: &[(&str, String)],
+        body: &str,
+        api_key: &str,
+        parse: fn(&str) -> Result<ChatReply, ChatError>,
+    ) -> Result<ChatReply, ChatError> {
+        let client = reqwest::blocking::Client::builder()
+            .connect_timeout(Duration::from_secs(u64::from(AI_CONNECT_TIMEOUT_SECONDS)))
+            .timeout(Duration::from_secs(u64::from(AI_REQUEST_TIMEOUT_SECONDS)))
+            .build()
+            .map_err(|_| ChatError {
+                kind: ChatErrorKind::Network,
+                message: "AI 接口请求初始化失败".to_owned(),
+            })?;
+        let mut request = client.post(endpoint);
+        for (name, value) in headers {
+            request = request.header(*name, value);
+        }
+        let response = request
+            .body(body.to_owned())
+            .send()
+            .map_err(|error| map_transport_error(&error, api_key))?;
+        let status = response.status();
+        let retry_after = response
+            .headers()
+            .get("retry-after")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
+        let response_body = response.text().map_err(|_| ChatError {
+            kind: ChatErrorKind::Network,
+            message: redact_api_key("AI 接口响应读取失败", api_key),
+        })?;
+        if !status.is_success() {
+            let mut error =
+                classify_http_failure(status.as_u16(), &response_body, retry_after.as_deref());
+            error.message = redact_api_key(&error.message, api_key);
+            return Err(error);
+        }
+        parse(&response_body).map_err(|mut error| {
+            error.message = redact_api_key(&error.message, api_key);
+            error
+        })
+    }
+
+    fn map_transport_error(error: &reqwest::Error, api_key: &str) -> ChatError {
+        let (kind, message) = if error.is_timeout() {
+            (
+                ChatErrorKind::Timeout,
+                format!(
+                    "AI 接口请求超时，请检查请求地址、模型或网络（已等待 {AI_REQUEST_TIMEOUT_SECONDS} 秒）。"
+                ),
+            )
+        } else if error.is_connect() || error.is_request() {
+            (
+                ChatErrorKind::Network,
+                "AI 接口连接失败，请检查网络或请求地址。".to_owned(),
+            )
+        } else {
+            (ChatErrorKind::Other, "AI 接口请求失败。".to_owned())
+        };
+        ChatError {
+            kind,
+            message: redact_api_key(&message, api_key),
+        }
+    }
+
+    fn redact_api_key(message: &str, api_key: &str) -> String {
+        let key = api_key.trim();
+        if key.chars().count() < 4 {
+            message.to_owned()
+        } else {
+            message.replace(key, "［已隐藏］")
+        }
+    }
+
+    fn openai_message_text(message: &Value) -> Option<String> {
+        let content = message.get("content")?;
+        match content {
+            Value::String(text) => nonempty_owned(text),
+            Value::Array(parts) => {
+                let mut texts = Vec::new();
+                for part in parts {
+                    if let Some(text) = part.get("text").and_then(Value::as_str) {
+                        if let Some(text) = nonempty_owned(text) {
+                            texts.push(text);
+                        }
+                    } else if let Some(text) = part.as_str() {
+                        if let Some(text) = nonempty_owned(text) {
+                            texts.push(text);
+                        }
+                    }
+                }
+                if texts.is_empty() {
+                    None
+                } else {
+                    Some(texts.join("\n"))
+                }
+            }
+            _ => None,
+        }
+    }
+
+    fn nonempty_owned(text: &str) -> Option<String> {
+        if text.trim().is_empty() {
+            None
+        } else {
+            Some(text.to_owned())
+        }
+    }
+
+    fn string_field(value: &Value, key: &str) -> Option<String> {
+        value
+            .get(key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+            .map(str::to_owned)
+    }
+
+    fn read_u64(value: &Value, key: &str) -> Option<u64> {
+        let number = value.get(key)?;
+        if let Some(parsed) = number.as_u64() {
+            return Some(parsed);
+        }
+        if let Some(parsed) = number.as_i64() {
+            return u64::try_from(parsed).ok();
+        }
+        number.as_f64().and_then(|parsed| {
+            if parsed.is_finite() && parsed >= 0.0 {
+                Some(parsed as u64)
+            } else {
+                None
+            }
+        })
+    }
+
+    fn parse_retry_after(value: Option<&str>) -> Option<u64> {
+        let text = value?.trim();
+        if text.is_empty() {
+            None
+        } else {
+            text.parse::<u64>().ok()
+        }
+    }
+
+    fn looks_like_context_overflow(body: &str) -> bool {
+        let normalized = body.to_ascii_lowercase();
+        normalized.contains("context length")
+            || normalized.contains("maximum context")
+            || normalized.contains("max context")
+            || normalized.contains("context window")
+            || normalized.contains("too many tokens")
+            || normalized.contains("maximum tokens")
+            || normalized.contains("max tokens")
+            || normalized.contains("token limit")
+            || normalized.contains("maximum token")
+            || normalized.contains("max_tokens")
+            || body.contains("超出上下文")
+            || body.contains("上下文长度")
+            || body.contains("上下文限制")
+            || body.contains("最大 token")
+            || body.contains("token 上限")
+            || (normalized.contains("token")
+                && (normalized.contains("context")
+                    || normalized.contains("maximum")
+                    || normalized.contains("exceed")))
+    }
+
+    fn looks_like_timeout(body: &str) -> bool {
+        let normalized = body.to_ascii_lowercase();
+        normalized.contains("timeout") || normalized.contains("timed out") || body.contains("超时")
+    }
+}
+
+#[allow(dead_code, unused_imports)]
+pub use card_chat::{
+    chat_json, classify_http_failure, parse_anthropic_reply, parse_openai_chat_reply, ChatError,
+    ChatErrorKind, ChatReply,
+};
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3551,5 +3980,172 @@ mod tests {
             .map(|(_, body)| body)
             .expect("HTTP 请求应包含 body");
         serde_json::from_str(body).expect("HTTP 请求 body 应为 JSON")
+    }
+
+    #[test]
+    fn parse_openai_chat_reply_reads_usage_model_and_content() {
+        let reply = parse_openai_chat_reply(
+            r#"{"model":"gpt-test","choices":[{"message":{"content":"{\"ok\":true}"}}],"usage":{"prompt_tokens":12,"completion_tokens":34}}"#,
+        )
+        .expect("有用量的 OpenAI 响应应能解析");
+
+        assert_eq!(reply.content, r#"{"ok":true}"#);
+        assert_eq!(reply.input_tokens, Some(12));
+        assert_eq!(reply.output_tokens, Some(34));
+        assert_eq!(reply.model.as_deref(), Some("gpt-test"));
+    }
+
+    #[test]
+    fn parse_openai_chat_reply_reads_content_parts() {
+        let reply = parse_openai_chat_reply(
+            r#"{"choices":[{"message":{"content":[{"type":"text","text":"第一段"},{"type":"text","text":"第二段"}]}}]}"#,
+        )
+        .expect("分段内容应拼成一段");
+
+        assert_eq!(reply.content, "第一段\n第二段");
+        assert_eq!(reply.input_tokens, None);
+        assert_eq!(reply.output_tokens, None);
+        assert_eq!(reply.model, None);
+    }
+
+    #[test]
+    fn parse_openai_chat_reply_allows_missing_usage() {
+        let reply = parse_openai_chat_reply(r#"{"choices":[{"message":{"content":"hello"}}]}"#)
+            .expect("没有 usage 时仍应返回内容");
+
+        assert_eq!(reply.content, "hello");
+        assert_eq!(reply.input_tokens, None);
+        assert_eq!(reply.output_tokens, None);
+        assert_eq!(reply.model, None);
+    }
+
+    #[test]
+    fn parse_openai_chat_reply_rejects_empty_content() {
+        let error = parse_openai_chat_reply(
+            r#"{"choices":[{"message":{"content":"  "}}],"usage":{"prompt_tokens":1,"completion_tokens":2}}"#,
+        )
+        .expect_err("空白内容应失败");
+
+        assert_eq!(error.kind, ChatErrorKind::Other);
+        assert!(error.message.contains("没有可用内容"));
+    }
+
+    #[test]
+    fn parse_anthropic_reply_reads_usage_and_joins_text() {
+        let reply = parse_anthropic_reply(
+            r#"{"model":"claude-test","content":[{"type":"text","text":"第一段"},{"type":"text","text":"第二段"}],"usage":{"input_tokens":8,"output_tokens":9}}"#,
+        )
+        .expect("有用量的 Anthropic 响应应能解析");
+
+        assert_eq!(reply.content, "第一段\n第二段");
+        assert_eq!(reply.input_tokens, Some(8));
+        assert_eq!(reply.output_tokens, Some(9));
+        assert_eq!(reply.model.as_deref(), Some("claude-test"));
+    }
+
+    #[test]
+    fn parse_anthropic_reply_allows_missing_usage() {
+        let reply = parse_anthropic_reply(r#"{"content":[{"type":"text","text":"只有正文"}]}"#)
+            .expect("没有 usage 时仍应返回内容");
+
+        assert_eq!(reply.content, "只有正文");
+        assert_eq!(reply.input_tokens, None);
+        assert_eq!(reply.output_tokens, None);
+        assert_eq!(reply.model, None);
+    }
+
+    #[test]
+    fn parse_anthropic_reply_rejects_empty_content() {
+        let error = parse_anthropic_reply(r#"{"content":[{"type":"text","text":""}]}"#)
+            .expect_err("空内容应失败");
+
+        assert_eq!(error.kind, ChatErrorKind::Other);
+        assert!(error.message.contains("没有可用内容"));
+    }
+
+    #[test]
+    fn classify_http_failure_maps_rate_limit_and_retry_after() {
+        let parsed = classify_http_failure(429, "slow down", Some("12"));
+        assert_eq!(
+            parsed.kind,
+            ChatErrorKind::RateLimit {
+                retry_after_secs: Some(12)
+            }
+        );
+
+        let unparsed = classify_http_failure(429, "slow down", Some("not-a-number"));
+        assert_eq!(
+            unparsed.kind,
+            ChatErrorKind::RateLimit {
+                retry_after_secs: None
+            }
+        );
+
+        let missing = classify_http_failure(429, "slow down", None);
+        assert_eq!(
+            missing.kind,
+            ChatErrorKind::RateLimit {
+                retry_after_secs: None
+            }
+        );
+        assert!(missing.message.contains("HTTP 429"));
+    }
+
+    #[test]
+    fn classify_http_failure_maps_auth() {
+        for status in [401, 403] {
+            let error = classify_http_failure(status, "nope", None);
+            assert_eq!(error.kind, ChatErrorKind::Auth);
+            assert!(error.message.contains(&status.to_string()));
+        }
+    }
+
+    #[test]
+    fn classify_http_failure_maps_context_timeout_network_and_other() {
+        let overflow = classify_http_failure(
+            400,
+            "This model's maximum context length is 128000 tokens.",
+            None,
+        );
+        assert_eq!(overflow.kind, ChatErrorKind::ContentTooLarge);
+
+        let plain_bad_request = classify_http_failure(400, "bad request", None);
+        assert_eq!(plain_bad_request.kind, ChatErrorKind::Other);
+
+        let timed_out = classify_http_failure(408, "", None);
+        assert_eq!(timed_out.kind, ChatErrorKind::Timeout);
+
+        let timeout_text = classify_http_failure(499, "请求超时", None);
+        assert_eq!(timeout_text.kind, ChatErrorKind::Timeout);
+
+        let server = classify_http_failure(503, "unavailable", None);
+        assert_eq!(server.kind, ChatErrorKind::Network);
+        assert!(server.message.contains("HTTP 503"));
+
+        let disconnected = classify_http_failure(0, "connection refused", None);
+        assert_eq!(disconnected.kind, ChatErrorKind::Network);
+        assert!(disconnected.message.contains("连接失败"));
+
+        let other = classify_http_failure(418, "teapot", None);
+        assert_eq!(other.kind, ChatErrorKind::Other);
+    }
+
+    #[test]
+    fn classify_http_failure_message_omits_secret() {
+        let secret = "sk-SUPER-SECRET-KEY-123456";
+        let cases = [
+            classify_http_failure(400, &format!("bad request {secret}"), None),
+            classify_http_failure(401, secret, None),
+            classify_http_failure(429, secret, Some(secret)),
+            classify_http_failure(500, secret, None),
+        ];
+        for error in cases {
+            assert!(
+                !error.message.contains(secret),
+                "错误信息不应包含密钥：{}",
+                error.message
+            );
+            assert!(!error.message.contains("SUPER-SECRET"));
+        }
     }
 }
