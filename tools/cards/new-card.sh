@@ -24,8 +24,8 @@ if [ -d "$REPO/apps/desktop/src-tauri/target" ]; then
   cp -c -R "$REPO/apps/desktop/src-tauri/target" "$WT/apps/desktop/src-tauri/target"
 fi
 
-# 2) 前端依赖：从 pnpm 全局仓库离线安装（硬链接，不联网；CI=true 避免要终端确认）
-( cd "$WT" && CI=true pnpm install --offline --frozen-lockfile )
+# 2) 前端依赖：按锁文件原样安装（--frozen-lockfile，版本与主工作区一致；仓库里已有的包走硬链接；CI=true 避免要终端确认）
+( cd "$WT" && CI=true pnpm install --frozen-lockfile )
 
 # 3) 预热：前端构建（生成 dist，Tauri 编译需要它）+ Rust 检查与测试编译
 ( cd "$WT" && tools/cards/run.sh web-build )
