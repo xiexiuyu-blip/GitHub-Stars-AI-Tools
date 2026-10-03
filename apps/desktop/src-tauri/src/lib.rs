@@ -2,11 +2,13 @@ mod ai;
 mod auth;
 mod backup;
 mod capture;
+mod card_pipeline;
 mod db;
 mod dev_guard;
 mod embedding;
 mod embedding_state;
 mod github;
+mod inbox_view;
 mod jobs;
 mod library;
 mod local_api;
@@ -1066,6 +1068,42 @@ fn commit_capture_batch(
         &text,
         source_context.as_deref().unwrap_or(""),
     )
+}
+
+#[tauri::command]
+fn preview_capture(
+    app_handle: tauri::AppHandle,
+    text: String,
+) -> Result<inbox_view::CapturePreview, String> {
+    let storage = AppStorage::from_app_handle(&app_handle)?;
+    inbox_view::preview_capture(storage.database_path(), &text)
+}
+
+#[tauri::command]
+fn list_inbox(
+    app_handle: tauri::AppHandle,
+    status: Option<String>,
+    limit: Option<i64>,
+    offset: Option<i64>,
+) -> Result<inbox_view::InboxPage, String> {
+    let storage = AppStorage::from_app_handle(&app_handle)?;
+    inbox_view::list_inbox(storage.database_path(), status.as_deref(), limit, offset)
+}
+
+#[tauri::command]
+fn set_inbox_status(
+    app_handle: tauri::AppHandle,
+    id: String,
+    status: String,
+) -> Result<(), String> {
+    let storage = AppStorage::from_app_handle(&app_handle)?;
+    inbox_view::set_inbox_status(storage.database_path(), &id, &status)
+}
+
+#[tauri::command]
+fn set_inbox_note(app_handle: tauri::AppHandle, id: String, note: String) -> Result<(), String> {
+    let storage = AppStorage::from_app_handle(&app_handle)?;
+    inbox_view::set_inbox_note(storage.database_path(), &id, &note)
 }
 
 #[tauri::command]
@@ -6824,6 +6862,10 @@ pub fn run() {
             export_library_csv,
             prepare_knowledge,
             commit_capture_batch,
+            preview_capture,
+            list_inbox,
+            set_inbox_status,
+            set_inbox_note,
             get_graph_overview,
             solve_problem,
             solve_v2,
