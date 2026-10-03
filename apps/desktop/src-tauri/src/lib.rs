@@ -1277,9 +1277,13 @@ fn build_reference_pack_v2(
 }
 
 #[tauri::command]
-fn copy_item_for_codex(app_handle: tauri::AppHandle, repo_id: String) -> Result<String, String> {
+fn copy_item_for_codex(
+    app_handle: tauri::AppHandle,
+    repo_id: String,
+    problem: Option<String>,
+) -> Result<String, String> {
     let connection = open_pack_database(&app_handle)?;
-    packs::render_item_for_codex(&connection, &repo_id)
+    packs::render_item_for_codex_with(&connection, &repo_id, problem.as_deref())
 }
 
 #[tauri::command]

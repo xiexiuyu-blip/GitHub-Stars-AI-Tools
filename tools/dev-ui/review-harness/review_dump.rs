@@ -268,9 +268,11 @@ fn call(work: &Path, cmd: &str, args: &serde_json::Value) -> Result<serde_json::
         }
         "copy_item_for_codex" => {
             let connection = Connection::open(work).map_err(|e| e.to_string())?;
-            Ok(Value::String(packs::render_item_for_codex(
+            let problem = args.get("problem").and_then(Value::as_str);
+            Ok(Value::String(packs::render_item_for_codex_with(
                 &connection,
                 &arg_str(args, "repoId")?,
+                problem,
             )?))
         }
         "build_reference_pack_v2" => {

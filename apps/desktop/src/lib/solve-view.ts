@@ -108,9 +108,48 @@ export function noIntentNote(result: SolveResult): string | null {
 }
 
 /**
+ * 任务词在本机能力里的近义说法：本机的 Skill 说明大多是英文，MCP 只有名字（`gpt-image`），
+ * 光用中文任务词（「封面」「配图」）对不上已经装好的 `ai-draw`、`gpt-image`。
+ * 只放意思真的相近的词，不放太短、太泛的词（`cut` 会命中 `execute`）。
+ */
+const LOCAL_SYNONYMS: Record<string, readonly string[]> = {
+  封面: ['cover', 'thumbnail', 'poster', 'image', 'draw', '出图', '绘图', '画图', '生图'],
+  海报: ['poster', 'banner', 'image', 'draw', '出图', '绘图', '画图', '生图'],
+  配图: ['illustration', 'infographic', 'image', 'draw', '出图', '绘图', '画图', '生图'],
+  插图: ['illustration', 'image', 'draw', '出图', '绘图', '画图', '生图'],
+  图片: ['image', 'picture', 'draw', '出图', '绘图', '画图', '生图'],
+  主图: ['image', 'draw', '出图', '绘图', '画图', '生图'],
+  详情页: ['image', 'draw', '出图', '绘图', '画图', '生图'],
+  视频: ['video'],
+  短视频: ['video', 'shorts', '剪辑'],
+  剪辑: ['video', 'editing'],
+  字幕: ['subtitle', 'caption', 'srt', 'whisper', '转写', '逐字稿', '妙记'],
+  配音: ['voiceover', 'speech', 'tts'],
+  ppt: ['pptx', 'slides', '幻灯片', '演示'],
+  文档: ['docx', 'document', 'word', 'pdf'],
+  表格: ['xlsx', 'sheet', 'excel'],
+  公众号: ['wechat', 'weixin', '微信'],
+  微信: ['wechat', 'weixin'],
+  小红书: ['xhs', 'xiaohongshu', 'rednote'],
+  抖音: ['douyin', 'tiktok'],
+  文案: ['copywriting', '写作'],
+  翻译: ['translate', 'translation'],
+  采集: ['crawl', 'scrape', 'fetch', '抓取'],
+  爬虫: ['crawl', 'scrape', '抓取'],
+  电商: ['ecommerce', 'commerce'],
+};
+
+function localTerms(intent: string): string[] {
+  const base = intent.trim().toLowerCase();
+  if (!base) return [];
+  return [base, ...(LOCAL_SYNONYMS[base] ?? [])];
+}
+
+/**
  * 从本机已装的 Skill / MCP 里挑出该写进参考包的：
- * 1. 名字和选中的项目对得上的（说明这个工具本机已经装了，Codex 不用再装）；
- * 2. 名字或一句话里含任务词的，最多 5 个（「本机已有的相关能力」）。
+ * 1. 名字和选中的项目对得上的（说明这个工具本机已经装了，Codex 不用再装），排最前；
+ * 2. 和任务相关的，最多 limit 个（「本机已有的相关能力」）：任务词（含近义说法）出现在名字里算 3 分、
+ *    只出现在一句话里算 1 分，每个任务词只算一次，按总分从高到低挑，同分按名字排。
  * 全部本机能力有几十上百个，整个塞进去只会淹没重点。
  */
 export function pickLocalCapabilities(
@@ -127,9 +166,9 @@ export function pickLocalCapabilities(
     const short = full.split('/').pop();
     if (short) repoNames.add(short);
   }
-  const words = intents.map((intent) => intent.trim().toLowerCase()).filter(Boolean);
+  const groups = intents.map(localTerms).filter((terms) => terms.length > 0);
   const installed: LocalCapabilityInput[] = [];
-  const related: LocalCapabilityInput[] = [];
+  const scored: { item: LocalCapabilityInput; score: number }[] = [];
   for (const item of all) {
     const name = item.name.trim().toLowerCase();
     if (!name) continue;
@@ -137,10 +176,16 @@ export function pickLocalCapabilities(
       installed.push(item);
       continue;
     }
-    const text = `${name} ${item.oneLiner.toLowerCase()}`;
-    if (related.length < limit && words.some((word) => text.includes(word))) related.push(item);
+    const line = item.oneLiner.toLowerCase();
+    let score = 0;
+    for (const terms of groups) {
+      if (terms.some((term) => name.includes(term))) score += 3;
+      else if (terms.some((term) => line.includes(term))) score += 1;
+    }
+    if (score > 0) scored.push({ item, score });
   }
-  return [...installed, ...related];
+  scored.sort((left, right) => right.score - left.score || left.item.name.localeCompare(right.item.name));
+  return [...installed, ...scored.slice(0, Math.max(0, limit)).map((entry) => entry.item)];
 }
 
 /** 第一个是主参考，其余是备选。why 原样带上。local 是本机已装的相关能力（见 pickLocalCapabilities）。 */

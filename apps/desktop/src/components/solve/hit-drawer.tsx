@@ -16,6 +16,8 @@ import { cn } from '@/lib/utils';
  */
 export function HitDrawer(props: {
   hit: SolveHit;
+  /** 这次想做的事（搜索的那句话），复制给 Codex 时带上 */
+  problem?: string;
   scenarios: ScenarioSummary[];
   picked: boolean;
   isMain: boolean;
@@ -50,7 +52,7 @@ export function HitDrawer(props: {
   async function copyForCodex() {
     let text = '';
     try {
-      text = await copyItemForCodex(props.hit.id);
+      text = await copyItemForCodex(props.hit.id, props.problem);
     } catch (reason) {
       const message = describeInvokeError(reason);
       if (message.includes('这个功能还没接上') && detail) {
