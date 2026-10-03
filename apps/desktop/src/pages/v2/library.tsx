@@ -529,7 +529,7 @@ export function LibraryPage(props: LibraryPageProps) {
       : 'grid-cols-1';
 
   return (
-    <section className="flex h-full min-h-0 flex-col gap-3 overflow-hidden px-5 pt-4 pb-5 max-[899px]:px-4 max-[899px]:pt-3 max-[899px]:pb-4">
+    <section className="flex h-full min-h-0 flex-col gap-3 overflow-auto px-5 pt-4 pb-5 max-[899px]:px-4 max-[899px]:pt-3 max-[899px]:pb-4">
       <PageHeader title="资料库" subtitle={subtitle} />
       <div className="relative z-20 flex shrink-0 flex-wrap items-center gap-3">
         <div className="relative w-full min-[900px]:min-w-[240px] min-[900px]:flex-1">
@@ -585,7 +585,7 @@ export function LibraryPage(props: LibraryPageProps) {
         <span className="ml-auto text-xs font-medium text-on-surface-variant">{resultCount == null ? '…' : resultCount} 个</span>
       </div>
       <AutomationBanner hint={hint} onAction={props.onOpenToolbox} />
-      <div className={cn('grid min-h-0 flex-1 gap-3', gridClass)}>
+      <div className={cn('grid min-h-[420px] flex-1 gap-3', gridClass)}>
         {layout === 'wide' ? (
           <Card className="flex min-h-0 flex-col overflow-hidden">
             {renderFilters()}

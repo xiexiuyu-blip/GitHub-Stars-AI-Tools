@@ -124,7 +124,7 @@ export function automationHint(status: AutomationStatus | null, pending: number)
       hue: 148,
       icon: 'autorenew',
       title: `正在后台整理，还剩 ${pending} 个`,
-      detail: `今天已用约 ${formatTokens(status.tokens24h)} token，约整理了 ${approxRepos(status.tokens24h)} 个。`,
+      detail: `最近 24 小时已用约 ${formatTokens(status.tokens24h)} token，约整理了 ${approxRepos(status.tokens24h)} 个。`,
       actionLabel: null,
     };
   }

@@ -1,5 +1,5 @@
 import type { CaptureCommit } from '@/lib/api';
-import type { CapturePreview, CapturePreviewRow, InboxItem, InboxPage } from '@/lib/contracts';
+import type { CapturePreview, CapturePreviewRow, InboxItem, InboxPage, RepoMention } from '@/lib/contracts';
 
 /**
  * 收集页的展示规则。不依赖 React。
@@ -285,6 +285,43 @@ export function inboxExcerpt(item: Pick<InboxItem, 'excerpt' | 'title'>): string
 export function inboxQuote(item: Pick<InboxItem, 'quote'>): string | null {
   const text = (item.quote ?? '').replace(/\s+/g, ' ').trim();
   return text || null;
+}
+
+export type MentionSummary = {
+  total: number;
+  starred: number;
+  inInbox: number;
+  fresh: number;
+  /** 新的项目名，按文章里出现的顺序 */
+  freshNames: string[];
+};
+
+/** 文章里提到的 GitHub 项目：没有就是 null。先算「已收藏」，再算「已在收集箱」，剩下的是新的。 */
+export function mentionSummary(mentions: readonly RepoMention[] | undefined): MentionSummary | null {
+  if (!mentions || mentions.length === 0) return null;
+  let starred = 0;
+  let inInbox = 0;
+  const freshNames: string[] = [];
+  for (const mention of mentions) {
+    if (mention.starred) starred += 1;
+    else if (mention.inInbox) inInbox += 1;
+    else freshNames.push(mention.fullName);
+  }
+  return { total: mentions.length, starred, inInbox, fresh: freshNames.length, freshNames };
+}
+
+/** 一行说明：「文中提到 7 个 GitHub 项目：3 个已收藏，1 个已在收集箱，3 个是新的」。 */
+export function mentionLine(summary: MentionSummary): string {
+  const parts: string[] = [];
+  if (summary.starred > 0) parts.push(`${summary.starred} 个已收藏`);
+  if (summary.inInbox > 0) parts.push(`${summary.inInbox} 个已在收集箱`);
+  if (summary.fresh > 0) parts.push(`${summary.fresh} 个是新的`);
+  return `文中提到 ${summary.total} 个 GitHub 项目：${parts.join('，')}`;
+}
+
+/** 把新项目收进收集箱时交给 `commit_capture_batch` 的文字：每个项目一行网址。 */
+export function mentionText(summary: MentionSummary): string {
+  return summary.freshNames.map((name) => `https://github.com/${name}`).join('\n');
 }
 
 /** 还有没读过的链接吗（GitHub 仓库、已归档的不算）。 */

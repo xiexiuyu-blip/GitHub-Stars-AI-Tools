@@ -1687,6 +1687,8 @@ fn meta_content(metas: &[(String, String)], key: &str) -> Option<String> {
         .map(|(_, value)| value.clone())
 }
 
+/// 两种赋值符号都认的简便写法，只有测试在用（生产代码用 `js_assigned_string_with` 指定符号）。
+#[cfg(test)]
 fn js_assigned_string(html: &str, ident: &str) -> Option<String> {
     js_assigned_string_with(html, ident, b"=:")
 }

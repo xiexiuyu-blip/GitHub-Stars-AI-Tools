@@ -16,6 +16,9 @@ import {
   inboxContext,
   inboxExcerpt,
   inboxQuote,
+  mentionLine,
+  mentionSummary,
+  mentionText,
   inboxFilterOptions,
   inboxHeading,
   inboxMeta,
@@ -464,5 +467,41 @@ describe('收集箱条目的原话', () => {
     expect(inboxQuote({ quote: '' })).toBeNull();
     expect(inboxQuote({ quote: '  \n ' })).toBeNull();
     expect(inboxQuote({})).toBeNull();
+  });
+});
+
+describe('文章里提到的 GitHub 项目', () => {
+  const mentions = [
+    { fullName: 'a/one', starred: true, inInbox: false },
+    { fullName: 'b/two', starred: false, inInbox: true },
+    { fullName: 'c/three', starred: false, inInbox: false },
+    { fullName: 'd/four', starred: true, inInbox: true },
+    { fullName: 'e/five', starred: false, inInbox: false },
+  ];
+
+  it('没有提到就是 null（旧版后台没有这一项也一样）', () => {
+    expect(mentionSummary(undefined)).toBeNull();
+    expect(mentionSummary([])).toBeNull();
+  });
+
+  it('先算已收藏，再算已在收集箱，剩下的是新的，并按出现顺序留下名字', () => {
+    expect(mentionSummary(mentions)).toEqual({
+      total: 5,
+      starred: 2,
+      inInbox: 1,
+      fresh: 2,
+      freshNames: ['c/three', 'e/five'],
+    });
+  });
+
+  it('一行说明只写有数的那几类', () => {
+    expect(mentionLine(mentionSummary(mentions)!)).toBe('文中提到 5 个 GitHub 项目：2 个已收藏，1 个已在收集箱，2 个是新的');
+    expect(mentionLine(mentionSummary([{ fullName: 'a/b', starred: true, inInbox: false }])!)).toBe('文中提到 1 个 GitHub 项目：1 个已收藏');
+    expect(mentionLine(mentionSummary([{ fullName: 'a/b', starred: false, inInbox: false }])!)).toBe('文中提到 1 个 GitHub 项目：1 个是新的');
+  });
+
+  it('收进收集箱的文字：每个新项目一行网址', () => {
+    expect(mentionText(mentionSummary(mentions)!)).toBe('https://github.com/c/three\nhttps://github.com/e/five');
+    expect(mentionText(mentionSummary([{ fullName: 'a/b', starred: true, inInbox: false }])!)).toBe('');
   });
 });

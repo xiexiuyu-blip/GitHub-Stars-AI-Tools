@@ -1845,19 +1845,39 @@ fn clear_github_token_after_account_cache_failure(error: String) -> String {
     }
 }
 
-#[tauri::command]
-fn clear_github_token(app_handle: tauri::AppHandle) -> Result<(), String> {
-    auth::clear_github_token()?;
-    let storage = AppStorage::from_app_handle(&app_handle)?;
-    storage.mark_github_accounts_disconnected()
+/// 读写钥匙串可能弹出系统授权框，一直等用户输入密码。同步的 Tauri 命令跑在主线程上，
+/// 弹框期间整个窗口都卡住（开发版每次重新编译后第一次启动，停在「正在加载本地配置…」的就是它）；
+/// 放进 `spawn_blocking`，窗口照常能动，授权框在上面等着，点完再继续。
+async fn run_keychain_blocking<T, F>(job: F) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, String> + Send + 'static,
+{
+    tauri::async_runtime::spawn_blocking(job)
+        .await
+        .map_err(|error| format!("钥匙串操作没有执行完：{error}"))?
 }
 
 #[tauri::command]
-fn has_ai_api_key(provider: String) -> Result<bool, String> {
+async fn clear_github_token(app_handle: tauri::AppHandle) -> Result<(), String> {
+    run_keychain_blocking(move || {
+        auth::clear_github_token()?;
+        let storage = AppStorage::from_app_handle(&app_handle)?;
+        storage.mark_github_accounts_disconnected()
+    })
+    .await
+}
+
+#[tauri::command]
+async fn has_ai_api_key(provider: String) -> Result<bool, String> {
+    run_keychain_blocking(move || has_ai_api_key_blocking(&provider)).await
+}
+
+fn has_ai_api_key_blocking(provider: &str) -> Result<bool, String> {
     if provider.trim().eq_ignore_ascii_case("none") {
         return Ok(false);
     }
-    let account = ai_api_key_account(&provider)?;
+    let account = ai_api_key_account(provider)?;
     Ok(
         auth::read_secure_password(auth::credential_service(), &account)?
             .as_deref()
@@ -1866,28 +1886,45 @@ fn has_ai_api_key(provider: String) -> Result<bool, String> {
 }
 
 #[tauri::command]
-fn save_ai_api_key(provider: String, api_key: String) -> Result<(), String> {
-    let account = ai_api_key_account(&provider)?;
-    auth::save_secure_password(auth::credential_service(), &account, &api_key)
+async fn save_ai_api_key(provider: String, api_key: String) -> Result<(), String> {
+    run_keychain_blocking(move || {
+        let account = ai_api_key_account(&provider)?;
+        auth::save_secure_password(auth::credential_service(), &account, &api_key)
+    })
+    .await
 }
 
 #[tauri::command]
-fn has_embedding_api_key(provider: String, base_url: Option<String>) -> Result<bool, String> {
-    Ok(read_embedding_api_key(&provider, base_url.as_deref())?.is_some())
+async fn has_embedding_api_key(provider: String, base_url: Option<String>) -> Result<bool, String> {
+    run_keychain_blocking(move || {
+        Ok(read_embedding_api_key(&provider, base_url.as_deref())?.is_some())
+    })
+    .await
 }
 
 #[tauri::command]
-fn save_embedding_api_key(
+async fn save_embedding_api_key(
     provider: String,
     base_url: Option<String>,
     api_key: String,
 ) -> Result<(), String> {
+    run_keychain_blocking(move || {
+        save_embedding_api_key_blocking(&provider, base_url.as_deref(), &api_key)
+    })
+    .await
+}
+
+fn save_embedding_api_key_blocking(
+    provider: &str,
+    base_url: Option<&str>,
+    api_key: &str,
+) -> Result<(), String> {
     let normalized_api_key = api_key.trim();
     if normalized_api_key.is_empty() {
-        return clear_embedding_api_key();
+        return auth::delete_secure_password(auth::credential_service(), EMBEDDING_API_KEY_ACCOUNT);
     }
     let credential = StoredEmbeddingApiCredential {
-        scope: embedding_api_key_scope(&provider, base_url.as_deref())?,
+        scope: embedding_api_key_scope(provider, base_url)?,
         api_key: normalized_api_key.to_owned(),
     };
     let serialized = serde_json::to_string(&credential)
@@ -1900,8 +1937,11 @@ fn save_embedding_api_key(
 }
 
 #[tauri::command]
-fn clear_embedding_api_key() -> Result<(), String> {
-    auth::delete_secure_password(auth::credential_service(), EMBEDDING_API_KEY_ACCOUNT)
+async fn clear_embedding_api_key() -> Result<(), String> {
+    run_keychain_blocking(|| {
+        auth::delete_secure_password(auth::credential_service(), EMBEDDING_API_KEY_ACCOUNT)
+    })
+    .await
 }
 
 fn read_embedding_api_key(
@@ -2215,19 +2255,22 @@ fn json_string_field(
 }
 
 #[tauri::command]
-fn clear_ai_api_key(provider: Option<String>) -> Result<(), String> {
-    match provider
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        Some(provider) if !provider.eq_ignore_ascii_case("none") => {
-            let account = ai_api_key_account(provider)?;
-            auth::delete_secure_password(auth::credential_service(), &account)
+async fn clear_ai_api_key(provider: Option<String>) -> Result<(), String> {
+    run_keychain_blocking(move || {
+        match provider
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            Some(provider) if !provider.eq_ignore_ascii_case("none") => {
+                let account = ai_api_key_account(provider)?;
+                auth::delete_secure_password(auth::credential_service(), &account)
+            }
+            Some(_) => Ok(()),
+            None => clear_all_ai_api_keys(),
         }
-        Some(_) => Ok(()),
-        None => clear_all_ai_api_keys(),
-    }
+    })
+    .await
 }
 
 #[tauri::command]

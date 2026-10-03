@@ -1078,13 +1078,13 @@ fn why_text_legacy(repo: &RepoRecord, terms: &[String]) -> String {
     truncate_chars(fallback, WHY_LIMIT)
 }
 
-/// 说明这个词在哪里对上的。`readme_hits` 是 README 里提到的次数：只在 README 里对上就写它；
-/// 别处已经对上、README 里也提到得多（5 次以上）时，在后面补一句。
+/// 说明这个词在哪里对上的。`readme_hits` 是 README 里提到的次数：只在 README 里对上就写「项目说明里提到 N 次」；
+/// 别处已经对上、README 里也提到得多（5 次以上）时，在后面补一句「说明里提到 N 次」（给不看代码的人读，不写 README 这个词）。
 fn match_label(repo: &RepoRecord, intent: &str, readme_hits: usize) -> String {
     match field_label(repo, intent) {
-        Some(label) if readme_hits >= 5 => format!("{label}·README 提到 {readme_hits} 次"),
+        Some(label) if readme_hits >= 5 => format!("{label}·说明里提到 {readme_hits} 次"),
         Some(label) => label,
-        None if readme_hits >= README_MIN_HITS => format!("README 提到 {readme_hits} 次"),
+        None if readme_hits >= README_MIN_HITS => format!("项目说明里提到 {readme_hits} 次"),
         None => "描述".to_owned(),
     }
 }
@@ -3883,7 +3883,7 @@ mod tests {
         assert_eq!(result.hits[0].id, "focused");
         assert!(result.hits[0].score > result.hits[1].score);
         assert!(
-            result.hits[0].why.contains("README 提到"),
+            result.hits[0].why.contains("说明里提到"),
             "{}",
             result.hits[0].why
         );
@@ -3913,7 +3913,7 @@ mod tests {
         assert_eq!(ids, vec!["direct", "hidden"]);
         assert!(result.hits[0].score > result.hits[1].score);
         assert!(
-            result.hits[1].why.contains("README 提到"),
+            result.hits[1].why.contains("项目说明里提到"),
             "{}",
             result.hits[1].why
         );

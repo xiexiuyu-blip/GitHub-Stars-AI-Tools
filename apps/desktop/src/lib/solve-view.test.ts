@@ -168,11 +168,11 @@ describe('gapNote', () => {
 });
 
 describe('matchBadge', () => {
-  it('多个意图都对上了是蓝色「都对上了」', () => {
+  it('全都对上是默认情况，不标（八条里六七条都是，每条都标就等于没标）', () => {
     expect(matchBadge(
       hit({ id: 'a', fullMatch: true, matched: ['小红书', '封面'] }),
       ['小红书', '封面'],
-    )).toEqual({ tone: 'blue', text: '都对上了' });
+    )).toBeNull();
   });
 
   it('只对上一部分是灰色，多个词连写', () => {
@@ -182,7 +182,7 @@ describe('matchBadge', () => {
     )).toEqual({ tone: 'gray', text: '只对上「小红书」「封面」' });
   });
 
-  it('只有一个意图词时，即使全对上也不标「都对上了」', () => {
+  it('只有一个意图词时，全对上也不标', () => {
     expect(matchBadge(
       hit({ id: 'a', fullMatch: true, matched: ['小红书'] }),
       ['小红书'],

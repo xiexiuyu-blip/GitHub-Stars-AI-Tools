@@ -9,6 +9,11 @@ type ReadmeRendererProps = {
   repositoryFullName: string;
   sourcePath: string;
   className?: string;
+  /**
+   * 单个 `~` 也算删除线（GitHub 的 README 就是这样）。参考包里到处是 `~/.agents/skills`、`~/.codex/config.toml`，
+   * 一段话里有两个 `~` 就会被画成删除线并吞掉 `~`，所以参考包预览要关掉。
+   */
+  singleTilde?: boolean;
 };
 
 export function ReadmeRenderer(props: ReadmeRendererProps) {
@@ -69,7 +74,7 @@ export function ReadmeRenderer(props: ReadmeRendererProps) {
   return (
     <div className={className}>
       <ReactMarkdown
-        remarkPlugins={[remarkGfm]}
+        remarkPlugins={[[remarkGfm, { singleTilde: props.singleTilde ?? true }]]}
         rehypePlugins={[rehypeRaw, rehypeSanitize]}
         components={components}
       >

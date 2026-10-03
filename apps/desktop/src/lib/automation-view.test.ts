@@ -178,7 +178,7 @@ describe('automationHint', () => {
 
   it('整理中显示今天用了多少，没有按钮', () => {
     const hint = automationHint(status({ queued: 2, tokens24h: 40_000 }), 7);
-    expect(hint?.detail).toBe('今天已用约 4 万 token，约整理了 10 个。');
+    expect(hint?.detail).toBe('最近 24 小时已用约 4 万 token，约整理了 10 个。');
     expect(hint?.actionLabel).toBeNull();
   });
 });

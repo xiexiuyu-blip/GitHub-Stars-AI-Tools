@@ -5,6 +5,7 @@ import {
   confirmLibraryCard,
   copyItemForCodex,
   describeInvokeError,
+  plainTechnicalError,
   getGithubAuthState,
   getLibraryDetail,
   getTodayView,
@@ -190,5 +191,25 @@ describe('describeInvokeError', () => {
     expect(describeInvokeError(new Error('Error: 这段文字太长，请分几次粘贴'))).toBe('这段文字太长，请分几次粘贴');
     expect(describeInvokeError('')).toBe('操作没有完成，请稍后再试。');
     expect(describeInvokeError(null)).toBe('操作没有完成，请稍后再试。');
+  });
+});
+
+describe('plainTechnicalError / describeInvokeError：页面代码的英文异常翻成人话', () => {
+  it('复制失败、网络失败、页面代码出错各有一句人话', () => {
+    expect(plainTechnicalError("Failed to execute 'writeText' on 'Clipboard': Document is not focused.")).toBe('复制没成功，请再点一次。');
+    expect(plainTechnicalError('TypeError: Load failed')).toBe('网络没连上，稍后再试一次。');
+    expect(plainTechnicalError("TypeError: Cannot read properties of null (reading 'activeCount')")).toContain('页面出了点小问题');
+    expect(plainTechnicalError('x is not a function')).toContain('页面出了点小问题');
+  });
+
+  it('后台给的中文提示和不认识的话原样保留', () => {
+    expect(plainTechnicalError('GitHub Token 无效或权限不足')).toBeNull();
+    expect(describeInvokeError('同步没有完成：网络连不上')).toBe('同步没有完成：网络连不上');
+  });
+
+  it('describeInvokeError 对技术错误也走翻译，缺命令的优先', () => {
+    expect(describeInvokeError(new TypeError("Cannot read properties of undefined (reading 'x')"))).toContain('页面出了点小问题');
+    expect(describeInvokeError("Failed to execute 'writeText' on 'Clipboard'")).toBe('复制没成功，请再点一次。');
+    expect(describeInvokeError('Command foo not found')).toBe('这个功能还没接上。');
   });
 });

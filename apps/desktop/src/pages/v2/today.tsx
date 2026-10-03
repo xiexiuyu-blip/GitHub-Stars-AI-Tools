@@ -384,7 +384,7 @@ export function TodayPage(props: TodayPageProps) {
   const hiddenCount = viewAllPreset ? Math.max(0, listedTotal - ordered.length) : 0;
 
   return (
-    <section className="flex h-full min-h-0 flex-col gap-3 overflow-hidden px-5 pt-4 pb-5 max-[899px]:px-4 max-[899px]:pt-3 max-[899px]:pb-4">
+    <section className="flex h-full min-h-0 flex-col gap-3 overflow-auto px-5 pt-4 pb-5 max-[899px]:px-4 max-[899px]:pt-3 max-[899px]:pb-4">
       <PageHeader title={`${greetingFor(new Date().getHours())}，${name}`} subtitle={subtitle} />
       <div className="grid shrink-0 grid-cols-2 gap-3 min-[900px]:grid-cols-4">
         <StatCard label="本周新收藏" value={today ? (today.counts?.weekNew ?? 0) : '…'} icon="auto_awesome" tone="blue" active={filter === 'week'} onClick={() => choose('week')} />
@@ -393,7 +393,8 @@ export function TodayPage(props: TodayPageProps) {
         <StatCard label="在用" value={readingCounts ? readingCounts.inUse : '…'} icon="task_alt" tone="green" active={filter === 'in_use'} onClick={() => choose('in_use')} />
       </div>
       <AutomationBanner hint={hint} onAction={props.onOpenToolbox} />
-      <div className="grid min-h-0 flex-1 grid-cols-1 gap-3 min-[900px]:grid-cols-[minmax(340px,460px)_minmax(0,1fr)]">
+      {/* 窗口矮的时候整页滚动，不要把列表和详情压成一条缝：下面这一块至少 420px 高 */}
+      <div className="grid min-h-[420px] flex-1 grid-cols-1 gap-3 min-[900px]:grid-cols-[minmax(340px,460px)_minmax(0,1fr)]">
         <Card className={cn('flex min-h-0 flex-col overflow-hidden', hideList && 'hidden')}>
           <div ref={listScrollRef} className="min-h-0 flex-1 overflow-auto py-1">
             {renderListBody()}
@@ -508,12 +509,12 @@ function emptyCopy(filter: TodayFilter): { title: string; description: string } 
   if (filter === 'want') {
     return {
       title: '还没有标成「想试」的工具',
-      description: '在右边点「想试」，它就会出现在这里',
+      description: '先回到「今天值得先看」，看到想试的就点它的「想试」（资料库里也行），就会出现在这里',
     };
   }
   return {
     title: '这里没有内容',
-    description: '在右边点「想试」，它就会出现在这里',
+    description: '先回到「今天值得先看」，看到想试的就点它的「想试」，就会出现在这里',
   };
 }
 

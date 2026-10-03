@@ -208,9 +208,24 @@ export function getGithubAuthState(): Promise<GitHubAuthState> {
 }
 
 /** 把后端报错收成 Fox 能看懂的一句话。命令还没合并时，告诉他功能还没接上。 */
+/**
+ * 浏览器 / 页面代码抛出来的英文技术错误（不是后台写给用户看的中文提示）：翻成一句人话。
+ * 认不出来就返回 null，原样显示。
+ */
+export function plainTechnicalError(raw: string): string | null {
+  if (/writeText|clipboard/i.test(raw)) return '复制没成功，请再点一次。';
+  if (/Failed to fetch|NetworkError|Load failed|network request failed/i.test(raw)) return '网络没连上，稍后再试一次。';
+  if (/Cannot read propert|is not a function|is not an object|is not iterable|undefined is not|null is not|is not defined|Unexpected token|JSON\.parse|not valid JSON/i.test(raw)) {
+    return '页面出了点小问题，已有的资料都在。稍后再试一次；还不行，把这句话截图告诉我。';
+  }
+  return null;
+}
+
 export function describeInvokeError(reason: unknown): string {
   const raw = readErrorMessage(reason).trim();
   if (isMissingCommand(raw)) return '这个功能还没接上。';
+  const technical = plainTechnicalError(raw);
+  if (technical) return technical;
   const cleaned = raw.replace(/^Error:\s*/i, '').trim();
   if (!cleaned) return '操作没有完成，请稍后再试。';
   const chars = Array.from(cleaned);
