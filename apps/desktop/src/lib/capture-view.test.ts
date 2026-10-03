@@ -243,7 +243,7 @@ describe('收集箱筛选、状态和归档', () => {
   });
 
   it('待处理带转圈，已整理为蓝，失败为红，已归档为灰', () => {
-    expect(inboxStatusTag('pending')).toEqual({ tone: 'gray', text: '待处理', spinning: true });
+    expect(inboxStatusTag('pending')).toEqual({ tone: 'gray', text: '待处理', spinning: false });
     expect(inboxStatusTag('ready')).toEqual({ tone: 'blue', text: '已整理', spinning: false });
     expect(inboxStatusTag('failed')).toEqual({ tone: 'red', text: '失败', spinning: false });
     expect(inboxStatusTag('archived')).toEqual({ tone: 'gray', text: '已归档', spinning: false });

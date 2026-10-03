@@ -122,7 +122,8 @@ export function inboxStatusTag(status: InboxItem['status']): InboxStatusTag {
   if (status === 'ready') return { tone: 'blue', text: '已整理', spinning: false };
   if (status === 'failed') return { tone: 'red', text: '失败', spinning: false };
   if (status === 'archived') return { tone: 'gray', text: '已归档', spinning: false };
-  return { tone: 'gray', text: '待处理', spinning: true };
+  // 不转圈：目前没有后台会自动处理收集箱，转圈会让人以为它正在忙。以后接上自动整理再按真实状态转。
+  return { tone: 'gray', text: '待处理', spinning: false };
 }
 
 export function archiveAction(status: InboxItem['status']): { label: string; target: 'pending' | 'archived' } {
