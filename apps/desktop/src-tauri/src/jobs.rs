@@ -3046,4 +3046,35 @@ mod tests {
         );
         assert_eq!(snap(&conn, "legacy-run").status, "cancelled");
     }
+
+    #[test]
+    fn a_recovery_that_runs_while_a_legacy_request_is_in_flight_leaves_a_consistent_ledger() {
+        // 真实顺序：旧功能的请求先预留 → 启动恢复（比如第一次打不开库、之后才成功）跑了一遍 → 请求结束记账。
+        // 不能留下排队中 / 进行中的幽灵行，也不能少记：窗口里的用量至少是真实用量
+        let dir = crate::spend_guard::testing::Dir::new();
+        dir.control(r#"{"dailyBudgetTokens":100000,"paused":false}"#);
+        let _scope = dir.use_in_this_thread();
+        let prompt = "说".repeat(1000);
+        let permit = crate::spend_guard::check_before_request(&prompt).expect("应通过额度检查");
+        let conn = open_db(dir.path()).unwrap();
+        recover_running_jobs(&conn, &now_db_time()).unwrap();
+        crate::spend_guard::record_after_request("openai", "m", &prompt, "答", Some((700, 50)));
+        drop(permit);
+        let open: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM ai_jobs WHERE status IN ('queued', 'running')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(open, 0, "不能留下排队中或一直进行中的幽灵行");
+        drop(conn);
+        let status = queue_status(dir.path()).unwrap();
+        assert_eq!((status.running, status.queued), (0, 0));
+        assert!(
+            status.tokens_24h >= 750,
+            "真实用量 750 一定要在窗口里，实际 {}",
+            status.tokens_24h
+        );
+    }
 }

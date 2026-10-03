@@ -5226,13 +5226,19 @@ fn batch_generate_repository_ai_documents_worker(
                     full_name: repository.full_name,
                     error: error.clone(),
                 });
-                // 连续失败说明是配置的问题（密钥 / 模型 / 网络），不是某个仓库的问题：不要把几百个仓库一个个试完
-                consecutive_failures += 1;
-                if consecutive_failures >= BATCH_STOP_AFTER_FAILURES {
-                    stopped_by_budget = Some(format!(
-                        "连续 {BATCH_STOP_AFTER_FAILURES} 个仓库都失败了，先停下（最后一个错误：{error}）。请检查 AI 引擎设置和网络后再试。"
-                    ));
-                    break;
+                // 连续失败说明是配置的问题（密钥 / 模型 / 网络），不是某个仓库的问题：不要把几百个仓库一个个试完。
+                // 但成功过一次之后引擎就是好的：某个仓库自己的问题（内容太长、内容被服务商拒绝）不算，
+                // 否则一小撮特殊仓库会让每次「增量」都卡在它们前面，后面的永远轮不到
+                if generated_count == 0 || !is_repository_specific_failure(&error) {
+                    consecutive_failures += 1;
+                    if consecutive_failures >= BATCH_STOP_AFTER_FAILURES {
+                        stopped_by_budget = Some(format!(
+                            "连续 {BATCH_STOP_AFTER_FAILURES} 个仓库都失败了，先停下（最后一个错误：{error}）。请检查 AI 引擎设置和网络后再试。"
+                        ));
+                        // 这一个已经试过了，要算进「已处理」
+                        scanned_count += 1;
+                        break;
+                    }
                 }
             }
         }
@@ -5291,6 +5297,14 @@ fn batch_generate_repository_ai_documents_worker(
 
 /// 整批解析连续失败这么多个就停下。
 const BATCH_STOP_AFTER_FAILURES: usize = 5;
+
+/// 这个错误是某一个仓库自己的问题（README 太长、内容被服务商拒绝），不说明 AI 引擎坏了。
+fn is_repository_specific_failure(error: &str) -> bool {
+    error.contains("超过模型上下文")
+        || ["HTTP 400", "HTTP 413", "HTTP 422"]
+            .iter()
+            .any(|status| error.contains(status))
+}
 
 enum BatchItemOutcome {
     Generated,
@@ -7330,6 +7344,31 @@ mod tests {
     use super::*;
     use std::sync::{mpsc, Arc};
     use std::time::Duration;
+
+    #[test]
+    fn only_a_repositorys_own_problems_are_left_out_of_the_batch_breaker() {
+        // 内容太长、内容被服务商拒绝：是那个仓库自己的问题
+        for own in [
+            "OpenAI 接口请求失败（HTTP 400）：Content Exists Risk",
+            "OpenAI 接口请求失败（HTTP 413）：README 内容超过模型上下文限制，请换用更大上下文模型",
+            "Anthropic 接口请求失败（HTTP 422）：请求被拒绝",
+            "OpenAI 接口请求失败：README 内容超过模型上下文限制",
+        ] {
+            assert!(is_repository_specific_failure(own), "{own}");
+        }
+        // 引擎坏了的那类：密钥、额度、地址、服务商故障、断网——连着出现就该停
+        for engine in [
+            "OpenAI 接口请求失败（HTTP 401）：API Key 无效或权限不足",
+            "OpenAI 接口请求失败（HTTP 402）：余额不足",
+            "OpenAI 接口请求失败（HTTP 404）：请求地址或模型 ID 不存在",
+            "OpenAI 接口请求失败（HTTP 429）：请求过于频繁",
+            "OpenAI 接口请求失败（HTTP 503）：服务暂时不可用",
+            "AI 接口请求超时，请检查请求地址、模型 ID 或网络连接（已等待 120 秒）。",
+            "AI 接口请求失败：error sending request",
+        ] {
+            assert!(!is_repository_specific_failure(engine), "{engine}");
+        }
+    }
 
     #[test]
     fn recommendation_readme_commands_are_allowed_by_main_capability() {

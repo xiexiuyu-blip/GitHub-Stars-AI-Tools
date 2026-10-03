@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::io::Read;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const DEFAULT_OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
 const DEFAULT_ANTHROPIC_BASE_URL: &str = "https://api.anthropic.com/v1";
@@ -910,9 +910,18 @@ fn is_private_network_ai_host(host: &str) -> bool {
         || (parts[0] == 192 && parts[1] == 168)
 }
 
-/// 4xx 是服务商在处理之前就拒绝的（密钥 / 模型 / 额度 / 参数不对、限流）：不计费。5xx 和别的状态不确定，当作可能计费。
+/// 4xx 是服务商在处理之前就拒绝的（密钥 / 模型 / 额度 / 参数不对、限流）：不计费。
+/// 5xx、408（代理等不到上游就回的超时）和别的状态不确定，当作可能计费。
 fn status_may_be_billed(http_code: Option<u16>) -> bool {
-    !matches!(http_code, Some(400..=499))
+    !matches!(http_code, Some(400..=407 | 409..=499))
+}
+
+/// 请求没有到服务商那里：连接没建起来（拒绝连接、解析不了域名、握手失败），
+/// 或者在建立连接的时限内就超时了——后一种在没有 `is_connect` 标记的网络栈上也算没发出去。
+/// 别的传输错误（读响应时断了、等响应超时）请求已经发出去了，服务商可能已经开始计费。
+fn transport_error_is_unsent(is_connect: bool, is_timeout: bool, elapsed: Duration) -> bool {
+    is_connect
+        || (is_timeout && elapsed <= Duration::from_secs(u64::from(AI_CONNECT_TIMEOUT_SECONDS) + 1))
 }
 
 fn request_openai(config: &AiRequestConfig, prompt: &str) -> Result<String, String> {
@@ -1007,6 +1016,8 @@ fn request_openai_streaming(
             Err("OpenAI 流式响应中没有摘要内容".to_owned())
         }
         Err(stream_error) => {
+            // 流式那次可能已经计费，回退的普通请求再花一次：两次都要记
+            crate::spend_guard::account_failed_stream();
             emit(
                 stage,
                 "fallback",
@@ -1117,6 +1128,7 @@ fn request_anthropic_streaming(
             Err("Anthropic 流式响应中没有摘要内容".to_owned())
         }
         Err(stream_error) => {
+            crate::spend_guard::account_failed_stream();
             emit(
                 stage,
                 "fallback",
@@ -2051,15 +2063,25 @@ fn execute_json_post(
             request = request.header(*name, value);
         }
 
+        let sent_at = Instant::now();
         let response = match request.body(body.to_owned()).send() {
             Ok(response) => response,
-            Err(error) if should_retry_ai_transport_error(&error, attempt) => {
-                sleep_before_ai_retry(attempt);
-                continue;
-            }
             Err(error) => {
-                // 没连上、被拒绝连接这类（不是超时）：请求没到服务商那里，没有计费
-                if !error.is_timeout() {
+                let unsent = transport_error_is_unsent(
+                    error.is_connect(),
+                    error.is_timeout(),
+                    sent_at.elapsed(),
+                );
+                if should_retry_ai_transport_error(&error, attempt) {
+                    // 这次可能已经发出去、被计费了：重试成功后账本里也要有它
+                    if !unsent {
+                        crate::spend_guard::account_failed_attempt();
+                    }
+                    sleep_before_ai_retry(attempt);
+                    continue;
+                }
+                if unsent {
+                    // 没连上：请求没到服务商那里，没有计费
                     crate::spend_guard::release_unbilled();
                 }
                 return Err(format_ai_request_error(error));
@@ -2076,6 +2098,10 @@ fn execute_json_post(
         };
 
         if should_retry_ai_response(&api_response, attempt) {
+            // 限流（429）是服务商处理之前就拒绝的；5xx 不确定，可能已经计费
+            if status_may_be_billed(api_response.http_code) {
+                crate::spend_guard::account_failed_attempt();
+            }
             sleep_before_ai_retry(attempt);
             continue;
         }
@@ -2105,17 +2131,30 @@ where
         request = request.header(*name, value);
     }
 
-    let mut response = request
-        .body(body.to_owned())
-        .send()
-        .map_err(format_ai_request_error)?;
+    let sent_at = Instant::now();
+    let mut response = match request.body(body.to_owned()).send() {
+        Ok(response) => response,
+        Err(error) => {
+            // 连接没建起来：没有计费；别的传输错误请求可能已经发出去了，回退到普通请求时要记上这一笔
+            if !transport_error_is_unsent(error.is_connect(), error.is_timeout(), sent_at.elapsed())
+            {
+                crate::spend_guard::mark_possibly_billed();
+            }
+            return Err(format_ai_request_error(error));
+        }
+    };
     let status = response.status();
     if !status.is_success() {
+        if status_may_be_billed(Some(status.as_u16())) {
+            crate::spend_guard::mark_possibly_billed();
+        }
         let body = response
             .text()
             .map_err(|error| format!("AI 接口响应读取失败：{error}"))?;
         return Err(format_ai_http_error("AI", Some(status.as_u16()), &body));
     }
+    // 收到了成功的状态行：服务商已经开始生成，之后不管怎么断掉都可能已经计费
+    crate::spend_guard::mark_possibly_billed();
 
     let mut buffer = String::new();
     let mut full_text = String::new();
@@ -2850,6 +2889,14 @@ mod card_chat {
 
     fn looks_like_context_overflow(body: &str) -> bool {
         let normalized = body.to_ascii_lowercase();
+        // 「max_tokens 比模型允许的输出上限还大」是请求参数配错了，缩短输入没用；
+        // 只有同时提到上下文（输入加输出超过了上下文窗口）才算内容太长
+        if normalized.contains("max_tokens")
+            && !normalized.contains("context")
+            && !body.contains("上下文")
+        {
+            return false;
+        }
         normalized.contains("context length")
             || normalized.contains("maximum context")
             || normalized.contains("max context")
@@ -4392,18 +4439,295 @@ mod tests {
 
     #[test]
     fn only_client_errors_are_known_to_be_unbilled() {
-        for code in [400, 401, 402, 403, 404, 408, 409, 422, 429, 451] {
+        for code in [400, 401, 402, 403, 404, 409, 422, 429, 451] {
             assert!(
                 !status_may_be_billed(Some(code)),
                 "HTTP {code} 在处理之前就被拒绝，不计费"
             );
         }
-        for code in [500, 502, 503, 504, 524] {
+        for code in [408, 500, 502, 503, 504, 524] {
             assert!(
                 status_may_be_billed(Some(code)),
-                "HTTP {code} 不确定，当作可能计费"
+                "HTTP {code} 不确定（408 常是代理等不到上游就回的），当作可能计费"
             );
         }
         assert!(status_may_be_billed(None), "不知道状态码，当作可能计费");
+    }
+
+    #[test]
+    fn a_max_tokens_misconfiguration_is_not_blamed_on_the_content() {
+        // 「max_tokens 比模型允许的输出上限还大」是参数配错了，缩短输入没用：不能当成「内容太长」把任务判成致命
+        let anthropic = classify_http_failure(
+            400,
+            r#"{"type":"error","error":{"type":"invalid_request_error","message":"max_tokens: 100000 > 8192, which is the maximum allowed number of output tokens for claude-3-5-sonnet-20241022"}}"#,
+            None,
+        );
+        assert_eq!(
+            anthropic.kind,
+            ChatErrorKind::Other,
+            "{}",
+            anthropic.message
+        );
+        let openai = classify_http_failure(
+            400,
+            r#"{"error":{"message":"max_tokens is too large: 40000. This model supports at most 16384 completion tokens, whereas you provided 40000.","type":"invalid_request_error","param":"max_tokens"}}"#,
+            None,
+        );
+        assert_eq!(openai.kind, ChatErrorKind::Other, "{}", openai.message);
+        // 真的是内容太长的几种写法照旧认得（包括同时提到 max_tokens 和上下文窗口的）
+        for genuine in [
+            "This model's maximum context length is 8192 tokens. However, your messages resulted in 9000 tokens.",
+            "prompt is too long: 250000 tokens > 200000 maximum",
+            "input length and `max_tokens` exceed context limit: 188240 + 21333 > 200000, decrease input length or `max_tokens` and try again",
+            "请求超出上下文长度限制",
+        ] {
+            let error = classify_http_failure(400, genuine, None);
+            assert_eq!(error.kind, ChatErrorKind::ContentTooLarge, "{genuine}");
+        }
+    }
+
+    #[test]
+    fn transport_errors_tell_unsent_requests_from_lost_ones() {
+        let secs = Duration::from_secs;
+        assert!(transport_error_is_unsent(true, false, secs(0)), "没连上");
+        assert!(
+            transport_error_is_unsent(true, true, secs(100)),
+            "连接阶段的错误不管多久都是没发出去"
+        );
+        assert!(
+            transport_error_is_unsent(false, true, secs(15)),
+            "没有连接标记、但在建立连接的时限内超时：算没发出去"
+        );
+        assert!(
+            !transport_error_is_unsent(false, true, secs(120)),
+            "等响应等到超时：请求早就发出去了，可能已经计费"
+        );
+        assert!(
+            !transport_error_is_unsent(false, false, secs(1)),
+            "读响应时断了之类：请求发出去了"
+        );
+    }
+
+    // —— 旧功能的记账：走真的请求函数，打到本地假服务，看账本里留下什么 ——
+
+    const SPEND_BUDGET: &str = r#"{"dailyBudgetTokens":100000,"paused":false}"#;
+    const SPEND_LATEST: &str = "SELECT status, input_tokens, output_tokens FROM ai_jobs WHERE target_id LIKE 'legacy-%' ORDER BY created_at DESC, rowid DESC LIMIT 1";
+    const SPEND_REPLY: &str = r#"{"choices":[{"message":{"content":"好的"}}],"usage":{"prompt_tokens":700,"completion_tokens":50}}"#;
+
+    fn loopback_config(url: String) -> AiRequestConfig {
+        AiRequestConfig {
+            provider: "openai-compatible".to_owned(),
+            api_key: "sk-test".to_owned(),
+            base_url: Some(url),
+            model: "custom-model".to_owned(),
+        }
+    }
+
+    /// 收到完整请求后什么也不回就断开（服务商可能已经处理了、回复丢了）。
+    fn spawn_dropping_server(connections: usize) -> (String, thread::JoinHandle<usize>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("应能启动本地测试 HTTP 服务");
+        let address = listener.local_addr().expect("应能读取本地监听地址");
+        let handle = thread::spawn(move || {
+            let mut received = 0;
+            for _ in 0..connections {
+                let (mut stream, _) = listener.accept().expect("应能接收本地 HTTP 请求");
+                stream
+                    .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+                    .expect("应能设置读取超时");
+                if read_http_request(&mut stream).starts_with("POST") {
+                    received += 1;
+                }
+            }
+            received
+        });
+        (format!("http://{address}/test"), handle)
+    }
+
+    fn prompt_of_1000_tokens() -> String {
+        "说".repeat(1000)
+    }
+
+    #[test]
+    fn a_refused_connection_is_not_billed_and_gives_the_reservation_back() {
+        let dir = crate::spend_guard::testing::Dir::new();
+        dir.control(SPEND_BUDGET);
+        let _scope = dir.use_in_this_thread();
+        // 监听后立刻关掉：端口上没人，连接被拒绝
+        let address = TcpListener::bind("127.0.0.1:0")
+            .and_then(|listener| listener.local_addr())
+            .expect("应能占一个本地端口");
+        let error = request_openai(
+            &loopback_config(format!("http://{address}/test")),
+            &prompt_of_1000_tokens(),
+        )
+        .expect_err("没人监听应失败");
+        assert!(error.contains("请求失败"), "{error}");
+        let (status, input, output) = dir.row(SPEND_LATEST);
+        assert_eq!((status.as_str(), input, output), ("cancelled", 0, 0));
+        assert_eq!(dir.used(), 0, "请求没到服务商那里，一分都不该留");
+    }
+
+    #[test]
+    fn a_connection_lost_after_the_request_arrived_stays_on_the_books() {
+        // 服务商收到了请求、回复丢了：可能已经计费。三次尝试都是这样，每次都按提示词的估计记一笔
+        let dir = crate::spend_guard::testing::Dir::new();
+        dir.control(SPEND_BUDGET);
+        let _scope = dir.use_in_this_thread();
+        let (url, server) = spawn_dropping_server(AI_API_MAX_ATTEMPTS);
+        let error = request_openai(&loopback_config(url), &prompt_of_1000_tokens())
+            .expect_err("服务商一直不回应应失败");
+        assert_eq!(
+            server.join().expect("假服务应正常结束"),
+            AI_API_MAX_ATTEMPTS
+        );
+        assert!(error.contains("请求失败"), "{error}");
+        let (status, input, output) = dir.row(SPEND_LATEST);
+        assert_eq!(
+            (status.as_str(), input, output),
+            ("cancelled", 3 * 1000, 0),
+            "三次尝试都可能已经计费"
+        );
+    }
+
+    #[test]
+    fn a_rejection_after_an_earlier_server_error_keeps_the_earlier_attempt() {
+        // 第一次 503（可能已计费）→ 重试被限流 429（没计费）→ 再试被 401 拒绝（没计费）：账本里只该有第一次那笔
+        let dir = crate::spend_guard::testing::Dir::new();
+        dir.control(SPEND_BUDGET);
+        let _scope = dir.use_in_this_thread();
+        let (url, server) = spawn_http_sequence_server(vec![
+            ("503 Service Unavailable", r#"{"error":{"message":"busy"}}"#),
+            (
+                "429 Too Many Requests",
+                r#"{"error":{"message":"slow down"}}"#,
+            ),
+            ("401 Unauthorized", r#"{"error":{"message":"bad key"}}"#),
+        ]);
+        let error = request_openai(&loopback_config(url), &prompt_of_1000_tokens())
+            .expect_err("密钥错误应失败");
+        assert_eq!(server.join().expect("假服务应正常结束").len(), 3);
+        assert!(error.contains("401"), "{error}");
+        let (status, input, output) = dir.row(SPEND_LATEST);
+        assert_eq!(
+            (status.as_str(), input, output),
+            ("cancelled", 1000, 0),
+            "只留 503 那次的提示词估计：后两次在处理之前就被拒绝"
+        );
+    }
+
+    #[test]
+    fn a_plain_rejection_gives_the_whole_reservation_back() {
+        let dir = crate::spend_guard::testing::Dir::new();
+        dir.control(SPEND_BUDGET);
+        let _scope = dir.use_in_this_thread();
+        let (url, server) =
+            spawn_http_server("401 Unauthorized", r#"{"error":{"message":"bad key"}}"#);
+        request_openai(&loopback_config(url), &prompt_of_1000_tokens()).expect_err("应失败");
+        server.join().expect("假服务应正常结束");
+        let (status, input, output) = dir.row(SPEND_LATEST);
+        assert_eq!((status.as_str(), input, output), ("cancelled", 0, 0));
+    }
+
+    #[test]
+    fn a_retry_that_succeeds_still_pays_for_the_failed_attempt() {
+        // 第一次 503（可能已计费）、重试成功：账本里是两次的总和，不是只有成功那次
+        let dir = crate::spend_guard::testing::Dir::new();
+        dir.control(SPEND_BUDGET);
+        let _scope = dir.use_in_this_thread();
+        let (url, server) = spawn_http_sequence_server(vec![
+            ("503 Service Unavailable", r#"{"error":{"message":"busy"}}"#),
+            ("200 OK", SPEND_REPLY),
+        ]);
+        let content =
+            request_openai(&loopback_config(url), &prompt_of_1000_tokens()).expect("重试后应成功");
+        server.join().expect("假服务应正常结束");
+        assert_eq!(content, "好的");
+        let (status, input, output) = dir.row(SPEND_LATEST);
+        assert_eq!(
+            (status.as_str(), input, output),
+            ("succeeded", 700 + 1000, 50),
+            "成功那次的真实用量，加上 503 那次的提示词估计"
+        );
+    }
+
+    #[test]
+    fn a_broken_stream_and_its_fallback_are_both_paid_for() {
+        // 流式回复收到了状态行但内容读不懂（服务商已经开始生成）→ 回退到普通请求成功：两次都要记
+        let dir = crate::spend_guard::testing::Dir::new();
+        dir.control(SPEND_BUDGET);
+        let _scope = dir.use_in_this_thread();
+        let (url, server) = spawn_http_sequence_server(vec![
+            ("200 OK", "data: not-json\n\n"),
+            ("200 OK", SPEND_REPLY),
+        ]);
+        let mut emit = |_: &str, _: &str, _: Option<&str>, _: Option<&str>, _: Option<&str>| {};
+        let content = request_openai_streaming(
+            &loopback_config(url),
+            &prompt_of_1000_tokens(),
+            "summarize",
+            &mut emit,
+        )
+        .expect("回退的普通请求应成功");
+        server.join().expect("假服务应正常结束");
+        assert_eq!(content, "好的");
+        let (status, input, output) = dir.row(SPEND_LATEST);
+        assert_eq!(
+            (status.as_str(), input, output),
+            ("succeeded", 700 + 1000, 50),
+            "回退成功那次的真实用量，加上流式那次的提示词估计"
+        );
+    }
+
+    #[test]
+    fn a_stream_the_provider_refused_is_not_paid_for() {
+        // 很多网关对 stream 直接回 400：没有计费，回退的普通请求只记它自己的用量
+        let dir = crate::spend_guard::testing::Dir::new();
+        dir.control(SPEND_BUDGET);
+        let _scope = dir.use_in_this_thread();
+        let (url, server) = spawn_http_sequence_server(vec![
+            (
+                "400 Bad Request",
+                r#"{"error":{"message":"stream is not supported"}}"#,
+            ),
+            ("200 OK", SPEND_REPLY),
+        ]);
+        let mut emit = |_: &str, _: &str, _: Option<&str>, _: Option<&str>, _: Option<&str>| {};
+        request_openai_streaming(
+            &loopback_config(url),
+            &prompt_of_1000_tokens(),
+            "summarize",
+            &mut emit,
+        )
+        .expect("回退的普通请求应成功");
+        server.join().expect("假服务应正常结束");
+        let (status, input, output) = dir.row(SPEND_LATEST);
+        assert_eq!((status.as_str(), input, output), ("succeeded", 700, 50));
+    }
+
+    #[test]
+    fn a_broken_stream_followed_by_a_rejected_fallback_keeps_only_the_stream() {
+        let dir = crate::spend_guard::testing::Dir::new();
+        dir.control(SPEND_BUDGET);
+        let _scope = dir.use_in_this_thread();
+        let (url, server) = spawn_http_sequence_server(vec![
+            ("200 OK", "data: not-json\n\n"),
+            ("401 Unauthorized", r#"{"error":{"message":"bad key"}}"#),
+        ]);
+        let mut emit = |_: &str, _: &str, _: Option<&str>, _: Option<&str>, _: Option<&str>| {};
+        let error = request_openai_streaming(
+            &loopback_config(url),
+            &prompt_of_1000_tokens(),
+            "summarize",
+            &mut emit,
+        )
+        .expect_err("两次都失败");
+        server.join().expect("假服务应正常结束");
+        assert!(error.contains("普通请求也失败"), "{error}");
+        let (status, input, output) = dir.row(SPEND_LATEST);
+        assert_eq!(
+            (status.as_str(), input, output),
+            ("cancelled", 1000, 0),
+            "流式那次可能已计费，被拒的回退请求没有"
+        );
     }
 }

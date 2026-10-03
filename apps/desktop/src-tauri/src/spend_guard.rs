@@ -8,9 +8,13 @@
 //! - 请求前（`check_before_request`）：在一个 `BEGIN IMMEDIATE` 里查「额度是 0 / 队列暂停 / 24 小时已用 + 本次预计 > 额度」，
 //!   通过就**同一个事务里**往账本写一条 `running` 的预留行（用量 = 本次预计）。队列认领看得见这条预留，
 //!   所以旧功能的请求在途时，队列不会再认领出去把额度撑破；两个旧功能的请求同时来，也只有放得下的那个过得去；
-//! - 请求后（`record_after_request`）：把预留行换成真实用量（服务商回的真实用量；流式没有就按文字估，中文按 1 字 1 token）；
+//! - 请求后（`record_after_request`）：把预留行换成真实用量（服务商回的真实用量；没有用量——流式、或回复里没写——
+//!   就按文字估，中文按 1 字 1 token，而且不低于预留：推理模型的思考 token 不在文字里）；
 //! - 没记账就结束（出错、panic）：预留行记成已取消，只留「提示词那部分」的估计用量（请求发出去了才可能计费，输出那部分没有）。
-//!   程序崩溃时留下的预留行，下次启动由 `jobs::recover_running_jobs` 记成已取消，用量照旧计入窗口。
+//!   程序崩溃时留下的预留行，下次启动由 `jobs::recover_running_jobs` 记成已取消，用量照旧计入窗口；
+//! - 同一次请求里的多次尝试（5xx 后重试、流式失败后回退到普通请求）：每一次可能已经计费的失败尝试，
+//!   按提示词的估计用量记一笔（`account_failed_attempt`），最后结算或收尾时一起算进去；
+//!   肯定没计费的（被 4xx 拒绝、连接没建起来）不记，整笔请求都没计费就把预留整个退回（`release_unbilled`）。
 //!
 //! 额度、暂停都用队列的控制文件（工具箱里「AI 自动整理」的设置），所以只有一处开关。
 //! 没装闸（单元测试）时什么都不拦；正式运行时没装上就一律拒绝，宁可旧功能暂时不能用，也不在没有额度保护时花钱。
@@ -56,11 +60,30 @@ thread_local! {
     static PROBE_DEPTH: Cell<u32> = const { Cell::new(0) };
     static PERMIT_DEPTH: Cell<u32> = const { Cell::new(0) };
     static RESERVATION: RefCell<Option<Reservation>> = const { RefCell::new(None) };
+    /// 最近这次尝试可能已经到了服务商那里（流式请求收到了状态行、读到一半断了），还没记进 `EXTRA_TOKENS`。
+    static MAYBE_BILLED: Cell<bool> = const { Cell::new(false) };
+    /// 同一次请求里更早的、已经失败但可能计费的尝试（5xx 后重试、流式失败后回退到普通请求）：
+    /// 每次按提示词的估计用量记一笔，最后结算（或收尾）时一起算进去。
+    static EXTRA_TOKENS: Cell<u64> = const { Cell::new(0) };
+}
+
+#[cfg(test)]
+thread_local! {
+    /// 测试里指定这个线程用哪个库（见 `testing::Dir::use_in_this_thread`）；正式运行里没有这一项。
+    static TEST_DATABASE: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
 }
 
 /// 启动时装上。只能装一次；数据库路径之后不变。
 pub fn install(database_path: &Path) {
     let _ = DATABASE.set(database_path.to_path_buf());
+}
+
+fn database_in_use() -> Option<PathBuf> {
+    #[cfg(test)]
+    if let Some(path) = TEST_DATABASE.with(|slot| slot.borrow().clone()) {
+        return Some(path);
+    }
+    DATABASE.get().cloned()
 }
 
 pub fn is_refusal(message: &str) -> bool {
@@ -101,18 +124,22 @@ impl Drop for SpendPermit {
     fn drop(&mut self) {
         PERMIT_DEPTH.with(|depth| depth.set(depth.get().saturating_sub(1)));
         if self.outermost {
-            // 到这里还在，说明这次请求没有记账就结束了（出错、panic）
+            // 到这里还在，说明这次请求没有记账就结束了（出错、panic）：
+            // 最后一次尝试可能已经发出去了（留提示词那部分），加上更早失败但可能计费的那些
+            let earlier = EXTRA_TOKENS.with(Cell::take);
             if let Some(reservation) = RESERVATION.with(|slot| slot.borrow_mut().take()) {
-                if let Err(error) = cancel_reservation(&reservation, &jobs::now_db_time()) {
+                let kept = reservation.input_estimate.saturating_add(earlier);
+                if let Err(error) = cancel_reservation(&reservation, &jobs::now_db_time(), kept) {
                     eprintln!("旧版 AI 的预留没有收尾：{error}");
                 }
             }
+            MAYBE_BILLED.with(|flag| flag.set(false));
         }
     }
 }
 
 pub fn check_before_request(prompt: &str) -> Result<SpendPermit, String> {
-    begin(DATABASE.get().map(PathBuf::as_path), prompt)
+    begin(database_in_use().as_deref(), prompt)
 }
 
 fn begin(database: Option<&Path>, prompt: &str) -> Result<SpendPermit, String> {
@@ -129,6 +156,8 @@ fn begin(database: Option<&Path>, prompt: &str) -> Result<SpendPermit, String> {
     if !outermost {
         return Ok(permit);
     }
+    MAYBE_BILLED.with(|flag| flag.set(false));
+    EXTRA_TOKENS.with(|extra| extra.set(0));
     let Some(database) = database else {
         // 没装闸：单元测试里不拦；正式运行时拒绝
         if cfg!(test) {
@@ -155,14 +184,51 @@ fn begin(database: Option<&Path>, prompt: &str) -> Result<SpendPermit, String> {
     Ok(permit)
 }
 
-/// 请求被服务商直接拒绝（4xx：密钥 / 模型 / 额度 / 参数不对）或根本没连上：没有计费，把预留整个还回去，不留任何用量。
+/// 最后一次尝试被服务商直接拒绝（4xx：密钥 / 模型 / 额度 / 参数不对、限流）或根本没连上：这一次没有计费，
+/// 把预留还回去，只留更早失败但可能计费的尝试（`account_failed_attempt` 记下的），没有的话不留任何用量。
 /// 不调用的话，预留行会在凭证放掉时留下提示词那部分的估计用量——一把错的密钥、一个配错的模型，
 /// 整批解析连失败 20 多次，就在账本里记下 9 万多 token、什么也没花，把队列和所有旧功能锁 24 小时。
+/// 最近这次尝试如果可能已经到了服务商那里（`mark_possibly_billed` 之后），就什么也不退：留给凭证放掉时按「可能计费」收尾。
 pub fn release_unbilled() {
-    if let Some(reservation) = RESERVATION.with(|slot| slot.borrow_mut().take()) {
-        if let Err(error) = release_reservation(&reservation, &jobs::now_db_time()) {
+    if MAYBE_BILLED.with(Cell::get) {
+        return;
+    }
+    let Some(reservation) = RESERVATION.with(|slot| slot.borrow_mut().take()) else {
+        return;
+    };
+    let earlier = EXTRA_TOKENS.with(Cell::get);
+    match cancel_reservation(&reservation, &jobs::now_db_time(), earlier) {
+        Ok(()) => EXTRA_TOKENS.with(|extra| extra.set(0)),
+        Err(error) => {
             eprintln!("旧版 AI 的预留没有退回：{error}");
+            // 没退成：把预留放回去，凭证放掉时会收尾成「已取消 + 提示词那部分」，不会留下一条永远 running 的行
+            RESERVATION.with(|slot| *slot.borrow_mut() = Some(reservation));
         }
+    }
+}
+
+/// 最近这次尝试可能已经到了服务商那里（流式请求收到了状态行；超时或读到一半断了）。
+/// 之后如果请求还要继续（回退到普通请求），再调 `account_failed_stream` 把它记下来。
+pub fn mark_possibly_billed() {
+    MAYBE_BILLED.with(|flag| flag.set(true));
+}
+
+/// 一次可能已计费的尝试失败了，但请求还会继续（5xx 后重试、流式失败后回退到普通请求）：
+/// 把这次尝试提示词的估计用量记下，最后结算（或收尾）时一起算进去——否则只有最后一次的用量进账本。
+pub fn account_failed_attempt() {
+    let input = RESERVATION.with(|slot| {
+        slot.borrow()
+            .as_ref()
+            .map_or(0, |reservation| reservation.input_estimate)
+    });
+    EXTRA_TOKENS.with(|extra| extra.set(extra.get().saturating_add(input)));
+    MAYBE_BILLED.with(|flag| flag.set(false));
+}
+
+/// 流式请求失败、马上要回退到普通请求：流式那次如果可能已经计费，就把它记下。
+pub fn account_failed_stream() {
+    if MAYBE_BILLED.with(Cell::get) {
+        account_failed_attempt();
     }
 }
 
@@ -175,7 +241,7 @@ pub fn record_after_request(
     usage: Option<(u64, u64)>,
 ) {
     record(
-        DATABASE.get().map(PathBuf::as_path),
+        database_in_use().as_deref(),
         provider,
         model,
         prompt,
@@ -201,6 +267,9 @@ fn record(
     });
     let estimate = (estimate_tokens(prompt), estimate_tokens(content));
     let now = jobs::now_db_time();
+    // 更早失败但可能计费的尝试（见 `account_failed_attempt`）：算进输入那一列
+    let earlier = EXTRA_TOKENS.with(Cell::take);
+    MAYBE_BILLED.with(|flag| flag.set(false));
     let reservation = RESERVATION.with(|slot| slot.borrow_mut().take());
     let result = match reservation {
         Some(reservation) if reservation.database == database => {
@@ -216,6 +285,7 @@ fn record(
                     (estimate.0, total.saturating_sub(estimate.0))
                 }
             };
+            let input = input.saturating_add(earlier);
             let mut outcome = Err(String::new());
             for attempt in 0..3 {
                 outcome = settle_reservation(&reservation, &now, provider, model, input, output);
@@ -233,13 +303,21 @@ fn record(
                 Err(error) => {
                     // 记不上：把预留放回去，凭证放掉时会收尾成「已取消 + 提示词那部分」，不会留下一条永远 running 的行
                     RESERVATION.with(|slot| *slot.borrow_mut() = Some(reservation));
+                    EXTRA_TOKENS.with(|extra| extra.set(earlier));
                     Err(error)
                 }
             }
         }
         _ => {
             let (input, output) = real_usage.unwrap_or(estimate);
-            record_at(database, &now, provider, model, input, output)
+            record_at(
+                database,
+                &now,
+                provider,
+                model,
+                input.saturating_add(earlier),
+                output,
+            )
         }
     };
     if let Err(error) = result {
@@ -357,24 +435,16 @@ fn settle_reservation(
     Ok(changed > 0)
 }
 
-/// 没有计费：预留整个还回去（记成已取消、用量清零）。
-fn release_reservation(reservation: &Reservation, now: &str) -> Result<(), String> {
+/// 预留行记成已取消，只留 `kept_tokens`（0 就是整个退回）：
+/// - 没记账就结束：提示词那部分的估计用量，加上更早失败但可能计费的尝试；
+/// - 最后一次尝试没有计费（`release_unbilled`）：只留更早失败但可能计费的那些。
+fn cancel_reservation(
+    reservation: &Reservation,
+    now: &str,
+    kept_tokens: u64,
+) -> Result<(), String> {
     let connection = jobs::open_db(&reservation.database)?;
-    connection
-        .execute(
-            "UPDATE ai_jobs
-             SET status = 'cancelled', input_tokens = 0, output_tokens = 0, finished_at = ?1, updated_at = ?1
-             WHERE id = ?2 AND status = 'running'",
-            params![now, reservation.id],
-        )
-        .map_err(|error| format!("预留退回失败：{error}"))?;
-    Ok(())
-}
-
-/// 没记账就结束：记成已取消，只留提示词那部分的估计用量。
-fn cancel_reservation(reservation: &Reservation, now: &str) -> Result<(), String> {
-    let connection = jobs::open_db(&reservation.database)?;
-    let kept = i64::try_from(reservation.input_estimate.min(MAX_RECORDED_TOKENS)).unwrap_or(0);
+    let kept = i64::try_from(kept_tokens.min(MAX_RECORDED_TOKENS)).unwrap_or(0);
     connection
         .execute(
             "UPDATE ai_jobs
@@ -445,20 +515,19 @@ fn readable_tokens(tokens: u64) -> String {
     }
 }
 
+/// 账本夹具：别的模块的测试（走真请求函数的记账测试）也用它。
 #[cfg(test)]
-mod tests {
+pub(crate) mod testing {
     use super::*;
     use std::fs;
     use std::sync::atomic::{AtomicU64, Ordering};
-    use std::sync::{Arc, Barrier};
-    use std::thread;
 
     static NEXT: AtomicU64 = AtomicU64::new(0);
 
-    struct Dir(PathBuf);
+    pub(crate) struct Dir(PathBuf);
 
     impl Dir {
-        fn new() -> Self {
+        pub(crate) fn new() -> Self {
             let path = std::env::temp_dir().join(format!(
                 "fsl-spend-guard-{}-{}",
                 std::process::id(),
@@ -479,19 +548,19 @@ mod tests {
             Self(database)
         }
 
-        fn path(&self) -> &Path {
+        pub(crate) fn path(&self) -> &Path {
             &self.0
         }
 
-        fn control(&self, text: &str) {
+        pub(crate) fn control(&self, text: &str) {
             fs::write(jobs::queue_control_path(&self.0), text).unwrap();
         }
 
-        fn used(&self) -> i64 {
+        pub(crate) fn used(&self) -> i64 {
             jobs::tokens_used_in_last_day(&self.0, &jobs::now_db_time()).unwrap()
         }
 
-        fn row(&self, sql: &str) -> (String, i64, i64) {
+        pub(crate) fn row(&self, sql: &str) -> (String, i64, i64) {
             Connection::open(&self.0)
                 .unwrap()
                 .query_row(sql, [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
@@ -506,6 +575,30 @@ mod tests {
             }
         }
     }
+
+    impl Dir {
+        /// 这个线程里的请求都记到这个库（没装全局闸门时的测试用；每个测试自己的线程，互不影响）。
+        pub(crate) fn use_in_this_thread(&self) -> DatabaseScope {
+            TEST_DATABASE.with(|slot| *slot.borrow_mut() = Some(self.0.clone()));
+            DatabaseScope
+        }
+    }
+
+    pub(crate) struct DatabaseScope;
+
+    impl Drop for DatabaseScope {
+        fn drop(&mut self) {
+            TEST_DATABASE.with(|slot| *slot.borrow_mut() = None);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::testing::Dir;
+    use super::*;
+    use std::sync::{Arc, Barrier};
+    use std::thread;
 
     const BUDGET_100K: &str = r#"{"dailyBudgetTokens":100000,"paused":false}"#;
     const LEGACY_ROW: &str =
@@ -855,6 +948,140 @@ mod tests {
         drop(permit);
         let (status, _, _) = dir.row(LEGACY_ROW);
         assert_eq!(status, "cancelled", "不能留下一条永远 running 的行");
+    }
+
+    #[test]
+    fn an_earlier_possibly_billed_attempt_survives_a_later_unbilled_one() {
+        // 第一次尝试 5xx（可能已计费）、重试时被限流 / 被拒（肯定没计费）：不能把整笔预留退光，
+        // 否则第一次那笔可能的花费就从账本里消失了
+        let dir = Dir::new();
+        dir.control(BUDGET_100K);
+        let permit = begin(Some(dir.path()), &"说".repeat(1000)).expect("应通过");
+        account_failed_attempt();
+        release_unbilled();
+        drop(permit);
+        assert_eq!(dir.used(), 1000, "只留更早那次的提示词估计，最后一次没计费");
+        let (status, input, output) = dir.row(LEGACY_ROW_LATEST);
+        assert_eq!((status.as_str(), input, output), ("cancelled", 1000, 0));
+    }
+
+    #[test]
+    fn earlier_failed_attempts_are_added_to_the_settled_usage() {
+        let dir = Dir::new();
+        dir.control(BUDGET_100K);
+        let permit = begin(Some(dir.path()), &"说".repeat(1000)).expect("应通过");
+        account_failed_attempt();
+        account_failed_attempt();
+        record(
+            Some(dir.path()),
+            "openai",
+            "m",
+            &"说".repeat(1000),
+            "答",
+            Some((500, 100)),
+        );
+        drop(permit);
+        let (status, input, output) = dir.row(LEGACY_ROW_LATEST);
+        assert_eq!(
+            (status.as_str(), input, output),
+            ("succeeded", 500 + 2 * 1000, 100),
+            "两次失败的尝试各按提示词估计记一笔，加上最后成功那次的真实用量"
+        );
+        assert_eq!(dir.used(), 2600);
+    }
+
+    #[test]
+    fn a_possibly_billed_attempt_is_never_released() {
+        let dir = Dir::new();
+        dir.control(BUDGET_100K);
+        let permit = begin(Some(dir.path()), &"说".repeat(1000)).expect("应通过");
+        mark_possibly_billed();
+        release_unbilled();
+        drop(permit);
+        assert_eq!(
+            dir.used(),
+            1000,
+            "这次尝试可能已经计费，不能退，只留提示词那部分"
+        );
+    }
+
+    #[test]
+    fn a_stream_that_never_reached_the_provider_leaves_nothing_behind() {
+        // 流式请求连接失败 / 被 4xx 拒绝：没有 mark，回退的普通请求也被拒——整笔退回，一个字都不留
+        let dir = Dir::new();
+        dir.control(BUDGET_100K);
+        let permit = begin(Some(dir.path()), &"说".repeat(1000)).expect("应通过");
+        account_failed_stream();
+        release_unbilled();
+        drop(permit);
+        assert_eq!(dir.used(), 0);
+    }
+
+    #[test]
+    fn a_stream_that_may_have_been_billed_is_counted_before_the_fallback() {
+        let dir = Dir::new();
+        dir.control(BUDGET_100K);
+        let permit = begin(Some(dir.path()), &"说".repeat(1000)).expect("应通过");
+        mark_possibly_billed();
+        account_failed_stream();
+        assert!(
+            !MAYBE_BILLED.with(Cell::get),
+            "记下之后标记要清掉，回退的普通请求自己重新判断"
+        );
+        // 回退的普通请求被 4xx 拒了：退回它自己那部分，流式那次留着
+        release_unbilled();
+        drop(permit);
+        assert_eq!(dir.used(), 1000);
+    }
+
+    #[test]
+    fn a_failed_release_puts_the_reservation_back_so_nothing_stays_running() {
+        let dir = Dir::new();
+        dir.control(BUDGET_100K);
+        let permit = begin(Some(dir.path()), &"说".repeat(1000)).expect("应通过");
+        RESERVATION.with(|slot| {
+            if let Some(reservation) = slot.borrow_mut().as_mut() {
+                reservation.database = dir
+                    .path()
+                    .with_file_name("not-a-dir")
+                    .join("x")
+                    .join("y.sqlite3");
+            }
+        });
+        release_unbilled();
+        assert!(
+            RESERVATION.with(|slot| slot.borrow().is_some()),
+            "没退成要把预留放回去，凭证放掉时才有人收尾"
+        );
+        RESERVATION.with(|slot| {
+            if let Some(reservation) = slot.borrow_mut().as_mut() {
+                reservation.database = dir.path().to_path_buf();
+            }
+        });
+        drop(permit);
+        let (status, input, _) = dir.row(LEGACY_ROW);
+        assert_eq!(status, "cancelled", "不能留下一条永远 running 的行");
+        assert_eq!(input, 1000);
+    }
+
+    #[test]
+    fn accounting_state_does_not_leak_into_the_next_request() {
+        let dir = Dir::new();
+        dir.control(BUDGET_100K);
+        let permit = begin(Some(dir.path()), &"说".repeat(1000)).expect("应通过");
+        account_failed_attempt();
+        mark_possibly_billed();
+        drop(permit);
+        let before = dir.used();
+        assert_eq!(before, 2000, "这一次：更早 1000 + 最后一次 1000");
+        let permit = begin(Some(dir.path()), &"说".repeat(1000)).expect("应通过");
+        release_unbilled();
+        drop(permit);
+        assert_eq!(
+            dir.used(),
+            before,
+            "上一次的「可能计费」标记和累计不能带进下一次请求：这一次被拒绝，应当整笔退回"
+        );
     }
 
     #[test]

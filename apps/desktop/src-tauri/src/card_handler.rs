@@ -11,7 +11,7 @@ use rusqlite::{params, params_from_iter, Connection, OptionalExtension, Transact
 use serde::Serialize;
 use serde_json::Value;
 use std::path::Path;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -54,6 +54,9 @@ pub struct RepoCardHandler {
     client_factory: Option<ClientFactory>,
     /// 连续被服务商拒绝的次数（线程之间共用）。任何一次成功或别的失败都会清零。
     rejections: AtomicU32,
+    /// 这次运行里已经成功过：引擎、模型、地址都是对的。之后零星的 4xx（比如某个仓库的内容被服务商拒绝）
+    /// 是那一条自己的问题，不数「连续被拒绝」，免得几个特殊仓库把整条队列停掉。
+    proven: AtomicBool,
 }
 
 impl RepoCardHandler {
@@ -62,6 +65,7 @@ impl RepoCardHandler {
             config,
             client_factory: None,
             rejections: AtomicU32::new(0),
+            proven: AtomicBool::new(false),
         }
     }
 
@@ -72,20 +76,23 @@ impl RepoCardHandler {
             config,
             client_factory: Some(client_factory),
             rejections: AtomicU32::new(0),
+            proven: AtomicBool::new(false),
         }
     }
 
     /// 数「连续被拒绝」：被服务商拒绝（不计费的 4xx）的累加，够数了就把这一次升级成暂停整条队列；别的结果清零。
+    /// 只在还没成功过的时候数：一成功，配置就证明是对的，之后的拒绝不再说明配置有问题。
     fn track_rejections(&self, failure: JobFailure) -> JobFailure {
-        let rejected = matches!(
-            &failure,
-            JobFailure::Fatal {
-                kind: ErrorKind::ContentTooLarge,
-                message,
-            } if http_status_in(message).is_some_and(|status| (400..500).contains(&status))
-                // 真正的「内容超过模型上下文」是这一条自己的问题（一个特别长的 README），不是配置错了
-                && !message.contains("超过模型上下文")
-        );
+        let rejected = !self.proven.load(Ordering::SeqCst)
+            && matches!(
+                &failure,
+                JobFailure::Fatal {
+                    kind: ErrorKind::ContentTooLarge,
+                    message,
+                } if http_status_in(message).is_some_and(|status| (400..500).contains(&status))
+                    // 真正的「内容超过模型上下文」是这一条自己的问题（一个特别长的 README），不是配置错了
+                    && !message.contains("超过模型上下文")
+            );
         if !rejected {
             self.rejections.store(0, Ordering::SeqCst);
             return failure;
@@ -162,6 +169,7 @@ impl JobHandler for RepoCardHandler {
             self.track_rejections(map_card_error(error))
         })?;
         self.rejections.store(0, Ordering::SeqCst);
+        self.proven.store(true, Ordering::SeqCst);
         if let Err(message) = apply_scenario_tags(&mut conn, &job.account_id, repo_id) {
             return Err(JobFailure::Retryable {
                 kind: ErrorKind::Other,
@@ -900,6 +908,10 @@ mod tests {
         let success = handler
             .run(&job("job-r1", "repository", "r1"), db.path())
             .expect("合法卡应成功");
+        assert!(
+            handler.proven.load(Ordering::SeqCst),
+            "成功过一次，配置就算证明是对的"
+        );
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert_eq!(success.input_tokens, 111);
         assert_eq!(success.output_tokens, 22);
@@ -2214,6 +2226,23 @@ mod tests {
                 handler.track_rejections(JobFailure::Fatal {
                     kind: ErrorKind::ContentTooLarge,
                     message: "AI 接口请求失败（HTTP 400）：内容超过模型上下文或最大 token 限制，请缩短输入。".to_owned(),
+                }),
+                JobFailure::Fatal { .. }
+            ));
+        }
+    }
+
+    #[test]
+    fn once_a_card_has_succeeded_scattered_rejections_never_pause_the_queue() {
+        // 配置对不对已经由前面的成功证明了。之后某几个仓库的内容被服务商拒绝（比如内容审核的 400），
+        // 是它们自己的问题：连着 20 个也只是各自失败，不能把整条队列停掉
+        let (handler, _) = scripted(Ok(ok_config()), vec![]);
+        handler.proven.store(true, Ordering::SeqCst);
+        for _ in 0..20 {
+            assert!(matches!(
+                handler.track_rejections(JobFailure::Fatal {
+                    kind: ErrorKind::ContentTooLarge,
+                    message: "AI 接口请求失败（HTTP 400）：Content Exists Risk".to_owned(),
                 }),
                 JobFailure::Fatal { .. }
             ));
