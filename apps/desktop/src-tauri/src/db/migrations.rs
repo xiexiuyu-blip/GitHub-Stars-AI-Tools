@@ -201,6 +201,11 @@ const MIGRATIONS: &[Migration] = &[
         name: "web_content",
         sql: include_str!("../../../../../packages/storage/migrations/fox/031_web_content.sql"),
     },
+    Migration {
+        version: "032",
+        name: "repo_license",
+        sql: include_str!("../../../../../packages/storage/migrations/fox/032_repo_license.sql"),
+    },
 ];
 
 pub fn latest_migration() -> &'static Migration {
@@ -474,10 +479,11 @@ mod tests {
         let path = temp_db("web-content");
         let report = migrate_database(&path).expect("空库应能迁到 031");
         assert_eq!(report.applied.len(), MIGRATIONS.len());
-        assert_eq!(MIGRATIONS.len(), 31);
-        assert_eq!(latest_migration().version, "031");
-        assert_eq!(latest_migration().name, "web_content");
+        assert_eq!(MIGRATIONS.len(), 32);
+        assert_eq!(latest_migration().version, "032");
+        assert_eq!(latest_migration().name, "repo_license");
         assert!(report.applied.iter().any(|item| item == "031 web_content"));
+        assert!(report.applied.iter().any(|item| item == "032 repo_license"));
         assert!(report.backup_path.is_none());
         for table in [
             "discover_candidates",
@@ -687,6 +693,106 @@ INSERT INTO ai_task_items(id, run_id, repository_id, full_name, status, reason) 
         }
     }
 
+    fn license_columns(path: &Path) -> Vec<(String, String, i64, Option<String>)> {
+        let connection = Connection::open(path).expect("应能打开测试库");
+        let mut statement = connection
+            .prepare("PRAGMA table_info(repositories)")
+            .expect("应能读取表结构");
+        statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                ))
+            })
+            .expect("应能遍历列")
+            .map(|row| row.expect("应能读取列"))
+            .filter(|column| column.0 == "license_spdx" || column.0 == "license_name")
+            .collect()
+    }
+
+    #[test]
+    fn fresh_database_has_nullable_license_columns_without_defaults() {
+        let path = temp_db("license-fresh");
+        let report = migrate_database(&path).expect("空库应能迁到 032");
+        assert!(report.applied.iter().any(|item| item == "032 repo_license"));
+        assert_eq!(latest_migration().version, "032");
+        assert_eq!(latest_migration().name, "repo_license");
+        let columns = license_columns(&path);
+        assert_eq!(columns.len(), 2);
+        for name in ["license_spdx", "license_name"] {
+            let column = columns
+                .iter()
+                .find(|column| column.0 == name)
+                .unwrap_or_else(|| panic!("缺少列 {name}"));
+            assert_eq!(column.1.to_ascii_uppercase(), "TEXT", "{name}");
+            assert_eq!(column.2, 0, "{name} 应可空");
+            assert!(column.3.is_none(), "{name} 不应有默认值");
+        }
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_file(format!("{}-wal", path.display()));
+        let _ = fs::remove_file(format!("{}-shm", path.display()));
+    }
+
+    #[test]
+    fn upgrade_from_031_keeps_rows_and_leaves_license_null() {
+        let path = temp_db("license-upgrade");
+        {
+            let mut connection = Connection::open(&path).expect("应能创建 031 夹具");
+            connection
+                .execute_batch("PRAGMA foreign_keys = ON;")
+                .expect("应能打开外键");
+            for migration in MIGRATIONS
+                .iter()
+                .filter(|migration| migration.version <= "031")
+            {
+                apply_one(&mut connection, migration).expect("夹具迁移应成功");
+            }
+            connection
+                .execute_batch(
+                    "
+INSERT INTO github_accounts(id, login, token_ref) VALUES ('acct', 'fox', 'test');
+INSERT INTO repositories(id, account_id, owner, name, full_name, topics_json, html_url, sync_status, starred_at) VALUES
+  ('r1', 'acct', 'a', 'one', 'a/one', '[]', 'https://github.com/a/one', 'active', '2026-09-01T00:00:00Z'),
+  ('r2', 'acct', 'b', 'two', 'b/two', '[]', 'https://github.com/b/two', 'active', '2026-09-02T00:00:00Z');
+",
+                )
+                .expect("夹具数据应能写入");
+            assert!(license_columns(&path).is_empty(), "031 的库还没有许可证列");
+            assert_eq!(count_query(&path, "SELECT COUNT(*) FROM repositories"), 2);
+        }
+
+        let report = migrate_database(&path).expect("031 库应能升到 032");
+        assert_eq!(report.applied, vec!["032 repo_license".to_owned()]);
+        assert_eq!(count_query(&path, "SELECT COUNT(*) FROM repositories"), 2);
+        assert_eq!(
+            count_query(
+                &path,
+                "SELECT COUNT(*) FROM repositories WHERE license_spdx IS NULL AND license_name IS NULL"
+            ),
+            2
+        );
+        let connection = Connection::open(&path).expect("应能打开升级后的库");
+        let full_name: String = connection
+            .query_row(
+                "SELECT full_name FROM repositories WHERE id = 'r1'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("旧行应还在");
+        assert_eq!(full_name, "a/one");
+        drop(connection);
+
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_file(format!("{}-wal", path.display()));
+        let _ = fs::remove_file(format!("{}-shm", path.display()));
+        if let Some(backup) = report.backup_path {
+            let _ = fs::remove_file(backup);
+        }
+    }
+
     #[test]
     #[ignore = "会写入 dev 库并生成迁移备份，只在 FOX_STARS_MIGRATE_DEV=1 时运行"]
     fn migrate_live_dev_database_when_explicitly_requested() {
@@ -734,7 +840,7 @@ INSERT INTO ai_task_items(id, run_id, repository_id, full_name, status, reason) 
             &path,
             "SELECT MAX(CAST(version AS INTEGER)) FROM schema_migrations",
         );
-        assert_eq!(version, 31);
+        assert_eq!(version, 32);
     }
 
     #[test]

@@ -20,6 +20,7 @@ mod local_api;
 mod packs;
 mod ranking_query;
 mod rankings_live;
+mod repo_facts;
 mod scenarios;
 mod solve;
 mod storage;

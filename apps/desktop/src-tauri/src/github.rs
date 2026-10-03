@@ -33,6 +33,8 @@ pub struct StarredRepository {
     pub forks_count: u64,
     pub starred_at: String,
     pub pushed_at: Option<String>,
+    pub license_spdx: Option<String>,
+    pub license_name: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -93,6 +95,23 @@ struct StarredRepositoryItem {
     repo: GitHubRepository,
 }
 
+/// 键存在（哪怕值是 null）就返回 `Some(..)`；键不存在时 serde 用 default，得到外层 `None`。
+fn deserialize_present<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer).map(Some)
+}
+
+#[derive(Deserialize)]
+struct GitHubLicense {
+    #[serde(default)]
+    spdx_id: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+}
+
 #[derive(Deserialize)]
 struct GitHubRepository {
     id: u64,
@@ -105,6 +124,10 @@ struct GitHubRepository {
     stargazers_count: u64,
     forks_count: u64,
     pushed_at: Option<String>,
+    /// 三种情况要分开：没有这个键 = 不知道（外层 None）；`null` = GitHub 说这个仓库没有声明许可证（`Some(None)`）；
+    /// 有对象 = 有许可证。落库时「没声明」存成空串，「不知道」存成 NULL，详情才能说「未声明」而不是留空。
+    #[serde(default, deserialize_with = "deserialize_present")]
+    license: Option<Option<GitHubLicense>>,
     owner: GitHubOwner,
 }
 
@@ -400,7 +423,14 @@ pub fn fetch_starred_repositories_page(
         "{STARRED_REPOSITORIES_API}?per_page={PAGE_SIZE}&page={page}&sort=created&direction=desc"
     );
     let body = github_api_get(token, &url, STARRED_ACCEPT)?;
-    let items = serde_json::from_str::<Vec<StarredRepositoryItem>>(&body)
+    parse_starred_repositories(account_id, &body)
+}
+
+fn parse_starred_repositories(
+    account_id: &str,
+    body: &str,
+) -> Result<Vec<StarredRepository>, String> {
+    let items = serde_json::from_str::<Vec<StarredRepositoryItem>>(body)
         .map_err(|error| format!("GitHub Stars 响应解析失败：{error}"))?;
 
     items
@@ -415,6 +445,12 @@ fn map_starred_repository(
 ) -> Result<StarredRepository, String> {
     let topics_json = serde_json::to_string(&item.repo.topics.unwrap_or_default())
         .map_err(|error| format!("GitHub Topics 序列化失败：{error}"))?;
+    let (license_spdx, license_name) = match item.repo.license {
+        Some(Some(license)) => (license.spdx_id, license.name),
+        // GitHub 明确说没有许可证：存成空串，和「还没同步」（NULL）区分开
+        Some(None) => (Some(String::new()), None),
+        None => (None, None),
+    };
 
     Ok(StarredRepository {
         id: repository_local_id(account_id, item.repo.id),
@@ -430,6 +466,8 @@ fn map_starred_repository(
         forks_count: item.repo.forks_count,
         starred_at: item.starred_at,
         pushed_at: item.repo.pushed_at,
+        license_spdx,
+        license_name,
     })
 }
 
@@ -521,5 +559,117 @@ mod tests {
 
         assert!(timestamp.ends_with('Z'));
         OffsetDateTime::parse(&timestamp, &Rfc3339).expect("时间戳必须符合 RFC3339");
+    }
+
+    #[test]
+    fn parse_starred_repositories_reads_license_variants() {
+        let body = r#"[
+            {
+                "starred_at": "2026-01-01T00:00:00Z",
+                "repo": {
+                    "id": 1,
+                    "name": "mit-repo",
+                    "full_name": "octo/mit-repo",
+                    "description": null,
+                    "language": "Rust",
+                    "topics": ["cli"],
+                    "html_url": "https://github.com/octo/mit-repo",
+                    "stargazers_count": 10,
+                    "forks_count": 2,
+                    "pushed_at": "2026-01-02T00:00:00Z",
+                    "owner": {"login": "octo", "id": 7},
+                    "license": {
+                        "key": "mit",
+                        "name": "MIT License",
+                        "spdx_id": "MIT",
+                        "url": "https://api.github.com/licenses/mit",
+                        "node_id": "MDc6TGljZW5zZW1pdA=="
+                    }
+                }
+            },
+            {
+                "starred_at": "2026-01-01T00:00:00Z",
+                "repo": {
+                    "id": 2,
+                    "name": "other-repo",
+                    "full_name": "octo/other-repo",
+                    "description": null,
+                    "language": null,
+                    "topics": null,
+                    "html_url": "https://github.com/octo/other-repo",
+                    "stargazers_count": 1,
+                    "forks_count": 0,
+                    "pushed_at": null,
+                    "owner": {"login": "octo"},
+                    "license": {"key": "other", "name": "Other", "spdx_id": "NOASSERTION"}
+                }
+            },
+            {
+                "starred_at": "2026-01-01T00:00:00Z",
+                "repo": {
+                    "id": 3,
+                    "name": "none-repo",
+                    "full_name": "octo/none-repo",
+                    "description": null,
+                    "language": null,
+                    "topics": [],
+                    "html_url": "https://github.com/octo/none-repo",
+                    "stargazers_count": 0,
+                    "forks_count": 0,
+                    "pushed_at": null,
+                    "owner": {"login": "octo"},
+                    "license": null
+                }
+            },
+            {
+                "starred_at": "2026-01-01T00:00:00Z",
+                "repo": {
+                    "id": 4,
+                    "name": "missing-repo",
+                    "full_name": "octo/missing-repo",
+                    "description": null,
+                    "language": null,
+                    "topics": [],
+                    "html_url": "https://github.com/octo/missing-repo",
+                    "stargazers_count": 0,
+                    "forks_count": 0,
+                    "pushed_at": null,
+                    "owner": {"login": "octo"}
+                }
+            },
+            {
+                "starred_at": "2026-01-01T00:00:00Z",
+                "repo": {
+                    "id": 5,
+                    "name": "name-only",
+                    "full_name": "octo/name-only",
+                    "description": null,
+                    "language": null,
+                    "topics": [],
+                    "html_url": "https://github.com/octo/name-only",
+                    "stargazers_count": 0,
+                    "forks_count": 0,
+                    "pushed_at": null,
+                    "owner": {"login": "octo"},
+                    "license": {"name": "Custom Only", "key": "other"}
+                }
+            }
+        ]"#;
+
+        let parsed = parse_starred_repositories("1001", body).expect("应能解析 Stars 响应");
+        assert_eq!(parsed.len(), 5);
+        assert_eq!(parsed[0].id, "1001:1");
+        assert_eq!(parsed[0].license_spdx.as_deref(), Some("MIT"));
+        assert_eq!(parsed[0].license_name.as_deref(), Some("MIT License"));
+        assert_eq!(parsed[1].license_spdx.as_deref(), Some("NOASSERTION"));
+        assert_eq!(parsed[1].license_name.as_deref(), Some("Other"));
+        assert_eq!(parsed[1].topics_json, "[]");
+        // license: null → GitHub 说没有声明：空串；没有 license 这个键 → 不知道：None
+        assert_eq!(parsed[2].license_spdx.as_deref(), Some(""));
+        assert_eq!(parsed[2].license_name, None);
+        assert_eq!(parsed[3].license_spdx, None);
+        assert_eq!(parsed[3].license_name, None);
+        assert_eq!(parsed[4].license_spdx, None);
+        assert_eq!(parsed[4].license_name.as_deref(), Some("Custom Only"));
     }
 }

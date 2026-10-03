@@ -304,7 +304,8 @@ pub fn get_library_detail(path: &Path, id: &str) -> Result<LibraryDetail, String
     let sql = "
 SELECT r.id, r.full_name, r.html_url, r.description, r.language, r.stars_count,
        r.starred_at, r.pushed_at, d.one_liner_zh, d.card_json, a.read_status,
-       r.forks_count, d.keywords_json, r.topics_json, rd.raw_markdown
+       r.forks_count, d.keywords_json, r.topics_json, rd.raw_markdown,
+       r.license_spdx, r.license_name
 FROM repositories r
 LEFT JOIN annotations a ON a.repo_id = r.id
 LEFT JOIN repo_ai_documents d ON d.repo_id = r.id
@@ -319,15 +320,25 @@ WHERE r.id = ?1
                 row.get::<_, Option<String>>(12)?,
                 row.get::<_, Option<String>>(13)?,
                 row.get::<_, Option<String>>(14)?,
+                row.get::<_, Option<String>>(15)?,
+                row.get::<_, Option<String>>(16)?,
             ))
         })
         .optional()
         .map_err(|error| format!("仓库详情读取失败：{error}"))?;
-    let Some((raw, forks_count, keywords_json, topics_json, readme)) = found else {
+    let Some((raw, forks_count, keywords_json, topics_json, readme, license_spdx, license_name)) =
+        found
+    else {
         return Err("找不到这个仓库".to_owned());
     };
     let scenario_ids = scenario_ids_for(&connection, &[raw.id.clone()])?;
-    let item = into_item(raw, scenario_ids.get(id).cloned().unwrap_or_default());
+    let topics = parse_string_list(topics_json);
+    let mut item = into_item(raw, scenario_ids.get(id).cloned().unwrap_or_default());
+    if item.form.is_none() {
+        item.form =
+            crate::repo_facts::infer_form(&topics, &item.full_name, item.description.as_deref())
+                .map(str::to_owned);
+    }
     // 列表结构不带整张卡。详情字段从同一行再取一次。
     let card = load_card(&connection, id)?;
     Ok(LibraryDetail {
@@ -342,11 +353,11 @@ WHERE r.id = ?1
         alternatives_hint: string_array(&card, "alternatives_hint"),
         inspiration_for_fox: card_string(&card, "inspiration_for_fox"),
         risks: string_array(&card, "risks"),
-        license: card_string(&card, "license"),
+        license: detail_license(license_spdx, license_name, &card),
         maturity: card_string(&card, "maturity"),
         zh_friendly: card.get("zh_friendly").and_then(Value::as_bool),
         keywords: parse_string_list(keywords_json),
-        topics: parse_string_list(topics_json),
+        topics,
         forks_count,
         readme_excerpt: readme.as_deref().and_then(readme_excerpt),
     })
@@ -976,6 +987,20 @@ fn sanitized_card(value: Value) -> Value {
         std::borrow::Cow::Borrowed(_) => value,
         std::borrow::Cow::Owned(clean) => clean,
     }
+}
+
+/// 已声明的 SPDX（含 NOASSERTION / Other）优先于 AI 卡。
+/// 两列都是 NULL：还没同步。GitHub 返回 null 时同步也会写成 NULL，和「还没同步」相同，这时落到 AI 卡，没有就是 None。
+/// 列里已经有空白标识时，视为明确未声明，返回「未声明」，不再退回 AI 卡。
+fn detail_license(spdx: Option<String>, name: Option<String>, card: &Value) -> Option<String> {
+    let label = crate::repo_facts::license_label(spdx.as_deref(), name.as_deref());
+    if label.declared {
+        return Some(label.text);
+    }
+    if spdx.is_none() && name.is_none() {
+        return card_string(card, "license");
+    }
+    Some(label.text)
 }
 
 fn card_string(card: &Value, key: &str) -> Option<String> {
@@ -2207,7 +2232,8 @@ mod tests {
         assert!(bad.problems_solved.is_empty());
         assert!(bad.use_when.is_empty());
         assert!(bad.what_it_is.is_none());
-        assert!(bad.item.form.is_none());
+        // 卡里的 form 是数组，仍然不算；话题 CLI 会按推断规则补成 cli。
+        assert_eq!(bad.item.form.as_deref(), Some("cli"));
         assert!(bad.item.confidence.is_none());
         assert!(bad.zh_friendly.is_none());
         assert!(bad.license.is_none());
@@ -2247,6 +2273,199 @@ mod tests {
         let lab = Lab::new("missing-detail");
         let error = get_library_detail(&lab.path, "nope").expect_err("不存在的仓库应失败");
         assert_eq!(error, "找不到这个仓库");
+    }
+
+    fn set_license(conn: &Connection, id: &str, spdx: Option<&str>, name: Option<&str>) {
+        conn.execute(
+            "UPDATE repositories SET license_spdx = ?1, license_name = ?2 WHERE id = ?3",
+            params![spdx, name, id],
+        )
+        .expect("应能写入许可证");
+    }
+
+    #[test]
+    fn detail_license_prefers_github_then_card_then_unknown() {
+        let lab = Lab::new("license-priority");
+        lab.with(|conn| {
+            let mut github = Repo::new("github");
+            github.card_json = Some(r#"{"license":"Apache-2.0","form":"library"}"#.to_owned());
+            github.save(conn);
+            set_license(conn, "github", Some("MIT"), Some("MIT License"));
+
+            let mut unrecognized = Repo::new("unrecognized");
+            unrecognized.card_json = Some(r#"{"license":"MIT","form":"library"}"#.to_owned());
+            unrecognized.save(conn);
+            set_license(
+                conn,
+                "unrecognized",
+                Some("NOASSERTION"),
+                Some("自定义许可证"),
+            );
+
+            let mut other = Repo::new("other");
+            other.card_json = Some(r#"{"license":"MIT","form":"library"}"#.to_owned());
+            other.save(conn);
+            set_license(conn, "other", Some("Other"), None);
+
+            let mut from_card = Repo::new("card");
+            from_card.card_json = Some(r#"{"license":"Apache-2.0","form":"library"}"#.to_owned());
+            from_card.save(conn);
+
+            let mut unknown = Repo::new("unknown");
+            unknown.card_json = Some(r#"{"license":null,"form":"library"}"#.to_owned());
+            unknown.save(conn);
+
+            let mut bare = Repo::new("bare");
+            bare.write_doc = false;
+            bare.save(conn);
+        });
+
+        assert_eq!(
+            get_library_detail(&lab.path, "github")
+                .unwrap()
+                .license
+                .as_deref(),
+            Some("MIT")
+        );
+        assert_eq!(
+            get_library_detail(&lab.path, "unrecognized")
+                .unwrap()
+                .license
+                .as_deref(),
+            Some("自定义许可证")
+        );
+        assert_eq!(
+            get_library_detail(&lab.path, "other")
+                .unwrap()
+                .license
+                .as_deref(),
+            Some("其他（见仓库）")
+        );
+        assert_eq!(
+            get_library_detail(&lab.path, "card")
+                .unwrap()
+                .license
+                .as_deref(),
+            Some("Apache-2.0")
+        );
+        assert_eq!(
+            get_library_detail(&lab.path, "unknown").unwrap().license,
+            None
+        );
+        assert_eq!(get_library_detail(&lab.path, "bare").unwrap().license, None);
+    }
+
+    #[test]
+    fn detail_license_blank_spdx_is_undeclared() {
+        let lab = Lab::new("license-blank");
+        lab.with(|conn| {
+            let mut blank = Repo::new("blank");
+            blank.card_json = Some(r#"{"license":"MIT","form":"library"}"#.to_owned());
+            blank.save(conn);
+            set_license(conn, "blank", Some("   "), Some("MIT License"));
+
+            let mut empty = Repo::new("empty");
+            empty.card_json = Some(r#"{"license":"Apache-2.0","form":"library"}"#.to_owned());
+            empty.save(conn);
+            set_license(conn, "empty", Some(""), None);
+        });
+
+        assert_eq!(
+            get_library_detail(&lab.path, "blank")
+                .unwrap()
+                .license
+                .as_deref(),
+            Some("未声明")
+        );
+        assert_eq!(
+            get_library_detail(&lab.path, "empty")
+                .unwrap()
+                .license
+                .as_deref(),
+            Some("未声明")
+        );
+    }
+
+    #[test]
+    fn detail_form_infers_topics_without_changing_list() {
+        let lab = Lab::new("form-infer");
+        lab.with(|conn| {
+            let mut bare = Repo::new("bare");
+            bare.write_doc = false;
+            bare.one_liner = None;
+            bare.full_name = "someone/plain".to_owned();
+            bare.topics_json = r#"["MCP-Server", ""]"#.to_owned();
+            bare.description = Some("这是一个 cli 营销简介".to_owned());
+            bare.save(conn);
+
+            let mut named = Repo::new("named");
+            named.write_doc = false;
+            named.one_liner = None;
+            named.full_name = "mcp-fan/widget-mcp".to_owned();
+            named.topics_json = "[]".to_owned();
+            named.description = Some("electron desktop".to_owned());
+            named.save(conn);
+
+            let mut card = Repo::new("card");
+            card.full_name = "someone/tool".to_owned();
+            card.topics_json = r#"["mcp","cli"]"#.to_owned();
+            card.card_json = Some(r#"{"form":"app"}"#.to_owned());
+            card.save(conn);
+
+            let mut plain = Repo::new("plain");
+            plain.write_doc = false;
+            plain.one_liner = None;
+            plain.full_name = "mcp-fan/notes".to_owned();
+            plain.topics_json = "[]".to_owned();
+            plain.description = Some("mcp skill cli electron".to_owned());
+            plain.save(conn);
+        });
+
+        let mut filters = LibraryFilters::default();
+        filters.card_state = Some("all".to_owned());
+        filters.limit = Some(20);
+        let page = list_library_view(&lab.path, &filters).unwrap();
+        let form_of = |id: &str| {
+            page.items
+                .iter()
+                .find(|item| item.id == id)
+                .and_then(|item| item.form.clone())
+        };
+        assert_eq!(form_of("bare"), None);
+        assert_eq!(form_of("named"), None);
+        assert_eq!(form_of("card").as_deref(), Some("app"));
+        assert_eq!(form_of("plain"), None);
+        assert!(page.counts.forms.get("mcp").is_none());
+        assert_eq!(page.counts.forms.get("app"), Some(&1));
+
+        assert_eq!(
+            get_library_detail(&lab.path, "bare")
+                .unwrap()
+                .item
+                .form
+                .as_deref(),
+            Some("mcp")
+        );
+        assert_eq!(
+            get_library_detail(&lab.path, "named")
+                .unwrap()
+                .item
+                .form
+                .as_deref(),
+            Some("mcp")
+        );
+        assert_eq!(
+            get_library_detail(&lab.path, "card")
+                .unwrap()
+                .item
+                .form
+                .as_deref(),
+            Some("app")
+        );
+        assert_eq!(
+            get_library_detail(&lab.path, "plain").unwrap().item.form,
+            None
+        );
     }
 
     #[test]
