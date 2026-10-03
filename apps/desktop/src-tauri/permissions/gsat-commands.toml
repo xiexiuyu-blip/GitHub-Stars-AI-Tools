@@ -90,6 +90,8 @@ commands.allow = [
   "get_graph_overview",
   "solve_problem",
   "create_reference_pack",
+  "build_reference_pack_v2",
+  "copy_item_for_codex",
   "create_dev_backup",
   "list_backups",
   "create_backup_now",

@@ -9,6 +9,7 @@ mod embedding_state;
 mod github;
 mod library;
 mod local_api;
+mod packs;
 mod ranking_query;
 mod rankings_live;
 mod storage;
@@ -1100,6 +1101,37 @@ fn create_reference_pack(
     };
     let id = v2_ops::save_pack(storage.database_path(), &title, &problem, &markdown)?;
     Ok(format!("{id}\n\n{content}"))
+}
+
+fn open_pack_database(app_handle: &tauri::AppHandle) -> Result<rusqlite::Connection, String> {
+    let storage = AppStorage::from_app_handle(app_handle)?;
+    let connection = rusqlite::Connection::open_with_flags(
+        storage.database_path(),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .map_err(|error| format!("数据库打开失败：{error}"))?;
+    connection
+        .busy_timeout(Duration::from_millis(5000))
+        .map_err(|error| format!("数据库参数设置失败：{error}"))?;
+    Ok(connection)
+}
+
+#[tauri::command]
+fn build_reference_pack_v2(
+    app_handle: tauri::AppHandle,
+    request: packs::PackRequest,
+    format: packs::PackFormat,
+    generated_on: Option<String>,
+) -> Result<packs::PackOutput, String> {
+    let connection = open_pack_database(&app_handle)?;
+    let generated_on = packs::resolve_generated_on(generated_on.as_deref());
+    packs::build_pack(&connection, &request, format, &generated_on)
+}
+
+#[tauri::command]
+fn copy_item_for_codex(app_handle: tauri::AppHandle, repo_id: String) -> Result<String, String> {
+    let connection = open_pack_database(&app_handle)?;
+    packs::render_item_for_codex(&connection, &repo_id)
 }
 
 #[tauri::command]
@@ -6778,6 +6810,8 @@ pub fn run() {
             get_graph_overview,
             solve_problem,
             create_reference_pack,
+            build_reference_pack_v2,
+            copy_item_for_codex,
             create_dev_backup,
             list_backups,
             create_backup_now,
@@ -6906,6 +6940,16 @@ mod tests {
         ] {
             assert!(permissions.contains(&format!("\"{command}\"")));
         }
+    }
+
+    #[test]
+    fn reference_pack_v2_commands_are_allowed_by_main_capability() {
+        let permissions = include_str!("../permissions/gsat-commands.toml");
+        assert!(permissions.contains("\"build_reference_pack_v2\""));
+        assert!(permissions.contains("\"copy_item_for_codex\""));
+        let manifest = include_str!("../gen/schemas/acl-manifests.json");
+        assert!(manifest.contains("\"build_reference_pack_v2\""));
+        assert!(manifest.contains("\"copy_item_for_codex\""));
     }
 
     #[test]
