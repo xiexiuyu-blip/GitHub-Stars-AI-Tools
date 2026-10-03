@@ -1121,6 +1121,19 @@ fn rotate_local_api_token(app_handle: tauri::AppHandle) -> Result<String, String
     local_api::rotate_token(storage.database_path())
 }
 
+/// 没有收集专用令牌时生成一把，方便工具箱直接复制。完整令牌的读取命令不会自动生成。
+#[tauri::command]
+fn get_local_api_capture_token(app_handle: tauri::AppHandle) -> Result<String, String> {
+    let storage = AppStorage::from_app_handle(&app_handle)?;
+    local_api::ensure_capture_token(storage.database_path())
+}
+
+#[tauri::command]
+fn rotate_local_api_capture_token(app_handle: tauri::AppHandle) -> Result<String, String> {
+    let storage = AppStorage::from_app_handle(&app_handle)?;
+    local_api::rotate_capture_token(storage.database_path())
+}
+
 #[tauri::command]
 fn export_library_csv(app_handle: tauri::AppHandle, destination: String) -> Result<usize, String> {
     let storage = AppStorage::from_app_handle(&app_handle)?;
@@ -7078,6 +7091,8 @@ pub fn run() {
             set_local_api_enabled,
             get_local_api_token,
             rotate_local_api_token,
+            get_local_api_capture_token,
+            rotate_local_api_capture_token,
             export_library_csv,
             prepare_knowledge,
             commit_capture_batch,
