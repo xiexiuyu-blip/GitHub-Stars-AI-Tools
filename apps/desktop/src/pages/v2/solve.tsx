@@ -46,6 +46,7 @@ export function SolvePage(props: {
   const [format, setFormat] = useState<PackFormat>('markdown');
   const [packState, setPackState] = useState<PackState | null>(null);
   const [packAttempt, setPackAttempt] = useState(0);
+  const [copied, setCopied] = useState(false);
 
   const runSearch = useCallback((raw: string) => {
     const text = raw.trim();
@@ -124,6 +125,13 @@ export function SolvePage(props: {
     };
   }, [packKey, result, picked, format, packAttempt, activeQuery]);
 
+  // 复制成功后按钮上显示一会儿「已复制」
+  useEffect(() => {
+    if (!copied) return;
+    const timer = window.setTimeout(() => setCopied(false), 1600);
+    return () => window.clearTimeout(timer);
+  }, [copied]);
+
   function onSubmit(event: FormEvent) {
     event.preventDefault();
     runSearch(query);
@@ -140,6 +148,7 @@ export function SolvePage(props: {
     try {
       if (!navigator.clipboard?.writeText) throw new Error('clipboard');
       await navigator.clipboard.writeText(content);
+      setCopied(true);
       toast.show({ title: '已复制，去 Codex 里粘贴', sub: `${count} 个参考项目` });
     } catch {
       toast.show({ title: '浏览器不允许自动复制', sub: '请手动选中后按 ⌘C' });
@@ -158,15 +167,10 @@ export function SolvePage(props: {
     <Button type="submit" variant="primary" className="h-12 rounded-xl px-6 text-base" disabled={!query.trim()}>找</Button>
   );
 
-  const copyButton = hasResult ? (
-    <Button variant="primary" disabled={!canCopy} onClick={() => void copyToCodex()}>
-      <Icon name="content_copy" size={16} />
-      复制给 Codex
-    </Button>
-  ) : (
-    <Button variant="default" disabled={!canCopy} onClick={() => void copyToCodex()}>
-      <Icon name="content_copy" size={16} />
-      复制给 Codex
+  const copyButton = (
+    <Button variant={hasResult ? 'primary' : 'default'} disabled={!canCopy} onClick={() => void copyToCodex()}>
+      <Icon name={copied ? 'check' : 'content_copy'} size={16} />
+      {copied ? '已复制' : '复制给 Codex'}
     </Button>
   );
 
@@ -238,7 +242,10 @@ export function SolvePage(props: {
         <Card className="flex min-h-0 flex-col overflow-hidden">
           <div className="flex min-h-12 shrink-0 flex-wrap items-center gap-2.5 border-b border-muted px-4 py-2">
             <h3 className="m-0 text-base font-semibold whitespace-nowrap text-foreground">参考包</h3>
-            <span className="text-xs font-medium text-on-surface-variant">已选 {selectedHits.length} 个</span>
+            <span className="text-xs font-medium text-on-surface-variant">
+              已选 {selectedHits.length} 个
+              {selectedHits.length > 0 && pack?.content ? ` · 约 ${pack.content.length.toLocaleString('zh-CN')} 字` : ''}
+            </span>
             <div className="min-w-2 flex-1" />
             <Segmented
               options={formatOptions}

@@ -40,7 +40,7 @@ export function PickCard(props: {
         {/* 身份：名字、所有者、语言、星数 */}
         <div className="flex min-w-0 items-baseline gap-2">
           <b className="min-w-0 shrink truncate text-[15px] leading-[1.35] font-semibold text-foreground">{repo || props.item.fullName}</b>
-          <span className="ml-auto shrink-0 group-hover:invisible">
+          <span className={cn('ml-auto shrink-0 group-hover:invisible', props.selected && 'invisible')}>
             <StatusTag group={props.item.readingGroup} />
           </span>
         </div>
@@ -66,7 +66,7 @@ export function PickCard(props: {
           </div>
         ) : null}
       </div>
-      <div className="absolute top-2.5 right-2.5 z-10 hidden items-center gap-0.5 rounded-md border border-border bg-card p-0.5 shadow-sm group-hover:flex">
+      <div className={cn('absolute top-2.5 right-2.5 z-10 items-center gap-0.5 rounded-md border border-border bg-card p-0.5 shadow-sm group-hover:flex', props.selected ? 'flex' : 'hidden')}>
         <HoverIcon label="想试（T）" icon="bookmark_add" onClick={props.onWant} />
         <HoverIcon label="不要了（X）" icon="close" onClick={props.onDrop} />
       </div>
