@@ -618,10 +618,63 @@ fn short_hash(value: &str) -> String {
     format!("{:x}", Sha256::digest(value.as_bytes()))[..24].to_owned()
 }
 
+/// 这一批从哪来。`platform` 记在批次上，`via` 记在每个新条目上。
+/// `original_text` 有值时写成条目的原话；没有就不写这一列。
+pub struct CaptureSource<'a> {
+    pub platform: &'a str,
+    pub via: &'a str,
+    pub original_text: Option<&'a str>,
+}
+
+const CAPTURE_EXCERPT_CHARS: usize = 2000;
+
+fn normalize_capture_platform(platform: &str) -> &'static str {
+    match platform {
+        "web" => "web",
+        "github" => "github",
+        "x" => "x",
+        "wechat" => "wechat",
+        "telegram" => "telegram",
+        "discord" => "discord",
+        "forum" => "forum",
+        "xiaohongshu" => "xiaohongshu",
+        "bilibili" => "bilibili",
+        "youtube" => "youtube",
+        "local" => "local",
+        "other" => "other",
+        _ => "other",
+    }
+}
+
+fn normalize_capture_via(via: &str) -> &'static str {
+    match via {
+        "local_api" => "local_api",
+        _ => "paste_batch",
+    }
+}
+
 pub fn commit_capture(
     path: &Path,
     text: &str,
     source_context: &str,
+) -> Result<CaptureCommit, String> {
+    commit_capture_with(
+        path,
+        text,
+        source_context,
+        &CaptureSource {
+            platform: "other",
+            via: "paste_batch",
+            original_text: None,
+        },
+    )
+}
+
+pub fn commit_capture_with(
+    path: &Path,
+    text: &str,
+    source_context: &str,
+    source: &CaptureSource<'_>,
 ) -> Result<CaptureCommit, String> {
     let links = extract_links_from_text(text);
     let mut result = CaptureCommit {
@@ -632,6 +685,15 @@ pub fn commit_capture(
         // 没有链接就不留批次记录，用户补上链接后还能再贴一次。
         return Ok(result);
     }
+    let batch_platform = normalize_capture_platform(source.platform);
+    let captured_via = normalize_capture_via(source.via);
+    let excerpt = source.original_text.map(|original| {
+        original
+            .trim()
+            .chars()
+            .take(CAPTURE_EXCERPT_CHARS)
+            .collect::<String>()
+    });
     let mut connection = open_db(path)?;
     let account = account_id(&connection)?;
     let hash = format!("{:x}", Sha256::digest(text.trim().as_bytes()));
@@ -643,11 +705,12 @@ pub fn commit_capture(
         .map_err(|error| format!("收集事务开启失败：{error}"))?;
     let inserted_batch = tx
         .execute(
-            "INSERT OR IGNORE INTO capture_batches(id, account_id, raw_text_hash, source_platform, source_context, url_count, github_repo_count) VALUES (?1, ?2, ?3, 'other', ?4, ?5, ?6)",
+            "INSERT OR IGNORE INTO capture_batches(id, account_id, raw_text_hash, source_platform, source_context, url_count, github_repo_count) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
                 batch_id,
                 account,
                 hash,
+                batch_platform,
                 context,
                 links.len() as i64,
                 links.iter().filter(|link| link.kind == "github_repo").count() as i64
@@ -706,11 +769,18 @@ pub fn commit_capture(
             "cap-{}",
             short_hash(&format!("{batch_id}|{}", link.normalized_url))
         );
-        tx.execute(
-            "INSERT INTO inbox_items(id, account_id, original_url, normalized_url, title, item_type, source_platform, source_context, captured_via, capture_batch_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'paste_batch', ?9)",
-            params![id, account, link.url, link.normalized_url, title, item_type, link.platform, context, batch_id],
-        )
-        .map_err(|error| format!("收集条目写入失败：{error}"))?;
+        let write_item = if let Some(excerpt) = &excerpt {
+            tx.execute(
+                "INSERT INTO inbox_items(id, account_id, original_url, normalized_url, title, item_type, source_platform, source_context, captured_via, capture_batch_id, raw_excerpt) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                params![id, account, link.url, link.normalized_url, title, item_type, link.platform, context, captured_via, batch_id, excerpt],
+            )
+        } else {
+            tx.execute(
+                "INSERT INTO inbox_items(id, account_id, original_url, normalized_url, title, item_type, source_platform, source_context, captured_via, capture_batch_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                params![id, account, link.url, link.normalized_url, title, item_type, link.platform, context, captured_via, batch_id],
+            )
+        };
+        write_item.map_err(|error| format!("收集条目写入失败：{error}"))?;
         result.created += 1;
     }
     tx.commit()
@@ -1416,5 +1486,90 @@ mod tests {
         assert!(restore_database_file(&path, &backup).is_err());
         let _ = fs::remove_file(&path);
         let _ = fs::remove_file(backup);
+    }
+
+    #[test]
+    fn commit_capture_still_writes_paste_batch_and_other() {
+        let path = temp_db();
+        with_account(&path);
+        let committed =
+            commit_capture(&path, "旧入口 https://github.com/acme/legacy", "测试群").unwrap();
+        assert_eq!(committed.created, 1);
+        let connection = open_db(&path).unwrap();
+        let (batch_platform, via, excerpt, link_platform): (String, String, String, String) = connection
+            .query_row(
+                "SELECT capture_batches.source_platform, inbox_items.captured_via, inbox_items.raw_excerpt, inbox_items.source_platform FROM inbox_items JOIN capture_batches ON capture_batches.id = inbox_items.capture_batch_id",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(batch_platform, "other");
+        assert_eq!(via, "paste_batch");
+        assert_eq!(excerpt, "");
+        assert_eq!(link_platform, "github");
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn commit_capture_with_unknown_platform_and_via_fall_back() {
+        let path = temp_db();
+        with_account(&path);
+        let committed = commit_capture_with(
+            &path,
+            "看 https://github.com/acme/fallback",
+            "上下文",
+            &CaptureSource {
+                platform: "WeChat",
+                via: "clipboard",
+                original_text: Some("  原话保留  "),
+            },
+        )
+        .unwrap();
+        assert_eq!(committed.created, 1);
+        let connection = open_db(&path).unwrap();
+        let (batch_platform, via, excerpt, link_platform): (String, String, String, String) = connection
+            .query_row(
+                "SELECT capture_batches.source_platform, inbox_items.captured_via, inbox_items.raw_excerpt, inbox_items.source_platform FROM inbox_items JOIN capture_batches ON capture_batches.id = inbox_items.capture_batch_id",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(batch_platform, "other");
+        assert_eq!(via, "paste_batch");
+        assert_eq!(excerpt, "原话保留");
+        assert_eq!(link_platform, "github");
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn commit_capture_with_stores_known_platform_via_and_trimmed_excerpt() {
+        let path = temp_db();
+        with_account(&path);
+        let words = format!("  {}  ", "字".repeat(2005));
+        let committed = commit_capture_with(
+            &path,
+            "看 https://github.com/acme/excerpt-fn",
+            "群",
+            &CaptureSource {
+                platform: "wechat",
+                via: "local_api",
+                original_text: Some(&words),
+            },
+        )
+        .unwrap();
+        assert_eq!(committed.created, 1);
+        let connection = open_db(&path).unwrap();
+        let (batch_platform, via, excerpt): (String, String, String) = connection
+            .query_row(
+                "SELECT capture_batches.source_platform, inbox_items.captured_via, inbox_items.raw_excerpt FROM inbox_items JOIN capture_batches ON capture_batches.id = inbox_items.capture_batch_id",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(batch_platform, "wechat");
+        assert_eq!(via, "local_api");
+        assert_eq!(excerpt.chars().count(), 2000);
+        assert_eq!(excerpt, "字".repeat(2000));
+        let _ = fs::remove_file(path);
     }
 }
