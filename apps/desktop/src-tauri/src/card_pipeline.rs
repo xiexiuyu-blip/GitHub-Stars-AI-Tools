@@ -3279,6 +3279,9 @@ INSERT INTO entity_categories(account_id, entity_type, entity_id, category_id, i
         seed_repo(&conn, Some(&usable_readme()));
         conn.execute_batch(
             "
+-- 迁移 030 已建了真正的 scenarios 表；这个测试要用一张精简版，先拿掉真表
+DROP TABLE IF EXISTS entity_scenarios;
+DROP TABLE IF EXISTS scenarios;
 CREATE TABLE scenarios(slug TEXT, name_zh TEXT);
 INSERT INTO scenarios(slug, name_zh) VALUES ('xhs', '小红书');
 ",
@@ -3379,6 +3382,9 @@ INSERT INTO categories(id, account_id, parent_id, slug, name_zh, sort_order, arc
         assert!(input.readme.is_some());
         conn.execute_batch(
             "
+-- 迁移 030 已建了真正的 scenarios 表；这个测试要用一张精简版，先拿掉真表
+DROP TABLE IF EXISTS entity_scenarios;
+DROP TABLE IF EXISTS scenarios;
 CREATE TABLE scenarios(slug TEXT, name_zh TEXT, account_id TEXT, archived INTEGER);
 INSERT INTO scenarios(slug, name_zh, account_id, archived) VALUES
   ('zeta', '后一个', 'acct', 0),
