@@ -107,4 +107,8 @@ commands.allow = [
   "merge_knowledge_concepts",
   "search_library_semantic",
   "enqueue_missing_cards",
+  "list_library_view",
+  "get_library_detail",
+  "set_library_reading",
+  "get_today_view",
 ]
