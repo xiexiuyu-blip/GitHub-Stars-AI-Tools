@@ -12,7 +12,7 @@
 4. 不启动 App：不运行 `pnpm dev:desktop`、`tauri dev`、`cargo run`、`open`；不碰 `/Applications` 里的 Fox Stars Lab；不占用 8765、39217 端口。
 5. 不用 git 写命令（`add` / `commit` / `checkout` / `branch` / `merge` / `reset` / `stash` / `push` / `remote` / `tag` / `worktree`）。只许 `git status` `git diff` `git log` `git show`。提交和合并由总控做，仓库不推送到任何远端。
 6. 不联网装东西：不运行 `pnpm install|add`、`cargo add|update`、`npm`、`pip`、`brew`、`curl`、`wget`。需要新依赖，就写进报告的「需要决定的事」，不要自己加。
-7. 只改任务卡「允许改动」里的路径。别的文件哪怕想顺手改也别改，写进报告。不删除文件（需要删的写进报告）。
+7. 只改任务卡「允许改动」里的路径。别的文件哪怕想顺手改也别改，写进报告；总控交回后会逐个核对，越界的改动会被还原。只许删除你自己新建的文件，其他文件需要删，写进报告。
 8. 数据库：`packages/storage/migrations/fox/001–018` 一个字都不改；`repositories`、`repo_ai_documents`、`repo_tags`、`annotations` 现有列不改名、不删除（web-search 在直接读它们）；新迁移只追加，不删表。
 
 ## 做完的标准
@@ -31,5 +31,5 @@
 
 ## 命令与交回
 
-- 构建和测试只用 `tools/cards/run.sh <web-build|web-test|rust-fmt|rust-fmt-fix|rust-check|rust-test>`（详见命令契约）。其他 shell 命令基本会被拒绝，被拒就换一种办法，别想绕过。
+- 构建和测试只用 `tools/cards/run.sh <web-build|web-test|rust-fmt|rust-fmt-fix|rust-check|rust-test>`（详见命令契约）。普通的文件和文本操作（`mkdir`、`mv`、`cp`、`sed`、`find`、删除自己新建的单个文件）可以用。被红线禁止的命令会被拦截并返回错误：换一种办法完成，别想绕过。
 - 完成后把交回报告写到工作区根目录的 `.card-report.md`（格式见命令契约 §6，已被 git 忽略）。最后一条消息只写：一句话结论 + “报告在 .card-report.md”。
