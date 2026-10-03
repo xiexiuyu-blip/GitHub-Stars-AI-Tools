@@ -246,7 +246,20 @@ pub(crate) fn insert_named_test_account(path: &Path, id: &str, login: &str) {
         .expect("应能写入测试账号");
 }
 
+/// 同一个进程里的迁移排队执行。启动时嵌入维护线程和主线程几乎同时打开数据库：
+/// 有待执行的迁移（全新的库，或升级后第一次启动）时，两边会同时去建同一张表 / 加同一列，
+/// 一边报「database is locked」或「duplicate column name」。失败的如果是主线程，后台队列、旧版 AI 额度闸门、
+/// 本地接口就都没起来，而且没有任何提示（2026-10-04 复核审查员 12 次里复现 12 次）。
+static MIGRATION_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 pub fn migrate_database(database_path: &Path) -> Result<MigrationReport, String> {
+    let _guard = MIGRATION_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    migrate_database_locked(database_path)
+}
+
+fn migrate_database_locked(database_path: &Path) -> Result<MigrationReport, String> {
     if let Some(parent) = database_path.parent() {
         fs::create_dir_all(parent)
             .map_err(|error| format!("数据库目录创建失败：{}：{error}", parent.display()))?;

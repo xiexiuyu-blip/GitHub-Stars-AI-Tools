@@ -358,13 +358,18 @@ pub fn claim_next(
     } else {
         0
     };
+    // 认领会把这条任务的 updated_at 改成现在：如果它身上还留着 24 小时以前的失败用量，
+    // 这些旧账会被「重新记到今天」，白白占掉当天的额度（队列里本来就有一批积压的、试跑留下用量的任务）。
+    // 所以先让过了 24 小时的旧账过期（归零），再记这次的预留。
     let changed = tx
         .execute(
             "UPDATE ai_jobs
-             SET status = 'running', attempts = attempts + 1, started_at = ?1, updated_at = ?1,
-                 input_tokens = input_tokens + ?3
+             SET status = 'running', attempts = attempts + 1, started_at = ?1,
+                 input_tokens = (CASE WHEN updated_at >= ?4 THEN input_tokens ELSE 0 END) + ?3,
+                 output_tokens = CASE WHEN updated_at >= ?4 THEN output_tokens ELSE 0 END,
+                 updated_at = ?1
              WHERE id = ?2 AND status = 'queued'",
-            params![now, id, reserved],
+            params![now, id, reserved, cutoff],
         )
         .map_err(|error| format!("任务认领失败：{error}"))?;
     if changed == 0 {
@@ -621,14 +626,16 @@ pub fn start_worker(db_path: &Path, handlers: Vec<Arc<dyn JobHandler>>) -> Worke
 
 /// 上次没跑完的任务回到队列。认领时记在它们行上的预留原样保留：那次请求可能已经发出去、花了钱，
 /// 不能因为程序被关掉、重新编译或崩溃就当没发生过。隔一会儿才再认领，免得一直崩的任务立刻又花一次。
+/// `updated_at` 不改：那次请求发生在认领的时候，预留按那个时间进 24 小时窗口。改成现在，
+/// 几天前就停在 running 的旧行会把预留「重新记到今天」。
 fn recover_running_jobs(conn: &Connection, now: &str) -> Result<usize, String> {
     let not_before = shift_db_time(now, INTERRUPTED_RETRY_DELAY_SECS)?;
     let changed = conn
         .execute(
             "UPDATE ai_jobs
-             SET status = 'queued', error_kind = ?1, started_at = NULL, not_before = ?3, updated_at = ?2
+             SET status = 'queued', error_kind = ?1, started_at = NULL, not_before = ?2
              WHERE status = 'running'",
-            params![ErrorKind::Interrupted.as_str(), now, not_before],
+            params![ErrorKind::Interrupted.as_str(), not_before],
         )
         .map_err(|error| format!("中断任务恢复失败：{error}"))?;
     Ok(changed)
@@ -881,6 +888,24 @@ fn count_status(conn: &Connection, status: &str) -> Result<i64, String> {
         |row| row.get(0),
     )
     .map_err(|error| format!("任务计数失败：{error}"))
+}
+
+/// 24 小时前的时刻（和库里的时间同一个格式）。过了这个时刻的用量不再计入。
+pub(crate) fn day_ago_db_time() -> String {
+    shift_db_time(&now_db_time(), -DAY_SECS).unwrap_or_default()
+}
+
+/// 处理器在失败前已经确定花掉的用量（比如第一次调用成功、紧接着的修复调用失败）：直接记到这条在跑的任务上。
+/// 之后结束时 `MAX(input_tokens - 预留, 0) + 失败该记的` 会把它保留下来。
+pub(crate) fn add_charge(db_path: &Path, id: &str, tokens: u64) -> Result<(), String> {
+    let tokens = i64::try_from(tokens.min(5_000_000)).unwrap_or(0);
+    let conn = open_db(db_path)?;
+    conn.execute(
+        "UPDATE ai_jobs SET input_tokens = input_tokens + ?1 WHERE id = ?2 AND status = 'running'",
+        params![tokens, id],
+    )
+    .map_err(|error| format!("用量记录失败：{error}"))?;
+    Ok(())
 }
 
 /// 最近 24 小时已用的 token。和队列认领、状态显示是同一个口径（含在跑任务的预留、已取消的任务），
@@ -2861,5 +2886,73 @@ mod tests {
         let worker = start_worker(db.path(), Vec::new());
         assert!(!worker.status().stopped);
         worker.stop();
+    }
+
+    #[test]
+    fn claim_expires_charges_older_than_a_day_instead_of_redating_them() {
+        let db = TestDb::new("claim-expire");
+        let conn = db.conn();
+        // 三天前失败过一次、身上还留着 3 万用量的排队任务；和一条一小时前才失败过（用量还在窗口里）的
+        for (id, updated_at, tokens) in [
+            ("stale", "2026-10-01T08:00:00.000Z", 30_000),
+            ("fresh", "2026-10-03T11:00:00.000Z", 4_000),
+        ] {
+            conn.execute(
+                "INSERT INTO ai_jobs(id, account_id, job_type, target_type, target_id, priority, status, attempts, input_tokens, output_tokens, created_at, updated_at)
+                 VALUES (?1, 'acct', 'repo_card', 'repository', ?1, ?4, 'queued', 1, ?2, 10, '2026-10-01T00:00:00.000Z', ?3)",
+                params![id, tokens, updated_at, if id == "stale" { 1 } else { 2 }],
+            )
+            .unwrap();
+        }
+        drop(conn);
+        let handled = vec![ClaimCandidate {
+            job_type: "repo_card".to_owned(),
+            spends_tokens: true,
+        }];
+        let mut conn = db.conn();
+        // 窗口里只有 fresh 的 4000；stale 的 3 万早就过期了，不算
+        assert_eq!(
+            tokens_used_since(&conn, "2026-10-02T12:00:00.000Z").unwrap(),
+            4_010
+        );
+        let stale = claim_one(&mut conn, &handled, &gate(false, 100_000)).unwrap();
+        assert_eq!(stale.id, "stale");
+        let row = snap(&conn, "stale");
+        assert_eq!(
+            (row.input_tokens, row.output_tokens),
+            (CLAIM_RESERVE_TOKENS, 0),
+            "认领会把 updated_at 改成现在：过期的旧用量要先清零，不能被重新记到今天"
+        );
+        let fresh = claim_one(&mut conn, &handled, &gate(false, 100_000)).unwrap();
+        assert_eq!(fresh.id, "fresh");
+        let row = snap(&conn, "fresh");
+        assert_eq!(
+            (row.input_tokens, row.output_tokens),
+            (4_000 + CLAIM_RESERVE_TOKENS, 10),
+            "窗口里的旧用量照旧保留"
+        );
+    }
+
+    #[test]
+    fn recovering_an_old_running_row_does_not_redate_its_reserve_into_today() {
+        let db = TestDb::new("recover-old");
+        let conn = db.conn();
+        conn.execute(
+            "INSERT INTO ai_jobs(id, account_id, job_type, target_type, target_id, status, attempts, input_tokens, started_at, created_at, updated_at)
+             VALUES ('old-run', 'acct', 'repo_card', 'repository', 'old-run', 'running', 1, 12000, '2026-10-01T08:00:00.000Z', '2026-10-01T07:00:00.000Z', '2026-10-01T08:00:00.000Z')",
+            [],
+        )
+        .unwrap();
+        assert_eq!(recover_running_jobs(&conn, NOW).unwrap(), 1);
+        let row = snap(&conn, "old-run");
+        assert_eq!(row.status, "queued");
+        assert_eq!(row.input_tokens, 12_000, "账本不改");
+        drop(conn);
+        // 那次请求发生在三天前：预留按当时的时间算，不计入今天的窗口
+        let status = queue_status(db.path()).unwrap();
+        assert_eq!(
+            status.tokens_24h, 0,
+            "几天前的预留不能被恢复动作重新记到今天"
+        );
     }
 }

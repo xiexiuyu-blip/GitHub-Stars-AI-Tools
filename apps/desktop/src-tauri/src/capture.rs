@@ -109,10 +109,19 @@ fn candidates(text: &str) -> Vec<String> {
 }
 
 pub fn extract_links_from_text(text: &str) -> Vec<ExtractedLink> {
+    extract_links_limited(text, MAX_LINKS_PER_TEXT)
+}
+
+/// 读网页正文用：不限制链接条数（调用方自己在找到够多的仓库后停）。
+pub(crate) fn extract_links_unlimited(text: &str) -> Vec<ExtractedLink> {
+    extract_links_limited(text, usize::MAX)
+}
+
+fn extract_links_limited(text: &str, limit: usize) -> Vec<ExtractedLink> {
     let mut links = Vec::new();
     let mut seen = HashSet::new();
     for raw in candidates(text) {
-        if links.len() >= MAX_LINKS_PER_TEXT {
+        if links.len() >= limit {
             break;
         }
         let Some(link) = build_link(&raw) else {

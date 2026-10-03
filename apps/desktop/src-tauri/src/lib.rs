@@ -3549,7 +3549,10 @@ fn check_runtime_readiness_worker(
 
     let tag_network = match (verified_account_id.as_deref(), hydrated_ai_config.as_ref()) {
         (Some(account_id), Some(ai_config)) => match storage.as_ref() {
-            Some(storage) => check_runtime_tag_network(storage, account_id, ai_config),
+            // 和上面的连接测试、相似推荐一样是一次很小的探测：不看额度，但用量照样记账
+            Some(storage) => {
+                spend_guard::probe(|| check_runtime_tag_network(storage, account_id, ai_config))
+            }
             None => runtime_check_skipped_with_action(
                 "AI 标签网络未检测".to_owned(),
                 Some("需要先修复本地数据库。".to_owned()),
@@ -5618,9 +5621,13 @@ fn search_repositories_worker(
                 }
                 Err(error) => {
                     eprintln!("AI 搜索筛选失败，已降级到本地证据：{error}");
-                    let answer_error =
+                    // 被额度拒绝（用完 / 暂停 / 额度是 0）时，原因就是那句话；「去测试 AI 连接」是错的建议
+                    let answer_error = if spend_guard::is_refusal(&error) {
+                        format!("AI 筛选没有进行，已改用本地证据生成结果。{error}")
+                    } else {
                         "AI 筛选未完成，已改用本地证据生成结果。可在设置中测试 AI 连接后重试。"
-                            .to_owned();
+                            .to_owned()
+                    };
                     ai_answer_error = Some(answer_error.clone());
                     emit_ai_stream_status(
                         &app_handle,
@@ -7131,12 +7138,17 @@ pub fn run() {
                     let _ = window.set_title("Fox Stars Lab Dev");
                 }
             }
+            // 旧版 AI 功能（整批解析、标签网络、AI 搜索……）和队列共用同一个每日额度：
+            // 必须在起任何后台线程、打开数据库之前装上闸，并且只靠路径，不依赖数据库能不能打开。
+            // 以前装在「打开数据库成功」的分支里，那一步失败时闸门就一直是开着的。
+            match AppStorage::database_path_from_app_handle(app.handle()) {
+                Ok(path) => spend_guard::install(&path),
+                Err(error) => eprintln!("额度闸门没有装上，旧版 AI 功能会被拒绝：{error}"),
+            }
             start_embedding_maintenance(app.handle().clone());
             if let Ok(storage) = AppStorage::from_app_handle(app.handle()) {
                 let _ = local_api::start_if_enabled(storage.database_path());
                 let database_path = storage.database_path().to_path_buf();
-                // 旧版 AI 功能（整批解析、标签网络、AI 搜索……）和队列共用同一个每日额度：必须在任何 AI 请求之前装上。
-                spend_guard::install(&database_path);
                 let settings_handle = app.handle().clone();
                 // 闭包只被放进处理器，这里不调用，所以启动时不读钥匙串。
                 let handler = card_handler::RepoCardHandler::new(Arc::new(move || {

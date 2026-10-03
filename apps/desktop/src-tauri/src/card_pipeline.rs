@@ -199,6 +199,9 @@ pub struct CardRunError {
     pub kind: CardRunErrorKind,
     pub message: String,
     pub retry_after_secs: Option<u64>,
+    /// 失败之前已经确定花掉的 token（第一次调用成功，紧接着的修复调用失败）。
+    /// 处理器会把它记到这条任务上，不然网络 / 限流这类「没花钱」的失败会把那次已经计费的调用丢掉。
+    pub spent_tokens: u64,
 }
 
 struct ExistingDoc {
@@ -474,7 +477,13 @@ pub fn run_repo_card(
         Ok(card) => card,
         Err(failure) => {
             let repair = repair_request(&request, &first.content, &failure.messages());
-            let second = client.complete_json(&repair).map_err(from_llm)?;
+            let spent = tokens.input.saturating_add(tokens.output);
+            let second = client.complete_json(&repair).map_err(|error| {
+                // 第一次调用已经成功（已计费），修复调用才失败：把第一次的用量带出去
+                let mut failure = from_llm(error);
+                failure.spent_tokens = spent;
+                failure
+            })?;
             tokens.add(&repair, &second, &mut warnings);
             if let Some(name) = second
                 .model
@@ -2275,6 +2284,7 @@ fn from_llm(error: LlmError) -> CardRunError {
         kind,
         message: error.message,
         retry_after_secs,
+        spent_tokens: 0,
     }
 }
 
@@ -2311,6 +2321,7 @@ fn card_error(
         kind,
         message: message.to_owned(),
         retry_after_secs,
+        spent_tokens: 0,
     }
 }
 

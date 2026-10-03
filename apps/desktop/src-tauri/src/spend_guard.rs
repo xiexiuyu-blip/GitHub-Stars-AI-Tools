@@ -17,11 +17,15 @@ use crate::jobs;
 use rusqlite::{params, Connection};
 use std::cell::Cell;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{Mutex, MutexGuard, OnceLock};
 
-/// 旧功能没有给输出设 `max_tokens`，输出长度不可控；按一个宽松的值估。
+/// 旧功能没有给输出设 `max_tokens`，输出长度不可控；按一个宽松的值估：至少 3000，翻译这类输出和输入一样长的取输入的长度。
 /// 一篇 README 摘要实测输出约 1k，标签网络一批可达几千。
-const OUTPUT_ALLOWANCE_TOKENS: u64 = 3_000;
+const MIN_OUTPUT_ALLOWANCE_TOKENS: u64 = 3_000;
+
+/// 单次调用记进账本的上限（每一列）。服务商回一个离谱的用量（几十亿）会让账本求和溢出，
+/// 「最近 24 小时已用」读不出来，队列和旧功能都被锁 24 小时。
+const MAX_RECORDED_TOKENS: u64 = 5_000_000;
 
 /// 拒绝时的前缀。调用方用 `is_refusal` 认它。
 pub const REFUSAL_PREFIX: &str = "AI 额度：";
@@ -30,7 +34,12 @@ static DATABASE: OnceLock<PathBuf> = OnceLock::new();
 
 thread_local! {
     static PROBE_DEPTH: Cell<u32> = const { Cell::new(0) };
+    static PERMIT_DEPTH: Cell<u32> = const { Cell::new(0) };
 }
+
+/// 旧功能的请求一次只放一个过去：「问额度 → 发请求 → 记账」是一整段，
+/// 两个请求同时问到「还有 10 万」、各自花 6 万，就是 12 万。队列有自己的预留，不走这把锁。
+static LEGACY_LOCK: Mutex<()> = Mutex::new(());
 
 /// 启动时装上。只能装一次；数据库路径之后不变。
 pub fn install(database_path: &Path) {
@@ -60,15 +69,50 @@ fn probing() -> bool {
     PROBE_DEPTH.with(|depth| depth.get() > 0)
 }
 
-pub fn check_before_request(prompt: &str) -> Result<(), String> {
+/// 通过了额度检查的凭证。拿着它直到请求结束并记完账。同一个线程里可以重入
+/// （流式请求失败后会在里面再发一次普通请求），只有最外层真的持有那把锁。
+pub struct SpendPermit {
+    _lock: Option<MutexGuard<'static, ()>>,
+}
+
+impl Drop for SpendPermit {
+    fn drop(&mut self) {
+        PERMIT_DEPTH.with(|depth| depth.set(depth.get().saturating_sub(1)));
+    }
+}
+
+fn acquire_permit() -> SpendPermit {
+    let outermost = PERMIT_DEPTH.with(|depth| {
+        let current = depth.get();
+        depth.set(current + 1);
+        current == 0
+    });
+    let lock = outermost.then(|| {
+        LEGACY_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+    });
+    SpendPermit { _lock: lock }
+}
+
+pub fn check_before_request(prompt: &str) -> Result<SpendPermit, String> {
+    let permit = acquire_permit();
     let Some(database) = DATABASE.get() else {
-        return Ok(());
+        // 没装闸：单元测试里不拦；正式运行时拒绝（宁可旧功能暂时不能用，也不能在没有额度保护的情况下花钱）
+        if cfg!(test) {
+            return Ok(permit);
+        }
+        return Err(format!(
+            "{REFUSAL_PREFIX}额度闸门还没有准备好，旧版的 AI 功能先不能用。重新打开应用再试。"
+        ));
     };
     if probing() {
-        return Ok(());
+        return Ok(permit);
     }
-    let estimated = estimate_tokens(prompt).saturating_add(OUTPUT_ALLOWANCE_TOKENS);
-    check_at(database, &jobs::now_db_time(), estimated)
+    let input = estimate_tokens(prompt);
+    let estimated = input.saturating_add(MIN_OUTPUT_ALLOWANCE_TOKENS.max(input));
+    check_at(database, &jobs::now_db_time(), estimated)?;
+    Ok(permit)
 }
 
 /// `usage` 是服务商回的真实用量（输入，输出）；没有就按文字估。
@@ -84,14 +128,17 @@ pub fn record_after_request(
     };
     let (input, output) =
         usage.unwrap_or_else(|| (estimate_tokens(prompt), estimate_tokens(content)));
-    let _ = record_at(
+    if let Err(error) = record_at(
         database,
         &jobs::now_db_time(),
         provider,
         model,
         input,
         output,
-    );
+    ) {
+        // 记不上账不能悄悄吞掉：至少留一条日志（开发版在终端里能看到）
+        eprintln!("旧版 AI 用量没有记上（{input} + {output} token）：{error}");
+    }
 }
 
 /// 估算 token：中日韩文字约 1 个字 1 个 token，别的字符约 4 个字符 1 个 token。宁多勿少。
@@ -167,9 +214,9 @@ fn insert_ledger_row(
     input_tokens: u64,
     output_tokens: u64,
 ) -> Result<(), String> {
-    let input = i64::try_from(input_tokens).unwrap_or(i64::MAX / 4);
-    let output = i64::try_from(output_tokens).unwrap_or(i64::MAX / 4);
-    connection
+    let input = i64::try_from(input_tokens.min(MAX_RECORDED_TOKENS)).unwrap_or(0);
+    let output = i64::try_from(output_tokens.min(MAX_RECORDED_TOKENS)).unwrap_or(0);
+    let inserted = connection
         .execute(
             "INSERT INTO ai_jobs(id, account_id, job_type, target_type, target_id, priority, status, attempts, max_attempts,
                                  provider, model, prompt_version, input_tokens, output_tokens, created_at, started_at, finished_at, updated_at)
@@ -181,6 +228,9 @@ fn insert_ledger_row(
             params![provider, model, input, output, now],
         )
         .map_err(|error| format!("用量记账失败：{error}"))?;
+    if inserted == 0 {
+        return Err("还没有 GitHub 账号，这笔用量记不到任何人名下".to_owned());
+    }
     Ok(())
 }
 
@@ -199,6 +249,8 @@ mod tests {
     use super::*;
     use std::fs;
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::thread;
+    use std::time::Duration;
 
     static NEXT: AtomicU64 = AtomicU64::new(0);
 
@@ -248,7 +300,9 @@ mod tests {
     #[test]
     fn nothing_is_blocked_without_a_guard_installed() {
         // 单元测试里没有 install：旧代码的测试不该被额度拦住
-        assert!(check_before_request("任意提示词").is_ok());
+        let permit = check_before_request("任意提示词");
+        assert!(permit.is_ok());
+        drop(permit);
         record_after_request("openai", "m", "p", "c", None);
     }
 
@@ -343,5 +397,65 @@ mod tests {
         assert_eq!(readable_tokens(10_000), "1.0 万 token");
         assert_eq!(readable_tokens(138_651), "13.9 万 token");
         assert_eq!(readable_tokens(100_000), "10.0 万 token");
+    }
+
+    #[test]
+    fn permits_serialize_requests_but_are_reentrant_on_one_thread() {
+        // 同一线程里再取一次（流式失败后回退到普通请求）不能死锁
+        let outer = check_before_request("外层").expect("应通过");
+        let inner = check_before_request("内层").expect("同一线程重入不能死锁");
+        drop(inner);
+        drop(outer);
+        // 别的线程要等外层放掉才拿得到
+        let outer = check_before_request("外层").expect("应通过");
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let waiter = thread::spawn(move || {
+            let _permit = check_before_request("别的线程").expect("应通过");
+            let _ = sender.send(());
+        });
+        assert!(
+            receiver.recv_timeout(Duration::from_millis(300)).is_err(),
+            "外层还拿着，别的线程不该拿到"
+        );
+        drop(outer);
+        receiver
+            .recv_timeout(Duration::from_secs(3))
+            .expect("放掉之后别的线程应该拿到");
+        waiter.join().unwrap();
+    }
+
+    #[test]
+    fn recording_without_any_account_is_an_error_not_a_silent_success() {
+        let dir = Dir::new();
+        Connection::open(dir.path())
+            .unwrap()
+            .execute("DELETE FROM github_accounts", [])
+            .unwrap();
+        let error = record_at(dir.path(), NOW, "openai", "m", 100, 10).unwrap_err();
+        assert!(error.contains("账号"), "{error}");
+    }
+
+    #[test]
+    fn absurd_usage_is_clamped_so_the_ledger_sum_cannot_overflow() {
+        let dir = Dir::new();
+        dir.control(r#"{"dailyBudgetTokens":100000}"#);
+        for _ in 0..3 {
+            record_at(dir.path(), NOW, "openai", "m", u64::MAX, u64::MAX).unwrap();
+        }
+        let used = jobs::tokens_used_in_last_day(dir.path(), NOW).expect("求和不能溢出");
+        assert_eq!(used, 3 * 2 * MAX_RECORDED_TOKENS as i64);
+    }
+
+    #[test]
+    fn long_inputs_get_a_long_output_allowance() {
+        // 翻译这类输出和输入一样长：2 万字的提示词，检查要看 4 万 token 的余量
+        let dir = Dir::new();
+        dir.control(r#"{"dailyBudgetTokens":100000}"#);
+        record_at(dir.path(), NOW, "openai", "m", 70_000, 0).unwrap();
+        let long_prompt = "说".repeat(20_000);
+        let estimated = estimate_tokens(&long_prompt)
+            .saturating_add(MIN_OUTPUT_ALLOWANCE_TOKENS.max(estimate_tokens(&long_prompt)));
+        assert_eq!(estimated, 40_000);
+        assert!(check_at(dir.path(), NOW, estimated).is_err());
     }
 }

@@ -374,7 +374,7 @@ pub fn list_jobs(path: &Path, limit: i64) -> Result<Vec<JobRow>, String> {
     let connection = open_db(path)?;
     let mut statement = connection
         .prepare(
-            "SELECT id, job_type, status, error_kind, error_message FROM ai_jobs ORDER BY updated_at DESC LIMIT ?1",
+            "SELECT id, job_type, status, error_kind, error_message FROM ai_jobs WHERE target_id NOT LIKE 'legacy-%' ORDER BY updated_at DESC LIMIT ?1",
         )
         .map_err(|error| format!("任务列表准备失败：{error}"))?;
     let rows = statement
@@ -399,7 +399,9 @@ pub fn cancel_job(path: &Path, id: &str) -> Result<(), String> {
     let connection = open_db(path)?;
     let changed = connection
         .execute(
-            "UPDATE ai_jobs SET status = 'cancelled', finished_at = strftime('%Y-%m-%dT%H:%M:%fZ','now'), updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ?1 AND status IN ('queued','running','failed')",
+            // finished_at 沿用这条任务原来的记账时间（失败的是结束时间，排队 / 在跑的是 updated_at），不改成现在：
+            // 取消几天前失败的任务，不能把它的旧用量「重新记到今天」。
+            "UPDATE ai_jobs SET status = 'cancelled', finished_at = COALESCE(finished_at, updated_at), updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ?1 AND status IN ('queued','running','failed')",
             params![id],
         )
         .map_err(|error| format!("取消任务失败：{error}"))?;
@@ -440,12 +442,18 @@ pub fn retry_failed_jobs(path: &Path) -> Result<usize, String> {
         }
         ids
     };
+    let cutoff = crate::jobs::day_ago_db_time();
     let mut changed = 0;
     for id in ids {
         changed += connection
             .execute(
-                "UPDATE OR IGNORE ai_jobs SET status = 'queued', attempts = 0, error_message = NULL, finished_at = NULL, not_before = NULL, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ?1 AND status = 'failed'",
-                params![id],
+                // 过了 24 小时的旧失败用量一起清零：重新排队会把 updated_at 改成现在，
+                // 不清的话几天前的账会被「重新记到今天」（20 条各 3 万的旧失败，重试一下就占掉 60 万）。
+                "UPDATE OR IGNORE ai_jobs SET status = 'queued', attempts = 0, error_message = NULL, finished_at = NULL, not_before = NULL,
+                    input_tokens = CASE WHEN updated_at >= ?2 THEN input_tokens ELSE 0 END,
+                    output_tokens = CASE WHEN updated_at >= ?2 THEN output_tokens ELSE 0 END,
+                    updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ?1 AND status = 'failed'",
+                params![id, cutoff],
             )
             .map_err(|error| format!("失败任务重试失败：{error}"))?;
     }
@@ -1285,11 +1293,17 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn temp_db() -> PathBuf {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        std::env::temp_dir().join(format!("fsl-v2-{nanos}.sqlite3"))
+        // 只用时间会让两个测试在同一纳秒拿到同一个文件名，一起迁移同一个库（复核审查员 2/4 次复现）
+        std::env::temp_dir().join(format!(
+            "fsl-v2-{}-{}-{nanos}.sqlite3",
+            std::process::id(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ))
     }
 
     fn with_account(path: &Path) {
@@ -1638,6 +1652,88 @@ mod tests {
         );
         assert_eq!(status("conflict-old").0, "failed");
         assert_eq!(status("conflict-new").0, "queued");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn retry_and_cancel_do_not_redate_old_charges_into_today() {
+        let path = temp_db();
+        with_account(&path);
+        let connection = open_db(&path).unwrap();
+        let recent = crate::jobs::now_db_time();
+        let old = "2026-01-01T00:00:00.000Z";
+        connection
+            .execute_batch(&format!(
+                "INSERT INTO ai_jobs(id, account_id, job_type, target_type, target_id, status, attempts, error_kind, error_message, input_tokens, finished_at, updated_at, created_at) VALUES
+                   ('old-failed', 'acct', 'repo_card', 'repository', 'o1', 'failed', 3, 'timeout', '超时', 30000, '{old}', '{old}', '{old}'),
+                   ('new-failed', 'acct', 'repo_card', 'repository', 'n1', 'failed', 3, 'timeout', '超时', 30000, '{recent}', '{recent}', '{recent}'),
+                   ('old-cancel', 'acct', 'repo_card', 'repository', 'o2', 'failed', 3, 'timeout', '超时', 30000, '{old}', '{old}', '{old}');"
+            ))
+            .unwrap();
+        drop(connection);
+        // 一天前的旧账本来就不计入；重试 / 取消之后也不能被「重新记到今天」
+        assert_eq!(crate::jobs::queue_status(&path).unwrap().tokens_24h, 30_000);
+        assert_eq!(retry_failed_jobs(&path).unwrap(), 3);
+        let connection = open_db(&path).unwrap();
+        let tokens = |id: &str| -> i64 {
+            connection
+                .query_row(
+                    "SELECT input_tokens FROM ai_jobs WHERE id = ?1",
+                    [id],
+                    |row| row.get(0),
+                )
+                .unwrap()
+        };
+        assert_eq!(tokens("old-failed"), 0, "旧失败的用量清零");
+        assert_eq!(tokens("new-failed"), 30_000, "24 小时内的失败用量保留");
+        assert_eq!(crate::jobs::queue_status(&path).unwrap().tokens_24h, 30_000);
+        drop(connection);
+        // 取消一条几天前失败的任务：finished_at 沿用原来的，不变成现在
+        let connection = open_db(&path).unwrap();
+        connection
+            .execute("UPDATE ai_jobs SET status = 'failed', finished_at = ?1, updated_at = ?1, input_tokens = 30000 WHERE id = 'old-cancel'", [old])
+            .unwrap();
+        drop(connection);
+        cancel_job(&path, "old-cancel").unwrap();
+        let connection = open_db(&path).unwrap();
+        let finished: String = connection
+            .query_row(
+                "SELECT finished_at FROM ai_jobs WHERE id = 'old-cancel'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(finished, old);
+        assert_eq!(
+            crate::jobs::queue_status(&path).unwrap().tokens_24h,
+            30_000 + 0
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn the_job_list_hides_the_legacy_ledger_rows() {
+        let path = temp_db();
+        with_account(&path);
+        let connection = open_db(&path).unwrap();
+        connection
+            .execute_batch(
+                "INSERT INTO ai_jobs(id, account_id, job_type, target_type, target_id, status) VALUES
+                   ('real', 'acct', 'repo_card', 'repository', 'r1', 'queued'),
+                   ('ledger', 'acct', 'problem_answer', 'query', 'legacy-abc', 'succeeded');",
+            )
+            .unwrap();
+        drop(connection);
+        let ids: Vec<String> = list_jobs(&path, 40)
+            .unwrap()
+            .into_iter()
+            .map(|job| job.id)
+            .collect();
+        assert_eq!(
+            ids,
+            vec!["real".to_owned()],
+            "旧功能的账本行不该出现在任务列表里（也不能被取消）"
+        );
         let _ = std::fs::remove_file(&path);
     }
 }

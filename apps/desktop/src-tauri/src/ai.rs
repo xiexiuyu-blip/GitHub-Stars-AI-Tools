@@ -192,26 +192,37 @@ struct AiSearchPlanJson {
 #[derive(Deserialize)]
 struct OpenAiChatResponse {
     choices: Vec<OpenAiChoice>,
+    /// 服务商回的真实用量。旧功能的额度闸门（`spend_guard`）用它记账，没有就按文字估。
+    /// 按任意 JSON 读：有的兼容接口写成小数、字符串或 null，不能因此把一个好好的回复当成解析失败。
     #[serde(default)]
-    usage: Option<OpenAiUsage>,
+    usage: Option<serde_json::Value>,
 }
 
-/// 服务商回的真实用量。旧功能的额度闸门（`spend_guard`）用它记账，没有就按文字估。
-#[derive(Deserialize)]
-struct OpenAiUsage {
-    prompt_tokens: Option<u64>,
-    completion_tokens: Option<u64>,
-}
-
-impl OpenAiUsage {
-    fn pair(&self) -> Option<(u64, u64)> {
-        usage_pair(self.prompt_tokens, self.completion_tokens)
-    }
+/// 从 `usage` 对象里取（输入，输出）token 数；取不到或为 0 就返回 `None`（改按文字估）。
+fn usage_from_json(
+    usage: &serde_json::Value,
+    input_key: &str,
+    output_key: &str,
+) -> Option<(u64, u64)> {
+    let count = |key: &str| -> Option<u64> {
+        let value = usage.get(key)?;
+        if let Some(whole) = value.as_u64() {
+            return Some(whole);
+        }
+        if let Some(float) = value.as_f64() {
+            if float.is_finite() && float >= 0.0 {
+                return Some(float as u64);
+            }
+            return None;
+        }
+        value.as_str()?.trim().parse::<u64>().ok()
+    };
+    usage_pair(count(input_key), count(output_key))
 }
 
 fn usage_pair(input: Option<u64>, output: Option<u64>) -> Option<(u64, u64)> {
     let pair = (input.unwrap_or(0), output.unwrap_or(0));
-    if pair.0 + pair.1 > 0 {
+    if pair.0.saturating_add(pair.1) > 0 {
         Some(pair)
     } else {
         None
@@ -244,19 +255,7 @@ struct OpenAiMessageContentPart {
 struct AnthropicMessageResponse {
     content: Vec<AnthropicContentBlock>,
     #[serde(default)]
-    usage: Option<AnthropicUsage>,
-}
-
-#[derive(Deserialize)]
-struct AnthropicUsage {
-    input_tokens: Option<u64>,
-    output_tokens: Option<u64>,
-}
-
-impl AnthropicUsage {
-    fn pair(&self) -> Option<(u64, u64)> {
-        usage_pair(self.input_tokens, self.output_tokens)
-    }
+    usage: Option<serde_json::Value>,
 }
 
 #[derive(Deserialize)]
@@ -913,7 +912,7 @@ fn is_private_network_ai_host(host: &str) -> bool {
 
 fn request_openai(config: &AiRequestConfig, prompt: &str) -> Result<String, String> {
     // 旧功能不走队列，和队列共用每日额度：发请求前问一句，成功后记账（见 spend_guard.rs）。
-    crate::spend_guard::check_before_request(prompt)?;
+    let _permit = crate::spend_guard::check_before_request(prompt)?;
     let request = build_openai_chat_request(config, prompt, false);
     let response = execute_json_post(&request.endpoint, &request.headers, &request.body)?;
 
@@ -939,7 +938,10 @@ fn request_openai(config: &AiRequestConfig, prompt: &str) -> Result<String, Stri
             return Err(format!("OpenAI 响应解析失败：{error}"));
         }
     };
-    let usage = parsed.usage.as_ref().and_then(OpenAiUsage::pair);
+    let usage = parsed
+        .usage
+        .as_ref()
+        .and_then(|value| usage_from_json(value, "prompt_tokens", "completion_tokens"));
     let content = parsed
         .choices
         .into_iter()
@@ -961,7 +963,7 @@ fn request_openai_streaming(
     stage: &str,
     emit: &mut AiStreamCallback<'_>,
 ) -> Result<String, String> {
-    crate::spend_guard::check_before_request(prompt)?;
+    let _permit = crate::spend_guard::check_before_request(prompt)?;
     let request = build_openai_chat_request(config, prompt, true);
     match execute_sse_post(
         &request.endpoint,
@@ -1016,7 +1018,7 @@ fn request_anthropic(
     prompt: &str,
     max_tokens: u16,
 ) -> Result<String, String> {
-    crate::spend_guard::check_before_request(prompt)?;
+    let _permit = crate::spend_guard::check_before_request(prompt)?;
     let request = build_anthropic_message_request(config, prompt, max_tokens, false);
     let response = execute_json_post(&request.endpoint, &request.headers, &request.body)?;
 
@@ -1041,7 +1043,10 @@ fn request_anthropic(
             return Err(format!("Anthropic 响应解析失败：{error}"));
         }
     };
-    let usage = parsed.usage.as_ref().and_then(AnthropicUsage::pair);
+    let usage = parsed
+        .usage
+        .as_ref()
+        .and_then(|value| usage_from_json(value, "input_tokens", "output_tokens"));
     let content = parsed
         .content
         .into_iter()
@@ -1066,7 +1071,7 @@ fn request_anthropic_streaming(
     stage: &str,
     emit: &mut AiStreamCallback<'_>,
 ) -> Result<String, String> {
-    crate::spend_guard::check_before_request(prompt)?;
+    let _permit = crate::spend_guard::check_before_request(prompt)?;
     let request = build_anthropic_message_request(config, prompt, max_tokens, true);
     match execute_sse_post(
         &request.endpoint,
@@ -4327,5 +4332,45 @@ mod tests {
             );
             assert!(!error.message.contains("SUPER-SECRET"));
         }
+    }
+
+    #[test]
+    fn usage_is_read_leniently_and_never_fails_a_good_reply() {
+        use serde_json::json;
+        assert_eq!(
+            usage_from_json(
+                &json!({"prompt_tokens": 120, "completion_tokens": 30}),
+                "prompt_tokens",
+                "completion_tokens"
+            ),
+            Some((120, 30))
+        );
+        // 小数、字符串、负数、null、整个 usage 是字符串：都不能让回复解析失败，只是改按文字估
+        assert_eq!(
+            usage_from_json(
+                &json!({"prompt_tokens": 12.0, "completion_tokens": "7"}),
+                "prompt_tokens",
+                "completion_tokens"
+            ),
+            Some((12, 7))
+        );
+        for bad in [
+            json!({"prompt_tokens": -1, "completion_tokens": null}),
+            json!("n/a"),
+            json!({}),
+            json!({"prompt_tokens": 0, "completion_tokens": 0}),
+        ] {
+            assert_eq!(
+                usage_from_json(&bad, "prompt_tokens", "completion_tokens"),
+                None,
+                "{bad}"
+            );
+        }
+        let reply = r#"{"choices":[{"message":{"content":"ok"}}],"usage":"n/a"}"#;
+        let parsed: OpenAiChatResponse =
+            serde_json::from_str(reply).expect("usage 写成什么都不能让整个回复解析失败");
+        assert_eq!(parsed.choices.len(), 1);
+        // 离谱的大数不能在相加时 panic
+        assert!(usage_pair(Some(u64::MAX), Some(u64::MAX)).is_some());
     }
 }

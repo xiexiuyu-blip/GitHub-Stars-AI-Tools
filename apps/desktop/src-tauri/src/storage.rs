@@ -719,7 +719,10 @@ impl AppStorage {
         Ok(())
     }
 
-    fn database_path_from_app_handle(app_handle: &tauri::AppHandle) -> Result<PathBuf, String> {
+    /// 只算出数据库路径（并做正式库保护），不打开、不迁移数据库。
+    pub(crate) fn database_path_from_app_handle(
+        app_handle: &tauri::AppHandle,
+    ) -> Result<PathBuf, String> {
         let data_dir = app_handle
             .path()
             .app_data_dir()

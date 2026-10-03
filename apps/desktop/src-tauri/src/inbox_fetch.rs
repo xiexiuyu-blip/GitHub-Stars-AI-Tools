@@ -3,7 +3,7 @@
 //! 联网必须走 `PageFetcher`。测试注入假实现；真正的 `SafePageFetcher` 每一跳先检查链接，
 //! 再把主机解析成 IP，拒绝内网后用 `curl --resolve` 把这次解析结果固定住。
 
-use crate::capture::{extract_links_from_text, ip_is_blocked, url_is_safe};
+use crate::capture::{extract_links_unlimited, ip_is_blocked, url_is_safe};
 use crate::web_fetch::url_encode;
 use encoding_rs::{Encoding, UTF_8};
 use flate2::read::{DeflateDecoder, GzDecoder, ZlibDecoder};
@@ -1350,7 +1350,9 @@ fn is_inline_tag(name: &str) -> bool {
 fn repos_from_text(text: &str) -> Vec<String> {
     let mut found = Vec::new();
     let mut seen = HashSet::new();
-    for link in extract_links_from_text(text) {
+    // 文章里的链接数不设上限（一篇文章可以有几百个链接，排在前面的网站链接不能把后面的仓库挤掉）；
+    // 找到 MAX_PAGE_REPOS 个仓库就停。聊天里粘贴的文字才有「最多 300 条」的限制。
+    for link in extract_links_unlimited(text) {
         if link.kind != "github_repo" {
             continue;
         }
@@ -1895,10 +1897,9 @@ fn remove_hidden(html: &str) -> String {
                 continue;
             }
             TagScan::NotATag => {}
-            TagScan::Unterminated => {
-                out.push_str(&html[index..]);
-                break;
-            }
+            // 没结束的标签吞掉了剩下的整页：丢掉。浏览器也不会显示它，
+            // 而推给后面的话，里面的 <script> / <style> 源码会漏进摘要。
+            TagScan::Unterminated => break,
         }
         out.push('<');
         index += 1;
@@ -2057,8 +2058,10 @@ fn scan_tag_at(html: &str, start: usize) -> TagScan {
     } else {
         false
     };
-    while index < bytes.len() && bytes[index].is_ascii_whitespace() {
-        index += 1;
+    // 按 HTML 规范：`<` 或 `</` 后面必须紧跟一个字母才是标签。`I <3 you`、`a < b`、`<1>` 都只是文字：
+    // 以前把它们当成标签，一路扫到下一个 `>`，中间的内容（比如一个仓库网址）就丢了。
+    if index >= bytes.len() || !bytes[index].is_ascii_alphabetic() {
+        return TagScan::NotATag;
     }
     let name_start = index;
     while index < bytes.len() && is_name_byte(bytes[index]) {
@@ -2165,7 +2168,10 @@ fn parse_attrs(source: &str) -> Vec<(String, String)> {
             index += 1;
         }
         if index == name_start {
-            break;
+            // 不认识的字节（`@click`、多余的引号）：跳过它，后面的属性（比如 href）还要读。
+            // 按字符边界走，免得落在多字节字符中间。
+            index = next_boundary(source, index);
+            continue;
         }
         let name = source[name_start..index].to_ascii_lowercase();
         while index < bytes.len() && bytes[index].is_ascii_whitespace() {
@@ -4567,7 +4573,8 @@ https://github.com/real/repo
             let page = extract_web(&html, "https://example.com/bomb");
             let _ = page.title;
             assert!(github_repos_in(&html, "https://example.com/bomb").is_empty());
-            assert_eq!(remove_hidden(&html).len(), html.len());
+            // 没结束的标签吞掉了剩下的整页：丢掉（浏览器也不显示），不再推给后面
+            assert!(remove_hidden(&html).len() <= html.len());
         });
         // 引号没配对：同样是一直扫到末尾
         let quoted = "<a title=\"x ".repeat(100_000);
@@ -4725,5 +4732,65 @@ https://github.com/real/repo
             let text = html_fragment_to_text(&html, false);
             assert!(text.starts_with("前文"), "{}", &text[..text.len().min(80)]);
         });
+    }
+
+    #[test]
+    fn less_than_signs_in_text_are_not_tags() {
+        // 修复前：`<3`、`< b` 被当成标签，一路吞到下一个 `>`，中间的仓库网址丢了
+        let html = "<article><p>I <3 you https://github.com/o/n</p></article>";
+        assert_eq!(
+            github_repos_in(html, "https://blog.example/lt"),
+            vec!["o/n".to_owned()]
+        );
+        let spaced = "<article><p>a < b and github.com/p/q</p></article>";
+        assert_eq!(
+            github_repos_in(spaced, "https://blog.example/lt2"),
+            vec!["p/q".to_owned()]
+        );
+        assert!(html_fragment_to_text(html, false).contains("I <3 you"));
+    }
+
+    #[test]
+    fn attribute_parsing_skips_junk_bytes_and_still_reads_later_attributes() {
+        let attrs = parse_attrs(r#"@click="go()" class="x" "stray" href="https://github.com/o/n""#);
+        assert!(
+            attrs
+                .iter()
+                .any(|(name, value)| name == "href" && value == "https://github.com/o/n"),
+            "{attrs:?}"
+        );
+        let html = r#"<article><a @click="go()" href="https://github.com/o/n">项目</a></article>"#;
+        assert_eq!(
+            github_repos_in(html, "https://blog.example/attrs"),
+            vec!["o/n".to_owned()]
+        );
+    }
+
+    #[test]
+    fn an_unterminated_tag_does_not_leak_page_source_into_the_excerpt() {
+        let html = concat!(
+            "<html><head><title>标题</title></head><body><p>正常的第一段</p>",
+            "<a href=\"foo>被吞掉的内容</a><style>.secret{color:red}</style>",
+            "<script>var token = 'abc';</script></body></html>",
+        );
+        let page = extract_web(html, "https://blog.example/leak");
+        assert!(page.excerpt.contains("正常的第一段"), "{}", page.excerpt);
+        assert!(!page.excerpt.contains("secret"), "{}", page.excerpt);
+        assert!(!page.excerpt.contains("var token"), "{}", page.excerpt);
+        assert!(!page.excerpt.contains('<'), "{}", page.excerpt);
+    }
+
+    #[test]
+    fn many_site_links_do_not_crowd_out_the_repos_in_an_article() {
+        // 400 个别的链接排在前面，仓库在后面：「一段文字最多 300 条链接」只管聊天粘贴，不管文章里提取仓库
+        let mut html = String::from("<article>");
+        for index in 0..400 {
+            html.push_str(&format!("<a href=\"https://example.com/p{index}\">x</a>"));
+        }
+        html.push_str("<p>https://github.com/late/one https://github.com/late/two</p></article>");
+        assert_eq!(
+            github_repos_in(&html, "https://blog.example/many"),
+            vec!["late/one".to_owned(), "late/two".to_owned()]
+        );
     }
 }

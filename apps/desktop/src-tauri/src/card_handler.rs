@@ -113,7 +113,14 @@ impl JobHandler for RepoCardHandler {
                 now: now_stamp(),
             },
         )
-        .map_err(map_card_error)?;
+        .map_err(|error| {
+            // 第一次调用已经计费、修复调用才失败：把已经花掉的记到这条任务上，
+            // 否则网络 / 限流这类「没花钱」的失败会把它丢掉
+            if error.spent_tokens > 0 {
+                let _ = jobs::add_charge(db_path, &job.id, error.spent_tokens);
+            }
+            map_card_error(error)
+        })?;
         if let Err(message) = apply_scenario_tags(&mut conn, &job.account_id, repo_id) {
             return Err(JobFailure::Retryable {
                 kind: ErrorKind::Other,
@@ -396,11 +403,42 @@ fn map_card_error(error: CardRunError) -> JobFailure {
             kind: ErrorKind::Other,
             message,
         },
+        // 请求被服务商直接拒绝（模型名 / 地址不对、参数不支持）：没有计费，也不会因为重试变好。
+        // 以前当成普通的「其他」错误：每次尝试记 4k、重试 3 次，8 个任务就把 10 万额度「用完」了，什么也没花。
+        // 404 是模型或地址配错了：停下整条队列让人去改，别一个个失败；别的 4xx 只让这一条失败，不重试、不记用量。
+        CardRunErrorKind::Other if http_status_in(&message) == Some(404) => {
+            JobFailure::PauseQueue {
+                kind: ErrorKind::Other,
+                message,
+            }
+        }
+        CardRunErrorKind::Other
+            if matches!(http_status_in(&message), Some(400 | 405 | 415 | 422)) =>
+        {
+            JobFailure::Fatal {
+                kind: ErrorKind::ContentTooLarge,
+                message,
+            }
+        }
         CardRunErrorKind::Database | CardRunErrorKind::Other => JobFailure::Retryable {
             kind: ErrorKind::Other,
             message,
             retry_after_secs: error.retry_after_secs,
         },
+    }
+}
+
+/// 从「AI 接口请求失败（HTTP 404）：…」这种错误信息里取出状态码。
+fn http_status_in(message: &str) -> Option<u16> {
+    let start = message.find("HTTP ")? + "HTTP ".len();
+    let digits: String = message[start..]
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect();
+    if digits.len() == 3 {
+        digits.parse().ok()
+    } else {
+        None
     }
 }
 
@@ -522,6 +560,7 @@ mod tests {
             kind: CardRunErrorKind::Other,
             message: "OpenAI 响应中没有可用内容（结束原因 stop）".to_owned(),
             retry_after_secs: None,
+            spent_tokens: 0,
         });
         assert!(matches!(
             empty,
@@ -535,6 +574,7 @@ mod tests {
             kind: CardRunErrorKind::Other,
             message: "别的错误".to_owned(),
             retry_after_secs: None,
+            spent_tokens: 0,
         });
         assert!(matches!(
             other,
@@ -2003,6 +2043,79 @@ mod tests {
                 "SELECT priority FROM ai_jobs WHERE target_id = 'old'"
             ),
             6
+        );
+    }
+
+    #[test]
+    fn provider_rejections_are_not_charged_and_not_retried() {
+        let rejected = |status: u16| CardRunError {
+            kind: CardRunErrorKind::Other,
+            message: format!("AI 接口请求失败（HTTP {status}）：请求被拒绝"),
+            retry_after_secs: None,
+            spent_tokens: 0,
+        };
+        // 404：模型名或请求地址配错了，停下整条队列让人去改
+        assert!(matches!(
+            map_card_error(rejected(404)),
+            JobFailure::PauseQueue {
+                kind: ErrorKind::Other,
+                ..
+            }
+        ));
+        // 400 / 422 等：只让这一条失败，用「不计费」的种类，不重试
+        for status in [400, 405, 415, 422] {
+            assert!(
+                matches!(
+                    map_card_error(rejected(status)),
+                    JobFailure::Fatal {
+                        kind: ErrorKind::ContentTooLarge,
+                        ..
+                    }
+                ),
+                "HTTP {status}"
+            );
+        }
+        // 500 之类仍按原来的方式处理（可重试）
+        assert!(matches!(
+            map_card_error(rejected(500)),
+            JobFailure::Retryable { .. }
+        ));
+        assert_eq!(http_status_in("没有状态码"), None);
+        assert_eq!(http_status_in("（HTTP 4）"), None);
+    }
+
+    #[test]
+    fn a_failed_repair_call_keeps_the_first_calls_usage_on_the_job() {
+        let db = TempDb::new("repair-spent");
+        prepare_runnable(&db);
+        db.open()
+            .execute(
+                "INSERT INTO ai_jobs(id, account_id, job_type, target_type, target_id, status, attempts)
+                 VALUES ('job-1', 'acct', 'repo_card', 'repository', 'r1', 'running', 1)",
+                [],
+            )
+            .unwrap();
+        // 第一次调用成功（已计费 3000 + 500）但回的不是 JSON，紧接着的修复调用断网了：
+        // 「断网」本身记 0，但第一次那笔 3500 不能丢
+        let (handler, _) = scripted(
+            Ok(ok_config()),
+            vec![
+                reply("这不是 JSON", "m", 3000, 500),
+                llm_err(LlmErrorKind::Network, "断了"),
+            ],
+        );
+        assert_retryable(
+            handler.run(&job("job-1", "repository", "r1"), db.path()),
+            ErrorKind::Network,
+            None,
+            "断了",
+        );
+        assert_eq!(
+            cell_i64(
+                &db.open(),
+                "SELECT input_tokens FROM ai_jobs WHERE id = 'job-1'"
+            ),
+            3500
         );
     }
 }
