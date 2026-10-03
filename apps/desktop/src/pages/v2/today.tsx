@@ -354,7 +354,7 @@ export function TodayPage(props: TodayPageProps) {
     : !today && phase === 'error'
       ? '今天的清单没有读出来。'
       : today
-        ? buildTodayLead(today.counts?.weekNew ?? 0, today.counts?.cardsPending ?? 0, weekGroups.picks.length)
+        ? buildTodayLead(today.counts?.weekNew ?? 0, weekGroups.picks.length)
         : '正在整理今天的清单…';
   const matchedDetail = detail && detail.id === selectedId ? detail : null;
   const shownDetail = matchedDetail
@@ -438,7 +438,7 @@ export function TodayPage(props: TodayPageProps) {
                 key={item.id}
                 item={item}
                 selected={item.id === selectedId}
-                why={pickWhyLine(item.oneLiner)}
+                why={pickWhyLine(item)}
                 onSelect={() => pickRow(item.id)}
                 onWant={() => void changeReading(item.id, 'want')}
                 onDrop={() => void changeReading(item.id, 'dropped')}

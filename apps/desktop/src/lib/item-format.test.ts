@@ -145,11 +145,15 @@ describe('greetingFor', () => {
 });
 
 describe('buildTodayLead', () => {
-  it('有待整理、有推荐、都没有，以及负数', () => {
-    expect(buildTodayLead(4, 2, 3)).toBe('这周你收藏了 4 个新工具，其中 2 个正在等 AI 整理。先从下面 3 个你可能用得上的看起。');
-    expect(buildTodayLead(4, 0, 3)).toBe('这周你收藏了 4 个新工具。先从下面 3 个你可能用得上的看起。');
-    expect(buildTodayLead(0, 0, 0)).toBe('这周你收藏了 0 个新工具。AI 整理好之后，这里会按你常做的事挑出值得先看的。');
-    expect(buildTodayLead(-3, Number.NaN, -1)).toBe('这周你收藏了 0 个新工具。AI 整理好之后，这里会按你常做的事挑出值得先看的。');
+  it('有推荐、没有推荐，以及负数和非数字', () => {
+    expect(buildTodayLead(4, 3)).toBe('这周你收藏了 4 个新工具。先从下面 3 个你可能用得上的看起。');
+    expect(buildTodayLead(0, 0)).toBe('这周你收藏了 0 个新工具。AI 整理好之后，这里会按你常做的事挑出值得先看的。');
+    expect(buildTodayLead(-3, -1)).toBe('这周你收藏了 0 个新工具。AI 整理好之后，这里会按你常做的事挑出值得先看的。');
+    expect(buildTodayLead(Number.NaN, Number.NaN)).toBe('这周你收藏了 0 个新工具。AI 整理好之后，这里会按你常做的事挑出值得先看的。');
+  });
+
+  it('不再提全库的「等 AI 整理」数量', () => {
+    expect(buildTodayLead(8, 3)).not.toContain('整理');
   });
 });
 
@@ -191,10 +195,14 @@ describe('仓库名、截断与今日列表', () => {
     expect(clipText('中文', 0)).toBe('');
   });
 
-  it('pickWhyLine 只用一句话', () => {
-    expect(pickWhyLine(' 做封面 ')).toBe('适合：做封面');
-    expect(pickWhyLine('')).toBeNull();
-    expect(pickWhyLine(null)).toBeNull();
+  it('pickWhyLine 只在有 highlight 且和一句话不同时才给出', () => {
+    expect(pickWhyLine({ oneLiner: '做封面', highlight: ' 批量做小红书封面 ' })).toBe('适合：批量做小红书封面');
+    expect(pickWhyLine({ oneLiner: '做封面', highlight: '做封面' })).toBeNull();
+    expect(pickWhyLine({ oneLiner: ' 做封面 ', highlight: '做封面' })).toBeNull();
+    expect(pickWhyLine({ oneLiner: '做封面', highlight: '' })).toBeNull();
+    expect(pickWhyLine({ oneLiner: '做封面', highlight: null })).toBeNull();
+    expect(pickWhyLine({ oneLiner: '做封面' })).toBeNull();
+    expect(pickWhyLine({ oneLiner: null, highlight: '做封面' })).toBe('适合：做封面');
   });
 
   it('assembleWeekGroups 隐藏已标状态的推荐，并去掉重复和不要了', () => {
