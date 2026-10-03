@@ -357,9 +357,10 @@ pub fn set_library_reading(path: &Path, ids: &[String], group: &str) -> Result<u
         return Err("一次最多设置 200 个".to_owned());
     }
     let connection = open_write(path)?;
-    let tx = connection
-        .unchecked_transaction()
-        .map_err(|error| format!("状态写入失败：{error}"))?;
+    // 先读后写：一开始就拿写锁，避免和后台整理同时提交时立刻报 database is locked。
+    let tx =
+        rusqlite::Transaction::new_unchecked(&connection, rusqlite::TransactionBehavior::Immediate)
+            .map_err(|error| format!("状态写入失败：{error}"))?;
     let mut seen = HashSet::new();
     let mut changed = 0usize;
     for id in ids {

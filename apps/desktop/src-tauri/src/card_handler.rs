@@ -196,7 +196,7 @@ pub fn enqueue_new_stars(db_path: &Path, repo_ids: &[String]) -> Result<usize, S
 pub fn confirm_card(db_path: &Path, repo_id: &str) -> Result<(), String> {
     let mut conn = open_db(db_path)?;
     let tx = conn
-        .transaction()
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .map_err(|error| format!("理解卡确认失败：{error}"))?;
     let card_json = read_card_json(&tx, repo_id)?;
     let updated = rewrite_review_status(card_json.as_deref(), "confirmed")?;
@@ -225,7 +225,7 @@ pub fn confirm_card(db_path: &Path, repo_id: &str) -> Result<(), String> {
 pub fn request_regenerate(db_path: &Path, repo_id: &str) -> Result<(), String> {
     let mut conn = open_db(db_path)?;
     let tx = conn
-        .transaction()
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .map_err(|error| format!("理解卡重做失败：{error}"))?;
     let account_id: Option<String> = tx
         .query_row(

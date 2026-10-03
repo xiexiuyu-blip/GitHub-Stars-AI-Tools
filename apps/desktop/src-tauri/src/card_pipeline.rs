@@ -614,7 +614,11 @@ fn persist_card(
     now: &str,
     warnings: &mut Vec<String>,
 ) -> Result<bool, CardRunError> {
-    let tx = conn.transaction().map_err(db_err)?;
+    // 先读后写：必须一开始就拿写锁（IMMEDIATE）。用默认的延迟事务时，另一个线程在这期间提交过，
+    // 写入会立刻报 database is locked（busy_timeout 不起作用），而模型调用已经花了钱。
+    let tx = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(db_err)?;
     if read_existing(&tx, repo_id)?
         .as_ref()
         .is_some_and(is_confirmed_doc)
