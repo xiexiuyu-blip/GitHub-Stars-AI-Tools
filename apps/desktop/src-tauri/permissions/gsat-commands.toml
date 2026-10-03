@@ -112,4 +112,7 @@ commands.allow = [
   "merge_knowledge_concepts",
   "search_library_semantic",
   "enqueue_missing_cards",
+  "list_scenarios",
+  "reclassify_scenarios",
+  "set_repository_scenario",
 ]
