@@ -8,6 +8,7 @@ use crate::web_fetch::url_encode;
 use rusqlite::{params, Connection, OpenFlags, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::borrow::Cow;
 use std::collections::HashSet;
 use std::net::{IpAddr, ToSocketAddrs};
 use std::path::{Path, PathBuf};
@@ -787,7 +788,7 @@ fn github_repos_in(raw_html: &str, page_url: &str) -> Vec<String> {
     }
     let cleaned = remove_hidden(raw_html);
     let region = content_html_for_repos(&cleaned, page_url);
-    repos_from_text(&repo_scan_text(region))
+    repos_from_text(&repo_scan_text(&region))
 }
 
 fn page_host_is_github(page_url: &str) -> bool {
@@ -797,20 +798,72 @@ fn page_host_is_github(page_url: &str) -> bool {
     }
 }
 
-/// 公众号只看 `js_content`。别的页面依次用 article、main、body。
-/// 都没有就用去掉脚本和样式后的整页，这样导航、页脚、侧栏里的站点链接进不来。
-fn content_html_for_repos<'a>(cleaned: &'a str, page_url: &str) -> &'a str {
-    let chosen = if is_wechat_url(page_url) {
+/// 公众号只看 `js_content`。别的页面依次用 article、main，再兜底到 body、整页。
+/// 兜底时先去掉导航、页眉、页脚、侧栏：站点自己的 GitHub 链接（主题、模板仓库）多在这些地方，
+/// 不是文章在讲的项目。找到 article / main / `js_content` 就整块用，里面自带的页眉页脚不去。
+fn content_html_for_repos<'a>(cleaned: &'a str, page_url: &str) -> Cow<'a, str> {
+    let wechat = is_wechat_url(page_url);
+    let focused = if wechat {
         element_by_id(cleaned, "js_content")
     } else {
-        element_inner(cleaned, "article")
-            .or_else(|| element_inner(cleaned, "main"))
-            .or_else(|| element_inner(cleaned, "body"))
+        element_inner(cleaned, "article").or_else(|| element_inner(cleaned, "main"))
     };
-    match chosen {
-        Some(inner) => inner,
-        None => cleaned,
+    match focused {
+        Some(inner) => Cow::Borrowed(inner),
+        None => {
+            let fallback = if wechat {
+                cleaned
+            } else {
+                element_inner(cleaned, "body").unwrap_or(cleaned)
+            };
+            Cow::Owned(without_page_chrome(fallback))
+        }
     }
+}
+
+/// 去掉 nav / header / footer / aside 整块。没有配对的结束标签就不去（免得一个没关的标签吞掉整页）。
+fn without_page_chrome(html: &str) -> String {
+    let bytes = html.as_bytes();
+    let mut out = String::with_capacity(html.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] != b'<' {
+            let start = index;
+            index += 1;
+            while index < bytes.len() && bytes[index] != b'<' {
+                index += 1;
+            }
+            out.push_str(&html[start..index]);
+            continue;
+        }
+        if let Some(tag) = parse_tag_at(html, index) {
+            if !tag.closing
+                && !tag.self_closing
+                && matches!(tag.name.as_str(), "nav" | "header" | "footer" | "aside")
+            {
+                let end = skip_element(html, tag.end, &tag.name);
+                if ends_with_close_tag(html, end, &tag.name) {
+                    index = end;
+                    continue;
+                }
+            }
+            out.push_str(&html[index..tag.end]);
+            index = tag.end;
+            continue;
+        }
+        out.push('<');
+        index += 1;
+    }
+    out
+}
+
+/// `skip_element` 找不到配对的结束标签时会一路吃到末尾；用这个分辨「真的关上了」和「吃到头了」。
+fn ends_with_close_tag(html: &str, end: usize, name: &str) -> bool {
+    let needle = format!("</{name}").into_bytes();
+    let tail_start = end.saturating_sub(needle.len() + 16);
+    html.as_bytes()[tail_start..end]
+        .windows(needle.len())
+        .any(|window| window.eq_ignore_ascii_case(&needle))
 }
 
 /// 按文档顺序拼出 href（先留着实体）和可见文字，最后统一做一次实体解码。
@@ -836,6 +889,12 @@ fn repo_scan_text(html: &str) -> String {
                     raw.push('\n');
                 }
             }
+            // 行内标签（span、strong……）不打断文字：编辑器会把一个网址拆进几个 span。
+            // 其余标签（段落、列表、表格、br、不认识的标签）都当换行，
+            // 否则相邻两段的网址会粘成一个，两个都认不出来。
+            if !is_inline_tag(&tag.name) {
+                raw.push('\n');
+            }
             index = tag.end;
             continue;
         }
@@ -843,6 +902,43 @@ fn repo_scan_text(html: &str) -> String {
         index += 1;
     }
     decode_entities(&raw)
+}
+
+fn is_inline_tag(name: &str) -> bool {
+    matches!(
+        name,
+        "a" | "abbr"
+            | "b"
+            | "bdi"
+            | "bdo"
+            | "big"
+            | "cite"
+            | "code"
+            | "data"
+            | "del"
+            | "dfn"
+            | "em"
+            | "font"
+            | "i"
+            | "ins"
+            | "kbd"
+            | "label"
+            | "mark"
+            | "q"
+            | "s"
+            | "samp"
+            | "small"
+            | "span"
+            | "strike"
+            | "strong"
+            | "sub"
+            | "sup"
+            | "time"
+            | "tt"
+            | "u"
+            | "var"
+            | "wbr"
+    )
 }
 
 fn repos_from_text(text: &str) -> Vec<String> {
@@ -3449,5 +3545,101 @@ https://github.com/real/repo
         assert_eq!(y_row.fetch_status, "done");
         assert_eq!(y_row.page_repos, "[]");
         assert_user_fields_untouched(&y_row);
+    }
+
+    #[test]
+    fn body_and_whole_page_fallbacks_skip_nav_header_footer_and_aside() {
+        let body = concat!(
+            "<body>",
+            "<header><a href=\"https://github.com/theme/header-link\">h</a></header>",
+            "<nav>https://github.com/site/nav</nav>",
+            "<div><p>推荐 https://github.com/real/one</p></div>",
+            "<aside>https://github.com/side/bar</aside>",
+            "<footer>Powered by https://github.com/hexojs/hexo</footer>",
+            "</body>",
+        );
+        assert_eq!(
+            github_repos_in(body, "https://blog.example/b"),
+            vec!["real/one".to_owned()]
+        );
+        let whole = concat!(
+            "<nav>https://github.com/site/nav</nav>",
+            "<div>https://github.com/real/two</div>",
+            "<footer>https://github.com/foot/er</footer>",
+        );
+        assert_eq!(
+            github_repos_in(whole, "https://blog.example/w"),
+            vec!["real/two".to_owned()]
+        );
+        assert_eq!(
+            github_repos_in(whole, "https://mp.weixin.qq.com/s/no-js-content"),
+            vec!["real/two".to_owned()]
+        );
+    }
+
+    #[test]
+    fn article_region_keeps_its_own_header_and_footer() {
+        let html = concat!(
+            "<nav>https://github.com/site/nav</nav>",
+            "<article><header>https://github.com/in/header</header>",
+            "<p>https://github.com/in/body</p>",
+            "<footer>https://github.com/in/footer</footer></article>",
+        );
+        assert_eq!(
+            github_repos_in(html, "https://blog.example/a"),
+            vec![
+                "in/header".to_owned(),
+                "in/body".to_owned(),
+                "in/footer".to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn unclosed_chrome_tag_does_not_swallow_the_page() {
+        let html = "<div><nav>菜单<p>https://github.com/real/after-nav</p></div>";
+        assert_eq!(
+            github_repos_in(html, "https://blog.example/u"),
+            vec!["real/after-nav".to_owned()]
+        );
+        let nested = concat!(
+            "<div><footer><footer>https://github.com/foot/nested</footer></footer>",
+            "<p>https://github.com/real/kept</p></div>",
+        );
+        assert_eq!(
+            github_repos_in(nested, "https://blog.example/n"),
+            vec!["real/kept".to_owned()]
+        );
+    }
+
+    #[test]
+    fn adjacent_blocks_do_not_glue_their_urls_together() {
+        let html = concat!(
+            "<article>",
+            "<p>https://github.com/a/b</p><p>https://github.com/c/d</p>",
+            "<ul><li>github.com/e/f</li><li>github.com/g/h</li></ul>",
+            "<table><tr><td>github.com/i/j</td><td>github.com/k/l</td></tr></table>",
+            "<div>github.com/m/n<br>github.com/o/p</div>",
+            "</article>",
+        );
+        assert_eq!(
+            github_repos_in(html, "https://blog.example/glue"),
+            ["a/b", "c/d", "e/f", "g/h", "i/j", "k/l", "m/n", "o/p"]
+                .iter()
+                .map(|name| (*name).to_owned())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn url_split_across_inline_tags_is_still_found() {
+        let html = concat!(
+            "<div id=\"js_content\"><p><span>https://github.com/</span>",
+            "<strong>owner</strong><span style=\"color:red\">/repo</span>。</p></div>",
+        );
+        assert_eq!(
+            github_repos_in(html, "https://mp.weixin.qq.com/s/split"),
+            vec!["owner/repo".to_owned()]
+        );
     }
 }
