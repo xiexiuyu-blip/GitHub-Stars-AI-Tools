@@ -30,6 +30,12 @@ export function togglePick(picked: readonly string[], id: string): string[] {
   return [...picked, id];
 }
 
+/** 把某一项设成主参考：勾选里排第一的就是主参考。不在勾选里或已经是第一个，原样返回。 */
+export function makeMain(picked: readonly string[], id: string): string[] {
+  if (!picked.includes(id) || picked[0] === id) return [...picked];
+  return [id, ...picked.filter((item) => item !== id)];
+}
+
 /** 按勾选顺序返回命中。不在命中里的 id 跳过。 */
 export function orderedPicks(hits: readonly SolveHit[], picked: readonly string[]): SolveHit[] {
   const byId = new Map(hits.map((hit) => [hit.id, hit]));

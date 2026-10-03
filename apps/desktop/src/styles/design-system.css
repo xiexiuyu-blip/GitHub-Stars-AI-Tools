@@ -27,6 +27,11 @@
   font-feature-settings: 'liga';
 }
 
+/* 图标字体加载好之前，图标名（home、psychology、add_link…）会以英文单词闪一下：先藏起来，main.tsx 在字体就绪（或 1.5 秒兜底）后打开 */
+html:not([data-icons-ready]) .material-symbols-outlined {
+  visibility: hidden;
+}
+
 /* ===========================================================================
  * 排版工具类 (与 @theme 的 text-* token 互补，提供 font-family 联动)
  * 设计模板用 font-headline-md / font-body-md / font-label-sm 同时设定字体族与字号

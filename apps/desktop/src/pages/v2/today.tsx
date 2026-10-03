@@ -19,11 +19,11 @@ import {
   getTodayView,
   listLibraryView,
   listScenarios,
-  regenerateLibraryCard,
   setLibraryReading,
 } from '@/lib/api';
 import { automationHint } from '@/lib/automation-view';
 import { useAiAutomation } from '@/hooks/use-ai-automation';
+import { useRegenerate } from '@/hooks/use-regenerate';
 import { useListKeys } from '@/hooks/use-list-keys';
 import { Button, Card, EmptyState, Kbd, PageHeader, StatCard, useToast } from '@/components/kit';
 import { AutomationBanner, ItemDetail, ItemRow, PickCard } from '@/components/library';
@@ -55,6 +55,7 @@ const FILTER_QUERY: Record<Exclude<TodayFilter, 'week'>, LibraryFilters> = {
 export function TodayPage(props: TodayPageProps) {
   const toast = useToast();
   const { status: automation } = useAiAutomation();
+  const regenerateCard = useRegenerate(props.onOpenToolbox);
   const [name, setName] = useState('Fox');
   const [phase, setPhase] = useState<'loading' | 'ready' | 'error'>('loading');
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -322,14 +323,6 @@ export function TodayPage(props: TodayPageProps) {
     }
   }
 
-  async function regenerateCard(id: string) {
-    try {
-      await regenerateLibraryCard(id);
-      toast.show({ title: '已排队，整理好会更新' });
-    } catch (reason) {
-      toast.show({ title: describeInvokeError(reason) });
-    }
-  }
 
   useListKeys({
     ids: ordered.map((item) => item.id),

@@ -318,7 +318,7 @@ function AppContent() {
       case 'map':
         return <MapPage />;
       case 'solve':
-        return <SolvePage initialQuestion={solveQuestion} onOpenDiscover={(scenarioId) => { setDiscoverScenario(scenarioId ?? null); setCurrentPage('discover'); }} />;
+        return <SolvePage initialQuestion={solveQuestion} onOpenDiscover={(scenarioId) => { setDiscoverScenario(scenarioId ?? null); setCurrentPage('discover'); }} onOpenToolbox={() => setCurrentPage('toolbox')} />;
       case 'packs':
         return <PacksPage question={solveQuestion} />;
       case 'toolbox':

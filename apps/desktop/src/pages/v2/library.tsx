@@ -8,7 +8,6 @@ import {
   getLibraryDetail,
   listLibraryView,
   listScenarios,
-  regenerateLibraryCard,
   setLibraryReading,
 } from '@/lib/api';
 import {
@@ -30,6 +29,7 @@ import {
 } from '@/lib/library-filters';
 import { automationHint } from '@/lib/automation-view';
 import { useAiAutomation } from '@/hooks/use-ai-automation';
+import { useRegenerate } from '@/hooks/use-regenerate';
 import { shouldIgnoreKey, useListKeys } from '@/hooks/use-list-keys';
 import { Button, Card, EmptyState, Kbd, PageHeader, Segmented, useToast } from '@/components/kit';
 import { AutomationBanner, ItemDetail, ItemRow } from '@/components/library';
@@ -55,6 +55,7 @@ type ListPhase = 'loading' | 'idle' | 'error';
 export function LibraryPage(props: LibraryPageProps) {
   const toast = useToast();
   const { status: automation } = useAiAutomation();
+  const regenerateCard = useRegenerate(props.onOpenToolbox);
   const [ui, setUi] = useState(() => withInitial(props.initialKeyword, props.initialScenario));
   const [keywordDraft, setKeywordDraft] = useState(() => withInitial(props.initialKeyword, props.initialScenario).keyword);
   const [scenarios, setScenarios] = useState<ScenarioSummary[]>([]);
@@ -426,14 +427,6 @@ export function LibraryPage(props: LibraryPageProps) {
     }
   }
 
-  async function regenerateCard(id: string) {
-    try {
-      await regenerateLibraryCard(id);
-      toast.show({ title: '已排队，整理好会更新' });
-    } catch (reason) {
-      toast.show({ title: describeInvokeError(reason) });
-    }
-  }
 
   changeReadingRef.current = (id, group) => { void changeReading(id, group); };
   copyForCodexRef.current = (id) => { void copyForCodex(id); };
