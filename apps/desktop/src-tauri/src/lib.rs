@@ -12,6 +12,7 @@ mod discover;
 mod embedding;
 mod embedding_state;
 mod github;
+mod inbox_fetch;
 mod inbox_view;
 mod jobs;
 mod library;
@@ -1184,6 +1185,25 @@ fn list_inbox(
 ) -> Result<inbox_view::InboxPage, String> {
     let storage = AppStorage::from_app_handle(&app_handle)?;
     inbox_view::list_inbox(storage.database_path(), status.as_deref(), limit, offset)
+}
+
+/// 读取收集箱里还没读过的公开链接。不登录、不带令牌，也不在启动时自动跑。
+#[tauri::command]
+async fn fetch_inbox_pending(
+    app_handle: tauri::AppHandle,
+    id: Option<String>,
+) -> Result<inbox_fetch::FetchSummary, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let storage = AppStorage::from_app_handle(&app_handle)?;
+        inbox_fetch::fetch_pending(
+            storage.database_path(),
+            &inbox_fetch::SafePageFetcher,
+            id.as_deref(),
+            20,
+        )
+    })
+    .await
+    .map_err(|_| "收集箱读取失败".to_owned())?
 }
 
 #[tauri::command]
@@ -7102,6 +7122,7 @@ pub fn run() {
             commit_capture_batch,
             preview_capture,
             list_inbox,
+            fetch_inbox_pending,
             set_inbox_status,
             set_inbox_note,
             get_graph_overview,

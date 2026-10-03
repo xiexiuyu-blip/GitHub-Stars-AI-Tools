@@ -92,6 +92,7 @@ commands.allow = [
   "commit_capture_batch",
   "preview_capture",
   "list_inbox",
+  "fetch_inbox_pending",
   "set_inbox_status",
   "set_inbox_note",
   "get_graph_overview",

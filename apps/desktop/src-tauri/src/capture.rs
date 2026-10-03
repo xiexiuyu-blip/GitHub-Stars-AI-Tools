@@ -361,7 +361,7 @@ fn ipv4_is_blocked(ip: Ipv4Addr) -> bool {
         || (octets[0] == 100 && (octets[1] & 0xc0) == 64)
 }
 
-fn ip_is_blocked(ip: IpAddr) -> bool {
+pub(crate) fn ip_is_blocked(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => ipv4_is_blocked(v4),
         IpAddr::V6(v6) => {

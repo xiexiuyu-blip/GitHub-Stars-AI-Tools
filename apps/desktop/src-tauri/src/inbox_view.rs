@@ -58,6 +58,11 @@ pub struct InboxItem {
     pub status: String,
     pub repository_id: Option<String>,
     pub created_at: String,
+    pub fetch_status: String,
+    pub fetch_error: String,
+    pub page_author: String,
+    /// `page_excerpt` 的前 400 个字符。超过时在末尾加「…」。
+    pub excerpt: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -328,7 +333,7 @@ fn load_items(
     offset: i64,
 ) -> Result<Vec<InboxItem>, String> {
     let sql = format!(
-        "SELECT id, original_url, normalized_url, title, item_type, source_platform, source_context, user_note, status, repository_id, created_at
+        "SELECT id, original_url, normalized_url, title, item_type, source_platform, source_context, user_note, status, repository_id, created_at, fetch_status, fetch_error, page_author, page_excerpt
          FROM inbox_items
          WHERE account_id = ?1 AND {}
          ORDER BY created_at DESC, id ASC
@@ -361,7 +366,24 @@ fn read_inbox_item(row: &rusqlite::Row<'_>) -> rusqlite::Result<InboxItem> {
         status: row.get(8)?,
         repository_id: row.get(9)?,
         created_at: row.get(10)?,
+        fetch_status: row.get(11)?,
+        fetch_error: row.get(12)?,
+        page_author: row.get(13)?,
+        excerpt: clip_excerpt(&row.get::<_, String>(14)?),
     })
+}
+
+/// 列表只给前 400 个字符。按字符截，不用字节；超过才加省略号。
+fn clip_excerpt(page_excerpt: &str) -> String {
+    let mut clipped = String::new();
+    for (index, ch) in page_excerpt.chars().enumerate() {
+        if index == 400 {
+            clipped.push('…');
+            break;
+        }
+        clipped.push(ch);
+    }
+    clipped
 }
 
 pub fn set_inbox_status(db_path: &Path, id: &str, status: &str) -> Result<(), String> {
@@ -1105,6 +1127,59 @@ https://github.com/someone/else";
         assert_eq!(video.source_context, "视频号");
         assert_eq!(video.item_type, "video");
         assert_eq!(video.repository_id.as_deref(), Some("repo-e"));
+        assert_eq!(group.fetch_status, "pending");
+        assert_eq!(group.fetch_error, "");
+        assert_eq!(group.page_author, "");
+        assert_eq!(group.excerpt, "");
+    }
+
+    #[test]
+    fn list_inbox_clips_excerpt_by_chars_not_bytes() {
+        let db = prepare_list();
+        let connection = Connection::open(db.path()).expect("应能打开测试库");
+        let exactly: String = "测".repeat(400);
+        let longer: String = "测".repeat(401);
+        assert!(longer.len() > 401, "用汉字才能证明按字符截");
+        connection
+            .execute(
+                "UPDATE inbox_items SET fetch_status = 'done', fetch_error = '不应出现', page_author = '甲', page_excerpt = ?1 WHERE id = 'b'",
+                params![exactly],
+            )
+            .expect("应能写入刚好 400 字的摘要");
+        connection
+            .execute(
+                "UPDATE inbox_items SET fetch_status = 'failed', fetch_error = '读不到', page_author = '乙', page_excerpt = ?1 WHERE id = 'c'",
+                params![longer],
+            )
+            .expect("应能写入超长摘要");
+        drop(connection);
+
+        let page = list_inbox(db.path(), Some("all"), None, None).expect("列表应成功");
+        let exact = page
+            .items
+            .iter()
+            .find(|item| item.id == "b")
+            .expect("应有刚好 400 字的那一条");
+        assert_eq!(exact.fetch_status, "done");
+        assert_eq!(exact.fetch_error, "不应出现");
+        assert_eq!(exact.page_author, "甲");
+        assert_eq!(exact.excerpt.chars().count(), 400);
+        assert_eq!(exact.excerpt, exactly);
+        assert!(!exact.excerpt.ends_with('…'));
+        let clipped = page
+            .items
+            .iter()
+            .find(|item| item.id == "c")
+            .expect("应有超长的那一条");
+        assert_eq!(clipped.fetch_status, "failed");
+        assert_eq!(clipped.fetch_error, "读不到");
+        assert_eq!(clipped.page_author, "乙");
+        assert_eq!(clipped.excerpt.chars().count(), 401);
+        assert!(clipped.excerpt.ends_with('…'));
+        assert_eq!(
+            &clipped.excerpt[..clipped.excerpt.len() - '…'.len_utf8()],
+            exactly
+        );
     }
 
     #[test]
@@ -1243,6 +1318,10 @@ https://github.com/someone/else";
             status: "pending".to_owned(),
             repository_id: None,
             created_at: "2026-10-03T00:00:00.000Z".to_owned(),
+            fetch_status: "pending".to_owned(),
+            fetch_error: "".to_owned(),
+            page_author: "作者".to_owned(),
+            excerpt: "摘要".to_owned(),
         };
         let page = InboxPage {
             items: vec![item],
@@ -1305,10 +1384,14 @@ https://github.com/someone/else";
             sorted_keys(item_json),
             vec![
                 "createdAt",
+                "excerpt",
+                "fetchError",
+                "fetchStatus",
                 "id",
                 "itemType",
                 "normalizedUrl",
                 "originalUrl",
+                "pageAuthor",
                 "platform",
                 "repositoryId",
                 "sourceContext",
@@ -1328,9 +1411,17 @@ https://github.com/someone/else";
             "userNote",
             "status",
             "createdAt",
+            "fetchStatus",
+            "fetchError",
+            "pageAuthor",
+            "excerpt",
         ] {
             assert!(item_json[key].is_string(), "{key} 应是字符串");
         }
+        assert_eq!(item_json["fetchStatus"], "pending");
+        assert_eq!(item_json["fetchError"], "");
+        assert_eq!(item_json["pageAuthor"], "作者");
+        assert_eq!(item_json["excerpt"], "摘要");
         assert!(item_json["repositoryId"].is_null());
         assert_eq!(item_json["status"], "pending");
         assert_eq!(item_json["platform"], "wechat");
