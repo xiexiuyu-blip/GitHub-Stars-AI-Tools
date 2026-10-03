@@ -215,7 +215,12 @@ export type InboxItem = {
   excerpt?: string;
   /** 收进来时的原话（比如微信群里那条消息）的前 200 个字符；粘贴收集没有，是空串 */
   quote?: string;
+  /** 读到的文章里提到的 GitHub 项目（卡 24）。旧版后台没有这一项，所以是可选的 */
+  githubRepos?: RepoMention[];
 };
+
+/** 文章里提到的一个 GitHub 项目：`starred` 已经在你的收藏里；`inInbox` 已经在收集箱里（含已归档的）。两个都不是就是「新的」。 */
+export type RepoMention = { fullName: string; starred: boolean; inInbox: boolean };
 
 /** 命令 `fetch_inbox_pending({ id? })`：联网读取还没读过的收集箱链接，只读公开内容、不登录。带 `id` 时只读这一条（失败过的也会重试）。
  *  一次最多处理 20 条；`remaining` 是还没读的条数（大于 0 说明要再调一次）。 */

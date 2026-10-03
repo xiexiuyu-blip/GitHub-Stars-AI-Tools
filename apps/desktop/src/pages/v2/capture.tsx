@@ -19,6 +19,8 @@ import {
   describeCommit,
   hasUnfetched,
   inboxHeading,
+  mentionSummary,
+  mentionText,
   type InboxFilter,
   isTooLong,
   noteError,
@@ -55,6 +57,7 @@ export function CapturePage() {
   const [noteMessage, setNoteMessage] = useState<string | null>(null);
   const [savingNote, setSavingNote] = useState(false);
   const [fetching, setFetching] = useState(false);
+  const [collectingId, setCollectingId] = useState<string | null>(null);
 
   const previewGen = useRef(0);
   const inboxGen = useRef(0);
@@ -182,6 +185,23 @@ export function CapturePage() {
     }
   }
   runFetchRef.current = runFetch;
+
+  /** 把文章里提到、还没收藏也没在收集箱里的 GitHub 项目收进收集箱。 */
+  async function collectRepos(item: InboxItem) {
+    const summary = mentionSummary(item.githubRepos);
+    if (!summary || summary.fresh === 0 || collectingId) return;
+    setCollectingId(item.id);
+    try {
+      const context = `来自文章：${inboxHeading(item.title, item.normalizedUrl)}`.slice(0, 190);
+      const result = await commitCaptureBatch(mentionText(summary), context);
+      toast.show({ title: describeCommit(result) });
+      await refreshSilently();
+    } catch (reason: unknown) {
+      toast.show({ title: describeInvokeError(reason) });
+    } finally {
+      if (mountedRef.current) setCollectingId(null);
+    }
+  }
 
   const matchedPreview = preview && previewFor === text ? preview : null;
   const commitReady = Boolean(matchedPreview && canCommit(matchedPreview) && !isTooLong(text));
@@ -372,6 +392,8 @@ export function CapturePage() {
         noteMessage={noteMessage}
         savingNote={savingNote}
         fetching={fetching}
+        collectingId={collectingId}
+        onCollectRepos={(item) => { void collectRepos(item); }}
         onFilter={chooseFilter}
         onLoadMore={() => { void loadMore(); }}
         onRetry={() => setReloadKey((key) => key + 1)}

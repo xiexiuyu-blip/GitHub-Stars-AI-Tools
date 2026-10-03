@@ -1,4 +1,5 @@
-import type { KeyboardEvent } from 'react';
+import { useState } from 'react';
+import type { CSSProperties, KeyboardEvent } from 'react';
 import type { InboxItem, InboxPage } from '@/lib/contracts';
 import { Button, Card, CardHeader, EmptyState, RepoAvatar, Segmented, Spinner, Tag } from '@/components/kit';
 import { Icon } from '@/components/ui/icon';
@@ -17,6 +18,8 @@ import {
   inboxHeading,
   inboxMeta,
   inboxQuote,
+  mentionLine,
+  mentionSummary,
   inboxStatusTag,
   kindIcon,
   type InboxFilter,
@@ -35,6 +38,9 @@ export function InboxCard(props: {
   savingNote: boolean;
   /** 后台正在联网读取收集箱里的链接（标题和摘要） */
   fetching: boolean;
+  /** 正在把某条文章里提到的新项目收进收集箱 */
+  collectingId: string | null;
+  onCollectRepos: (item: InboxItem) => void;
   onFilter: (value: InboxFilter) => void;
   onLoadMore: () => void;
   onRetry: () => void;
@@ -111,6 +117,8 @@ export function InboxCard(props: {
             noteMessage={props.editingId === item.id ? props.noteMessage : null}
             savingNote={props.savingNote && props.editingId === item.id}
             fetching={props.fetching}
+            collecting={props.collectingId === item.id}
+            onCollectRepos={props.onCollectRepos}
             onRetryFetch={props.onRetryFetch}
             onStartNote={props.onStartNote}
             onDraft={props.onDraft}
@@ -132,6 +140,8 @@ function InboxRow(props: {
   noteMessage: string | null;
   savingNote: boolean;
   fetching: boolean;
+  collecting: boolean;
+  onCollectRepos: (item: InboxItem) => void;
   onRetryFetch: (item: InboxItem) => void;
   onStartNote: (item: InboxItem) => void;
   onDraft: (value: string) => void;
@@ -150,6 +160,8 @@ function InboxRow(props: {
   );
   const excerpt = inboxExcerpt(props.item);
   const quote = inboxQuote(props.item);
+  const mentions = mentionSummary(props.item.githubRepos);
+  const [mentionsOpen, setMentionsOpen] = useState(false);
   const fetchNote = fetchLine(props.item, props.fetching);
   const tag = inboxStatusTag(props.item.status);
   const action = archiveAction(props.item.status);
@@ -182,6 +194,49 @@ function InboxRow(props: {
           <p className="mt-0.5 mb-0 line-clamp-2 border-l-2 border-muted pl-2 text-xs leading-[1.6] text-on-surface-variant" title={quote}>
             {quote}
           </p>
+        ) : null}
+        {mentions ? (
+          <div className="mt-1">
+            <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-on-surface-variant">
+              <button
+                type="button"
+                className="inline-flex items-center gap-0.5 text-accent-foreground hover:underline hover:underline-offset-[3px]"
+                aria-expanded={mentionsOpen}
+                onClick={() => setMentionsOpen((open) => !open)}
+              >
+                <Icon name={mentionsOpen ? 'expand_more' : 'chevron_right'} size={16} />
+                {mentionLine(mentions)}
+              </button>
+              {mentions.fresh > 0 ? (
+                <Button size="sm" loading={props.collecting} onClick={() => props.onCollectRepos(props.item)}>
+                  把 {mentions.fresh} 个新的收进来
+                </Button>
+              ) : null}
+            </div>
+            {mentionsOpen ? (
+              <ul className="mt-1.5 mb-0 flex list-none flex-wrap gap-1.5 p-0">
+                {(props.item.githubRepos ?? []).map((mention) => (
+                  <li key={mention.fullName} className="inline-flex items-center gap-1.5 rounded-md border border-border bg-card px-2 py-0.5 text-xs">
+                    <a
+                      className="text-foreground hover:underline hover:underline-offset-[3px]"
+                      href={`https://github.com/${mention.fullName}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                    >
+                      {mention.fullName}
+                    </a>
+                    {mention.starred ? (
+                      <Tag tone="blue">已收藏</Tag>
+                    ) : mention.inInbox ? (
+                      <Tag>已在收集箱</Tag>
+                    ) : (
+                      <span className="scn-chip" style={{ '--h': 150 } as CSSProperties}>新的</span>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            ) : null}
+          </div>
         ) : null}
         {meta ? <div className="truncate text-xs text-subtle">{meta}</div> : null}
         {fetchNote ? (
