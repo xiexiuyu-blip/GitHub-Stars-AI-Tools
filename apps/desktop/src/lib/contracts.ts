@@ -213,3 +213,8 @@ export type InboxPage = {
 
 /** 命令 `set_inbox_status({ id, status })`：归档、恢复等；`set_inbox_note({ id, note })`：写备注（最多 500 字） */
 export type SetInboxStatusRequest = { id: string; status: 'pending' | 'ready' | 'archived' };
+
+/** 命令 `confirm_library_card({ id })`：Fox 说「说得对」——把理解卡标为已确认（以后重新整理也不会覆盖）。
+ *  命令 `regenerate_library_card({ id })`：Fox 说「不对，重新整理」——把这个仓库排进整理队列重做一遍；
+ *  排队不等于马上花钱，是否真的执行受「每天额度」控制。两个命令成功都返回 null。 */
+export type CardReviewVerdict = 'confirmed' | 'regenerate';
