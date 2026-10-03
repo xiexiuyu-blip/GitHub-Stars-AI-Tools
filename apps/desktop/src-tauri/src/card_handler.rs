@@ -391,6 +391,11 @@ fn map_card_error(error: CardRunError) -> JobFailure {
             kind: ErrorKind::Other,
             message,
         },
+        // 模型回了空内容：试跑里同一个仓库连着三次都是空的（确定性的），再试只会白花 token，第一次就算失败
+        CardRunErrorKind::Other if message.contains("没有可用内容") => JobFailure::Fatal {
+            kind: ErrorKind::Other,
+            message,
+        },
         CardRunErrorKind::Database | CardRunErrorKind::Other => JobFailure::Retryable {
             kind: ErrorKind::Other,
             message,
@@ -510,6 +515,35 @@ fn now_stamp() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn empty_model_reply_fails_at_once_instead_of_retrying() {
+        let empty = map_card_error(CardRunError {
+            kind: CardRunErrorKind::Other,
+            message: "OpenAI 响应中没有可用内容（结束原因 stop）".to_owned(),
+            retry_after_secs: None,
+        });
+        assert!(matches!(
+            empty,
+            JobFailure::Fatal {
+                kind: ErrorKind::Other,
+                ..
+            }
+        ));
+        // 别的「其他」错误照旧可以重试
+        let other = map_card_error(CardRunError {
+            kind: CardRunErrorKind::Other,
+            message: "别的错误".to_owned(),
+            retry_after_secs: None,
+        });
+        assert!(matches!(
+            other,
+            JobFailure::Retryable {
+                kind: ErrorKind::Other,
+                ..
+            }
+        ));
+    }
     use crate::card_pipeline::{LlmError, LlmErrorKind, LlmReply, PROMPT_VERSION};
     use crate::db::migrations::migrate_database;
     use crate::jobs::{QueueControl, Worker, WorkerConfig};

@@ -47,6 +47,19 @@ impl ErrorKind {
     }
 }
 
+/// 一次失败的尝试，只要请求已经到了模型那边（回了坏 JSON、字段不对、空内容、超时），服务商就可能已经计费，
+/// 而失败时我们读不到真实用量。为了让「每天额度」这句话是真的，按这个估计值记一笔。
+/// 估计值取一张理解卡的平均用量（2026-10-04 真模型试跑：每张约 5k token，其中输入约 3k）。
+pub const FAILED_ATTEMPT_TOKEN_ESTIMATE: i64 = 4000;
+
+/// 这种失败说明请求已经被模型处理过，应该记一笔估计用量。网络不通、限流、认证失败、内容太大（本地就拦了）、被打断都没有真的花 token。
+fn failure_spends_tokens(kind: ErrorKind) -> bool {
+    matches!(
+        kind,
+        ErrorKind::BadJson | ErrorKind::Schema | ErrorKind::Timeout | ErrorKind::Other
+    )
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JobRecord {
     pub id: String,
@@ -344,6 +357,7 @@ pub fn finish_job(
             pause_queue(db_path, &job.id, now, kind, message)
         }
         Err(JobFailure::Fatal { kind, message }) => {
+            charge_failed_attempt(db_path, &job.id, kind)?;
             write_failure(db_path, &job.id, now, kind, &message)
         }
         Err(JobFailure::Retryable {
@@ -351,6 +365,7 @@ pub fn finish_job(
             message,
             retry_after_secs,
         }) => {
+            charge_failed_attempt(db_path, &job.id, kind)?;
             if job.attempts >= job.max_attempts {
                 return write_failure(db_path, &job.id, now, kind, &message);
             }
@@ -360,6 +375,20 @@ pub fn finish_job(
             requeue_job(db_path, &job.id, now, kind, &message, &not_before)
         }
     }
+}
+
+/// 失败的尝试也记用量（累加在这条任务上，后面重试成功时不会被盖掉）。只对仍在 running 的任务生效。
+fn charge_failed_attempt(db_path: &Path, id: &str, kind: ErrorKind) -> Result<(), String> {
+    if !failure_spends_tokens(kind) {
+        return Ok(());
+    }
+    let conn = open_db(db_path)?;
+    conn.execute(
+        "UPDATE ai_jobs SET input_tokens = input_tokens + ?1 WHERE id = ?2 AND status = 'running'",
+        params![FAILED_ATTEMPT_TOKEN_ESTIMATE, id],
+    )
+    .map_err(|error| format!("失败用量记录失败：{error}"))?;
+    Ok(())
 }
 
 fn pause_queue(
@@ -682,8 +711,8 @@ fn write_success(
         .execute(
             "UPDATE ai_jobs
              SET status = ?1,
-                 input_tokens = ?2,
-                 output_tokens = ?3,
+                 input_tokens = input_tokens + ?2,
+                 output_tokens = output_tokens + ?3,
                  provider = ?4,
                  model = ?5,
                  prompt_version = ?6,
@@ -755,9 +784,12 @@ fn tokens_used_since(conn: &Connection, cutoff: &str) -> Result<i64, String> {
     conn.query_row(
         "SELECT COALESCE(SUM(input_tokens + output_tokens), 0)
          FROM ai_jobs
-         WHERE status IN ('succeeded', 'skipped', 'failed')
-           AND finished_at IS NOT NULL
-           AND finished_at >= ?1",
+         WHERE (status IN ('succeeded', 'skipped', 'failed')
+                AND finished_at IS NOT NULL
+                AND finished_at >= ?1)
+            OR (status IN ('queued', 'running')
+                AND input_tokens + output_tokens > 0
+                AND updated_at >= ?1)",
         [cutoff],
         |row| row.get(0),
     )
@@ -1668,6 +1700,104 @@ mod tests {
         assert_eq!(row.error_message.as_deref(), Some("字段不对"));
         assert_eq!(row.finished_at.as_deref(), Some(NOW));
         assert_eq!(row.attempts, 1);
+    }
+
+    #[test]
+    fn failed_attempts_that_reached_the_model_are_charged_an_estimate() {
+        for kind in [
+            ErrorKind::BadJson,
+            ErrorKind::Schema,
+            ErrorKind::Timeout,
+            ErrorKind::Other,
+        ] {
+            let db = TestDb::new(&format!("charge-{}", kind.as_str()));
+            let conn = db.conn();
+            insert_running(&conn, "job", 1, 3);
+            drop(conn);
+            let failure = JobFailure::Retryable {
+                kind,
+                message: "模型回了不能用的内容".to_owned(),
+                retry_after_secs: None,
+            };
+            assert!(finish_job(db.path(), &record("job", 1, 3), NOW, Err(failure), 0.0).unwrap());
+            let row = snap(&db.conn(), "job");
+            assert_eq!(row.status, "queued", "{kind:?}");
+            assert_eq!(row.input_tokens, FAILED_ATTEMPT_TOKEN_ESTIMATE, "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn failures_that_never_reached_the_model_are_not_charged() {
+        for kind in [
+            ErrorKind::Network,
+            ErrorKind::RateLimit,
+            ErrorKind::ContentTooLarge,
+            ErrorKind::Interrupted,
+        ] {
+            let db = TestDb::new(&format!("nocharge-{}", kind.as_str()));
+            let conn = db.conn();
+            insert_running(&conn, "job", 1, 3);
+            drop(conn);
+            let failure = JobFailure::Fatal {
+                kind,
+                message: "没有到模型".to_owned(),
+            };
+            assert!(finish_job(db.path(), &record("job", 1, 3), NOW, Err(failure), 0.0).unwrap());
+            assert_eq!(snap(&db.conn(), "job").input_tokens, 0, "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn charged_failures_count_toward_the_daily_usage_even_while_waiting_to_retry() {
+        let db = TestDb::new("charge-usage");
+        let conn = db.conn();
+        insert_running(&conn, "job", 1, 3);
+        drop(conn);
+        let failure = JobFailure::Retryable {
+            kind: ErrorKind::BadJson,
+            message: "坏 JSON".to_owned(),
+            retry_after_secs: None,
+        };
+        let now = now_db_time();
+        assert!(finish_job(db.path(), &record("job", 1, 3), &now, Err(failure), 0.0).unwrap());
+        let status = queue_status(db.path()).unwrap();
+        assert_eq!(status.queued, 1);
+        assert_eq!(status.tokens_24h, FAILED_ATTEMPT_TOKEN_ESTIMATE);
+    }
+
+    #[test]
+    fn success_after_a_failed_attempt_keeps_the_earlier_charge() {
+        let db = TestDb::new("charge-then-success");
+        let conn = db.conn();
+        insert_running(&conn, "job", 1, 3);
+        drop(conn);
+        let failure = JobFailure::Retryable {
+            kind: ErrorKind::Schema,
+            message: "字段不对".to_owned(),
+            retry_after_secs: None,
+        };
+        assert!(finish_job(db.path(), &record("job", 1, 3), NOW, Err(failure), 0.0).unwrap());
+        // 再领一次（模拟重试）：直接把它改回 running
+        db.conn()
+            .execute(
+                "UPDATE ai_jobs SET status = 'running', attempts = 2 WHERE id = 'job'",
+                [],
+            )
+            .unwrap();
+        let success = JobSuccess {
+            input_tokens: 3000,
+            output_tokens: 1000,
+            provider: "p".to_owned(),
+            model: "m".to_owned(),
+            prompt_version: "v".to_owned(),
+            input_hash: "h".to_owned(),
+            skipped: false,
+        };
+        assert!(finish_job(db.path(), &record("job", 2, 3), NOW, Ok(success), 0.0).unwrap());
+        let row = snap(&db.conn(), "job");
+        assert_eq!(row.status, "succeeded");
+        assert_eq!(row.input_tokens, FAILED_ATTEMPT_TOKEN_ESTIMATE + 3000);
+        assert_eq!(row.output_tokens, 1000);
     }
 
     #[test]
