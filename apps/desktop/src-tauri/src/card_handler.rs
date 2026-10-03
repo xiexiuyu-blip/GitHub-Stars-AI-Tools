@@ -1797,7 +1797,7 @@ mod tests {
         let control = jobs::queue_control_path(db.path());
         fs::write(
             &control,
-            r#"{"paused":false,"dailyBudgetTokens":100,"pauseReason":null}"#,
+            r#"{"paused":false,"dailyBudgetTokens":50000,"pauseReason":null}"#,
         )
         .expect("控制文件应能写入");
         let settings = json!({
@@ -1805,11 +1805,11 @@ mod tests {
         });
         let status = automation_status(db.path(), &settings).expect("状态应能读出");
         assert!(status.enabled);
-        assert_eq!(status.daily_budget_tokens, 100);
+        assert_eq!(status.daily_budget_tokens, 50_000);
         assert!(!status.paused);
         assert!(status.pause_reason.is_none());
         assert_eq!(status.tokens_24h, 16);
-        assert_eq!(status.budget_remaining, 84);
+        assert_eq!(status.budget_remaining, 50_000 - 16);
         assert_eq!(status.queued, 2);
         assert_eq!(status.running, 1);
         assert_eq!(status.failed, 1);

@@ -904,21 +904,31 @@ fn queue_state(
         "paused"
     } else if running > 0 {
         "running"
-    } else if budget > 0 && tokens_24h >= i64::try_from(budget).unwrap_or(i64::MAX) {
+    } else if budget > 0
+        && tokens_24h.saturating_add(CLAIM_RESERVE_TOKENS)
+            > i64::try_from(budget).unwrap_or(i64::MAX)
+    {
+        // 剩下的额度放不下再认领一条任务的预留，就等于用完了：队列不会再领，界面也该这么说
         "budget_reached"
     } else {
         "idle"
     }
 }
 
+/// 还能用多少。剩下的不够认领一条任务的预留（`CLAIM_RESERVE_TOKENS`）就当 0：
+/// 队列不会再领，界面也不该说「还能整理几个」。
 fn budget_remaining(budget: u64, tokens_24h: i64) -> u64 {
     let Ok(budget_i64) = i64::try_from(budget) else {
         return 0;
     };
     if budget_i64 == 0 || tokens_24h >= budget_i64 {
+        return 0;
+    }
+    let remaining = (budget_i64 - tokens_24h.max(0)) as u64;
+    if remaining < CLAIM_RESERVE_TOKENS as u64 {
         0
     } else {
-        (budget_i64 - tokens_24h.max(0)) as u64
+        remaining
     }
 }
 
@@ -2755,7 +2765,9 @@ mod tests {
         )
         .unwrap();
         drop(conn);
-        set_daily_budget(&queue_control_path(db.path()), 100).unwrap();
+        // 额度要比认领一条任务的预留多一点，才能看出「还没用完」
+        let budget = CLAIM_RESERVE_TOKENS as u64 + 100;
+        set_daily_budget(&queue_control_path(db.path()), budget).unwrap();
         let status = queue_status(db.path()).unwrap();
         assert_eq!(status.queued, 2);
         assert_eq!(status.running, 1);
@@ -2763,8 +2775,8 @@ mod tests {
         assert_eq!(status.failed, 2);
         // 15 + 20 + skipped 7 + 最近失败 8 = 50。24 小时前的 999 和 50 不计入。
         assert_eq!(status.tokens_24h, 50);
-        assert_eq!(status.daily_budget, 100);
-        assert_eq!(status.budget_remaining, 50);
+        assert_eq!(status.daily_budget, budget);
+        assert_eq!(status.budget_remaining, budget - 50);
         assert_eq!(status.state, "running");
         assert!(status.pause_reason.is_none());
 
@@ -2777,10 +2789,18 @@ mod tests {
         drop(conn);
         assert_eq!(queue_status(db.path()).unwrap().state, "idle");
 
-        set_daily_budget(&queue_control_path(db.path()), 50).unwrap();
+        // 已用 50，再加一条的预留 12000 就是 12050：额度只有 12049 时，剩下的放不下一条，队列不会再领，状态就是「用完了」
+        set_daily_budget(
+            &queue_control_path(db.path()),
+            CLAIM_RESERVE_TOKENS as u64 + 49,
+        )
+        .unwrap();
         let reached = queue_status(db.path()).unwrap();
         assert_eq!(reached.state, "budget_reached");
-        assert_eq!(reached.budget_remaining, 0);
+        assert_eq!(
+            reached.budget_remaining, 0,
+            "剩下的不够再领一条，界面不该说「还能整理几个」"
+        );
         assert_eq!(reached.tokens_24h, 50);
 
         set_paused(&queue_control_path(db.path()), true).unwrap();
