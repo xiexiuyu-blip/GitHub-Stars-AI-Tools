@@ -13,6 +13,7 @@ mod local_api;
 mod packs;
 mod ranking_query;
 mod rankings_live;
+mod solve;
 mod storage;
 mod v2_ops;
 mod vector_index;
@@ -1082,6 +1083,12 @@ fn solve_problem(
 ) -> Result<v2_ops::SolveAnswer, String> {
     let storage = AppStorage::from_app_handle(&app_handle)?;
     v2_ops::solve_problem(storage.database_path(), &question)
+}
+
+#[tauri::command]
+fn solve_v2(app_handle: tauri::AppHandle, query: String) -> Result<solve::SolveResult, String> {
+    let storage = AppStorage::from_app_handle(&app_handle)?;
+    solve::solve_query(storage.database_path(), &query)
 }
 
 #[tauri::command]
@@ -6819,6 +6826,7 @@ pub fn run() {
             commit_capture_batch,
             get_graph_overview,
             solve_problem,
+            solve_v2,
             create_reference_pack,
             build_reference_pack_v2,
             copy_item_for_codex,
