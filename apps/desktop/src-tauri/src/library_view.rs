@@ -366,7 +366,11 @@ WHERE r.id = ?1
     let scenario_ids = scenario_ids_for(&connection, &[raw.id.clone()])?;
     let topics = parse_string_list(topics_json);
     let mut item = into_item(raw, scenario_ids.get(id).cloned().unwrap_or_default());
-    if item.form.is_none() {
+    if item
+        .form
+        .as_deref()
+        .map_or(true, crate::repo_facts::is_unspecific_form)
+    {
         item.form =
             crate::repo_facts::infer_form(&topics, &item.full_name, item.description.as_deref())
                 .map(str::to_owned);

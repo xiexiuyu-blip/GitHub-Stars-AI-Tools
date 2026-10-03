@@ -357,11 +357,7 @@ pub fn solve_query(db_path: &Path, query: &str) -> Result<SolveResult, String> {
             html_url: repo.html_url.clone(),
             stars_count: repo.stars,
             one_liner: hit_one_liner(repo),
-            form: if repo.has_card {
-                repo.form.clone()
-            } else {
-                None
-            },
+            form: repo.form.clone(),
             scenario_ids: repo.scenario_ids.clone(),
             matched: parts.matched,
             missing: parts.missing,
@@ -604,7 +600,13 @@ fn load_repos(
             stars,
             problems: card.problems.clone(),
             capabilities: card.capabilities.clone(),
-            form: card.form,
+            form: card
+                .form
+                .filter(|form| !crate::repo_facts::is_unspecific_form(form))
+                .or_else(|| {
+                    crate::repo_facts::infer_form(&topics, &full_name, Some(description.as_str()))
+                        .map(str::to_owned)
+                }),
             scenario_ids,
             has_card,
             github_description: description.clone(),

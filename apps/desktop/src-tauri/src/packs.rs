@@ -1031,7 +1031,7 @@ fn resolve_form(
         .and_then(Value::as_str)
     {
         let flat = flatten(raw);
-        if !flat.is_empty() {
+        if !crate::repo_facts::is_unspecific_form(&flat) {
             return Some(flat);
         }
     }
@@ -2395,6 +2395,43 @@ mod tests {
         assert!(markdown.content.contains("- 许可证：未声明"));
         assert!(markdown.content.contains("- 许可证：见 LICENSE 文件"));
         assert!(!markdown.content.contains("GPL-3.0"));
+    }
+
+    #[test]
+    fn unspecific_card_form_falls_back_to_name_and_topic_inference() {
+        let topics: Vec<String> = Vec::new();
+        let card: Value = serde_json::json!({ "form": "other" });
+        // 占位卡写 other，仓库名以 -skill 结尾：按 Skill 处理
+        assert_eq!(
+            resolve_form(
+                Some(&card),
+                &topics,
+                "op7418/guizang-social-card-skill",
+                None
+            )
+            .as_deref(),
+            Some("skill")
+        );
+        // 推断不出来就是没有，而不是把 other 当成形态
+        assert_eq!(
+            resolve_form(Some(&card), &topics, "lab/plain-tool", None),
+            None
+        );
+        // 大小写和别的占位写法一样处理
+        for raw in ["Other", " unknown ", "NONE"] {
+            let card: Value = serde_json::json!({ "form": raw });
+            assert_eq!(
+                resolve_form(Some(&card), &topics, "lab/x-mcp", None).as_deref(),
+                Some("mcp"),
+                "{raw}"
+            );
+        }
+        // 明确的形态不受影响
+        let card: Value = serde_json::json!({ "form": "app" });
+        assert_eq!(
+            resolve_form(Some(&card), &topics, "lab/x-skill", None).as_deref(),
+            Some("app")
+        );
     }
 
     #[test]
