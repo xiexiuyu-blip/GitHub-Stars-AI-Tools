@@ -1,6 +1,9 @@
 import { useEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
 import type { LibraryDetail } from '@/lib/contracts';
+import { communityNote, groupCommunity, itemMeta, stateLabel } from '@/lib/community-view';
+import { relativeDays } from '@/lib/item-format';
+import { useRepoCommunity } from '@/hooks/use-repo-community';
 import {
   buildCommunityPrompt,
   buildInstallPrompt,
@@ -10,7 +13,7 @@ import {
   type PreviewImage,
 } from '@/lib/repo-assets';
 import { ReadmeRenderer } from '@/components/readme-renderer';
-import { Button, CoverImage, EmptyState } from '@/components/kit';
+import { Button, CoverImage, EmptyState, Spinner, Tag } from '@/components/kit';
 import { Icon } from '@/components/ui/icon';
 import { cn } from '@/lib/utils';
 
@@ -277,6 +280,7 @@ export function CommunityPanel(props: { detail: LibraryDetail; onCopyPrompt: (te
   const links = communityLinks(props.detail.fullName);
   return (
     <div className="flex flex-col gap-3">
+      <CommunityDigest repoId={props.detail.id} />
       <SoftCard className="flex items-start gap-3">
         <span className="hue-tile grid size-10 shrink-0 place-items-center rounded-[10px]" style={{ '--h': 268 } as React.CSSProperties}>
           <Icon name="travel_explore" size={22} fill />
@@ -312,8 +316,86 @@ export function CommunityPanel(props: { detail: LibraryDetail; onCopyPrompt: (te
             </a>
           ))}
         </div>
-        <p className="mt-2.5 text-xs leading-[1.6] text-on-surface-variant">这些链接会在浏览器里打开，用的是你自己的登录状态。以后会把 Hacker News 和 GitHub Issues 里的讨论直接摘要在这里。</p>
+        <p className="mt-2.5 text-xs leading-[1.6] text-on-surface-variant">这些链接会在浏览器里打开，用的是你自己的登录状态。小红书、知乎、X 要登录才能看，所以只能交给你自己或 Codex。</p>
       </div>
+    </div>
+  );
+}
+
+/** 内置的讨论摘要：Hacker News 上的帖子 + GitHub 上评论最多的 Issues。平时只读本地缓存，点「查一查」才联网。 */
+function CommunityDigest(props: { repoId: string }) {
+  const { state, refresh } = useRepoCommunity(props.repoId);
+  if (state.phase === 'unavailable') return null;
+  const now = new Date();
+  const data = state.data;
+  const groups = data ? groupCommunity(data.items) : [];
+  const note = communityNote(data, now);
+  const checked = Boolean(data?.fetchedAt);
+
+  return (
+    <div>
+      <div className="mb-2 flex items-center gap-2">
+        <h3 className="m-0 flex min-w-0 flex-1 items-center gap-2 text-[13px] font-semibold text-foreground">
+          <span className="hue-tile grid size-6 place-items-center rounded-md" style={{ '--h': 28 } as React.CSSProperties}>
+            <Icon name="forum" size={15} fill />
+          </span>
+          社区里在聊什么
+        </h3>
+        {state.phase !== 'loading' ? (
+          <Button size="sm" loading={state.refreshing} onClick={refresh}>
+            {checked ? '重新查' : '查一查'}
+          </Button>
+        ) : null}
+      </div>
+
+      {state.phase === 'loading' ? <div className="flex items-center gap-2 text-xs text-on-surface-variant"><Spinner /> 读取中…</div> : null}
+      {state.refreshing ? (
+        <div className="mb-2 flex items-center gap-2 rounded-lg bg-accent px-3 py-2 text-xs text-foreground">
+          <Spinner /> 正在查 Hacker News 和 GitHub Issues（几秒，不用登录）…
+        </div>
+      ) : null}
+      {state.error ? <div className="mb-2 rounded-lg bg-error-container px-3 py-2 text-xs text-on-error-container">{state.error}</div> : null}
+      {!state.refreshing && note ? (
+        <p className={cn('mt-0 mb-2 text-xs leading-[1.6]', note.tone === 'warn' ? 'text-error' : 'text-on-surface-variant')}>{note.text}</p>
+      ) : null}
+
+      {state.phase === 'ready' && !checked && !state.refreshing ? (
+        <SoftCard className="text-xs leading-[1.7] text-on-surface-variant">
+          还没查过。点「查一查」，会去 Hacker News 和 GitHub Issues 找关于它的讨论，按热度列在这里：别人拿它做了什么、踩过什么坑，一眼就能扫一遍。
+        </SoftCard>
+      ) : null}
+
+      {groups.map((group) => (
+        <div key={group.source} className="mb-3 last:mb-0">
+          <div className="mb-1 text-xs font-medium text-on-surface-variant">{group.label}</div>
+          <ul className="m-0 flex list-none flex-col gap-1.5 p-0">
+            {group.items.map((item) => {
+              const meta = itemMeta(item);
+              const status = stateLabel(item);
+              return (
+                <li key={item.url}>
+                  <a
+                    href={item.url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="flex items-start gap-3 rounded-lg border border-border bg-card px-3 py-2.5 transition-colors hover:border-input hover:bg-surface-container-low"
+                  >
+                    <span className="min-w-0 flex-1">
+                      <span className="line-clamp-2 text-[13px] leading-[1.5] font-medium text-foreground">{item.title}</span>
+                      <span className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-on-surface-variant">
+                        {meta ? <span className="tabular-nums">{meta}</span> : null}
+                        {item.createdAt ? <span>{relativeDays(item.createdAt, now)}</span> : null}
+                        {status ? <Tag tone={item.state === 'open' ? 'blue' : 'gray'}>{status}</Tag> : null}
+                      </span>
+                    </span>
+                    <Icon name="open_in_new" size={14} className="mt-0.5 shrink-0 text-on-surface-variant" />
+                  </a>
+                </li>
+              );
+            })}
+          </ul>
+        </div>
+      ))}
     </div>
   );
 }
