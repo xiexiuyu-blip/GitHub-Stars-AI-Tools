@@ -1,7 +1,8 @@
 import type { ScenarioSummary, SolveHit } from '@/lib/contracts';
 import { formLabel } from '@/lib/library-filters';
 import { matchBadge, whyLine } from '@/lib/solve-view';
-import { RepoAvatar, ScenarioChip, StarCount, Tag } from '@/components/kit';
+import { CoverImage, RepoAvatar, ScenarioChip, StarCount, Tag } from '@/components/kit';
+import { useRepoCover } from '@/hooks/use-repo-cover';
 import { Icon } from '@/components/ui/icon';
 import { cn } from '@/lib/utils';
 
@@ -32,7 +33,7 @@ export function SolveHitRow(props: {
   return (
     <div
       className={cn(
-        'group grid grid-cols-[32px_40px_minmax(0,1fr)] items-start gap-2 border-t border-muted px-3 py-3 transition-colors first:border-t-0',
+        'group grid grid-cols-[32px_40px_minmax(0,1fr)] items-start gap-2 border-t border-muted px-3 py-3 transition-colors first:border-t-0 min-[1000px]:grid-cols-[32px_40px_minmax(0,1fr)_88px]',
         props.onOpen && 'cursor-pointer hover:bg-surface-container-low',
       )}
       onClick={props.onOpen}
@@ -95,6 +96,19 @@ export function SolveHitRow(props: {
           </button>
         ) : null}
       </div>
+      <RowCover id={hit.id} fullName={hit.fullName} />
     </div>
+  );
+}
+
+/** 右边的一小张封面（README 里的第一张截图，没有就是渐变底），宽窗口才显示：一眼认出「哪个是做什么的」。 */
+function RowCover(props: { id: string; fullName: string }) {
+  const cover = useRepoCover(props.id, props.fullName);
+  return (
+    <CoverImage
+      src={cover}
+      seed={props.fullName}
+      className="hidden h-[60px] w-[88px] shrink-0 rounded-md border border-border min-[1000px]:block"
+    />
   );
 }
