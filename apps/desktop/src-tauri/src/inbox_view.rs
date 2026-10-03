@@ -6,6 +6,7 @@
 use crate::capture::{extract_links_from_text, ExtractedLink};
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::time::Duration;
 
@@ -46,6 +47,14 @@ pub struct CapturePreview {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct RepoMention {
+    pub full_name: String,
+    pub starred: bool,
+    pub in_inbox: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct InboxItem {
     pub id: String,
     pub original_url: String,
@@ -65,6 +74,9 @@ pub struct InboxItem {
     pub excerpt: String,
     /// 收进来时的原话（比如微信群里那条消息）：`raw_excerpt` 的前 200 个字符，超过加「…」。粘贴收集没有原话，是空串。
     pub quote: String,
+    /// 正文里提到的 GitHub 项目。没有，或 `page_repos` 解析失败，就是空数组。
+    #[serde(default)]
+    pub github_repos: Vec<RepoMention>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -335,45 +347,159 @@ fn load_items(
     offset: i64,
 ) -> Result<Vec<InboxItem>, String> {
     let sql = format!(
-        "SELECT id, original_url, normalized_url, title, item_type, source_platform, source_context, user_note, status, repository_id, created_at, fetch_status, fetch_error, page_author, page_excerpt, raw_excerpt
+        "SELECT id, original_url, normalized_url, title, item_type, source_platform, source_context, user_note, status, repository_id, created_at, fetch_status, fetch_error, page_author, page_excerpt, raw_excerpt, page_repos
          FROM inbox_items
          WHERE account_id = ?1 AND {}
          ORDER BY created_at DESC, id ASC
          LIMIT ?2 OFFSET ?3",
         filter.clause()
     );
-    let mut statement = connection
-        .prepare(&sql)
-        .map_err(|error| format!("收集箱查询失败：{error}"))?;
-    let rows = statement
-        .query_map(params![account, limit, offset], read_inbox_item)
-        .map_err(|error| format!("收集箱查询失败：{error}"))?;
-    let mut items = Vec::new();
-    for row in rows {
-        items.push(row.map_err(|error| format!("收集箱行读取失败：{error}"))?);
-    }
-    Ok(items)
+    let mut drafts = {
+        let mut statement = connection
+            .prepare(&sql)
+            .map_err(|error| format!("收集箱查询失败：{error}"))?;
+        let rows = statement
+            .query_map(params![account, limit, offset], read_inbox_item)
+            .map_err(|error| format!("收集箱查询失败：{error}"))?;
+        let mut drafts = Vec::new();
+        for row in rows {
+            drafts.push(row.map_err(|error| format!("收集箱行读取失败：{error}"))?);
+        }
+        drafts
+    };
+    // 这一页的仓库状态只再查两次：一次收藏，一次收集箱。没有仓库名就不查。
+    fill_repo_mentions(connection, account, &mut drafts)?;
+    Ok(drafts.into_iter().map(|(item, _)| item).collect())
 }
 
-fn read_inbox_item(row: &rusqlite::Row<'_>) -> rusqlite::Result<InboxItem> {
-    Ok(InboxItem {
-        id: row.get(0)?,
-        original_url: row.get(1)?,
-        normalized_url: row.get(2)?,
-        title: row.get(3)?,
-        item_type: row.get(4)?,
-        platform: row.get(5)?,
-        source_context: row.get(6)?,
-        user_note: row.get(7)?,
-        status: row.get(8)?,
-        repository_id: row.get(9)?,
-        created_at: row.get(10)?,
-        fetch_status: row.get(11)?,
-        fetch_error: row.get(12)?,
-        page_author: row.get(13)?,
-        excerpt: clip_chars(&row.get::<_, String>(14)?, EXCERPT_LIST_CHARS),
-        quote: clip_chars(&row.get::<_, String>(15)?, QUOTE_LIST_CHARS),
-    })
+fn read_inbox_item(row: &rusqlite::Row<'_>) -> rusqlite::Result<(InboxItem, Vec<String>)> {
+    let page_repos: String = row.get(16)?;
+    Ok((
+        InboxItem {
+            id: row.get(0)?,
+            original_url: row.get(1)?,
+            normalized_url: row.get(2)?,
+            title: row.get(3)?,
+            item_type: row.get(4)?,
+            platform: row.get(5)?,
+            source_context: row.get(6)?,
+            user_note: row.get(7)?,
+            status: row.get(8)?,
+            repository_id: row.get(9)?,
+            created_at: row.get(10)?,
+            fetch_status: row.get(11)?,
+            fetch_error: row.get(12)?,
+            page_author: row.get(13)?,
+            excerpt: clip_chars(&row.get::<_, String>(14)?, EXCERPT_LIST_CHARS),
+            quote: clip_chars(&row.get::<_, String>(15)?, QUOTE_LIST_CHARS),
+            github_repos: Vec::new(),
+        },
+        parse_page_repos(&page_repos),
+    ))
+}
+
+fn parse_page_repos(raw: &str) -> Vec<String> {
+    match serde_json::from_str::<Vec<String>>(raw) {
+        Ok(names) => names,
+        Err(_) => Vec::new(),
+    }
+}
+
+fn fill_repo_mentions(
+    connection: &Connection,
+    account: &str,
+    drafts: &mut [(InboxItem, Vec<String>)],
+) -> Result<(), String> {
+    let mut names = Vec::new();
+    let mut seen_names = HashSet::new();
+    let mut urls = Vec::new();
+    let mut seen_urls = HashSet::new();
+    for (_, repo_names) in drafts.iter() {
+        for name in repo_names {
+            let key = name.to_ascii_lowercase();
+            if seen_names.insert(key.clone()) {
+                names.push(key);
+            }
+            let url = format!("https://github.com/{}", name.to_ascii_lowercase());
+            if seen_urls.insert(url.clone()) {
+                urls.push(url);
+            }
+        }
+    }
+    if names.is_empty() {
+        return Ok(());
+    }
+    let names_json = serde_json::to_string(&names).map_err(|_| "仓库名单序列化失败".to_owned())?;
+    let urls_json = serde_json::to_string(&urls).map_err(|_| "仓库名单序列化失败".to_owned())?;
+    let starred = starred_full_names(connection, account, &names_json)?;
+    let inbox_hits = inbox_urls_by_id(connection, account, &urls_json)?;
+    for (item, repo_names) in drafts.iter_mut() {
+        let mut mentions = Vec::with_capacity(repo_names.len());
+        for name in repo_names {
+            let key = name.to_ascii_lowercase();
+            let url = format!("https://github.com/{key}");
+            let in_inbox = inbox_hits
+                .get(&url)
+                .is_some_and(|ids| ids.iter().any(|id| id != &item.id));
+            mentions.push(RepoMention {
+                full_name: name.clone(),
+                starred: starred.contains(&key),
+                in_inbox,
+            });
+        }
+        item.github_repos = mentions;
+    }
+    Ok(())
+}
+
+fn starred_full_names(
+    connection: &Connection,
+    account: &str,
+    names_json: &str,
+) -> Result<HashSet<String>, String> {
+    let mut statement = connection
+        .prepare(
+            "SELECT lower(full_name)
+             FROM repositories
+             WHERE account_id = ?1
+               AND sync_status = 'active'
+               AND lower(full_name) IN (SELECT lower(value) FROM json_each(?2))",
+        )
+        .map_err(|error| format!("已收藏仓库查询失败：{error}"))?;
+    let rows = statement
+        .query_map(params![account, names_json], |row| row.get::<_, String>(0))
+        .map_err(|error| format!("已收藏仓库查询失败：{error}"))?;
+    let mut found = HashSet::new();
+    for row in rows {
+        found.insert(row.map_err(|error| format!("已收藏仓库读取失败：{error}"))?);
+    }
+    Ok(found)
+}
+
+fn inbox_urls_by_id(
+    connection: &Connection,
+    account: &str,
+    urls_json: &str,
+) -> Result<HashMap<String, Vec<String>>, String> {
+    let mut statement = connection
+        .prepare(
+            "SELECT id, lower(normalized_url)
+             FROM inbox_items
+             WHERE account_id = ?1
+               AND lower(normalized_url) IN (SELECT lower(value) FROM json_each(?2))",
+        )
+        .map_err(|error| format!("收集箱仓库查询失败：{error}"))?;
+    let rows = statement
+        .query_map(params![account, urls_json], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(|error| format!("收集箱仓库查询失败：{error}"))?;
+    let mut found: HashMap<String, Vec<String>> = HashMap::new();
+    for row in rows {
+        let (id, url) = row.map_err(|error| format!("收集箱仓库读取失败：{error}"))?;
+        found.entry(url).or_default().push(id);
+    }
+    Ok(found)
 }
 
 const EXCERPT_LIST_CHARS: usize = 400;
@@ -1363,6 +1489,11 @@ https://github.com/someone/else";
             page_author: "作者".to_owned(),
             excerpt: "摘要".to_owned(),
             quote: "原话".to_owned(),
+            github_repos: vec![RepoMention {
+                full_name: "octocat/hello".to_owned(),
+                starred: true,
+                in_inbox: false,
+            }],
         };
         let page = InboxPage {
             items: vec![item],
@@ -1428,6 +1559,7 @@ https://github.com/someone/else";
                 "excerpt",
                 "fetchError",
                 "fetchStatus",
+                "githubRepos",
                 "id",
                 "itemType",
                 "normalizedUrl",
@@ -1466,6 +1598,17 @@ https://github.com/someone/else";
         assert_eq!(item_json["pageAuthor"], "作者");
         assert_eq!(item_json["excerpt"], "摘要");
         assert_eq!(item_json["quote"], "原话");
+        let mentions = item_json["githubRepos"]
+            .as_array()
+            .expect("githubRepos 应是数组");
+        assert_eq!(mentions.len(), 1);
+        assert_eq!(
+            sorted_keys(&mentions[0]),
+            vec!["fullName", "inInbox", "starred"]
+        );
+        assert_eq!(mentions[0]["fullName"], "octocat/hello");
+        assert_eq!(mentions[0]["starred"], true);
+        assert_eq!(mentions[0]["inInbox"], false);
         assert!(item_json["repositoryId"].is_null());
         assert_eq!(item_json["status"], "pending");
         assert_eq!(item_json["platform"], "wechat");
@@ -1481,6 +1624,300 @@ https://github.com/someone/else";
         assert_eq!(inbox_counts["archived"], 1);
         for key in ["pending", "ready", "failed", "archived"] {
             assert!(inbox_counts[key].is_number(), "{key} 应是数字");
+        }
+    }
+
+    fn set_page_repos(connection: &Connection, id: &str, repos: &str) {
+        connection
+            .execute(
+                "UPDATE inbox_items SET page_repos = ?1 WHERE id = ?2",
+                params![repos, id],
+            )
+            .expect("应能写入 page_repos");
+    }
+
+    #[test]
+    fn list_inbox_marks_starred_and_inbox_mentions() {
+        let db = TempDb::new("repo-flags");
+        let connection = Connection::open(db.path()).expect("应能打开测试库");
+        connection
+            .execute(
+                "INSERT INTO github_accounts(id, login, token_ref, updated_at) VALUES ('old', 'olduser', 'test', '2020-01-01T00:00:00.000Z')",
+                [],
+            )
+            .expect("应能插入旧账号");
+        connection
+            .execute(
+                "INSERT INTO github_accounts(id, login, token_ref, updated_at) VALUES ('acct', 'fox', 'test', '2026-10-03T00:00:00.000Z')",
+                [],
+            )
+            .expect("应能插入当前账号");
+        insert_repo(&connection, "hello", "acct", "OctoCat/Hello", "active");
+        insert_repo(&connection, "gone", "acct", "gone/repo", "removed");
+        insert_repo(&connection, "other", "old", "other/star", "active");
+        insert_inbox(
+            &connection,
+            "post",
+            "acct",
+            "https://mp.weixin.qq.com/s/post",
+            "pending",
+            "2026-10-04T00:00:00.000Z",
+            "wechat",
+            "公众号",
+            "",
+            "推荐文章",
+            "webpage",
+            None,
+        );
+        insert_inbox(
+            &connection,
+            "hello-archived",
+            "acct",
+            "https://github.com/OctoCat/Hello",
+            "archived",
+            "2026-10-01T00:00:00.000Z",
+            "github",
+            "",
+            "",
+            "OctoCat/Hello",
+            "github_repository",
+            Some("hello"),
+        );
+        insert_inbox(
+            &connection,
+            "bar-archived",
+            "acct",
+            "https://GitHub.com/Foo/Bar",
+            "archived",
+            "2026-10-01T00:00:01.000Z",
+            "github",
+            "",
+            "",
+            "Foo/Bar",
+            "github_repository",
+            None,
+        );
+        insert_inbox(
+            &connection,
+            "lone",
+            "acct",
+            "https://github.com/lone/repo",
+            "pending",
+            "2026-10-03T00:00:00.000Z",
+            "github",
+            "",
+            "",
+            "lone/repo",
+            "github_repository",
+            None,
+        );
+        insert_inbox(
+            &connection,
+            "other-inbox",
+            "old",
+            "https://github.com/fresh/new",
+            "pending",
+            "2026-10-05T00:00:00.000Z",
+            "github",
+            "",
+            "",
+            "fresh/new",
+            "github_repository",
+            None,
+        );
+        insert_inbox(
+            &connection,
+            "bad-json",
+            "acct",
+            "https://example.com/bad",
+            "pending",
+            "2026-10-02T00:00:00.000Z",
+            "web",
+            "",
+            "",
+            "坏的",
+            "webpage",
+            None,
+        );
+        insert_inbox(
+            &connection,
+            "empty-json",
+            "acct",
+            "https://example.com/empty",
+            "pending",
+            "2026-10-02T00:00:01.000Z",
+            "web",
+            "",
+            "",
+            "空的",
+            "webpage",
+            None,
+        );
+        set_page_repos(
+            &connection,
+            "post",
+            r#"["octocat/hello","Foo/Bar","gone/repo","other/star","fresh/new"]"#,
+        );
+        set_page_repos(&connection, "lone", r#"["lone/repo"]"#);
+        set_page_repos(&connection, "bad-json", "not-json");
+        set_page_repos(&connection, "empty-json", "[]");
+        drop(connection);
+        checkpoint(db.path());
+
+        let page = list_inbox(db.path(), None, None, None).expect("列表应成功");
+        assert_eq!(page.total_count, 4);
+        assert_eq!(
+            page.counts,
+            InboxStatusCounts {
+                pending: 4,
+                ready: 0,
+                failed: 0,
+                archived: 2,
+            }
+        );
+        assert_eq!(
+            ids_of(&page),
+            vec!["post", "lone", "empty-json", "bad-json"]
+        );
+        let post = page
+            .items
+            .iter()
+            .find(|item| item.id == "post")
+            .expect("应有文章");
+        assert_eq!(post.github_repos.len(), 5);
+        let mention = |name: &str| {
+            post.github_repos
+                .iter()
+                .find(|item| item.full_name == name)
+                .unwrap_or_else(|| panic!("应有 {name}"))
+        };
+        let hello = mention("octocat/hello");
+        assert!(hello.starred, "大小写不同也应算已收藏");
+        assert!(hello.in_inbox, "已归档的收集也算已在收集箱");
+        let bar = mention("Foo/Bar");
+        assert!(!bar.starred);
+        assert!(bar.in_inbox, "链接大小写不同、且已归档，仍算已在收集箱");
+        let gone = mention("gone/repo");
+        assert!(!gone.starred, "取消收藏的不算");
+        assert!(!gone.in_inbox);
+        let other = mention("other/star");
+        assert!(!other.starred, "别的账号的收藏不算");
+        assert!(!other.in_inbox);
+        let fresh = mention("fresh/new");
+        assert!(!fresh.starred);
+        assert!(!fresh.in_inbox, "别的账号的收集箱不算");
+        let lone = page
+            .items
+            .iter()
+            .find(|item| item.id == "lone")
+            .expect("应有单独那条");
+        assert_eq!(lone.github_repos.len(), 1);
+        assert_eq!(lone.github_repos[0].full_name, "lone/repo");
+        assert!(!lone.github_repos[0].starred);
+        assert!(
+            !lone.github_repos[0].in_inbox,
+            "只有它自己这条时，不能算成别的收集"
+        );
+        assert!(page
+            .items
+            .iter()
+            .find(|item| item.id == "bad-json")
+            .expect("应有坏 JSON")
+            .github_repos
+            .is_empty());
+        assert!(page
+            .items
+            .iter()
+            .find(|item| item.id == "empty-json")
+            .expect("应有空数组")
+            .github_repos
+            .is_empty());
+
+        let value = serde_json::to_value(post).expect("条目应能序列化");
+        assert!(value["githubRepos"].is_array());
+        assert_eq!(
+            sorted_keys(&value["githubRepos"][0]),
+            vec!["fullName", "inInbox", "starred"]
+        );
+    }
+
+    #[test]
+    fn list_inbox_many_items_keep_repo_flags() {
+        let db = TempDb::new("repo-many");
+        let connection = Connection::open(db.path()).expect("应能打开测试库");
+        connection
+            .execute(
+                "INSERT INTO github_accounts(id, login, token_ref) VALUES ('acct', 'fox', 'test')",
+                [],
+            )
+            .expect("应能插入账号");
+        insert_repo(&connection, "shared", "acct", "Shared/Tool", "active");
+        insert_inbox(
+            &connection,
+            "bulk-arch",
+            "acct",
+            "https://github.com/bulk/item-00",
+            "archived",
+            "2026-01-01T00:00:00.000Z",
+            "github",
+            "",
+            "",
+            "bulk/item-00",
+            "github_repository",
+            None,
+        );
+        for index in 0..80 {
+            let id = format!("m{index:02}");
+            let created = format!("2026-10-03T{:02}:{:02}:00.000Z", index / 60, index % 60);
+            insert_inbox(
+                &connection,
+                &id,
+                "acct",
+                &format!("https://example.com/post-{index:02}"),
+                "pending",
+                &created,
+                "wechat",
+                "",
+                "",
+                "文章",
+                "webpage",
+                None,
+            );
+            set_page_repos(
+                &connection,
+                &id,
+                &format!(r#"["bulk/item-{index:02}","shared/tool"]"#),
+            );
+        }
+        drop(connection);
+        checkpoint(db.path());
+
+        let page = list_inbox(db.path(), None, Some(200), Some(0)).expect("很多条目也应能列出");
+        assert_eq!(page.total_count, 80);
+        assert_eq!(page.items.len(), 80);
+        assert_eq!(page.items[0].id, "m79");
+        assert_eq!(page.items[79].id, "m00");
+        assert_eq!(
+            page.counts,
+            InboxStatusCounts {
+                pending: 80,
+                ready: 0,
+                failed: 0,
+                archived: 1,
+            }
+        );
+        for (index, item) in page.items.iter().enumerate() {
+            let source = 79 - index;
+            assert_eq!(item.github_repos.len(), 2, "{}", item.id);
+            assert_eq!(
+                item.github_repos[0].full_name,
+                format!("bulk/item-{source:02}")
+            );
+            assert!(!item.github_repos[0].starred);
+            assert_eq!(item.github_repos[0].in_inbox, source == 0, "{}", item.id);
+            assert_eq!(item.github_repos[1].full_name, "shared/tool");
+            assert!(item.github_repos[1].starred, "大小写不同的收藏要标上");
+            assert!(!item.github_repos[1].in_inbox);
         }
     }
 
