@@ -124,4 +124,7 @@ commands.allow = [
   "get_ai_automation",
   "set_ai_automation",
   "enqueue_cards_now",
+  "list_discover",
+  "refresh_discover",
+  "get_repo_community",
 ]

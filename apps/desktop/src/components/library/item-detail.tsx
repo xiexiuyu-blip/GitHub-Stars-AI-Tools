@@ -100,8 +100,14 @@ function DetailBody(props: Parameters<typeof ItemDetail>[0] & { detail: LibraryD
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <div className="min-h-0 flex-1 overflow-auto">
-        {/* 封面：README 里的第一张截图；没有就是按名字上色的渐变 */}
-        <CoverImage src={cover} seed={detail.fullName} className="h-[150px] w-full shrink-0 border-b border-border" />
+        {/* 封面：README 里的第一张截图，完整显示（四周用它自己模糊的样子垫底）；没有图就只是一条按名字上色的渐变，不放大字母 */}
+        <CoverImage
+          src={cover}
+          seed={detail.fullName}
+          fit="contain"
+          letter={false}
+          className={cn('w-full shrink-0 border-b border-border', cover ? 'h-[200px]' : 'h-[72px]')}
+        />
 
         <div className="px-6 pb-6">
           {/* 头像压在封面下沿上（只有头像重叠，标题完整落在封面下面） */}

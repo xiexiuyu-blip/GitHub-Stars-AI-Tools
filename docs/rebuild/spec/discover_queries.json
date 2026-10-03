@@ -1,0 +1,60 @@
+{
+  "version": 1,
+  "since_days": 120,
+  "per_scenario_limit": 20,
+  "scenarios": {
+    "xhs": [
+      "topic:xiaohongshu stars:>30 pushed:>{since}",
+      "小红书 skill in:name,description stars:>30 pushed:>{since}"
+    ],
+    "wx": [
+      "wechat article in:name,description stars:>50 pushed:>{since}",
+      "公众号 skill in:name,description stars:>20 pushed:>{since}"
+    ],
+    "dy": [
+      "douyin in:name,description stars:>100 pushed:>{since}",
+      "topic:short-video stars:>100 pushed:>{since}"
+    ],
+    "img": [
+      "poster in:name,description stars:>100 pushed:>{since}",
+      "image generation skill in:description stars:>100 pushed:>{since}"
+    ],
+    "vid": [
+      "subtitle in:name,description stars:>200 pushed:>{since}",
+      "topic:video-editing stars:>200 pushed:>{since}"
+    ],
+    "ppt": [
+      "topic:pptx stars:>50 pushed:>{since}",
+      "markdown slides in:description stars:>200 pushed:>{since}"
+    ],
+    "wr": [
+      "copywriting in:name,description stars:>100 pushed:>{since}",
+      "writing skill in:name,description stars:>100 pushed:>{since}"
+    ],
+    "res": [
+      "web scraping in:description stars:>300 pushed:>{since}",
+      "deep research in:name,description stars:>300 pushed:>{since}"
+    ],
+    "data": [
+      "data analysis agent in:description stars:>200 pushed:>{since}",
+      "text-to-sql in:name,description stars:>200 pushed:>{since}"
+    ],
+    "kb": [
+      "knowledge base in:description stars:>500 pushed:>{since}",
+      "obsidian ai in:name,description stars:>100 pushed:>{since}"
+    ],
+    "auto": [
+      "workflow automation in:description stars:>500 pushed:>{since}",
+      "topic:mcp-server stars:>500 pushed:>{since}"
+    ],
+    "ec": [
+      "电商 skill in:name,description stars:>10 pushed:>{since}",
+      "ecommerce skill in:name,description stars:>10 pushed:>{since}"
+    ],
+    "seo": [
+      "seo skills in:name,description stars:>100 pushed:>{since}",
+      "marketing skills in:name,description stars:>100 pushed:>{since}"
+    ]
+  },
+  "_说明": "2026-10-04 总控用真实 GitHub 搜索逐条验证过：不要在一条里写多个 OR（会退化成泛泛的 agent / skills），尽量用 topic: 或「单个词 + skill」；中文单词查询会混进商城系统和垃圾合集，所以加 skill 限定。"
+}
