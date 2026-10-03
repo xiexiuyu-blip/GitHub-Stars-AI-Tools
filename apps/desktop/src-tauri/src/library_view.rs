@@ -15,7 +15,8 @@ use std::time::Duration;
 const CORE_SORT_MAX: i64 = 7;
 const NON_CORE_RANK: i64 = 99;
 const PICK_LIMIT: usize = 3;
-const WEEK_LIMIT: i64 = 8;
+/// 「本周新收藏」最多给多少条。统计卡上的数字是全部，点进去要对得上，所以给得宽一些；只防一周内爆量。
+const WEEK_LIMIT: i64 = 60;
 const MAX_READING_BATCH: usize = 200;
 const README_EXCERPT_CHARS: usize = 1500;
 
@@ -2453,7 +2454,7 @@ mod tests {
     }
 
     #[test]
-    fn today_week_new_uses_seven_day_boundary_and_eight_cap() {
+    fn today_week_new_uses_seven_day_boundary() {
         let lab = Lab::new("week");
         let now = "2026-10-03T12:00:00Z";
         lab.with(|conn| {
@@ -2485,15 +2486,47 @@ mod tests {
         let ids: Vec<_> = view.week_new.iter().map(|item| item.id.as_str()).collect();
         assert_eq!(
             ids,
-            vec!["w0a", "w0b", "w01", "w02", "w03", "w04", "w05", "w06"]
+            vec!["w0a", "w0b", "w01", "w02", "w03", "w04", "w05", "w06", "w07", "w08"]
         );
         assert_eq!(view.counts.week_new, 10);
         assert!(view
             .week_new
             .iter()
             .any(|item| item.id == "w02" && !item.has_card));
-        assert!(!ids.contains(&"w08"));
+        // 正好七天前的算在内，差一秒的不算
+        assert!(ids.contains(&"w08"));
         assert!(!ids.contains(&"w-out"));
+    }
+
+    #[test]
+    fn today_week_new_list_matches_the_count_until_the_cap() {
+        let lab = Lab::new("week-cap");
+        let now = "2026-10-03T12:00:00Z";
+        lab.with(|conn| {
+            for index in 0..(WEEK_LIMIT + 5) {
+                let mut repo = Repo::new(&format!("cap{index:03}"));
+                repo.starred_at =
+                    format!("2026-10-03T{:02}:{:02}:00Z", (index / 60) % 12, index % 60);
+                repo.save(conn);
+            }
+        });
+        let view = get_today_view(&lab.path, now).unwrap();
+        // 统计卡是全部，列表只给到上限
+        assert_eq!(view.counts.week_new, WEEK_LIMIT + 5);
+        assert_eq!(view.week_new.len() as i64, WEEK_LIMIT);
+
+        let small = Lab::new("week-small");
+        small.with(|conn| {
+            for index in 0..19 {
+                let mut repo = Repo::new(&format!("s{index:02}"));
+                repo.starred_at = format!("2026-10-02T{:02}:00:00Z", index);
+                repo.save(conn);
+            }
+        });
+        let view = get_today_view(&small.path, now).unwrap();
+        // 十几个的时候，点进去的列表和统计卡上的数字一致
+        assert_eq!(view.counts.week_new, 19);
+        assert_eq!(view.week_new.len(), 19);
     }
 
     #[test]

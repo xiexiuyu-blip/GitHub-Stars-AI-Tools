@@ -101,6 +101,8 @@ function FilterButton(props: {
         'mx-2 flex w-[calc(100%-16px)] items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm text-on-surface-variant',
         'hover:bg-surface-container-low hover:text-foreground',
         props.selected && 'bg-accent text-accent-foreground hover:bg-accent hover:text-accent-foreground',
+        // 当前筛选下一个都没有的选项淡一点：能点，但一眼看出点了也是空的
+        props.countsKnown && props.count === 0 && !props.selected && 'opacity-50',
       )}
     >
       {props.dotHue !== undefined ? (

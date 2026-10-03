@@ -1,12 +1,13 @@
 import type { KeyboardEvent } from 'react';
 import type { InboxItem, InboxPage } from '@/lib/contracts';
-import { Button, Card, CardHeader, EmptyState, Segmented, Spinner, Tag } from '@/components/kit';
+import { Button, Card, CardHeader, EmptyState, RepoAvatar, Segmented, Spinner, Tag } from '@/components/kit';
 import { Icon } from '@/components/ui/icon';
 import { relativeDays } from '@/lib/item-format';
 import {
   archiveAction,
   canOpenUrl,
   emptyInboxCopy,
+  githubFullName,
   inboxContext,
   inboxFilterOptions,
   inboxHeading,
@@ -122,6 +123,7 @@ function InboxRow(props: {
   onArchive: (item: InboxItem) => void;
 }) {
   const title = inboxHeading(props.item.title, props.item.normalizedUrl);
+  const repoName = githubFullName(props.item);
   const meta = inboxMeta(
     inboxContext(props.item.sourceContext, props.item.platform),
     relativeDays(props.item.createdAt, new Date()),
@@ -142,10 +144,14 @@ function InboxRow(props: {
   }
 
   return (
-    <div className="group grid grid-cols-[28px_minmax(0,1fr)_auto] items-start gap-2.5 border-t border-muted px-4 py-2.5 first:border-t-0">
-      <span className="grid size-7 place-items-center rounded-md bg-accent text-accent-foreground">
-        <Icon name={kindIcon(props.item.itemType)} size={16} />
-      </span>
+    <div className="group grid grid-cols-[32px_minmax(0,1fr)_auto] items-start gap-2.5 border-t border-muted px-4 py-2.5 first:border-t-0">
+      {repoName ? (
+        <RepoAvatar name={repoName} size="sm" />
+      ) : (
+        <span className="grid size-8 place-items-center rounded-md bg-accent text-accent-foreground">
+          <Icon name={kindIcon(props.item.itemType)} size={16} />
+        </span>
+      )}
       <div className="min-w-0">
         <b className="block truncate text-sm font-medium text-foreground" title={title}>{title}</b>
         {meta ? <div className="truncate text-xs text-on-surface-variant">{meta}</div> : null}

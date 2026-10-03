@@ -5,6 +5,7 @@ import {
   cardStateOptions,
   clearFilters,
   createLibraryUiState,
+  formLabel,
   formOptions,
   hasActiveFilters,
   nextPageOffset,
@@ -195,20 +196,20 @@ describe('筛选栏的联动计数', () => {
     expect(formOptions(null)).toEqual([]);
   });
 
-  it('整理状态三个选项，全部是已整理加整理中', () => {
+  it('整理状态三个选项，全部是已整理加待整理', () => {
     expect(cardStateOptions({ done: 3, pending: 2 })).toEqual([
       { value: 'done', label: '已整理 3' },
-      { value: 'pending', label: '整理中 2' },
+      { value: 'pending', label: '待整理 2' },
       { value: 'all', label: '全部 5' },
     ]);
     expect(cardStateOptions(null)).toEqual([
       { value: 'done', label: '已整理 0' },
-      { value: 'pending', label: '整理中 0' },
+      { value: 'pending', label: '待整理 0' },
       { value: 'all', label: '全部 0' },
     ]);
     expect(cardStateOptions({ done: Number.NaN, pending: Number.POSITIVE_INFINITY }).map((item) => item.label)).toEqual([
       '已整理 0',
-      '整理中 0',
+      '待整理 0',
       '全部 0',
     ]);
   });
@@ -292,3 +293,20 @@ describe('改状态的乐观更新', () => {
     expect(removeIfFilteredOut(items, 'missing', 'want').map((item) => item.id)).toEqual(['a', 'b']);
   });
 });
+
+describe('formLabel', () => {
+  it('常见形态写成中文', () => {
+    expect(formLabel('skill')).toBe('技能');
+    expect(formLabel(' app ')).toBe('应用');
+    expect(formLabel('cli')).toBe('命令行');
+  });
+
+  it('没填、空白、「其他」都不显示标签；不认识的原样给', () => {
+    expect(formLabel(null)).toBeNull();
+    expect(formLabel(undefined)).toBeNull();
+    expect(formLabel('  ')).toBeNull();
+    expect(formLabel('other')).toBeNull();
+    expect(formLabel('template')).toBe('template');
+  });
+});
+

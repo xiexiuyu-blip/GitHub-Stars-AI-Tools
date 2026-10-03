@@ -229,7 +229,7 @@ describe('crossNote', () => {
 
 describe('pendingNote', () => {
   it('还有在整理的就提示数量', () => {
-    expect(pendingNote(result({ pendingMatches: 2 }))).toBe('另有 2 个还在整理，整理完可能对得上。');
+    expect(pendingNote(result({ pendingMatches: 2 }))).toBe('另有 2 个还没整理，整理好后可能对得上。');
   });
 
   it('没有或不是正数时不提示', () => {

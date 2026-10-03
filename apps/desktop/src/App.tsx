@@ -27,7 +27,7 @@ const MapPage = lazy(() => import('@/pages/v2/map').then((module) => ({ default:
 const SolvePage = lazy(() => import('@/pages/v2/solve').then((module) => ({ default: module.SolvePage })));
 const PacksPage = lazy(() => import('@/pages/v2/packs').then((module) => ({ default: module.PacksPage })));
 const ToolboxPage = lazy(() => import('@/pages/v2/toolbox').then((module) => ({ default: module.ToolboxPage })));
-const V2RankingsPage = lazy(() => import('@/pages/v2/rankings').then((module) => ({ default: module.RankingsPage })));
+const DiscoverPage = lazy(() => import('@/pages/v2/discover').then((module) => ({ default: module.DiscoverPage })));
 
 type RepositoryNavigationState = {
   query: string;
@@ -44,6 +44,7 @@ function AppContent() {
   const [currentPage, setCurrentPage] = useState<AppPage>('today');
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
   const [solveQuestion, setSolveQuestion] = useState('');
+  const [discoverScenario, setDiscoverScenario] = useState<string | null>(null);
   const [libraryKeyword, setLibraryKeyword] = useState('');
   const [showWelcome, setShowWelcome] = useState(false);
   const [hasDismissedWelcome, setHasDismissedWelcome] = useState(false);
@@ -300,7 +301,7 @@ function AppContent() {
   function renderCurrentPage() {
     switch (currentPage) {
       case 'today':
-        return <TodayPage onOpenLibrary={() => setCurrentPage('library')} onOpenCapture={() => setCurrentPage('capture')} onOpenSolve={() => setCurrentPage('solve')} />;
+        return <TodayPage onOpenLibrary={() => setCurrentPage('library')} onOpenCapture={() => setCurrentPage('capture')} onOpenSolve={() => setCurrentPage('solve')} onOpenToolbox={() => setCurrentPage('toolbox')} />;
       case 'capture':
         return <CapturePage />;
       case 'library':
@@ -311,18 +312,19 @@ function AppContent() {
               setSolveQuestion(query);
               setCurrentPage('solve');
             }}
+            onOpenToolbox={() => setCurrentPage('toolbox')}
           />
         );
       case 'map':
         return <MapPage />;
       case 'solve':
-        return <SolvePage initialQuestion={solveQuestion} onOpenDiscover={(scenarioId) => { void scenarioId; setCurrentPage('discover'); }} />;
+        return <SolvePage initialQuestion={solveQuestion} onOpenDiscover={(scenarioId) => { setDiscoverScenario(scenarioId ?? null); setCurrentPage('discover'); }} />;
       case 'packs':
         return <PacksPage question={solveQuestion} />;
       case 'toolbox':
         return <ToolboxPage />;
       case 'discover':
-        return <V2RankingsPage />;
+        return <DiscoverPage key={discoverScenario ?? 'default'} initialScenarioId={discoverScenario} onOpenCapture={() => setCurrentPage('capture')} />;
       case 'dashboard':
         return (
           <DashboardPage

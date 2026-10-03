@@ -27,39 +27,46 @@ export function PickCard(props: {
   return (
     <div
       className={cn(
-        'group relative mx-3 my-2 flex cursor-pointer gap-3 rounded-xl border bg-card p-2.5 transition-all',
+        'group relative mx-3 my-2.5 flex cursor-pointer gap-3.5 rounded-lg border bg-card p-3 transition-all',
         props.selected
-          ? 'border-primary shadow-[inset_0_0_0_1px_var(--color-primary),0_4px_14px_rgba(46,107,240,0.12)]'
-          : 'border-border hover:border-input hover:shadow-[0_4px_12px_rgba(31,35,41,0.08)]',
+          ? 'border-primary shadow-[inset_0_0_0_1px_var(--color-primary),0_4px_14px_rgba(46,107,240,0.14)]'
+          : 'border-border shadow-xs hover:border-input hover:shadow-md',
       )}
       onClick={props.onSelect}
       aria-current={props.selected ? 'true' : undefined}
     >
-      <CoverImage src={cover} seed={props.item.fullName} className="h-[96px] w-[136px] shrink-0 rounded-lg border border-border" />
+      <CoverImage src={cover} seed={props.item.fullName} className="h-[100px] w-[140px] shrink-0 rounded-md border border-border" />
       <div className="flex min-w-0 flex-1 flex-col">
+        {/* 身份：名字、所有者、语言、星数 */}
         <div className="flex min-w-0 items-baseline gap-2">
-          <b className="min-w-0 shrink truncate text-[15px] font-semibold text-foreground">{repo || props.item.fullName}</b>
-          {owner ? <span className="min-w-0 truncate text-xs text-on-surface-variant">{owner}</span> : null}
-          <span className="ml-auto shrink-0 group-hover:invisible">
+          <b className="min-w-0 shrink truncate text-[15px] leading-[1.35] font-semibold text-foreground">{repo || props.item.fullName}</b>
+          <span className={cn('ml-auto shrink-0 group-hover:invisible', props.selected && 'invisible')}>
             <StatusTag group={props.item.readingGroup} />
           </span>
         </div>
-        {text ? <div className="mt-0.5 line-clamp-2 text-sm leading-[1.5] text-foreground">{text}</div> : null}
-        <div className="mt-auto flex flex-wrap items-center gap-x-2.5 gap-y-1 pt-1.5">
-          <StarCount value={props.item.starsCount} />
+        <div className="mt-0.5 flex min-w-0 items-center gap-2 text-xs text-subtle">
+          {owner ? <span className="min-w-0 truncate">{owner}</span> : null}
           <LangDot language={props.item.language} />
-          {chips.map((scenario) => (
-            <ScenarioChip key={scenario.id} name={scenario.nameZh} scenarioKey={scenario.slug || scenario.id} />
-          ))}
+          <StarCount value={props.item.starsCount} className="ml-auto" />
         </div>
+        {/* 内容：一句话 */}
+        {text ? <div className="mt-1.5 line-clamp-2 text-sm leading-[1.55] text-foreground">{text}</div> : null}
+        {/* 标签 */}
+        {chips.length > 0 ? (
+          <div className="mt-2 flex flex-wrap items-center gap-1.5">
+            {chips.map((scenario) => (
+              <ScenarioChip key={scenario.id} name={scenario.nameZh} scenarioKey={scenario.slug || scenario.id} />
+            ))}
+          </div>
+        ) : null}
         {props.why ? (
-          <div className="why-line mt-1.5 flex items-start gap-1 text-xs leading-[1.5]">
+          <div className="why-line mt-auto flex items-start gap-1 pt-2 text-xs leading-[1.5]">
             <Icon name="lightbulb" size={14} fill className="mt-px shrink-0" />
             <span className="min-w-0">{props.why}</span>
           </div>
         ) : null}
       </div>
-      <div className="absolute top-2 right-2 z-10 hidden items-center gap-0.5 rounded-lg border border-border bg-card p-0.5 shadow-sm group-hover:flex">
+      <div className={cn('absolute top-2.5 right-2.5 z-10 items-center gap-0.5 rounded-md border border-border bg-card p-0.5 shadow-sm group-hover:flex', props.selected ? 'flex' : 'hidden')}>
         <HoverIcon label="想试（T）" icon="bookmark_add" onClick={props.onWant} />
         <HoverIcon label="不要了（X）" icon="close" onClick={props.onDrop} />
       </div>

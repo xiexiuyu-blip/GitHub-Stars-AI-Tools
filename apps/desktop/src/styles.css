@@ -19,6 +19,7 @@
   /* --- 前景色 --- */
   --color-on-surface: #1F2329;
   --color-on-surface-variant: #646A73;
+  --color-subtle: #8F959E; /* 三级文字：时间、次要数字、占位 */
   --color-inverse-surface: #1F2329;
   --color-inverse-on-surface: #F2F3F5;
 
@@ -97,12 +98,18 @@
   --spacing-gutter: 1.5rem;
   --spacing-stack-gap: 1rem;
 
-  /* --- 圆角：标签 4px，按钮和输入框 6px，卡片 8px --- */
-  --radius-sm: 4px;
-  --radius: 6px;
-  --radius-md: 6px;
-  --radius-lg: 8px;
-  --radius-xl: 8px;
+  /* --- 圆角阶梯：标签 6，按钮和输入框 8，卡片 12，封面和浮层 16 --- */
+  --radius-sm: 6px;
+  --radius: 8px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-xl: 16px;
+
+  /* --- 阴影阶梯：卡片 xs，悬停 md，浮层 lg（都是带一点蓝灰的黑，不要纯黑） --- */
+  --shadow-xs: 0 1px 2px rgba(31, 35, 41, 0.04);
+  --shadow-sm: 0 1px 3px rgba(31, 35, 41, 0.07), 0 1px 2px rgba(31, 35, 41, 0.04);
+  --shadow-md: 0 4px 14px rgba(31, 35, 41, 0.09);
+  --shadow-lg: 0 12px 32px rgba(31, 35, 41, 0.16);
 
   /* --- 字体族：系统中文栈；数字用 Inter，没装就回落 --- */
   --font-body-md: "PingFang SC", "Noto Sans SC", -apple-system, system-ui, sans-serif;
@@ -219,12 +226,16 @@ body {
   background-image: none;
 }
 
-button,
-a,
-input,
-select,
-textarea {
-  font: inherit;
+/* 放进 base 层：不在任何层里的规则会压过所有 Tailwind 工具类，
+   结果是按钮、输入框、链接上写的 text-sm / font-medium 全部失效，统统变成 16px 常规字重。 */
+@layer base {
+  button,
+  a,
+  input,
+  select,
+  textarea {
+    font: inherit;
+  }
 }
 
 :focus-visible {

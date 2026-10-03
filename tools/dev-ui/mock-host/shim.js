@@ -159,6 +159,70 @@
     confirm_library_card: function () { return null; },
     regenerate_library_card: function () { return null; },
   };
+
+  /* ---- 发现 / 社区（卡 17 的命令）：后端合并前先用假数据看界面。项目都是真实存在的，数字是编的，只用来看版式 ---- */
+  var DISCOVER_FETCHED = {}; // 场景 id -> 刷新时间
+  var DISCOVER_INBOX = {};   // fullName -> true（commit_capture_batch 之后会变成「已在收集箱」）
+  var DISCOVER_POOL = [
+    { fullName: 'microsoft/markitdown', description: 'Python tool for converting files and office documents to Markdown.', language: 'Python', starsCount: 62400, topics: ['markdown', 'pdf', 'office', 'llm'], pushedAt: '2026-09-28T08:00:00Z' },
+    { fullName: 'remotion-dev/remotion', description: 'Make videos programmatically with React', language: 'TypeScript', starsCount: 31200, topics: ['video', 'react', 'animation'], pushedAt: '2026-10-02T08:00:00Z' },
+    { fullName: 'marp-team/marp', description: 'The entrypoint of Markdown presentation ecosystem', language: 'TypeScript', starsCount: 9800, topics: ['markdown', 'slides', 'presentation'], pushedAt: '2026-08-14T08:00:00Z' },
+    { fullName: 'Stirling-Tools/Stirling-PDF', description: '#1 Locally hosted web application that allows you to perform various operations on PDF files', language: 'Java', starsCount: 58100, topics: ['pdf', 'self-hosted', 'tools'], pushedAt: '2026-10-01T08:00:00Z' },
+    { fullName: 'yt-dlp/yt-dlp', description: 'A feature-rich command-line audio/video downloader', language: 'Python', starsCount: 98700, topics: ['youtube', 'video', 'downloader'], pushedAt: '2026-10-03T02:00:00Z' },
+    { fullName: 'excalidraw/excalidraw', description: 'Virtual whiteboard for sketching hand-drawn like diagrams', language: 'TypeScript', starsCount: 91500, topics: ['whiteboard', 'diagram', 'drawing'], pushedAt: '2026-09-30T08:00:00Z' },
+    { fullName: 'mendableai/firecrawl', description: 'Turn entire websites into LLM-ready markdown or structured data.', language: 'TypeScript', starsCount: 47300, topics: ['crawler', 'scraper', 'llm'], pushedAt: '2026-10-02T20:00:00Z' },
+    { fullName: 'slidevjs/slidev', description: null, language: 'TypeScript', starsCount: 38900, topics: [], pushedAt: '2026-07-02T08:00:00Z' },
+  ];
+  function discoverScenarios() {
+    return protoData().then(function (D) {
+      return D.scen.map(function (sc, idx) {
+        var count = D.items.filter(function (i) { return (i.sc || []).indexOf(sc.id) >= 0; }).length;
+        var fetched = DISCOVER_FETCHED[sc.id] || null;
+        return { id: sc.id, slug: sc.id, nameZh: sc.n, sortOrder: idx + 1, myCount: count,
+          thin: ['ec', 'seo', 'data'].indexOf(sc.id) >= 0 && count <= 14, candidateCount: fetched ? DISCOVER_POOL.length : 0, lastFetchedAt: fetched };
+      });
+    });
+  }
+  HANDLERS.list_discover = function (args) {
+    return discoverScenarios().then(function (list) {
+      var thinFirst = list.slice().sort(function (a, b) { return (Number(b.thin) - Number(a.thin)) || (a.sortOrder - b.sortOrder); });
+      var pick = (args && args.scenarioId) || (thinFirst[0] && thinFirst[0].id) || null;
+      var cur = list.filter(function (x) { return x.id === pick; })[0];
+      var cands = cur && cur.lastFetchedAt ? DISCOVER_POOL.map(function (c, n) {
+        return Object.assign({ htmlUrl: 'https://github.com/' + c.fullName, mine: n === 5, inInbox: !!DISCOVER_INBOX[c.fullName], fetchedAt: cur.lastFetchedAt }, c);
+      }) : [];
+      return { scenarios: list, selected: pick, candidates: cands };
+    });
+  };
+  HANDLERS.refresh_discover = function (args) {
+    return new Promise(function (resolve) {
+      setTimeout(function () {
+        DISCOVER_FETCHED[args.scenarioId] = new Date().toISOString();
+        resolve({ scenarioId: args.scenarioId, queries: 2, failedQueries: 0, fetched: DISCOVER_POOL.length, skippedMine: 3, message: null, rateLimitResetAt: null });
+      }, 1500);
+    });
+  };
+  var COMMUNITY_FETCHED = {};
+  HANDLERS.get_repo_community = function (args) {
+    var id = args && args.id;
+    if (args && args.refresh) { COMMUNITY_FETCHED[id] = new Date().toISOString(); }
+    var fetched = COMMUNITY_FETCHED[id] || null;
+    var items = !fetched ? [] : [
+      { source: 'hn', title: 'Show HN: I built this to turn my notes into slides', url: 'https://news.ycombinator.com/item?id=1', points: 312, comments: 87, createdAt: '2026-08-02T10:00:00Z', state: null },
+      { source: 'hn', title: 'How we use it to automate weekly reports', url: 'https://news.ycombinator.com/item?id=2', points: 96, comments: 31, createdAt: '2026-06-18T10:00:00Z', state: null },
+      { source: 'github_issue', title: 'Does it work with Chinese fonts?', url: 'https://github.com/x/y/issues/12', points: null, comments: 24, createdAt: '2026-05-01T10:00:00Z', state: 'closed' },
+      { source: 'github_issue', title: 'Windows install fails on Python 3.12', url: 'https://github.com/x/y/issues/48', points: null, comments: 17, createdAt: '2026-09-11T10:00:00Z', state: 'open' },
+    ];
+    return { repoId: id, fetchedAt: fetched, stale: !fetched, items: items, errors: [] };
+  };
+
+  if (!HANDLERS.commit_capture_batch) {
+    HANDLERS.commit_capture_batch = function (args) {
+      var m = /github\.com\/([^\s/]+\/[^\s/]+)/.exec((args && args.text) || '');
+      if (m) { DISCOVER_INBOX[m[1]] = true; }
+      return { created: 1, skipped: 0, duplicateBatch: false, alreadyStarred: 0, alreadyInInbox: 0, blocked: 0, linksFound: 1 };
+    };
+  }
   Object.keys(NEW_HANDLERS).forEach(function (k) { HANDLERS[k] = NEW_HANDLERS[k]; });
 
   function answer(cmd, args) {

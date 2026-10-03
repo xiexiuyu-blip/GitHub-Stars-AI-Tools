@@ -32,7 +32,7 @@ export function ItemRow(props: {
   return (
     <div
       className={cn(
-        'group relative grid cursor-pointer grid-cols-[40px_minmax(0,1fr)_auto] items-start gap-3 px-4 py-3 transition-colors',
+        'group relative grid cursor-pointer grid-cols-[40px_minmax(0,1fr)_auto] items-start gap-3 border-b border-muted px-4 py-3 transition-colors last:border-b-0',
         props.selected
           ? 'bg-primary/10 before:absolute before:top-2 before:bottom-2 before:left-0 before:w-[3px] before:rounded-r-[3px] before:bg-primary'
           : 'hover:bg-surface-container-low',
@@ -43,14 +43,13 @@ export function ItemRow(props: {
       <RepoAvatar name={props.item.fullName} size="md" />
       <div className="min-w-0">
         <div className="flex min-w-0 items-baseline gap-2">
-          <b className="min-w-0 shrink truncate text-[15px] font-semibold text-foreground">{repo || props.item.fullName}</b>
-          {owner ? <span className="min-w-0 truncate text-xs text-on-surface-variant">{owner}</span> : null}
+          <b className="min-w-0 shrink truncate text-[15px] leading-[1.35] font-semibold text-foreground">{repo || props.item.fullName}</b>
+          {owner ? <span className="min-w-0 truncate text-xs text-subtle">{owner}</span> : null}
         </div>
         {text ? (
-          <div className={cn('mt-0.5 line-clamp-2 text-sm leading-[1.5]', props.item.oneLiner ? 'text-foreground' : 'text-on-surface-variant')}>{text}</div>
+          <div className={cn('mt-0.5 line-clamp-2 text-sm leading-[1.55]', props.item.oneLiner ? 'text-foreground' : 'text-on-surface-variant')}>{text}</div>
         ) : null}
         <div className="mt-1.5 flex flex-wrap items-center gap-x-2.5 gap-y-1">
-          <StarCount value={props.item.starsCount} />
           <LangDot language={props.item.language} />
           {chips.map((scenario) => (
             <ScenarioChip key={scenario.id} name={scenario.nameZh} scenarioKey={scenario.slug || scenario.id} />
@@ -64,10 +63,11 @@ export function ItemRow(props: {
           </div>
         ) : null}
       </div>
-      <div className="flex flex-col items-end gap-1 pt-0.5 group-hover:invisible">
+      <div className="flex flex-col items-end gap-1.5 pt-0.5 group-hover:invisible">
+        <StarCount value={props.item.starsCount} />
         <StatusTag group={props.item.readingGroup} />
       </div>
-      <div className="absolute top-3 right-3 z-10 hidden items-center gap-0.5 rounded-lg border border-border bg-card p-0.5 shadow-sm group-hover:flex">
+      <div className="absolute top-3 right-3 z-10 hidden items-center gap-0.5 rounded-md border border-border bg-card p-0.5 shadow-sm group-hover:flex">
         <HoverButton label="想试（T）" icon="bookmark_add" onClick={props.onWant} />
         <HoverButton label="不要了（X）" icon="close" onClick={props.onDrop} />
       </div>

@@ -16,6 +16,7 @@ import {
   inboxMeta,
   inboxStatusTag,
   isTooLong,
+  githubFullName,
   kindIcon,
   noteError,
   previewDecision,
@@ -366,3 +367,21 @@ describe('收集箱条目文案和列表拼接', () => {
     expect(canOpenUrl('')).toBe(false);
   });
 });
+
+describe('githubFullName', () => {
+  it('从 GitHub 仓库链接取出 owner/repo，忽略后面的路径、参数和 .git', () => {
+    const repo = (url: string) => githubFullName({ itemType: 'github_repository', normalizedUrl: url });
+    expect(repo('https://github.com/openai/codex')).toBe('openai/codex');
+    expect(repo('https://github.com/openai/codex/issues/12?x=1')).toBe('openai/codex');
+    expect(repo('https://www.github.com/a-b/c.d.git')).toBe('a-b/c.d');
+    expect(repo('http://github.com/a/b#readme')).toBe('a/b');
+  });
+
+  it('不是仓库条目、或链接不是 GitHub 仓库，返回 null', () => {
+    expect(githubFullName({ itemType: 'webpage', normalizedUrl: 'https://github.com/a/b' })).toBeNull();
+    expect(githubFullName({ itemType: 'github_repository', normalizedUrl: 'https://example.com/a/b' })).toBeNull();
+    expect(githubFullName({ itemType: 'github_repository', normalizedUrl: 'https://github.com/a' })).toBeNull();
+    expect(githubFullName({ itemType: 'github_repository', normalizedUrl: '' })).toBeNull();
+  });
+});
+

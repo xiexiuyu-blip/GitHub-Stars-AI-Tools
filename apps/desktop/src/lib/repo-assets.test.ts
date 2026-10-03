@@ -1,9 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
   avatarUrl,
-  buildCommunityPrompt,
-  buildInstallPrompt,
   communityLinks,
+  explainerLinks,
   coverGradient,
   extractInstallSteps,
   extractPreviewImages,
@@ -211,14 +210,20 @@ describe('去别处看别人怎么用', () => {
     expect(links.find((link) => link.id === 'discussions')?.url).toBe('https://github.com/MengTo/Skills/discussions');
     for (const link of links) expect(link.url.startsWith('https://')).toBe(true);
   });
+});
 
-  it('给 Codex 的两段话：带上项目名和链接，要求不编造', () => {
-    const community = buildCommunityPrompt({ fullName: 'harry0703/MoneyPrinterTurbo', htmlUrl: 'https://github.com/harry0703/MoneyPrinterTurbo' });
-    expect(community).toContain('「MoneyPrinterTurbo」');
-    expect(community).toContain('https://github.com/harry0703/MoneyPrinterTurbo');
-    expect(community).toContain('不要编造');
-    const install = buildInstallPrompt({ fullName: 'op7418/guizang-social-card-skill' });
-    expect(install).toContain('https://github.com/op7418/guizang-social-card-skill');
-    expect(install).toContain('先告诉我');
+describe('explainerLinks', () => {
+  it('把 github.com 换成 DeepWiki / Zread 的域名', () => {
+    expect(explainerLinks('microsoft/markitdown')).toEqual([
+      { id: 'deepwiki', label: 'DeepWiki', url: 'https://deepwiki.com/microsoft/markitdown', hint: '按模块讲清项目结构，可以追问' },
+      { id: 'zread', label: 'Zread', url: 'https://zread.ai/microsoft/markitdown', hint: '用 AI 通读仓库后的解读文档' },
+    ]);
+  });
+
+  it('名字不是 owner/repo 就不给链接（不拼出怪地址）', () => {
+    expect(explainerLinks('')).toEqual([]);
+    expect(explainerLinks('just-a-name')).toEqual([]);
+    expect(explainerLinks('a/b/c')).toEqual([]);
+    expect(explainerLinks('a b/c')).toEqual([]);
   });
 });

@@ -1,7 +1,10 @@
 import { useMemo, useState } from 'react';
 import type { LibraryDetail, ReadingGroup, ScenarioSummary } from '@/lib/contracts';
 import { cleanHowToTry, clipText, firstSentences, monthDay, relativeDays, splitRepoName } from '@/lib/item-format';
-import { extractInstallSteps, extractPreviewImages, hasDownloadHint } from '@/lib/repo-assets';
+import { explainerLinks, extractInstallSteps, extractPreviewImages, hasDownloadHint } from '@/lib/repo-assets';
+import { itemPendingNote } from '@/lib/automation-view';
+import { formLabel } from '@/lib/library-filters';
+import { useAiAutomation } from '@/hooks/use-ai-automation';
 import { useRepoReadme } from '@/hooks/use-repo-readme';
 import { Button, CoverImage, EmptyState, LangDot, RepoAvatar, ScenarioChip, StarCount, Tag } from '@/components/kit';
 import { Icon } from '@/components/ui/icon';
@@ -26,6 +29,8 @@ export function ItemDetail(props: {
   onReadingChange: (group: ReadingGroup) => void;
   onConfirm: () => void;
   onRegenerate: () => void;
+  /** 去工具箱（开启 / 调整 AI 自动整理）。不传就不画这个按钮。 */
+  onOpenToolbox?: () => void;
   onCopyCodex: () => void;
   onCopyHow: (text: string) => void;
   /** 复制一段「给 Codex 的话」（安装请求、查别人怎么用）。不传就用 onCopyHow。 */
@@ -95,13 +100,19 @@ function DetailBody(props: Parameters<typeof ItemDetail>[0] & { detail: LibraryD
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <div className="min-h-0 flex-1 overflow-auto">
-        {/* 封面：README 里的第一张截图；没有就是按名字上色的渐变 */}
-        <CoverImage src={cover} seed={detail.fullName} className="h-[150px] w-full shrink-0 border-b border-border" />
+        {/* 封面：README 里的第一张截图，完整显示（四周用它自己模糊的样子垫底）；没有图就只是一条按名字上色的渐变，不放大字母 */}
+        <CoverImage
+          src={cover}
+          seed={detail.fullName}
+          fit="contain"
+          letter={false}
+          className={cn('w-full shrink-0 border-b border-border', cover ? 'h-[200px]' : 'h-[72px]')}
+        />
 
         <div className="px-6 pb-6">
           {/* 头像压在封面下沿上（只有头像重叠，标题完整落在封面下面） */}
-          <div className="relative z-10 grid grid-cols-[56px_minmax(0,1fr)] items-start gap-3.5">
-            <RepoAvatar name={detail.fullName} size="lg" className="-mt-7 shadow-[0_2px_8px_rgba(31,35,41,0.18)] ring-4 ring-card" />
+          <div className="relative z-10 grid grid-cols-[60px_minmax(0,1fr)] items-start gap-3">
+            <RepoAvatar name={detail.fullName} size="lg" className="-mt-7 ml-1 shadow-md ring-4 ring-card" />
             <div className="min-w-0 pt-2.5">
               <h2 className="m-0 text-[22px] leading-[1.25] font-bold tracking-tight break-words text-foreground">{repo || detail.fullName}</h2>
               {owner ? <div className="mt-0.5 text-[13px] text-on-surface-variant">{owner}</div> : null}
@@ -118,7 +129,7 @@ function DetailBody(props: Parameters<typeof ItemDetail>[0] & { detail: LibraryD
             {scenarioList.map((scenario) => (
               <ScenarioChip key={scenario.id} name={scenario.nameZh} scenarioKey={scenario.slug || scenario.id} />
             ))}
-            {detail.form ? <Tag>{detail.form}</Tag> : null}
+            {formLabel(detail.form) ? <Tag>{formLabel(detail.form)}</Tag> : null}
             {detail.maturity ? <Tag>{detail.maturity}</Tag> : null}
             {detail.zhFriendly === true ? <Tag tone="blue">中文友好</Tag> : null}
           </div>
@@ -126,13 +137,13 @@ function DetailBody(props: Parameters<typeof ItemDetail>[0] & { detail: LibraryD
           <ReadingSegmented className="mt-4" value={detail.readingGroup} onChange={props.onReadingChange} />
 
           {detail.hasCard ? (
-            <div className="mt-4 rounded-xl bg-accent px-4 py-3.5">
+            <div className="mt-4 rounded-lg bg-accent px-4 py-3.5">
               <div className="flex items-center gap-1.5 text-xs font-medium text-accent-foreground">
                 <Icon name="auto_awesome" size={14} fill />
                 AI 说明
                 <span className="ml-auto font-normal text-on-surface-variant">依据 README</span>
               </div>
-              <p className="mt-1.5 text-[15px] leading-[1.75] text-foreground">{firstSentences(summarySource, 3)}</p>
+              <p className="mt-1.5 text-sm leading-[1.8] text-foreground">{firstSentences(summarySource, 3)}</p>
               <div className="mt-2 flex flex-wrap items-center gap-0.5 text-xs text-on-surface-variant">
                 {detail.cardReview === 'confirmed' ? (
                   <span className="inline-flex items-center gap-1">
@@ -149,11 +160,7 @@ function DetailBody(props: Parameters<typeof ItemDetail>[0] & { detail: LibraryD
               </div>
             </div>
           ) : (
-            <div className="mt-4 rounded-xl bg-accent px-4 py-3.5">
-              <div className="flex items-center gap-1.5 text-xs font-medium text-accent-foreground">还没有中文说明</div>
-              <p className="mt-1.5 text-sm text-on-surface-variant">整理好之后，这里会出现中文说明、能做什么、怎么试。现在先看 GitHub 上的原文：</p>
-              <p className="mt-1.5 text-[15px] leading-[1.75] text-foreground">{detail.description?.trim() || '—'}</p>
-            </div>
+            <PendingNote fullName={detail.fullName} description={detail.description} onOpenToolbox={props.onOpenToolbox} />
           )}
 
           <div role="tablist" aria-label="项目详情" className="mt-5 flex gap-1 border-b border-border">
@@ -264,13 +271,14 @@ function DetailBody(props: Parameters<typeof ItemDetail>[0] & { detail: LibraryD
                 steps={steps}
                 howFallback={how}
                 hasDownload={downloadHint}
+                scenarioName={scenarioList[0]?.nameZh ?? null}
                 onCopyText={props.onCopyHow}
                 onCopyPrompt={copyPrompt}
               />
             ) : null}
             {tab === 'preview' ? <PreviewPanel detail={detail} readme={readme} images={images} /> : null}
             {tab === 'readme' ? <ReadmePanel detail={detail} readme={readme} /> : null}
-            {tab === 'community' ? <CommunityPanel detail={detail} onCopyPrompt={copyPrompt} /> : null}
+            {tab === 'community' ? <CommunityPanel detail={detail} scenarioName={scenarioList[0]?.nameZh ?? null} onCopyPrompt={copyPrompt} /> : null}
           </div>
         </div>
       </div>
@@ -315,6 +323,37 @@ function DetailSkeleton() {
         <div className="h-4 w-full animate-pulse rounded-md bg-muted" />
         <div className="h-4 w-5/6 animate-pulse rounded-md bg-muted" />
       </div>
+    </div>
+  );
+}
+
+/** 还没有中文说明：说清为什么（没开启 / 暂停 / 额度用完 / 在排队），需要你动手时给一个去工具箱的入口，下面先显示 GitHub 原文。 */
+function PendingNote(props: { fullName: string; description: string | null | undefined; onOpenToolbox?: () => void }) {
+  const { status } = useAiAutomation();
+  const note = itemPendingNote(status);
+  const explainers = explainerLinks(props.fullName);
+  return (
+    <div className="mt-4 rounded-lg bg-accent px-4 py-3.5">
+      <div className="flex items-center gap-1.5 text-xs font-medium text-accent-foreground">
+        <Icon name="hourglass_top" size={14} fill />
+        还没有中文说明
+        {note.actionLabel && props.onOpenToolbox ? (
+          <Button variant="text" size="sm" className="ml-auto h-6 px-1 text-xs" onClick={props.onOpenToolbox}>{note.actionLabel}</Button>
+        ) : null}
+      </div>
+      <p className="mt-1.5 text-sm text-on-surface-variant">{note.text}</p>
+      <p className="mt-1.5 text-[15px] leading-[1.75] text-foreground">{props.description?.trim() || '—'}</p>
+      {explainers.length > 0 ? (
+        <div className="mt-2.5 flex flex-wrap items-center gap-x-3 gap-y-1 border-t border-border/60 pt-2.5 text-xs text-on-surface-variant">
+          <span>想先了解它？看别人生成的解读：</span>
+          {explainers.map((link) => (
+            <a key={link.id} href={link.url} target="_blank" rel="noopener noreferrer" title={link.hint} className="inline-flex items-center gap-0.5 text-accent-foreground hover:underline hover:underline-offset-[3px]">
+              {link.label}
+              <Icon name="open_in_new" size={13} />
+            </a>
+          ))}
+        </div>
+      ) : null}
     </div>
   );
 }

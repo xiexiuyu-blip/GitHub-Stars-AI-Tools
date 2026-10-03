@@ -26,7 +26,7 @@ export function StatCard(props: {
       aria-pressed={props.active === true}
       style={style}
       className={cn(
-        'flex items-center gap-3 rounded-xl border border-border bg-card px-4 py-3 text-left shadow-[0_1px_2px_rgba(31,35,41,0.04)] transition-all hover:-translate-y-px hover:border-input hover:shadow-[0_4px_12px_rgba(31,35,41,0.08)]',
+        'flex items-center gap-3 rounded-lg border border-border bg-card px-4 py-3 text-left shadow-xs transition-all hover:-translate-y-px hover:border-input hover:shadow-md',
         props.active && 'border-primary bg-[hsl(var(--h)_100%_98.5%)] shadow-[inset_0_0_0_1px_var(--color-primary)]',
       )}
     >

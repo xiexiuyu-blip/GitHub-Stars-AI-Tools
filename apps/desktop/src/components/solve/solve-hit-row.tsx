@@ -1,5 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
 import type { ScenarioSummary, SolveHit } from '@/lib/contracts';
+import { formLabel } from '@/lib/library-filters';
 import { matchBadge, whyLine } from '@/lib/solve-view';
 import { RepoAvatar, ScenarioChip, StarCount, Tag } from '@/components/kit';
 import { Icon } from '@/components/ui/icon';
@@ -16,7 +17,7 @@ export function SolveHitRow(props: {
   const badge = matchBadge(hit, props.intents);
   const oneLiner = hit.oneLiner?.trim() ?? '';
   const related = whyLine(hit);
-  const form = hit.form?.trim() ?? '';
+  const form = formLabel(hit.form);
   const chips = (hit.scenarioIds ?? [])
     .map((id) => props.scenarios?.find((scenario) => scenario.id === id))
     .filter((scenario): scenario is ScenarioSummary => Boolean(scenario))
@@ -51,12 +52,18 @@ export function SolveHitRow(props: {
           </button>
           <StarCount value={hit.starsCount} />
           {form ? <Tag>{form}</Tag> : null}
+          {hit.hasCard === false ? <Tag>待整理</Tag> : null}
           {badge ? <Tag tone={badge.tone}>{badge.text}</Tag> : null}
           {chips.map((scenario) => (
             <ScenarioChip key={scenario.id} name={scenario.nameZh} scenarioKey={scenario.slug || scenario.id} />
           ))}
         </div>
-        {oneLiner ? <p className="mt-0.5 mb-0 text-sm leading-relaxed text-foreground">{oneLiner}</p> : null}
+        {oneLiner ? (
+          <p className={cn('mt-0.5 mb-0 text-sm leading-relaxed', hit.hasCard === false ? 'text-on-surface-variant' : 'text-foreground')}>
+            {hit.hasCard === false ? <span className="mr-1 text-xs text-subtle">GitHub 原文</span> : null}
+            {oneLiner}
+          </p>
+        ) : null}
         {related ? (
           <div className="mt-0.5 text-xs leading-5 text-on-surface-variant">
             <b className="font-medium">为什么相关</b>

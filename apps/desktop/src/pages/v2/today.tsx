@@ -22,15 +22,19 @@ import {
   regenerateLibraryCard,
   setLibraryReading,
 } from '@/lib/api';
+import { automationHint } from '@/lib/automation-view';
+import { useAiAutomation } from '@/hooks/use-ai-automation';
 import { useListKeys } from '@/hooks/use-list-keys';
 import { Button, Card, EmptyState, Kbd, PageHeader, StatCard, useToast } from '@/components/kit';
-import { ItemDetail, ItemRow, PickCard } from '@/components/library';
+import { AutomationBanner, ItemDetail, ItemRow, PickCard } from '@/components/library';
 import { cn } from '@/lib/utils';
 
 type TodayPageProps = {
   onOpenLibrary: () => void;
   onOpenCapture: () => void;
   onOpenSolve: () => void;
+  /** 去工具箱（开启 / 调整 AI 自动整理） */
+  onOpenToolbox?: () => void;
 };
 
 type TodayFilter = 'week' | 'pending' | 'want' | 'in_use';
@@ -49,8 +53,8 @@ const FILTER_QUERY: Record<Exclude<TodayFilter, 'week'>, LibraryFilters> = {
 };
 
 export function TodayPage(props: TodayPageProps) {
-  void props;
   const toast = useToast();
+  const { status: automation } = useAiAutomation();
   const [name, setName] = useState('Fox');
   const [phase, setPhase] = useState<'loading' | 'ready' | 'error'>('loading');
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -364,6 +368,7 @@ export function TodayPage(props: TodayPageProps) {
   const hideList = narrow && detailOpen;
   const hideDetail = narrow && !detailOpen;
   const empty = emptyCopy(filter);
+  const hint = automationHint(automation, today?.counts?.cardsPending ?? 0);
 
   return (
     <section className="flex h-full min-h-0 flex-col gap-3 overflow-hidden px-5 pt-4 pb-5 max-[899px]:px-4 max-[899px]:pt-3 max-[899px]:pb-4">
@@ -374,6 +379,7 @@ export function TodayPage(props: TodayPageProps) {
         <StatCard label="想试" value={readingCounts ? readingCounts.want : '…'} icon="bookmark" tone="violet" active={filter === 'want'} onClick={() => choose('want')} />
         <StatCard label="在用" value={readingCounts ? readingCounts.inUse : '…'} icon="task_alt" tone="green" active={filter === 'in_use'} onClick={() => choose('in_use')} />
       </div>
+      <AutomationBanner hint={hint} onAction={props.onOpenToolbox} />
       <div className="grid min-h-0 flex-1 grid-cols-1 gap-3 min-[900px]:grid-cols-[minmax(340px,460px)_minmax(0,1fr)]">
         <Card className={cn('flex min-h-0 flex-col overflow-hidden', hideList && 'hidden')}>
           <div className="min-h-0 flex-1 overflow-auto py-1">
@@ -397,6 +403,7 @@ export function TodayPage(props: TodayPageProps) {
             onReadingChange={(group) => { if (selectedId) void changeReading(selectedId, group); }}
             onConfirm={() => { if (selectedId) void confirmCard(selectedId); }}
             onRegenerate={() => { if (selectedId) void regenerateCard(selectedId); }}
+            onOpenToolbox={props.onOpenToolbox}
             onCopyCodex={() => { if (selectedId) void copyForCodex(selectedId); }}
             onCopyHow={(text) => {
               void writeClipboard(text).then((copied) => {
