@@ -82,6 +82,8 @@ commands.allow = [
   "set_ai_daily_budget",
   "get_local_api_status",
   "set_local_api_enabled",
+  "get_local_api_token",
+  "rotate_local_api_token",
   "export_library_csv",
   "prepare_knowledge",
   "commit_capture_batch",
@@ -93,4 +95,9 @@ commands.allow = [
   "log_repository_usage",
   "list_ranking_board",
   "get_health_summary",
+  "refresh_ranking_sources",
+  "set_repository_reading_status",
+  "merge_knowledge_concepts",
+  "search_library_semantic",
+  "enqueue_missing_cards",
 ]

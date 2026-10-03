@@ -1749,6 +1749,7 @@ dependencies = [
  "apple-native-keyring-store",
  "base64 0.22.1",
  "fastembed",
+ "getrandom 0.3.4",
  "hf-hub",
  "keyring",
  "keyring-core",

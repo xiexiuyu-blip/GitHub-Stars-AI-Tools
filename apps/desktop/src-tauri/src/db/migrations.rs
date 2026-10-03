@@ -402,15 +402,15 @@ mod tests {
     }
 
     #[test]
-    fn empty_database_applies_001_through_020() {
+    fn empty_database_applies_every_migration() {
         let path = temp_db("empty");
         let report = migrate_database(&path).expect("空库应能迁移到 020");
-        assert_eq!(report.applied.len(), 29);
+        assert_eq!(report.applied.len(), MIGRATIONS.len());
         assert!(report.backup_path.is_none());
 
         let connection = Connection::open(&path).expect("应能打开空库结果");
         let versions = read_applied(&connection).expect("应能读取版本");
-        assert_eq!(versions.len(), 29);
+        assert_eq!(versions.len(), MIGRATIONS.len());
         for migration in MIGRATIONS {
             assert!(
                 versions
@@ -450,70 +450,180 @@ mod tests {
         let _ = fs::remove_file(&path);
     }
 
-    #[test]
-    fn dev_copy_018_only_applies_019_and_020_without_count_changes() {
-        let source = PathBuf::from(
-            "/Users/fox/Library/Application Support/com.foxwork.fox-stars-lab.dev/fox-stars-lab.sqlite3",
-        );
-        if !source.exists() {
-            return;
-        }
-        let path = temp_db("dev-copy");
+    /// 造一个「正好停在 018」的库，并往几张表里放真实形状的数据，其中包括
+    /// 「应用已退出，任务中断」的旧失败项（真实库里有 139 个）。
+    /// 不再读本机的 dev 库：它已经迁到 029，拿它当 018 夹具，这个测试永远过不了。
+    fn build_018_fixture(path: &Path) {
+        let mut connection = Connection::open(path).expect("应能创建 018 夹具");
+        connection
+            .execute_batch("PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;")
+            .expect("夹具参数应可设置");
+        for migration in MIGRATIONS
+            .iter()
+            .filter(|migration| migration.version <= "018")
         {
-            let src = Connection::open_with_flags(
-                &source,
-                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-            )
-            .expect("应能只读打开 dev 副本");
-            let mut dst = Connection::open(&path).expect("应能创建临时副本");
-            let backup = rusqlite::backup::Backup::new(&src, &mut dst).expect("应能备份");
-            backup.step(-1).expect("应能复制 dev 副本");
+            apply_one(&mut connection, migration).expect("夹具迁移应成功");
         }
-        let before = (
-            count_query(
-                &path,
-                "SELECT COUNT(*) FROM repositories WHERE sync_status = 'active'",
-            ),
-            count_query(&path, "SELECT COUNT(*) FROM repo_readmes"),
-            count_query(&path, "SELECT COUNT(*) FROM repo_ai_documents"),
-            count_query(&path, "SELECT COUNT(*) FROM repo_ai_citations"),
-            count_query(&path, "SELECT COUNT(*) FROM inbox_items"),
-            count_query(&path, "SELECT COUNT(*) FROM tools"),
-        );
-        let report = migrate_database(&path).expect("018 副本应只追加 019/020");
+        connection
+            .execute_batch(
+                "
+INSERT INTO github_accounts(id, login, token_ref) VALUES ('acct', 'fox', 'test');
+INSERT INTO repositories(id, account_id, owner, name, full_name, description, language, topics_json, html_url, sync_status, starred_at) VALUES
+  ('r1', 'acct', 'a', 'one', 'a/one', '第一个', 'Python', '[\"mcp\"]', 'https://github.com/a/one', 'active', '2026-09-01T00:00:00Z'),
+  ('r2', 'acct', 'b', 'two', 'b/two', '第二个', 'TypeScript', '[]', 'https://github.com/b/two', 'active', '2026-09-02T00:00:00Z'),
+  ('r3', 'acct', 'c', 'three', 'c/three', '已取消 Star', NULL, '[]', 'https://github.com/c/three', 'removed', '2026-09-03T00:00:00Z');
+INSERT INTO repo_ai_documents(repo_id, summary_zh, readme_zh, keywords_json, suggested_tags_json, model, prompt_version, source_hash, generated_at) VALUES
+  ('r1', '这是第一个仓库的摘要', '', '[]', '[]', 'test', 'v1', 'hash', '2026-09-01T00:00:00Z');
+INSERT INTO inbox_items(id, account_id, original_url, normalized_url, item_type) VALUES
+  ('i1', 'acct', 'https://example.com/a', 'https://example.com/a', 'webpage');
+INSERT INTO ai_task_runs(id, account_id, task_type, status) VALUES ('run1', 'acct', 'batch_generate_ai_documents', 'failed');
+INSERT INTO ai_task_items(id, run_id, repository_id, full_name, status, reason) VALUES
+  ('t1', 'run1', 'r1', 'a/one', 'failed', '应用已退出，任务中断，可重试。'),
+  ('t2', 'run1', 'r2', 'b/two', 'failed', '模型输出不是可解析的 JSON');
+",
+            )
+            .expect("夹具数据应能写入");
+    }
+
+    fn table_counts(path: &Path) -> std::collections::BTreeMap<String, i64> {
+        let connection = Connection::open(path).expect("应能打开测试库");
+        let names: Vec<String> = {
+            let mut statement = connection
+                .prepare(
+                    "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
+                )
+                .expect("表清单应可读取");
+            statement
+                .query_map([], |row| row.get(0))
+                .expect("表清单应可遍历")
+                .map(|name| name.expect("表名应可读取"))
+                .collect()
+        };
+        names
+            .into_iter()
+            .map(|name| {
+                let count: i64 = connection
+                    .query_row(&format!("SELECT COUNT(*) FROM \"{name}\""), [], |row| {
+                        row.get(0)
+                    })
+                    .expect("计数应成功");
+                (name, count)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn synthetic_018_database_only_appends_newer_migrations_and_keeps_every_row() {
+        let path = temp_db("fixture-018");
+        build_018_fixture(&path);
+        let before = table_counts(&path);
+        assert_eq!(before["repositories"], 3);
+        assert_eq!(before["ai_task_items"], 2);
+
+        let report = migrate_database(&path).expect("018 库应只追加更新的迁移");
+        let expected: Vec<String> = MIGRATIONS
+            .iter()
+            .filter(|migration| migration.version > "018")
+            .map(|migration| format!("{} {}", migration.version, migration.name))
+            .collect();
+        assert_eq!(report.applied, expected);
+        assert!(report.backup_path.is_some(), "有数据的库迁移前必须先备份");
+
+        let after = table_counts(&path);
+        for (table, count) in &before {
+            // 版本记录表本来就会随迁移增加，下面单独核对
+            if table == "schema_migrations" {
+                continue;
+            }
+            assert_eq!(
+                after.get(table),
+                Some(count),
+                "迁移不能改动已有表 {table} 的行数"
+            );
+        }
         assert_eq!(
-            report.applied,
-            vec![
-                "019 upstream_embedding_invalidation".to_owned(),
-                "020 upstream_embedding_dirty_queue".to_owned(),
-                "021 capture_sources".to_owned(),
-                "022 taxonomy".to_owned(),
-                "023 knowledge_graph".to_owned(),
-                "024 ai_cards".to_owned(),
-                "025 ai_jobs".to_owned(),
-                "026 rankings".to_owned(),
-                "027 reference_packs".to_owned(),
-                "028 extensibility".to_owned(),
-                "029 public_views".to_owned(),
-            ]
+            after["schema_migrations"],
+            before["schema_migrations"] + report.applied.len() as i64
         );
-        assert!(report.backup_path.is_some());
-        let after = (
+        // 025 把旧失败项按仓库转成待重试任务：中断的、JSON 出错的各一条
+        assert_eq!(after["ai_jobs"], 2);
+        assert_eq!(
             count_query(
                 &path,
-                "SELECT COUNT(*) FROM repositories WHERE sync_status = 'active'",
+                "SELECT COUNT(*) FROM ai_jobs WHERE error_kind = 'interrupted' AND status = 'queued'"
             ),
-            count_query(&path, "SELECT COUNT(*) FROM repo_readmes"),
-            count_query(&path, "SELECT COUNT(*) FROM repo_ai_documents"),
-            count_query(&path, "SELECT COUNT(*) FROM repo_ai_citations"),
-            count_query(&path, "SELECT COUNT(*) FROM inbox_items"),
-            count_query(&path, "SELECT COUNT(*) FROM tools"),
+            1
         );
-        assert_eq!(before, (492, 242, 92, 703, 1, 1));
-        assert_eq!(before, after);
+        assert_eq!(
+            count_query(&path, "SELECT COUNT(*) FROM ai_jobs WHERE error_kind = 'bad_json'"),
+            1
+        );
+
+        // 再启动一次：没有新迁移，不应再生成备份
+        let again = migrate_database(&path).expect("第二次启动应直接通过");
+        assert!(again.applied.is_empty() && again.backup_path.is_none());
+
         let _ = fs::remove_file(&path);
         if let Some(backup) = report.backup_path {
             let _ = fs::remove_file(backup);
         }
+    }
+
+    #[test]
+    #[ignore = "会写入 dev 库并生成迁移备份，只在 FOX_STARS_MIGRATE_DEV=1 时运行"]
+    fn migrate_live_dev_database_when_explicitly_requested() {
+        if std::env::var("FOX_STARS_MIGRATE_DEV").ok().as_deref() != Some("1") {
+            panic!("拒绝迁移：未设置 FOX_STARS_MIGRATE_DEV=1");
+        }
+        let path = PathBuf::from(
+            "/Users/fox/Library/Application Support/com.foxwork.fox-stars-lab.dev/fox-stars-lab.sqlite3",
+        );
+        assert!(path.to_string_lossy().contains(".dev"));
+        assert!(!path
+            .parent()
+            .and_then(|parent| parent.file_name())
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name == "com.foxwork.fox-stars-lab"));
+        let before = (
+            count_query(&path, "SELECT COUNT(*) FROM repositories WHERE sync_status = 'active'"),
+            count_query(&path, "SELECT COUNT(*) FROM repo_readmes"),
+            count_query(&path, "SELECT COUNT(*) FROM repo_ai_documents"),
+            count_query(&path, "SELECT COUNT(*) FROM repo_ai_citations"),
+            count_query(&path, "SELECT COUNT(*) FROM inbox_items"),
+            count_query(&path, "SELECT COUNT(*) FROM tools"),
+        );
+        let report = migrate_database(&path).expect("dev 库应能追加迁移");
+        let after = (
+            count_query(&path, "SELECT COUNT(*) FROM repositories WHERE sync_status = 'active'"),
+            count_query(&path, "SELECT COUNT(*) FROM repo_readmes"),
+            count_query(&path, "SELECT COUNT(*) FROM repo_ai_documents"),
+            count_query(&path, "SELECT COUNT(*) FROM repo_ai_citations"),
+            count_query(&path, "SELECT COUNT(*) FROM inbox_items"),
+            count_query(&path, "SELECT COUNT(*) FROM tools"),
+        );
+        assert_eq!(before, after);
+        assert!(report.backup_path.as_ref().is_some_and(|backup| backup.exists()));
+        let version = count_query(&path, "SELECT MAX(CAST(version AS INTEGER)) FROM schema_migrations");
+        assert_eq!(version, 29);
+    }
+
+    #[test]
+    #[ignore = "会写 dev 库的分类、建议卡和榜单，只在 FOX_STARS_REFRESH_DEV=1 时运行"]
+    fn refresh_live_dev_knowledge_and_rankings() {
+        if std::env::var("FOX_STARS_REFRESH_DEV").ok().as_deref() != Some("1") {
+            panic!("拒绝：未设置 FOX_STARS_REFRESH_DEV=1");
+        }
+        let path = PathBuf::from(
+            "/Users/fox/Library/Application Support/com.foxwork.fox-stars-lab.dev/fox-stars-lab.sqlite3",
+        );
+        assert!(path.to_string_lossy().contains(".dev"));
+        let seeded = crate::v2_ops::seed_taxonomy(&path).expect("分类种子");
+        let classified = crate::v2_ops::rule_classify(&path).expect("规则分类");
+        let cards = crate::v2_ops::import_summary_cards(&path).expect("旧摘要转卡");
+        let queued = crate::v2_ops::enqueue_missing_cards(&path).expect("缺卡入队");
+        crate::v2_ops::set_daily_budget(&path, 200_000).expect("预算");
+        let rankings = crate::rankings_live::refresh_default_sources(&path).expect("榜单刷新");
+        eprintln!("seeded={seeded} classified={classified} cards={cards} queued={queued} rankings={rankings}");
+        assert!(!crate::v2_ops::source_enabled(&path, "github_trending_html").expect("trending"));
     }
 }

@@ -67,11 +67,13 @@ export function LibraryPage(props: { initialKeyword?: string }) {
             <button className="rounded-full border px-3 text-sm" type="button" onClick={() => setTable((value) => !value)}>{table ? '卡片' : '表格'}</button>
           </div>
         </header>
-        <div className="flex flex-wrap gap-2">
-          {FILTERS.map((filter) => (
-            <button key={filter.id} className={`rounded-full px-3 py-1 text-xs ${reading === filter.id ? 'bg-primary text-on-primary' : 'border'}`} type="button" onClick={() => setReading(filter.id)}>{filter.label}</button>
-          ))}
-        </div>
+      <div className="flex flex-wrap gap-2">
+        <button className="rounded-full border px-3 py-1 text-xs" type="button" onClick={() => void invoke('set_repository_reading_status', { ids: items.slice(0, 20).map((item) => item.id), status: 'want_to_try' }).then(() => setError('已把当前页标为想试'))}>把当前页标为想试</button>
+        <button className="rounded-full border px-3 py-1 text-xs" type="button" onClick={() => void invoke<Array<{ fullName: string; why: string }>>('search_library_semantic', { query: keyword || '本地知识库' }).then((hits) => setError(hits.length ? `摘要重合 ${hits.length} 条：${hits.map((hit) => hit.fullName).join('、')}。向量索引还是空的，这次没有用向量编造结果。` : '向量索引还是空的，摘要里也没有对得上的句子'))}>按摘要重合查找</button>
+        {FILTERS.map((filter) => (
+          <button key={filter.id} className={`rounded-full px-3 py-1 text-xs ${reading === filter.id ? 'bg-primary text-on-primary' : 'border'}`} type="button" onClick={() => setReading(filter.id)}>{filter.label}</button>
+        ))}
+      </div>
         {error ? <p className="text-sm text-red-700">{error}</p> : null}
         <div className="min-h-0 flex-1 overflow-auto">
           {table ? (

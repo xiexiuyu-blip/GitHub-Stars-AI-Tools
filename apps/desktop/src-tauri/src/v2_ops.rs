@@ -1,11 +1,10 @@
 use crate::capture::extract_links_from_text;
 use crate::db::migrations::migrate_database;
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::fs;
-use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Serialize)]
@@ -573,73 +572,114 @@ pub fn repair_model_json(raw: &str) -> Result<Value, String> {
     Ok(value)
 }
 
-pub fn url_is_safe(url: &str) -> Result<(), String> {
-    let parsed = url::Url::parse(url).map_err(|_| "链接格式无效".to_owned())?;
-    if parsed.scheme() != "https" && parsed.scheme() != "http" {
-        return Err("只允许 http 或 https".to_owned());
-    }
-    if parsed.username() != "" || parsed.password().is_some() {
-        return Err("链接不能带账号密码".to_owned());
-    }
-    let host = parsed.host_str().unwrap_or("").to_lowercase();
-    if host.is_empty() || host == "localhost" || host.ends_with(".local") || host.ends_with(".internal") {
-        return Err("拒绝访问本机或内网主机".to_owned());
-    }
-    if let Ok(ip) = host.parse::<IpAddr>() {
-        if ip_is_blocked(ip) {
-            return Err("拒绝访问内网或元数据地址".to_owned());
-        }
-    }
-    Ok(())
-}
-
-fn ip_is_blocked(ip: IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(ip) => ip.is_private() || ip.is_loopback() || ip.is_link_local() || ip.is_unspecified() || ip.octets() == [169, 254, 169, 254],
-        IpAddr::V6(ip) => ip.is_loopback() || ip.is_unspecified() || ip.is_unique_local(),
-    }
-}
-
-#[derive(Debug, Serialize)]
+#[derive(Debug, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CaptureCommit {
+    /// 新写进收集箱的条目数。
     pub created: usize,
+    /// 没有新建的总数：已收藏 + 已在收集箱 + 被拦截；整批重复时等于链接总数。
     pub skipped: usize,
     pub duplicate_batch: bool,
+    /// 已经在你的 Stars 里，不再重复收。
+    pub already_starred: usize,
+    pub already_in_inbox: usize,
+    /// 本机或内网地址，单独拦下，不影响其它链接。
+    pub blocked: usize,
+    pub links_found: usize,
+}
+
+fn short_hash(value: &str) -> String {
+    format!("{:x}", Sha256::digest(value.as_bytes()))[..24].to_owned()
 }
 
 pub fn commit_capture(path: &Path, text: &str, source_context: &str) -> Result<CaptureCommit, String> {
-    let connection = open_db(path)?;
-    let account = account_id(&connection)?;
     let links = extract_links_from_text(text);
-    let hash = format!("{:x}", Sha256::digest(text.as_bytes()));
-    let batch_id = format!("batch-{hash}");
-    let inserted_batch = connection.execute(
-        "INSERT OR IGNORE INTO capture_batches(id, account_id, raw_text_hash, source_platform, source_context, url_count, github_repo_count) VALUES (?1, ?2, ?3, 'other', ?4, ?5, ?6)",
-        params![batch_id, account, hash, source_context.chars().take(2000).collect::<String>(), links.len() as i64, links.iter().filter(|link| link.kind == "github_repo").count() as i64],
-    ).map_err(|error| format!("收集批次写入失败：{error}"))?;
-    if inserted_batch == 0 {
-        return Ok(CaptureCommit { created: 0, skipped: links.len(), duplicate_batch: true });
+    let mut result = CaptureCommit { links_found: links.len(), ..CaptureCommit::default() };
+    if links.is_empty() {
+        // 没有链接就不留批次记录，用户补上链接后还能再贴一次。
+        return Ok(result);
     }
-    let mut created = 0;
-    let mut skipped = 0;
-    for link in links {
-        url_is_safe(&link.url)?;
-        let item_type = if link.kind == "github_repo" { "github_repository" } else { "webpage" };
-        let platform = if link.kind == "x_post" { "x" } else if link.kind == "github_repo" { "github" } else { "web" };
+    let mut connection = open_db(path)?;
+    let account = account_id(&connection)?;
+    let hash = format!("{:x}", Sha256::digest(text.trim().as_bytes()));
+    let batch_id = format!("batch-{hash}");
+    let context: String = source_context.chars().take(2000).collect();
+    // 整批放进一个事务：中途出错整批都不留痕，不会出现「写了一半、却被记成已收过」。
+    let tx = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|error| format!("收集事务开启失败：{error}"))?;
+    let inserted_batch = tx
+        .execute(
+            "INSERT OR IGNORE INTO capture_batches(id, account_id, raw_text_hash, source_platform, source_context, url_count, github_repo_count) VALUES (?1, ?2, ?3, 'other', ?4, ?5, ?6)",
+            params![
+                batch_id,
+                account,
+                hash,
+                context,
+                links.len() as i64,
+                links.iter().filter(|link| link.kind == "github_repo").count() as i64
+            ],
+        )
+        .map_err(|error| format!("收集批次写入失败：{error}"))?;
+    if inserted_batch == 0 {
+        result.duplicate_batch = true;
+        result.skipped = links.len();
+        return Ok(result);
+    }
+    for link in &links {
+        if link.blocked_reason.is_some() {
+            result.blocked += 1;
+            continue;
+        }
+        if link.kind == "github_repo" {
+            let full_name = format!(
+                "{}/{}",
+                link.owner.as_deref().unwrap_or(""),
+                link.name.as_deref().unwrap_or("")
+            );
+            let starred: bool = tx
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM repositories WHERE account_id = ?1 AND sync_status = 'active' AND lower(full_name) = lower(?2))",
+                    params![account, full_name],
+                    |row| row.get(0),
+                )
+                .map_err(|error| format!("已收藏检查失败：{error}"))?;
+            if starred {
+                result.already_starred += 1;
+                continue;
+            }
+        }
+        let in_inbox: bool = tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM inbox_items WHERE account_id = ?1 AND normalized_url = ?2)",
+                params![account, link.normalized_url],
+                |row| row.get(0),
+            )
+            .map_err(|error| format!("收集箱查重失败：{error}"))?;
+        if in_inbox {
+            result.already_in_inbox += 1;
+            continue;
+        }
+        let item_type = match (link.kind.as_str(), link.platform.as_str()) {
+            ("github_repo", _) => "github_repository",
+            (_, "youtube" | "bilibili") => "video",
+            _ => "webpage",
+        };
         let title = match (&link.owner, &link.name) {
             (Some(owner), Some(name)) => format!("{owner}/{name}"),
-            _ => link.url.clone(),
+            _ => link.normalized_url.clone(),
         };
-        let id = format!("cap-{}", &hash[..12]);
-        let unique_id = format!("{id}-{}", created + skipped);
-        let changed = connection.execute(
-            "INSERT OR IGNORE INTO inbox_items(id, account_id, original_url, normalized_url, title, item_type, source_platform, source_context, captured_via, capture_batch_id) VALUES (?1, ?2, ?3, ?3, ?4, ?5, ?6, ?7, 'paste_batch', ?8)",
-            params![unique_id, account, link.url, title, item_type, platform, source_context, batch_id],
-        ).map_err(|error| format!("收集条目写入失败：{error}"))?;
-        if changed == 1 { created += 1; } else { skipped += 1; }
+        let id = format!("cap-{}", short_hash(&format!("{batch_id}|{}", link.normalized_url)));
+        tx.execute(
+            "INSERT INTO inbox_items(id, account_id, original_url, normalized_url, title, item_type, source_platform, source_context, captured_via, capture_batch_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'paste_batch', ?9)",
+            params![id, account, link.url, link.normalized_url, title, item_type, link.platform, context, batch_id],
+        )
+        .map_err(|error| format!("收集条目写入失败：{error}"))?;
+        result.created += 1;
     }
-    Ok(CaptureCommit { created, skipped, duplicate_batch: false })
+    tx.commit().map_err(|error| format!("收集提交失败：{error}"))?;
+    result.skipped = result.already_starred + result.already_in_inbox + result.blocked;
+    Ok(result)
 }
 
 #[derive(Debug, Serialize)]
@@ -847,6 +887,142 @@ pub struct RankingRow {
     pub relevance: f64,
 }
 
+pub fn source_enabled(path: &Path, source_id: &str) -> Result<bool, String> {
+    let connection = open_db(path)?;
+    let enabled: i64 = connection
+        .query_row(
+            "SELECT enabled FROM ranking_sources WHERE id = ?1",
+            params![source_id],
+            |row| row.get(0),
+        )
+        .map_err(|error| format!("榜单来源读取失败：{error}"))?;
+    Ok(enabled == 1)
+}
+
+pub fn mark_ranking_error(path: &Path, source_id: &str, error: &str) -> Result<(), String> {
+    let connection = open_db(path)?;
+    connection
+        .execute(
+            "UPDATE ranking_sources SET last_error = ?1, last_fetched_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ?2",
+            params![error.chars().take(500).collect::<String>(), source_id],
+        )
+        .map_err(|error| format!("榜单错误写入失败：{error}"))?;
+    Ok(())
+}
+
+pub fn replace_ranking_snapshot(path: &Path, source_id: &str, items: &[crate::rankings_live::RankItem]) -> Result<usize, String> {
+    if source_id == "github_trending_html" {
+        return Err("GitHub Trending 网页抓取保持关闭，不写入快照".to_owned());
+    }
+    let connection = open_db(path)?;
+    let stamp = chrono_stamp();
+    let snapshot_id = format!("{source_id}-{stamp}");
+    connection.execute(
+        "INSERT INTO ranking_snapshots(id, source_id, list_key, item_count) VALUES (?1, ?2, 'default', ?3)",
+        params![snapshot_id, source_id, items.len() as i64],
+    ).map_err(|error| format!("榜单快照写入失败：{error}"))?;
+    for (index, item) in items.iter().enumerate() {
+        connection.execute(
+            "INSERT INTO ranking_entries(snapshot_id, rank, full_name, description, html_url, stars_count) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![snapshot_id, index as i64 + 1, item.full_name, item.description, item.html_url, item.stars],
+        ).map_err(|error| format!("榜单条目写入失败：{error}"))?;
+    }
+    connection.execute(
+        "UPDATE ranking_sources SET last_error = '', last_fetched_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ?1",
+        params![source_id],
+    ).map_err(|error| format!("榜单来源更新失败：{error}"))?;
+    Ok(items.len())
+}
+
+pub fn set_reading_statuses(path: &Path, ids: &[String], status: &str) -> Result<usize, String> {
+    let stored = match status {
+        "unseen" => "unread",
+        "want_to_try" | "tried" | "in_use" | "dropped" => status,
+        "deprecated" => "deprecated",
+        _ => return Err("阅读状态只能是没看、想试、试过、在用或不要了".to_owned()),
+    };
+    let stored = if stored == "dropped" { "deprecated" } else { stored };
+    let connection = open_db(path)?;
+    let account = account_id(&connection)?;
+    let mut changed = 0;
+    for id in ids {
+        changed += connection.execute(
+            "INSERT INTO annotations(repo_id, account_id, read_status, updated_at) VALUES (?1, ?2, ?3, strftime('%Y-%m-%dT%H:%M:%fZ','now')) ON CONFLICT(repo_id) DO UPDATE SET read_status = excluded.read_status, updated_at = excluded.updated_at",
+            params![id, account, stored],
+        ).map_err(|error| format!("阅读状态写入失败：{error}"))?;
+    }
+    Ok(changed)
+}
+
+pub fn merge_named_concepts(path: &Path, source_name: &str, target_name: &str) -> Result<(), String> {
+    let connection = open_db(path)?;
+    let account = account_id(&connection)?;
+    for name in [source_name, target_name] {
+        let id = format!("concept-{name}");
+        connection.execute(
+            "INSERT OR IGNORE INTO kg_concepts(id, account_id, kind, name_zh, normalized_name, origin) VALUES (?1, ?2, 'capability', ?3, ?3, 'user')",
+            params![id, account, name],
+        ).map_err(|error| format!("概念准备失败：{error}"))?;
+    }
+    drop(connection);
+    merge_concepts(path, &format!("concept-{source_name}"), &format!("concept-{target_name}"))
+}
+
+pub fn merge_concepts(path: &Path, source_id: &str, target_id: &str) -> Result<(), String> {
+    if source_id == target_id {
+        return Err("不能把概念合并到自己".to_owned());
+    }
+    let connection = open_db(path)?;
+    let changed = connection.execute(
+        "UPDATE kg_concepts SET status = 'merged', merged_into_id = ?1, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ?2 AND status = 'active'",
+        params![target_id, source_id],
+    ).map_err(|error| format!("概念合并失败：{error}"))?;
+    if changed == 0 {
+        return Err("没有可合并的概念".to_owned());
+    }
+    connection.execute(
+        "UPDATE kg_edges SET dst_id = ?1 WHERE dst_type = 'concept' AND dst_id = ?2",
+        params![target_id, source_id],
+    ).ok();
+    Ok(())
+}
+
+pub fn semantic_search(path: &Path, query: &str) -> Result<Vec<SolveHit>, String> {
+    let answer = solve_problem(path, query)?;
+    Ok(answer.owned)
+}
+
+pub fn enqueue_missing_cards(path: &Path) -> Result<usize, String> {
+    let connection = open_db(path)?;
+    let account = account_id(&connection)?;
+    let changed = connection.execute(
+        r#"
+INSERT OR IGNORE INTO ai_jobs(id, account_id, job_type, target_type, target_id, status)
+SELECT 'card-' || repositories.id, ?1, 'repo_card', 'repository', repositories.id, 'queued'
+FROM repositories
+LEFT JOIN repo_ai_documents ON repo_ai_documents.repo_id = repositories.id
+WHERE repositories.sync_status = 'active'
+  AND (repo_ai_documents.repo_id IS NULL OR IFNULL(repo_ai_documents.card_json, '') = '')
+  AND IFNULL(repo_ai_documents.card_json, '') NOT LIKE '%"review_status":"confirmed"%'
+"#,
+        params![account],
+    ).map_err(|error| format!("缺摘要任务入队失败：{error}"))?;
+    Ok(changed)
+}
+
+pub fn restore_database_file(database_path: &Path, backup_path: &Path) -> Result<(), String> {
+    if !backup_path.is_file() {
+        return Err("备份文件不存在".to_owned());
+    }
+    let backup = Connection::open(backup_path).map_err(|error| format!("备份打开失败：{error}"))?;
+    let integrity: String = backup.query_row("PRAGMA integrity_check", [], |row| row.get(0)).map_err(|error| format!("备份校验失败：{error}"))?;
+    if integrity != "ok" {
+        return Err(format!("备份已损坏，拒绝恢复：{integrity}"));
+    }
+    fs::copy(backup_path, database_path).map_err(|error| format!("恢复失败：{error}"))?;
+    Ok(())
+}
+
 pub fn health_summary(path: &Path) -> Result<String, String> {
     let connection = open_db(path)?;
     let integrity: String = connection.query_row("PRAGMA integrity_check", [], |row| row.get(0)).map_err(|error| format!("健康检查失败：{error}"))?;
@@ -871,6 +1047,7 @@ fn chrono_stamp() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::capture::url_is_safe;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn temp_db() -> PathBuf {
@@ -941,6 +1118,74 @@ mod tests {
     }
 
     #[test]
+    fn capture_skips_starred_and_blocked_links_without_aborting_the_batch() {
+        let path = temp_db();
+        with_account(&path);
+        // fox/tool 已在 Stars 里（写法大小写不同）；内网链接单独拦下；其余两条应照常写入
+        let text = "已有 https://github.com/Fox/Tool，内网 http://192.168.1.10/admin 新的 https://github.com/acme/widget 和 https://x.com/u/status/1";
+        let first = commit_capture(&path, text, "测试群").unwrap();
+        assert_eq!(first.links_found, 4);
+        assert_eq!(first.already_starred, 1);
+        assert_eq!(first.blocked, 1);
+        assert_eq!(first.created, 2);
+        assert_eq!(first.skipped, 2);
+        assert!(!first.duplicate_batch);
+        let connection = open_db(&path).unwrap();
+        let stored: i64 = connection
+            .query_row("SELECT COUNT(*) FROM inbox_items WHERE capture_batch_id IS NOT NULL", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(stored, 2);
+        let platform: String = connection
+            .query_row("SELECT source_platform FROM inbox_items WHERE normalized_url = 'https://x.com/u/status/1'", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(platform, "x");
+        drop(connection);
+
+        // 同一段再贴：整批重复
+        assert!(commit_capture(&path, text, "测试群").unwrap().duplicate_batch);
+        // 换一段文字，但里面是同一个仓库的另一种写法（大小写 + 跟踪参数）：不会再新建
+        let again = commit_capture(&path, "再发一次 https://github.com/ACME/Widget?utm_source=wechat", "测试群").unwrap();
+        assert_eq!(again.created, 0);
+        assert_eq!(again.already_in_inbox, 1);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn text_without_links_leaves_no_batch_behind() {
+        let path = temp_db();
+        with_account(&path);
+        let empty = commit_capture(&path, "只有文字，没有链接。", "测试群").unwrap();
+        assert_eq!(empty.links_found, 0);
+        assert_eq!(empty.created, 0);
+        let connection = open_db(&path).unwrap();
+        let batches: i64 = connection.query_row("SELECT COUNT(*) FROM capture_batches", [], |row| row.get(0)).unwrap();
+        assert_eq!(batches, 0);
+        drop(connection);
+        // 补上链接后还能正常收
+        assert_eq!(commit_capture(&path, "只有文字，没有链接。https://example.com/a", "测试群").unwrap().created, 1);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn failed_insert_rolls_the_whole_batch_back() {
+        let path = temp_db();
+        with_account(&path);
+        let connection = open_db(&path).unwrap();
+        // 人为制造「第二条写入必然失败」：给 inbox_items 加一个触发器，遇到特定链接就报错
+        connection
+            .execute_batch("CREATE TRIGGER fail_on_boom BEFORE INSERT ON inbox_items WHEN NEW.normalized_url LIKE '%boom%' BEGIN SELECT RAISE(ABORT, 'boom'); END;")
+            .unwrap();
+        drop(connection);
+        let text = "先 https://example.com/ok 后 https://example.com/boom";
+        assert!(commit_capture(&path, text, "测试群").is_err());
+        let connection = open_db(&path).unwrap();
+        let items: i64 = connection.query_row("SELECT COUNT(*) FROM inbox_items WHERE capture_batch_id IS NOT NULL", [], |row| row.get(0)).unwrap();
+        let batches: i64 = connection.query_row("SELECT COUNT(*) FROM capture_batches", [], |row| row.get(0)).unwrap();
+        assert_eq!((items, batches), (0, 0), "出错时不能留下半批数据，也不能把这段文字记成已收过");
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
     fn cancel_returns_job_and_trending_html_stays_off() {
         let path = temp_db();
         with_account(&path);
@@ -955,5 +1200,35 @@ mod tests {
         assert_eq!(set_daily_budget(&path, 50_000).unwrap(), 50_000);
         log_usage(&path, "repo1", "useful", "测过", "mcp").unwrap();
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn five_interrupted_jobs_resume_and_tampered_backup_is_refused() {
+        let path = temp_db();
+        with_account(&path);
+        let connection = open_db(&path).unwrap();
+        for index in 0..5 {
+            connection.execute(
+                "INSERT INTO ai_jobs(id, account_id, job_type, target_type, target_id, status) VALUES (?1, 'acct', 'repo_card', 'repository', ?1, 'running')",
+                params![format!("run-{index}")],
+            ).unwrap();
+        }
+        connection.execute(
+            "INSERT INTO kg_concepts(id, account_id, kind, name_zh, normalized_name) VALUES ('cap-a', 'acct', 'capability', '抽链接', '抽链接'), ('cap-b', 'acct', 'capability', '整理链接', '整理链接')",
+            [],
+        ).unwrap();
+        drop(connection);
+        assert_eq!(recover_interrupted_jobs(&path).unwrap(), 5);
+        assert!(list_jobs(&path, 10).unwrap().iter().all(|job| job.status == "queued" && job.error_kind.as_deref() == Some("interrupted")));
+        merge_concepts(&path, "cap-a", "cap-b").unwrap();
+        set_reading_statuses(&path, &["repo1".to_owned()], "want_to_try").unwrap();
+        let backup_dir = std::env::temp_dir();
+        let backup = backup_database_file(&path, &backup_dir).unwrap();
+        let mut bytes = fs::read(&backup).unwrap();
+        bytes[0] ^= 0xff;
+        fs::write(&backup, bytes).unwrap();
+        assert!(restore_database_file(&path, &backup).is_err());
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_file(backup);
     }
 }

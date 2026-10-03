@@ -9,6 +9,7 @@ mod github;
 mod library;
 mod local_api;
 mod ranking_query;
+mod rankings_live;
 mod storage;
 mod v2_ops;
 mod vector_index;
@@ -1004,6 +1005,18 @@ fn set_local_api_enabled(app_handle: tauri::AppHandle, enabled: bool) -> Result<
 }
 
 #[tauri::command]
+fn get_local_api_token(app_handle: tauri::AppHandle) -> Result<String, String> {
+    let storage = AppStorage::from_app_handle(&app_handle)?;
+    local_api::token(storage.database_path()).ok_or_else(|| "还没有令牌，请先开启本地 API".to_owned())
+}
+
+#[tauri::command]
+fn rotate_local_api_token(app_handle: tauri::AppHandle) -> Result<String, String> {
+    let storage = AppStorage::from_app_handle(&app_handle)?;
+    local_api::rotate_token(storage.database_path())
+}
+
+#[tauri::command]
 fn export_library_csv(app_handle: tauri::AppHandle, destination: String) -> Result<usize, String> {
     let storage = AppStorage::from_app_handle(&app_handle)?;
     v2_ops::export_csv(storage.database_path(), std::path::Path::new(&destination))
@@ -1095,6 +1108,37 @@ fn list_ranking_board(app_handle: tauri::AppHandle) -> Result<Vec<v2_ops::Rankin
 fn get_health_summary(app_handle: tauri::AppHandle) -> Result<String, String> {
     let storage = AppStorage::from_app_handle(&app_handle)?;
     v2_ops::health_summary(storage.database_path())
+}
+
+#[tauri::command]
+fn refresh_ranking_sources(app_handle: tauri::AppHandle) -> Result<String, String> {
+    let storage = AppStorage::from_app_handle(&app_handle)?;
+    rankings_live::refresh_default_sources(storage.database_path())
+}
+
+#[tauri::command]
+fn set_repository_reading_status(app_handle: tauri::AppHandle, ids: Vec<String>, status: String) -> Result<usize, String> {
+    let storage = AppStorage::from_app_handle(&app_handle)?;
+    v2_ops::set_reading_statuses(storage.database_path(), &ids, &status)
+}
+
+#[tauri::command]
+fn merge_knowledge_concepts(app_handle: tauri::AppHandle, source_id: String, target_id: String) -> Result<(), String> {
+    let storage = AppStorage::from_app_handle(&app_handle)?;
+    v2_ops::merge_named_concepts(storage.database_path(), &source_id, &target_id)
+}
+
+#[tauri::command]
+fn search_library_semantic(app_handle: tauri::AppHandle, query: String) -> Result<Vec<v2_ops::SolveHit>, String> {
+    let storage = AppStorage::from_app_handle(&app_handle)?;
+    v2_ops::semantic_search(storage.database_path(), &query)
+}
+
+#[tauri::command]
+fn enqueue_missing_cards(app_handle: tauri::AppHandle) -> Result<usize, String> {
+    let storage = AppStorage::from_app_handle(&app_handle)?;
+    v2_ops::set_daily_budget(storage.database_path(), 200_000)?;
+    v2_ops::enqueue_missing_cards(storage.database_path())
 }
 
 #[tauri::command]
@@ -6541,6 +6585,8 @@ pub fn run() {
             set_ai_daily_budget,
             get_local_api_status,
             set_local_api_enabled,
+            get_local_api_token,
+            rotate_local_api_token,
             export_library_csv,
             prepare_knowledge,
             commit_capture_batch,
@@ -6552,6 +6598,11 @@ pub fn run() {
             log_repository_usage,
             list_ranking_board,
             get_health_summary,
+            refresh_ranking_sources,
+            set_repository_reading_status,
+            merge_knowledge_concepts,
+            search_library_semantic,
+            enqueue_missing_cards,
             list_library_cards,
             get_library_item,
             extract_links_from_text,

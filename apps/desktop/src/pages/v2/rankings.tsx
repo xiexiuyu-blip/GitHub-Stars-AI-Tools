@@ -6,13 +6,17 @@ type Row = { sourceId: string; sourceName: string; enabled: boolean; lastError: 
 export function RankingsPage() {
   const [rows, setRows] = useState<Row[]>([]);
   const [error, setError] = useState<string | null>(null);
-  useEffect(() => {
+  const [message, setMessage] = useState<string | null>(null);
+  function load() {
     invoke<Row[]>('list_ranking_board').then(setRows).catch((reason: unknown) => setError(String(reason)));
-  }, []);
+  }
+  useEffect(load, []);
   const sources = [...new Map(rows.map((row) => [row.sourceId, row])).values()];
   return (
     <section className="flex h-full flex-col gap-4 overflow-auto p-6">
       <h2 className="text-2xl font-semibold">发现与榜单</h2>
+      <button className="w-fit rounded-full border px-4 py-2 text-sm" type="button" onClick={() => void invoke<string>('refresh_ranking_sources').then((text) => { setMessage(text); load(); }).catch((reason: unknown) => setError(String(reason)))}>刷新三个默认来源</button>
+      {message ? <p className="text-sm text-on-surface-variant">{message}</p> : null}
       <p className="text-sm text-on-surface-variant">GitHub Trending 网页抓取保持关闭。断网时这里显示上次快照；现在如果还没刷新，只会看到来源名称。</p>
       {error ? <p className="text-sm text-red-700">{error}</p> : null}
       {sources.map((source) => (
