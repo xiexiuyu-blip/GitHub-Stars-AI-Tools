@@ -49,6 +49,9 @@ export type LibraryItem = {
   pushedAt: string | null;
   /** 理解卡的一句话；还没有卡就是 null */
   oneLiner: string | null;
+  /** 列表行第三行「适合：…」用的一句：理解卡里第一条 problems_solved，没有就第一条能力名，再没有就是 null。
+   *  后端暂时可能不返回这个字段（所以是可选的）；界面只在它非空且和 oneLiner 不同时才显示这一行。 */
+  highlight?: string | null;
   form: string | null;
   scenarioIds: string[];
   /** 库里存的原始状态值（unread / want_to_try / tried / in_use / watching / deprecated / later / read） */
