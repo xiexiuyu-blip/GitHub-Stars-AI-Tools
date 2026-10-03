@@ -368,15 +368,43 @@ describe('pickLocalCapabilities', () => {
     { name: 'gpt-image', oneLiner: 'MCP 工具', path: '~/.codex/config.toml' },
   ];
 
-  it('名字和选中项目对得上的排在最前（本机已装）', () => {
+  it('名字和选中项目对得上的排在最前（本机已装），相关的跟在后面', () => {
     const picked = pickLocalCapabilities(all, [{ fullName: 'op7418/guizang-social-card-skill' }], ['封面']);
-    expect(picked.map((item) => item.name)).toEqual(['guizang-social-card-skill', 'ai-draw']);
+    expect(picked.map((item) => item.name)).toEqual(['guizang-social-card-skill', 'ai-draw', 'gpt-image']);
   });
 
   it('任务词出现在名字或一句话里的算相关，最多 limit 个；不相关的不放', () => {
-    expect(pickLocalCapabilities(all, [], ['封面']).map((item) => item.name)).toEqual(['ai-draw']);
+    expect(pickLocalCapabilities(all, [], ['封面']).map((item) => item.name)).toEqual(['ai-draw', 'gpt-image']);
     expect(pickLocalCapabilities(all, [], ['小红书', '封面'], 1).map((item) => item.name)).toEqual(['ai-draw']);
     expect(pickLocalCapabilities(all, [], ['数据库'])).toEqual([]);
+    expect(pickLocalCapabilities(all, [], ['封面'], 0)).toEqual([]);
+  });
+
+  it('近义说法也算：中文任务词能对上英文说明和只有名字的 MCP', () => {
+    // 「配图」→ image / draw：MCP 只有名字（gpt-image），Skill 说明是英文
+    const real = [
+      { name: 'ai-draw', oneLiner: 'Route, generate, edit, save, and verify AI visual assets for…', path: '~/.agents/skills/ai-draw' },
+      { name: 'gpt-image', oneLiner: 'MCP 工具', path: '~/.codex/config.toml' },
+      { name: 'gemini-image', oneLiner: 'MCP 工具', path: '~/.codex/config.toml' },
+      { name: 'ai-upscale', oneLiner: 'Upscale AI-generated or photographic images via fal-ai MCP', path: '~/.agents/skills/ai-upscale' },
+      { name: 'lark-im', oneLiner: '飞书即时通讯：收发消息和管理群聊', path: '~/.agents/skills/lark-im' },
+    ];
+    // 名字里有 draw / image 的各 6 分（两个任务词各 3 分）；ai-upscale 只在一句话里有 image，2 分；lark-im 一分没有
+    expect(pickLocalCapabilities(real, [], ['详情页', '图片']).map((item) => item.name)).toEqual([
+      'ai-draw',
+      'gemini-image',
+      'gpt-image',
+      'ai-upscale',
+    ]);
+  });
+
+  it('名字里有任务词（含近义词）的排在只有一句话里有的前面；同分按名字', () => {
+    const items = [
+      { name: 'zzz-notes', oneLiner: '整理封面素材', path: 'p1' },
+      { name: 'cover-maker', oneLiner: '工具', path: 'p2' },
+      { name: 'aaa-poster', oneLiner: '工具', path: 'p3' },
+    ];
+    expect(pickLocalCapabilities(items, [], ['封面']).map((item) => item.name)).toEqual(['aaa-poster', 'cover-maker', 'zzz-notes']);
   });
 
   it('没有本机能力、没有任务词，都是空', () => {

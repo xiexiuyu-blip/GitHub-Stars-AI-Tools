@@ -334,6 +334,7 @@ export function SolvePage(props: {
         return (
           <HitDrawer
             hit={hit}
+            problem={result.query}
             scenarios={scenarios}
             picked={picked.includes(hit.id)}
             isMain={picked[0] === hit.id}

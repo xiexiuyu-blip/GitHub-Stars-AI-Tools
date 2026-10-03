@@ -305,12 +305,39 @@ fn truncate_chars(value: &str, max_chars: usize) -> String {
     }
 }
 
-/// 超出时先保留 `max_chars` 个字符，再加「…」。
+/// 超出时尽量在一个完整的分句后面截断，不留半句话：
+/// 1. 前 `max_chars` 个字符的后半段里，最后一个「，。；、！？」或「.;,」（后面跟空格）之前截断，不加「…」；
+/// 2. 英文没有这些标点时，在最后一个空格之前截断，加「…」；
+/// 3. 都没有才硬截 `max_chars` 个字符，加「…」。
 fn truncate_with_ellipsis(value: &str, max_chars: usize) -> String {
     if value.chars().count() <= max_chars {
         return value.to_owned();
     }
-    let kept: String = value.chars().take(max_chars).collect();
+    let head: Vec<char> = value.chars().take(max_chars).collect();
+    let floor = max_chars / 2;
+    let is_break = |index: usize| {
+        let ch = head[index];
+        matches!(ch, '，' | '。' | '；' | '、' | '！' | '？')
+            || (matches!(ch, '.' | ';' | ',') && head.get(index + 1) == Some(&' '))
+            || (matches!(ch, '.' | ';' | ',')
+                && index + 1 == head.len()
+                && value.chars().nth(max_chars) == Some(' '))
+    };
+    if let Some(index) = (floor..head.len()).rev().find(|index| is_break(*index)) {
+        let cut: String = head[..index].iter().collect();
+        let cut = cut.trim_end().to_owned();
+        if !cut.is_empty() {
+            return cut;
+        }
+    }
+    if let Some(index) = (floor..head.len()).rev().find(|index| head[*index] == ' ') {
+        let cut: String = head[..index].iter().collect();
+        let cut = cut.trim_end().to_owned();
+        if !cut.is_empty() {
+            return format!("{cut}…");
+        }
+    }
+    let kept: String = head.iter().collect();
     format!("{kept}…")
 }
 
@@ -840,5 +867,37 @@ mod tests {
         let manifest = include_str!("../gen/schemas/acl-manifests.json");
         assert!(permissions.contains("\"scan_local_capabilities\""));
         assert!(manifest.contains("\"scan_local_capabilities\""));
+    }
+
+    #[test]
+    fn truncation_prefers_a_clause_boundary_over_a_half_sentence() {
+        // 中文：后半段里最后一个逗号前截断，不加「…」
+        let text = format!(
+            "{}，{}，{}",
+            "甲".repeat(50),
+            "乙".repeat(20),
+            "丙".repeat(30)
+        );
+        assert_eq!(
+            truncate_with_ellipsis(&text, 80),
+            format!("{}，{}", "甲".repeat(50), "乙".repeat(20))
+        );
+        // 逗号太靠前（前半段）不算，宁可硬截
+        let early = format!("{}，{}", "甲".repeat(10), "乙".repeat(90));
+        assert_eq!(
+            truncate_with_ellipsis(&early, 80),
+            format!("{}，{}…", "甲".repeat(10), "乙".repeat(69))
+        );
+        // 英文：没有标点就在最后一个空格前截断并加「…」
+        let english = "Route generate edit save and verify AI visual assets for brand campaigns across channels and formats today";
+        let cut = truncate_with_ellipsis(english, 60);
+        assert!(cut.ends_with('…'));
+        assert!(!cut.trim_end_matches('…').ends_with(' '));
+        assert!(english.starts_with(cut.trim_end_matches('…')));
+        // 英文句内逗号（后面跟空格）也算分句
+        let comma = format!("{}, {}", "a".repeat(45), "b ".repeat(30));
+        assert_eq!(truncate_with_ellipsis(&comma, 60), "a".repeat(45));
+        // 没超长原样返回
+        assert_eq!(truncate_with_ellipsis("短句，不用截", 80), "短句，不用截");
     }
 }
