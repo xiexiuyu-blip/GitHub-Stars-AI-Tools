@@ -348,6 +348,8 @@ pub fn url_is_safe(url: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// 注意：**不要**把 198.18.0.0/15（基准测试网段）加进来。Fox 的电脑用 Clash / Surge 一类的「fake-ip」DNS，
+/// 所有域名在本机都解析成 198.18.x.x，再由代理软件接走；拦了这个段，收集箱就一个网页都读不了。
 fn ipv4_is_blocked(ip: Ipv4Addr) -> bool {
     let octets = ip.octets();
     ip.is_private()

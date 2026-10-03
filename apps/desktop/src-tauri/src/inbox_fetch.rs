@@ -13,7 +13,9 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-const MAX_BODY_BYTES: usize = 1_000_000;
+/// 公众号文章单篇就有 3.5 MB 上下（正文不大，内联的脚本和样式很大），所以上限放到 6 MB；
+/// 任务卡原来写的 1 MB 会让每一篇公众号都读不了（2026-10-04 真网络演练发现）。
+const MAX_BODY_BYTES: usize = 6_000_000;
 const MAX_REDIRECTS: usize = 3;
 const EXCERPT_CHARS: usize = 2000;
 const TITLE_CHARS: usize = 120;
@@ -424,7 +426,7 @@ fn resolve_location(current: &str, location: &str) -> Result<String, FetchProble
 
 fn accept_body(response: PageResponse) -> Result<PageResponse, FetchProblem> {
     if response.body.len() > MAX_BODY_BYTES {
-        return Err(FetchProblem::skip("页面超过 1 MB，没有读取"));
+        return Err(too_big_problem());
     }
     if (200..300).contains(&response.status) && !allowed_type(&response.content_type) {
         return Err(FetchProblem::skip("不是网页"));
@@ -470,6 +472,7 @@ fn safe_curl_arguments(
     resolve: &str,
     user_agent: &str,
 ) -> Vec<String> {
+    let max_filesize = MAX_BODY_BYTES.to_string();
     [
         "-q",
         "-sS",
@@ -482,7 +485,7 @@ fn safe_curl_arguments(
         "--connect-timeout",
         "6",
         "--max-filesize",
-        "1000000",
+        max_filesize.as_str(),
         "-A",
         user_agent,
         "-D",
@@ -526,7 +529,10 @@ fn curl_once_pinned(url: &str, ip: IpAddr) -> Result<PageResponse, FetchProblem>
         .code()
         .ok_or_else(|| FetchProblem::fail("联网失败"))?;
     if code != 0 {
-        return Err(curl_exit_problem(code));
+        return Err(curl_exit_problem(
+            code,
+            &String::from_utf8_lossy(&output.stderr),
+        ));
     }
     let header_text =
         std::fs::read_to_string(&dump.0).map_err(|_| FetchProblem::fail("读不到响应头"))?;
@@ -544,10 +550,20 @@ fn curl_once_pinned(url: &str, ip: IpAddr) -> Result<PageResponse, FetchProblem>
     })
 }
 
-fn curl_exit_problem(code: i32) -> FetchProblem {
+fn too_big_problem() -> FetchProblem {
+    FetchProblem::skip(format!(
+        "页面太大（超过 {} MB），没有读取",
+        MAX_BODY_BYTES / 1_000_000
+    ))
+}
+
+/// curl 的退出码。响应没有 Content-Length 时，超过 `--max-filesize` 是 56 加一句英文提示，不是 63，
+/// 要看 stderr 才分得出「页面太大」和「网络真的断了」。
+fn curl_exit_problem(code: i32, stderr: &str) -> FetchProblem {
     match code {
         28 => FetchProblem::fail("联网超时"),
-        63 => FetchProblem::skip("页面超过 1 MB，没有读取"),
+        63 => too_big_problem(),
+        56 if stderr.contains("maximum allowed file size") => too_big_problem(),
         5 | 6 | 7 | 35 | 52 | 55 | 56 => FetchProblem::fail("网络连不上"),
         _ => FetchProblem::fail("联网失败"),
     }
@@ -722,10 +738,11 @@ fn extract_web(raw: &str, page_url: &str) -> WebPage {
     } else {
         String::new()
     };
-    let author = if !meta_author.is_empty() {
-        meta_author
-    } else if !nick.is_empty() {
+    // 公众号：账号名优先（meta author 常是「点击关注→」这类引导语）；别的网站：meta author 优先
+    let author = if !nick.is_empty() {
         nick
+    } else if !meta_author.is_empty() {
+        meta_author
     } else {
         site
     };
@@ -808,14 +825,23 @@ fn wechat_blocked(title: &str, excerpt: &str, body: &str) -> bool {
     {
         return true;
     }
-    title.is_empty() && excerpt.chars().count() < 30
+    // 公众号的文章页一定有标题（og:title）。没有标题的多半是错误页或拦截页，哪怕里面有几句按钮文字
+    // （真网络演练里有一页只读出了「视频 小程序 赞 在看」）
+    title.is_empty()
 }
 
+/// 公众号名字。真实页面里：`var nickname = htmlDecode("名字")`、`nick_name: '名字'` 都是它；
+/// 页面里还有 `nickname: "data-miniprogram-nickname"`（一张属性名对照表）和后面的 `nick_name: '微信广告'`，
+/// 所以每种写法只认固定的赋值符号，并且忽略「看起来是属性名」的值。
 fn wechat_author(raw: &str, cleaned: &str) -> String {
-    for ident in ["nickname", "profile_nickname"] {
-        if let Some(name) = js_assigned_string(raw, ident) {
+    for (ident, separators) in [
+        ("nickname", b"=".as_slice()),
+        ("nick_name", b":".as_slice()),
+        ("profile_nickname", b"=:".as_slice()),
+    ] {
+        if let Some(name) = js_assigned_string_with(raw, ident, separators) {
             let text = plain_text(&name, AUTHOR_CHARS);
-            if !text.is_empty() {
+            if !text.is_empty() && !looks_like_attribute_name(&text) {
                 return text;
             }
         }
@@ -827,6 +853,14 @@ fn wechat_author(raw: &str, cleaned: &str) -> String {
         }
     }
     String::new()
+}
+
+/// `data-miniprogram-nickname` 这种全小写加连字符、没有汉字的值是代码里的名字，不是账号名。
+fn looks_like_attribute_name(text: &str) -> bool {
+    text.contains('-')
+        && text
+            .chars()
+            .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-' || ch == '_')
 }
 
 fn x_display_title(author: &str, body: &str) -> String {
@@ -1137,7 +1171,11 @@ fn remove_hidden(html: &str) -> String {
                 && !tag.self_closing
                 && matches!(tag.name.as_str(), "script" | "style" | "noscript" | "svg")
             {
-                index = skip_element(html, tag.end, &tag.name);
+                index = if tag.name == "svg" {
+                    skip_element(html, tag.end, &tag.name)
+                } else {
+                    skip_raw_text_element(html, tag.end, &tag.name)
+                };
                 continue;
             }
             out.push_str(&html[index..tag.end]);
@@ -1148,6 +1186,31 @@ fn remove_hidden(html: &str) -> String {
         index += 1;
     }
     out
+}
+
+/// `script`、`style`、`noscript` 的内容是原样文本，不是 HTML：到第一个 `</名字` 就结束，
+/// 里面出现的 `<script>`、`<div>` 之类（脚本字符串里的模板）都不算标签。
+/// 以前按「标签嵌套深度」数，脚本里一个没配对的 `<script>` 就让整页后面的内容全被吞掉
+/// （一篇公众号文章 3.6 MB 只剩 1 KB，标题、正文全丢）。
+fn skip_raw_text_element(html: &str, content_start: usize, name: &str) -> usize {
+    let bytes = html.as_bytes();
+    let needle = format!("</{name}").into_bytes();
+    let mut index = content_start;
+    while index + needle.len() <= bytes.len() {
+        if bytes[index] == b'<'
+            && bytes[index..index + needle.len()].eq_ignore_ascii_case(&needle)
+            && bytes
+                .get(index + needle.len())
+                .is_none_or(|next| next.is_ascii_whitespace() || *next == b'>' || *next == b'/')
+        {
+            return match html[index..].find('>') {
+                Some(relative) => index + relative + 1,
+                None => html.len(),
+            };
+        }
+        index += 1;
+    }
+    html.len()
 }
 
 fn skip_element(html: &str, content_start: usize, name: &str) -> usize {
@@ -1404,6 +1467,11 @@ fn meta_content(metas: &[(String, String)], key: &str) -> Option<String> {
 }
 
 fn js_assigned_string(html: &str, ident: &str) -> Option<String> {
+    js_assigned_string_with(html, ident, b"=:")
+}
+
+/// `separators` 是变量名后面允许的赋值符号：`=`（`var nickname = …`）或 `:`（`nick_name: '…'`）。
+fn js_assigned_string_with(html: &str, ident: &str, separators: &[u8]) -> Option<String> {
     let bytes = html.as_bytes();
     let needle = ident.as_bytes();
     let mut index = 0;
@@ -1413,11 +1481,13 @@ fn js_assigned_string(html: &str, ident: &str) -> Option<String> {
             continue;
         }
         if html[index..].starts_with(ident) {
-            let before_ok = index == 0 || !is_ident_byte(bytes[index - 1]);
+            // 前面不能紧贴字母数字、_、$，也不能是「-」：`data-miniprogram-nickname="…"` 是 HTML 属性，不是 JS 变量
+            let before_ok =
+                index == 0 || !(is_ident_byte(bytes[index - 1]) || bytes[index - 1] == b'-');
             let after = index + needle.len();
             let after_ok = after >= bytes.len() || !is_ident_byte(bytes[after]);
             if before_ok && after_ok {
-                if let Some(value) = assignment_after(html, after) {
+                if let Some(value) = assignment_after(html, after, separators) {
                     if !value.is_empty() {
                         return Some(value);
                     }
@@ -1433,17 +1503,37 @@ fn is_ident_byte(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'$'
 }
 
-fn assignment_after(html: &str, mut index: usize) -> Option<String> {
+fn assignment_after(html: &str, mut index: usize, separators: &[u8]) -> Option<String> {
     let bytes = html.as_bytes();
     while index < bytes.len() && bytes[index].is_ascii_whitespace() {
         index += 1;
     }
-    if index >= bytes.len() || (bytes[index] != b'=' && bytes[index] != b':') {
+    if index >= bytes.len() || !separators.contains(&bytes[index]) {
+        return None;
+    }
+    // `===`、`==` 是比较，不是赋值
+    if bytes[index] == b'=' && bytes.get(index + 1) == Some(&b'=') {
         return None;
     }
     index += 1;
     while index < bytes.len() && bytes[index].is_ascii_whitespace() {
         index += 1;
+    }
+    // 公众号页面里是 `var nickname = htmlDecode("名字")`：允许值外面包一层函数调用
+    if index < bytes.len() && (bytes[index].is_ascii_alphabetic() || bytes[index] == b'_') {
+        let mut call = index;
+        while call < bytes.len() && (is_ident_byte(bytes[call]) || bytes[call] == b'.') {
+            call += 1;
+        }
+        while call < bytes.len() && bytes[call].is_ascii_whitespace() {
+            call += 1;
+        }
+        if call < bytes.len() && bytes[call] == b'(' {
+            index = call + 1;
+            while index < bytes.len() && bytes[index].is_ascii_whitespace() {
+                index += 1;
+            }
+        }
     }
     if index >= bytes.len() || (bytes[index] != b'"' && bytes[index] != b'\'') {
         return None;
@@ -2141,6 +2231,7 @@ mod tests {
             "<title>验证</title><body>完成验证后即可继续访问</body>",
             "<title></title><body>请在微信客户端打开</body>",
             "<html><head></head><body>太短</body></html>",
+            "<html><body><div>：</div><div>，</div><div>视频</div><div>小程序</div><div>赞，轻点两下取消赞</div><div>在看，轻点两下取消在看</div></body></html>",
         ] {
             let page = extract_web(html, "https://mp.weixin.qq.com/s/blocked");
             assert_eq!(page.failure, Some(WECHAT_BLOCK_REASON), "{html}");
@@ -2364,20 +2455,37 @@ mod tests {
     }
 
     #[test]
-    fn body_over_one_megabyte_is_skipped_and_exact_limit_is_kept() {
+    fn body_over_the_limit_is_skipped_and_exact_limit_is_kept() {
         let exact = "a".repeat(MAX_BODY_BYTES);
         let ok = SeqFetcher::new(vec![Ok(page(200, "text/plain", &exact, None))]);
         let response = guarded("https://example.com/exact", &MapResolver::public(), &ok)
-            .expect("刚好 1 MB 应留下");
+            .expect("刚好等于上限应留下");
         assert_eq!(response.body.len(), MAX_BODY_BYTES);
 
         let mut too_big = "a".repeat(MAX_BODY_BYTES);
         too_big.push('b');
         let fetcher = SeqFetcher::new(vec![Ok(page(200, "text/html", &too_big, None))]);
         let error = guarded("https://example.com/big", &MapResolver::public(), &fetcher)
-            .expect_err("超过 1 MB 应跳过");
+            .expect_err("超过上限应跳过");
         assert_eq!(error.kind, FetchProblemKind::Skip);
-        assert_eq!(error.message, "页面超过 1 MB，没有读取");
+        assert_eq!(error.message, "页面太大（超过 6 MB），没有读取");
+    }
+
+    #[test]
+    fn curl_size_limit_errors_are_skips_not_network_failures() {
+        let big = "curl: (56) Exceeded the maximum allowed file size (6000000) with 6000000 bytes";
+        for (code, stderr) in [(63, ""), (56, big)] {
+            let problem = curl_exit_problem(code, stderr);
+            assert_eq!(problem.kind, FetchProblemKind::Skip, "{code}");
+            assert_eq!(problem.message, "页面太大（超过 6 MB），没有读取");
+        }
+        // 真的断了：56 但没有大小提示
+        let reset = curl_exit_problem(56, "curl: (56) Recv failure: Connection reset by peer");
+        assert_eq!(reset.kind, FetchProblemKind::Fail);
+        assert_eq!(reset.message, "网络连不上");
+        assert_eq!(curl_exit_problem(28, "").message, "联网超时");
+        assert_eq!(curl_exit_problem(6, "").message, "网络连不上");
+        assert_eq!(curl_exit_problem(99, "").message, "联网失败");
     }
 
     #[test]
@@ -2413,7 +2521,7 @@ mod tests {
             .any(|pair| pair[0] == "--connect-timeout" && pair[1] == "6"));
         assert!(args
             .windows(2)
-            .any(|pair| pair[0] == "--max-filesize" && pair[1] == "1000000"));
+            .any(|pair| pair[0] == "--max-filesize" && pair[1] == "6000000"));
         assert!(args
             .windows(2)
             .any(|pair| pair[0] == "--proto" && pair[1] == "=https"));
@@ -2777,5 +2885,76 @@ Content-Type: text/html; charset=utf-8\r\n\
         let summary = fetch_pending(&db.path, &again, Some("gone"), 20).expect("应成功");
         assert_eq!(summary.done + summary.failed + summary.skipped, 0);
         assert!(again.calls().is_empty());
+    }
+
+    /// 真实公众号页面的形状（2026-10-04 真网络演练里 3.6 MB 的一篇，裁剪后）：
+    /// 脚本字符串里有没配对的 `<script>`、空的 `<title>`、`data-miniprogram-nickname` 属性、
+    /// `var nickname = htmlDecode("名字")`、正文在 `visibility: hidden` 的 `js_content` 里。
+    #[test]
+    fn real_wechat_page_shape_is_read_in_full() {
+        let html = concat!(
+            "<!DOCTYPE html><html><head><meta charset=\"utf-8\">",
+            "<meta name=\"description\" content=\"全球顶级AI开源项目大赏！\" />",
+            "<meta name=\"author\" content=\"点击关注→\" />",
+            "<meta property=\"og:title\" content=\"吵着要学AI的小伙伴，可以看看这些牛批的开源项目\" />",
+            "<meta property=\"og:description\" content=\"全球顶级AI开源项目大赏！\" />",
+            "<meta property=\"og:site_name\" content=\"微信公众平台\" />",
+            "<title></title>",
+            "<script>var tpl = '<script src=\"x.js\"><\\/script>'; document.write(\"<script>\"); var a = 1 < 2;</script>",
+            "<style>.a{color:red}</style></head><body>",
+            "<div id=\"js_article\"><h1 class=\"rich_media_title\"><span class=\"js_title_inner\">吵着要学AI</span></h1>",
+            "<a data-miniprogram-nickname=\"小程序名\" href=\"#\">x</a>",
+            "<div class=\"rich_media_content\" id=\"js_content\" style=\"visibility: hidden;\">",
+            "<p>小伙伴们 大家好</p><p>TensorFlow 项目名称</p></div></div>",
+            "<script>var attrs = {\n  nickname: \"data-miniprogram-nickname\",\n};</script>",
+            "<script>if (nickname === '') {}; var nickname = htmlDecode(\"CodeSheep\"); var profile_nickname = \"\";</script>",
+            "<script>window.cgiData = {nick_name: 'CodeSheep', ads: {nick_name: '微信广告'}}</script>",
+            "</body></html>"
+        );
+        let page = extract_web(html, "https://mp.weixin.qq.com/s/abc");
+        assert_eq!(page.failure, None);
+        assert_eq!(page.title, "吵着要学AI的小伙伴，可以看看这些牛批的开源项目");
+        assert_eq!(page.author, "CodeSheep");
+        assert!(
+            page.excerpt.starts_with("全球顶级AI开源项目大赏！"),
+            "{}",
+            page.excerpt
+        );
+        assert!(page.excerpt.contains("小伙伴们 大家好"));
+        assert!(page.excerpt.contains("TensorFlow 项目名称"));
+        assert!(!page.excerpt.contains("document.write"));
+        assert!(!page.excerpt.contains("htmlDecode"));
+    }
+
+    #[test]
+    fn script_content_ends_at_the_first_closing_tag_even_with_unpaired_opens_inside() {
+        let html = "<p>前</p><script>var s = '<script>'; if (a < b) {}</script><p>后</p><style>p{}</style><p>尾</p>";
+        assert_eq!(remove_hidden(html), "<p>前</p><p>后</p><p>尾</p>");
+        // 大小写和空白不影响结束标签；没有结束标签就吃到文末
+        assert_eq!(remove_hidden("a<SCRIPT>x</SCRIPT >b"), "ab");
+        assert_eq!(remove_hidden("a<script>没有结束"), "a");
+        // 名字只是前缀的标签不算结束：</scripts> 不是 </script>
+        assert_eq!(remove_hidden("a<script>x</scripts>y</script>b"), "ab");
+    }
+
+    #[test]
+    fn attribute_named_like_a_variable_is_not_an_author() {
+        let html = "<a data-miniprogram-nickname=\"属性里的\">x</a><script>var nickname = 'JS里的';</script>";
+        assert_eq!(
+            js_assigned_string(html, "nickname").as_deref(),
+            Some("JS里的")
+        );
+        assert_eq!(
+            js_assigned_string(
+                "var n = decodeURIComponent('甲'); var nickname = htmlDecode( \"乙\" );",
+                "nickname"
+            )
+            .as_deref(),
+            Some("乙")
+        );
+        assert_eq!(
+            js_assigned_string("<a data-x-nickname=\"丙\">", "nickname"),
+            None
+        );
     }
 }
