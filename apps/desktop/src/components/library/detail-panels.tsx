@@ -1,12 +1,11 @@
 import { useEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
 import type { LibraryDetail } from '@/lib/contracts';
+import { buildCommunityPrompt, buildInstallPrompt } from '@/lib/codex-prompts';
 import { communityNote, groupCommunity, itemMeta, stateLabel } from '@/lib/community-view';
 import { relativeDays } from '@/lib/item-format';
 import { useRepoCommunity } from '@/hooks/use-repo-community';
 import {
-  buildCommunityPrompt,
-  buildInstallPrompt,
   communityLinks,
   releasesUrl,
   type InstallStep,
@@ -71,6 +70,7 @@ export function InstallPanel(props: {
   steps: InstallStep[];
   howFallback: string;
   hasDownload: boolean;
+  scenarioName?: string | null;
   onCopyText: (text: string) => void;
   onCopyPrompt: (text: string) => void;
 }) {
@@ -139,7 +139,7 @@ export function InstallPanel(props: {
           <b className="block text-sm font-semibold text-foreground">让 Codex 帮你装</b>
           <span className="text-xs leading-[1.6] text-on-surface-variant">复制一段话，粘给 Codex：它会先读 README、告诉你要改动什么，再一步步装好并验证。</span>
         </span>
-        <Button onClick={() => props.onCopyPrompt(buildInstallPrompt({ fullName: detail.fullName, htmlUrl: detail.htmlUrl }))}>
+        <Button onClick={() => props.onCopyPrompt(buildInstallPrompt({ fullName: detail.fullName, htmlUrl: detail.htmlUrl, form: detail.form, scenarioName: props.scenarioName }))}>
           <Icon name="content_copy" size={16} />
           复制
         </Button>
@@ -276,7 +276,7 @@ export function ReadmePanel(props: { detail: LibraryDetail; readme: ReadmeState 
 
 /* ─────────────── 社区：别人怎么用 ─────────────── */
 
-export function CommunityPanel(props: { detail: LibraryDetail; onCopyPrompt: (text: string) => void }) {
+export function CommunityPanel(props: { detail: LibraryDetail; scenarioName?: string | null; onCopyPrompt: (text: string) => void }) {
   const links = communityLinks(props.detail.fullName);
   return (
     <div className="flex flex-col gap-3">
@@ -290,7 +290,7 @@ export function CommunityPanel(props: { detail: LibraryDetail; onCopyPrompt: (te
           <span className="block text-xs leading-[1.6] text-on-surface-variant">
             复制一段话粘给 Codex：它会用你的 web-search，在小红书、知乎、B 站、X、Reddit、YouTube 等地方找真实的使用案例、踩过的坑和替代品，只引用查到的内容，附原帖链接。
           </span>
-          <Button className="mt-2.5" onClick={() => props.onCopyPrompt(buildCommunityPrompt({ fullName: props.detail.fullName, htmlUrl: props.detail.htmlUrl }))}>
+          <Button className="mt-2.5" onClick={() => props.onCopyPrompt(buildCommunityPrompt({ fullName: props.detail.fullName, htmlUrl: props.detail.htmlUrl, form: props.detail.form, scenarioName: props.scenarioName }))}>
             <Icon name="content_copy" size={16} />
             复制给 Codex
           </Button>

@@ -265,13 +265,14 @@ function DetailBody(props: Parameters<typeof ItemDetail>[0] & { detail: LibraryD
                 steps={steps}
                 howFallback={how}
                 hasDownload={downloadHint}
+                scenarioName={scenarioList[0]?.nameZh ?? null}
                 onCopyText={props.onCopyHow}
                 onCopyPrompt={copyPrompt}
               />
             ) : null}
             {tab === 'preview' ? <PreviewPanel detail={detail} readme={readme} images={images} /> : null}
             {tab === 'readme' ? <ReadmePanel detail={detail} readme={readme} /> : null}
-            {tab === 'community' ? <CommunityPanel detail={detail} onCopyPrompt={copyPrompt} /> : null}
+            {tab === 'community' ? <CommunityPanel detail={detail} scenarioName={scenarioList[0]?.nameZh ?? null} onCopyPrompt={copyPrompt} /> : null}
           </div>
         </div>
       </div>

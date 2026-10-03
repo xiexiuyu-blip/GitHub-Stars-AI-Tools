@@ -1,8 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
   avatarUrl,
-  buildCommunityPrompt,
-  buildInstallPrompt,
   communityLinks,
   explainerLinks,
   coverGradient,
@@ -211,16 +209,6 @@ describe('去别处看别人怎么用', () => {
     expect(links.find((link) => link.id === 'issues')?.url).toContain('github.com/MengTo/Skills/issues');
     expect(links.find((link) => link.id === 'discussions')?.url).toBe('https://github.com/MengTo/Skills/discussions');
     for (const link of links) expect(link.url.startsWith('https://')).toBe(true);
-  });
-
-  it('给 Codex 的两段话：带上项目名和链接，要求不编造', () => {
-    const community = buildCommunityPrompt({ fullName: 'harry0703/MoneyPrinterTurbo', htmlUrl: 'https://github.com/harry0703/MoneyPrinterTurbo' });
-    expect(community).toContain('「MoneyPrinterTurbo」');
-    expect(community).toContain('https://github.com/harry0703/MoneyPrinterTurbo');
-    expect(community).toContain('不要编造');
-    const install = buildInstallPrompt({ fullName: 'op7418/guizang-social-card-skill' });
-    expect(install).toContain('https://github.com/op7418/guizang-social-card-skill');
-    expect(install).toContain('先告诉我');
   });
 });
 

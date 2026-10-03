@@ -102,6 +102,13 @@ export function rowStatusTag(row: Pick<CapturePreviewRow, 'status' | 'blockedRea
   return reason ? { tone: 'red', text: '将被拦下', reason } : { tone: 'red', text: '将被拦下' };
 }
 
+/** 收集箱里的 GitHub 仓库条目 → `owner/repo`（用来显示头像）。不是仓库、或链接里认不出来就返回 null。 */
+export function githubFullName(item: { itemType: string; normalizedUrl: string }): string | null {
+  if (!REPO_KINDS.has(item.itemType)) return null;
+  const match = /^https?:\/\/(?:www\.)?github\.com\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+?)(?:\.git)?(?:[/?#]|$)/i.exec(item.normalizedUrl.trim());
+  return match ? `${match[1]}/${match[2]}` : null;
+}
+
 export function kindIcon(kind: string): string {
   if (REPO_KINDS.has(kind)) return 'inventory_2';
   if (X_KINDS.has(kind)) return 'forum';

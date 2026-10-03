@@ -342,27 +342,3 @@ export function explainerLinks(fullName: string): ExplainerLink[] {
     { id: 'zread', label: 'Zread', url: `https://zread.ai/${name}`, hint: '用 AI 通读仓库后的解读文档' },
   ];
 }
-
-export function buildCommunityPrompt(input: { fullName: string; htmlUrl?: string | null }): string {
-  const url = input.htmlUrl?.trim() || `https://github.com/${input.fullName}`;
-  return [
-    `请用 web-search 帮我查一下开源项目「${repoNameOf(input.fullName)}」（${url}）在网上的真实使用讨论，重点看：`,
-    '1. 谁在用、拿它做什么：给出 3–5 个具体的场景或案例，每条附原帖链接；',
-    '2. 实际用起来的体验：好用的地方、踩过的坑、常见的报错和解决办法；',
-    '3. 有没有更好、或更常被推荐的替代品；',
-    '4. 中文社区（小红书、知乎、B 站、微信公众号、V2EX、掘金）和英文社区（X、Reddit、Hacker News、YouTube、GitHub Issues / Discussions）分开列。',
-    '只引用你真正查到的内容，每条都带链接；查不到就直说，不要编造。',
-    '最后用不超过 300 字给我一个结论：它现在值不值得我花时间试。',
-  ].join('\n');
-}
-
-export function buildInstallPrompt(input: { fullName: string; htmlUrl?: string | null }): string {
-  const url = input.htmlUrl?.trim() || `https://github.com/${input.fullName}`;
-  return [
-    `请帮我在这台 Mac 上安装并跑通「${repoNameOf(input.fullName)}」（${url}）。`,
-    '1. 先读它 README 里的安装 / 快速开始部分，确认系统要求和依赖；',
-    '2. 动手之前先告诉我：会装到哪里、会改动什么、需要联网下载什么；有多种安装方式时选最简单、最容易撤销的；',
-    '3. 不确定的步骤先问我，不要编造命令；需要管理员权限或付费账号时停下来等我；',
-    '4. 装好后用一个最小的例子验证它真的能跑，再告诉我怎么用它做我手头的事。',
-  ].join('\n');
-}
