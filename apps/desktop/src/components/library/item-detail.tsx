@@ -84,6 +84,9 @@ function DetailBody(props: Parameters<typeof ItemDetail>[0] & { detail: LibraryD
   const tryText = how || steps[0]?.command || '';
   const summarySource = detail.whatItIs?.trim() ? detail.whatItIs : detail.oneLiner;
   const capabilities = detail.capabilities.slice(0, 4).map((item) => clipText(item, 46));
+  const useWhen = (detail.useWhen ?? []).map((item) => item.trim()).filter(Boolean).slice(0, 4);
+  const notFor = (detail.notFor ?? []).map((item) => item.trim()).filter(Boolean).slice(0, 3);
+  const risks = (detail.risks ?? []).map((item) => item.trim()).filter(Boolean).slice(0, 4);
   const scenarioList = detail.scenarioIds
     .map((id) => props.scenarios?.find((scenario) => scenario.id === id))
     .filter((scenario): scenario is ScenarioSummary => Boolean(scenario));
@@ -219,6 +222,51 @@ function DetailBody(props: Parameters<typeof ItemDetail>[0] & { detail: LibraryD
                       ))}
                     </ul>
                   </SoftCard>
+                ) : null}
+
+                {useWhen.length > 0 || notFor.length > 0 ? (
+                  <div className={cn('grid gap-3', useWhen.length > 0 && notFor.length > 0 && 'min-[560px]:grid-cols-2')}>
+                    {useWhen.length > 0 ? (
+                      <SoftCard>
+                        <SectionTitle icon="thumb_up" hue={148}>什么时候用它</SectionTitle>
+                        <ul className="m-0 flex list-none flex-col gap-1.5 p-0">
+                          {useWhen.map((item, index) => (
+                            <li key={`${index}-${item}`} className="flex items-start gap-2 text-sm leading-[1.6] text-foreground">
+                              <Icon name="check" size={16} className="mt-[3px] shrink-0 text-[hsl(148_55%_42%)]" />
+                              <span className="min-w-0">{item}</span>
+                            </li>
+                          ))}
+                        </ul>
+                      </SoftCard>
+                    ) : null}
+                    {notFor.length > 0 ? (
+                      <SoftCard>
+                        <SectionTitle icon="block" hue={4}>不太适合</SectionTitle>
+                        <ul className="m-0 flex list-none flex-col gap-1.5 p-0">
+                          {notFor.map((item, index) => (
+                            <li key={`${index}-${item}`} className="flex items-start gap-2 text-sm leading-[1.6] text-foreground">
+                              <Icon name="close" size={16} className="mt-[3px] shrink-0 text-[hsl(4_65%_52%)]" />
+                              <span className="min-w-0">{item}</span>
+                            </li>
+                          ))}
+                        </ul>
+                      </SoftCard>
+                    ) : null}
+                  </div>
+                ) : null}
+
+                {risks.length > 0 ? (
+                  <div className="rounded-lg border border-[hsl(36_80%_80%)] bg-[hsl(36_100%_96%)] p-4 dark:border-[hsl(36_40%_30%)] dark:bg-[hsl(36_30%_16%)]">
+                    <SectionTitle icon="warning" hue={36}>用之前注意</SectionTitle>
+                    <ul className="m-0 flex list-none flex-col gap-1.5 p-0">
+                      {risks.map((item, index) => (
+                        <li key={`${index}-${item}`} className="flex items-start gap-2 text-sm leading-[1.6] text-foreground">
+                          <Icon name="priority_high" size={16} className="mt-[3px] shrink-0 text-[hsl(36_90%_42%)]" />
+                          <span className="min-w-0">{item}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
                 ) : null}
 
                 {detail.hasCard || steps.length > 0 ? (

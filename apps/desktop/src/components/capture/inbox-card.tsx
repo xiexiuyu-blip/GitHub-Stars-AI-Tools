@@ -3,12 +3,16 @@ import type { InboxItem, InboxPage } from '@/lib/contracts';
 import { Button, Card, CardHeader, EmptyState, RepoAvatar, Segmented, Spinner, Tag } from '@/components/kit';
 import { Icon } from '@/components/ui/icon';
 import { relativeDays } from '@/lib/item-format';
+import { cn } from '@/lib/utils';
 import {
   archiveAction,
   canOpenUrl,
   emptyInboxCopy,
+  fetchLine,
   githubFullName,
+  inboxByline,
   inboxContext,
+  inboxExcerpt,
   inboxFilterOptions,
   inboxHeading,
   inboxMeta,
@@ -28,6 +32,8 @@ export function InboxCard(props: {
   draft: string;
   noteMessage: string | null;
   savingNote: boolean;
+  /** 后台正在联网读取收集箱里的链接（标题和摘要） */
+  fetching: boolean;
   onFilter: (value: InboxFilter) => void;
   onLoadMore: () => void;
   onRetry: () => void;
@@ -36,6 +42,7 @@ export function InboxCard(props: {
   onSaveNote: () => void;
   onCancelNote: () => void;
   onArchive: (item: InboxItem) => void;
+  onRetryFetch: (item: InboxItem) => void;
 }) {
   const counts = props.page?.counts ?? { pending: 0, ready: 0, failed: 0, archived: 0 };
   const options = inboxFilterOptions(counts);
@@ -56,6 +63,11 @@ export function InboxCard(props: {
           />
         )}
       />
+      {props.filter === 'pending' && props.page && props.page.items.length > 0 ? (
+        <p className="m-0 border-b border-muted bg-surface-container-low px-4 py-2 text-xs leading-[1.6] text-on-surface-variant">
+          这些链接还没有进你的资料库。想留的，在 GitHub 上点 Star，再点顶部「同步」，就会自动进资料库并整理；不想要的点「归档」。
+        </p>
+      ) : null}
       {renderBody()}
       {hasMore ? (
         <div className="flex justify-center border-t border-muted px-4 py-3">
@@ -97,6 +109,8 @@ export function InboxCard(props: {
             draft={props.draft}
             noteMessage={props.editingId === item.id ? props.noteMessage : null}
             savingNote={props.savingNote && props.editingId === item.id}
+            fetching={props.fetching}
+            onRetryFetch={props.onRetryFetch}
             onStartNote={props.onStartNote}
             onDraft={props.onDraft}
             onSaveNote={props.onSaveNote}
@@ -116,6 +130,8 @@ function InboxRow(props: {
   draft: string;
   noteMessage: string | null;
   savingNote: boolean;
+  fetching: boolean;
+  onRetryFetch: (item: InboxItem) => void;
   onStartNote: (item: InboxItem) => void;
   onDraft: (value: string) => void;
   onSaveNote: () => void;
@@ -124,10 +140,15 @@ function InboxRow(props: {
 }) {
   const title = inboxHeading(props.item.title, props.item.normalizedUrl);
   const repoName = githubFullName(props.item);
-  const meta = inboxMeta(
-    inboxContext(props.item.sourceContext, props.item.platform),
-    relativeDays(props.item.createdAt, new Date()),
+  const meta = inboxByline(
+    props.item.pageAuthor,
+    inboxMeta(
+      inboxContext(props.item.sourceContext, props.item.platform),
+      relativeDays(props.item.createdAt, new Date()),
+    ),
   );
+  const excerpt = inboxExcerpt(props.item);
+  const fetchNote = fetchLine(props.item, props.fetching);
   const tag = inboxStatusTag(props.item.status);
   const action = archiveAction(props.item.status);
   const errorId = `inbox-note-error-${props.item.id}`;
@@ -154,7 +175,24 @@ function InboxRow(props: {
       )}
       <div className="min-w-0">
         <b className="block truncate text-sm font-medium text-foreground" title={title}>{title}</b>
-        {meta ? <div className="truncate text-xs text-on-surface-variant">{meta}</div> : null}
+        {excerpt ? <p className="mt-0.5 mb-0 line-clamp-2 text-xs leading-[1.6] text-on-surface-variant">{excerpt}</p> : null}
+        {meta ? <div className="truncate text-xs text-subtle">{meta}</div> : null}
+        {fetchNote ? (
+          <div className={cn('mt-0.5 flex items-center gap-1.5 text-xs', fetchNote.tone === 'red' ? 'text-error' : 'text-on-surface-variant')}>
+            {fetchNote.spinning ? <Spinner /> : null}
+            <span>{fetchNote.text}</span>
+            {fetchNote.retry ? (
+              <button
+                type="button"
+                className="text-accent-foreground hover:underline hover:underline-offset-[3px]"
+                disabled={props.fetching}
+                onClick={() => props.onRetryFetch(props.item)}
+              >
+                重试
+              </button>
+            ) : null}
+          </div>
+        ) : null}
         {props.editing ? (
           <div className="mt-1.5">
             <div className="flex flex-wrap items-center gap-2">

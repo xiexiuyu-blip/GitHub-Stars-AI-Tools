@@ -3,6 +3,8 @@ import type { CapturePreview, InboxItem, InboxPage } from '@/lib/contracts';
 import {
   commitCaptureBatch,
   describeInvokeError,
+  fetchInboxPending,
+  isMissingCommandError,
   listInbox,
   previewCapture,
   setInboxNote,
@@ -15,6 +17,7 @@ import {
   canCommit,
   type CaptureSource,
   describeCommit,
+  hasUnfetched,
   inboxHeading,
   type InboxFilter,
   isTooLong,
@@ -51,6 +54,7 @@ export function CapturePage() {
   const [draft, setDraft] = useState('');
   const [noteMessage, setNoteMessage] = useState<string | null>(null);
   const [savingNote, setSavingNote] = useState(false);
+  const [fetching, setFetching] = useState(false);
 
   const previewGen = useRef(0);
   const inboxGen = useRef(0);
@@ -60,6 +64,18 @@ export function CapturePage() {
   const busyRef = useRef<string | null>(null);
   const filterRef = useRef(filter);
   filterRef.current = filter;
+  const inboxRef = useRef(inbox);
+  inboxRef.current = inbox;
+  const fetchingRef = useRef(false);
+  const mountedRef = useRef(true);
+  const runFetchRef = useRef<(id?: string) => Promise<void>>(async () => {});
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
 
   useEffect(() => {
     const decision = previewDecision(text);
@@ -120,6 +136,8 @@ export function CapturePage() {
         if (!active || gen !== inboxGen.current) return;
         setInbox(page);
         setInboxPhase('ready');
+        // 收进来的链接（X、公众号、视频、网页）只有网址：后台去读公开的标题和摘要，读完静默刷新
+        if (hasUnfetched(page.items)) void runFetchRef.current();
       })
       .catch((reason: unknown) => {
         if (!active || gen !== inboxGen.current) return;
@@ -130,6 +148,40 @@ export function CapturePage() {
       active = false;
     };
   }, [filter, reloadKey]);
+
+  /** 不清空列表地换一份新数据，用在后台读完一轮之后（正常刷新会先清空再转圈，会闪）。 */
+  async function refreshSilently() {
+    const status = filterRef.current;
+    const gen = inboxGen.current;
+    const size = Math.max(INBOX_PAGE_SIZE, inboxRef.current?.items.length ?? 0);
+    try {
+      const page = await listInbox(status, size, 0);
+      if (!mountedRef.current || gen !== inboxGen.current || status !== filterRef.current) return;
+      setInbox(page);
+    } catch {
+      // 静默刷新失败不打扰；下次正常刷新会再读
+    }
+  }
+
+  /** 让后台联网读还没读过的链接。一次最多 20 条，还有剩的就再来一轮（最多 5 轮）。带 id 只读这一条（读不到的重试）。 */
+  async function runFetch(id?: string) {
+    if (fetchingRef.current) return;
+    fetchingRef.current = true;
+    setFetching(true);
+    try {
+      for (let round = 0; round < 5; round += 1) {
+        const summary = await fetchInboxPending(id);
+        await refreshSilently();
+        if (id || summary.remaining <= 0 || summary.done + summary.failed + summary.skipped === 0) break;
+      }
+    } catch (reason: unknown) {
+      if (!isMissingCommandError(reason) && mountedRef.current) toast.show({ title: describeInvokeError(reason) });
+    } finally {
+      fetchingRef.current = false;
+      if (mountedRef.current) setFetching(false);
+    }
+  }
+  runFetchRef.current = runFetch;
 
   const matchedPreview = preview && previewFor === text ? preview : null;
   const commitReady = Boolean(matchedPreview && canCommit(matchedPreview) && !isTooLong(text));
@@ -319,6 +371,7 @@ export function CapturePage() {
         draft={draft}
         noteMessage={noteMessage}
         savingNote={savingNote}
+        fetching={fetching}
         onFilter={chooseFilter}
         onLoadMore={() => { void loadMore(); }}
         onRetry={() => setReloadKey((key) => key + 1)}
@@ -327,6 +380,7 @@ export function CapturePage() {
         onSaveNote={() => { void saveNote(); }}
         onCancelNote={cancelNote}
         onArchive={(item) => { void archive(item); }}
+        onRetryFetch={(item) => { void runFetch(item.id); }}
       />
     </section>
   );

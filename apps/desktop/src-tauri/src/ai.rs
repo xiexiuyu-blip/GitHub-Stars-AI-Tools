@@ -2342,7 +2342,7 @@ mod card_chat {
             })
             .ok_or_else(|| ChatError {
                 kind: ChatErrorKind::Other,
-                message: "OpenAI 响应中没有可用内容".to_owned(),
+                message: empty_openai_content_message(&value),
             })?;
         let usage = value.get("usage");
         Ok(ChatReply {
@@ -2351,6 +2351,49 @@ mod card_chat {
             output_tokens: usage.and_then(|item| read_u64(item, "completion_tokens")),
             model: string_field(&value, "model"),
         })
+    }
+
+    /// 空内容时多说一句原因：结束原因（length = 输出额度用完了）、有没有思考内容、这次已经用了多少 token。
+    /// 这些都是响应里的公开字段，不含任何密钥或用户内容。
+    fn empty_openai_content_message(value: &Value) -> String {
+        let first = value
+            .get("choices")
+            .and_then(Value::as_array)
+            .and_then(|choices| choices.first());
+        let mut message = "OpenAI 响应中没有可用内容".to_owned();
+        let mut notes = Vec::new();
+        if let Some(reason) = first
+            .and_then(|choice| choice.get("finish_reason"))
+            .and_then(Value::as_str)
+            .filter(|text| !text.trim().is_empty())
+        {
+            notes.push(format!("结束原因 {reason}"));
+        }
+        let has_reasoning = first
+            .and_then(|choice| choice.get("message"))
+            .map(|body| {
+                ["reasoning_content", "reasoning"].iter().any(|key| {
+                    body.get(*key)
+                        .and_then(Value::as_str)
+                        .is_some_and(|text| !text.trim().is_empty())
+                })
+            })
+            .unwrap_or(false);
+        if has_reasoning {
+            notes.push("模型只给了思考内容，没有正文".to_owned());
+        }
+        if let Some(tokens) = value
+            .get("usage")
+            .and_then(|usage| read_u64(usage, "completion_tokens"))
+        {
+            notes.push(format!("这次输出了 {tokens} token"));
+        }
+        if !notes.is_empty() {
+            message.push('（');
+            message.push_str(&notes.join("，"));
+            message.push('）');
+        }
+        message
     }
 
     pub fn parse_anthropic_reply(body: &str) -> Result<ChatReply, ChatError> {
@@ -4028,6 +4071,24 @@ mod tests {
 
         assert_eq!(error.kind, ChatErrorKind::Other);
         assert!(error.message.contains("没有可用内容"));
+    }
+
+    #[test]
+    fn empty_openai_content_explains_finish_reason_reasoning_and_usage() {
+        let error = parse_openai_chat_reply(
+            r#"{"choices":[{"finish_reason":"length","message":{"content":"","reasoning_content":"想了很多"}}],"usage":{"prompt_tokens":3000,"completion_tokens":2048}}"#,
+        )
+        .expect_err("空内容应失败");
+        assert!(error.message.contains("没有可用内容"));
+        assert!(error.message.contains("结束原因 length"));
+        assert!(error.message.contains("只给了思考内容"));
+        assert!(error.message.contains("2048"));
+        // 不带任何响应正文
+        assert!(!error.message.contains("想了很多"));
+
+        let plain = parse_openai_chat_reply(r#"{"choices":[{"message":{"content":null}}]}"#)
+            .expect_err("没有内容应失败");
+        assert_eq!(plain.message, "OpenAI 响应中没有可用内容");
     }
 
     #[test]

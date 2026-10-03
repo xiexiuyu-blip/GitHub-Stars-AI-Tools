@@ -206,7 +206,18 @@ export type InboxItem = {
   status: 'pending' | 'ready' | 'failed' | 'archived';
   repositoryId: string | null;
   createdAt: string;
+  /** 后台读取公开页面的进度（卡 23）：pending 还没读 / done 读到了 / failed 读不到（原因在 fetchError）/ skipped 不需要读（GitHub 仓库、非 https 等）。旧版后台没有下面四项，所以都是可选的。 */
+  fetchStatus?: 'pending' | 'done' | 'failed' | 'skipped';
+  fetchError?: string;
+  /** 页面作者：X 是帖子作者，公众号是号名 */
+  pageAuthor?: string;
+  /** 页面摘要的前 400 个字符 */
+  excerpt?: string;
 };
+
+/** 命令 `fetch_inbox_pending({ id? })`：联网读取还没读过的收集箱链接，只读公开内容、不登录。带 `id` 时只读这一条（失败过的也会重试）。
+ *  一次最多处理 20 条；`remaining` 是还没读的条数（大于 0 说明要再调一次）。 */
+export type FetchSummary = { done: number; failed: number; skipped: number; remaining: number };
 
 export type InboxPage = {
   items: InboxItem[];

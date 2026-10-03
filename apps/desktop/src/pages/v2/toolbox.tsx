@@ -78,6 +78,41 @@ function Section(props: { icon: string; hue: number; title: string; hint?: strin
   );
 }
 
+/** 一行令牌：说明它能做什么，一个「复制」、一个要点两下才生效的「重置」（重置后旧令牌立刻失效）。 */
+function TokenRow(props: { title: string; hint: string; onCopy: () => void; onReset: () => void }) {
+  const [armed, setArmed] = useState(false);
+  useEffect(() => {
+    if (!armed) return undefined;
+    const timer = window.setTimeout(() => setArmed(false), 4000);
+    return () => window.clearTimeout(timer);
+  }, [armed]);
+  return (
+    <div className="flex flex-wrap items-center gap-x-4 gap-y-2 rounded-lg border border-border px-3.5 py-2.5">
+      <div className="min-w-[220px] flex-1">
+        <b className="block text-sm font-medium text-foreground">{props.title}</b>
+        <span className="text-xs leading-[1.6] text-on-surface-variant">{props.hint}</span>
+      </div>
+      <div className="flex items-center gap-2">
+        <Button size="sm" onClick={props.onCopy}>复制令牌</Button>
+        <Button
+          size="sm"
+          variant="text"
+          onClick={() => {
+            if (!armed) {
+              setArmed(true);
+              return;
+            }
+            setArmed(false);
+            props.onReset();
+          }}
+        >
+          {armed ? '再点一次确认重置' : '重置'}
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 function Notice(props: { tone?: 'info' | 'warn'; children: ReactNode }) {
   return (
     <div className={cn('mb-3 flex flex-wrap items-center gap-2 rounded-lg px-3.5 py-2.5 text-sm', props.tone === 'warn' ? 'bg-error-container text-on-error-container' : 'bg-accent text-foreground')}>
@@ -381,9 +416,19 @@ export function ToolboxPage() {
           现在：{api?.enabled ? '已开启' : '关闭'}{api?.listening ? '，正在监听' : ''}（只监听 127.0.0.1:{api?.port ?? 39217}）
         </p>
         {api?.enabled ? (
-          <div className="mt-3 flex flex-wrap gap-2">
-            <Button onClick={() => void invoke<string>('get_local_api_token').then((token) => navigator.clipboard.writeText(token)).then(() => say('令牌已复制。调用时加请求头 Authorization: Bearer <令牌>')).catch((reason: unknown) => say(errorText(reason)))}>复制令牌</Button>
-            <Button onClick={() => void invoke<string>('rotate_local_api_token').then(() => { say('令牌已重置，旧令牌立即失效'); load(); }).catch((reason: unknown) => say(errorText(reason)))}>重置令牌</Button>
+          <div className="mt-3 flex flex-col gap-2.5">
+            <TokenRow
+              title="微信工作台用的令牌"
+              hint="只能往「收集」里放链接，读不到你的资料库。复制后粘进微信工作台的设置里就行。"
+              onCopy={() => void invoke<string>('get_local_api_capture_token').then((token) => navigator.clipboard.writeText(token)).then(() => say('收集专用令牌已复制')).catch((reason: unknown) => say(errorText(reason)))}
+              onReset={() => void invoke<string>('rotate_local_api_capture_token').then(() => say('收集专用令牌已重置，旧的立即失效，要把新的粘回微信工作台')).catch((reason: unknown) => say(errorText(reason)))}
+            />
+            <TokenRow
+              title="完整令牌（高级）"
+              hint="能读你的资料库，只给你信得过的本机工具。调用时加请求头 Authorization: Bearer 令牌。"
+              onCopy={() => void invoke<string>('get_local_api_token').then((token) => navigator.clipboard.writeText(token)).then(() => say('完整令牌已复制')).catch((reason: unknown) => say(errorText(reason)))}
+              onReset={() => void invoke<string>('rotate_local_api_token').then(() => { say('完整令牌已重置，旧的立即失效'); load(); }).catch((reason: unknown) => say(errorText(reason)))}
+            />
           </div>
         ) : null}
       </Section>

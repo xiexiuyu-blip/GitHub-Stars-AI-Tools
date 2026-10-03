@@ -3,6 +3,7 @@ import type {
   CapturePreview,
   DiscoverRefreshReport,
   DiscoverView,
+  FetchSummary,
   InboxPage,
   LibraryDetail,
   LibraryFilters,
@@ -132,6 +133,10 @@ export function previewCapture(text: string): Promise<CapturePreview> {
 
 export function listInbox(status?: string, limit?: number, offset?: number): Promise<InboxPage> {
   return call<InboxPage>('list_inbox', definedArgs({ status, limit, offset }));
+}
+
+export function fetchInboxPending(id?: string): Promise<FetchSummary> {
+  return call<FetchSummary>('fetch_inbox_pending', definedArgs({ id }));
 }
 
 export function setInboxStatus(id: string, status: SetInboxStatusRequest['status']): Promise<null> {

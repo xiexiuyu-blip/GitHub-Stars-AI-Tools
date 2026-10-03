@@ -10,7 +10,11 @@ import {
   commitButtonLabel,
   describeCommit,
   emptyInboxCopy,
+  fetchLine,
+  hasUnfetched,
+  inboxByline,
   inboxContext,
+  inboxExcerpt,
   inboxFilterOptions,
   inboxHeading,
   inboxMeta,
@@ -20,6 +24,7 @@ import {
   kindIcon,
   plainBlockedReason,
   noteError,
+  plainFetchError,
   previewDecision,
   previewSummary,
   removeInboxItem,
@@ -394,5 +399,60 @@ describe('plainBlockedReason', () => {
 
   it('别的原因原样给', () => {
     expect(plainBlockedReason(' 只收 http / https 链接 ')).toBe('只收 http / https 链接');
+  });
+});
+
+describe('收集箱读取内容的状态', () => {
+  it('读不到：红字原因加重试；原因为空时用兜底话', () => {
+    expect(fetchLine({ status: 'pending', fetchStatus: 'failed', fetchError: '帖子不存在、已删除或需要登录才能看' }, false)).toEqual({
+      tone: 'red',
+      text: '帖子不存在、已删除或需要登录才能看',
+      retry: true,
+    });
+    expect(fetchLine({ status: 'pending', fetchStatus: 'failed', fetchError: '  ' }, false)?.text).toBe('读不到内容');
+    expect(fetchLine({ status: 'pending', fetchStatus: 'failed' }, false)?.text).toBe('读不到内容');
+  });
+
+  it('还没读：正在读才转圈，没在读不说话', () => {
+    expect(fetchLine({ status: 'pending', fetchStatus: 'pending' }, true)).toEqual({ tone: 'gray', text: '正在读取内容…', spinning: true });
+    expect(fetchLine({ status: 'pending', fetchStatus: 'pending' }, false)).toBeNull();
+  });
+
+  it('读到了、不需要读、旧版后台没有这项、已归档：都不说话', () => {
+    expect(fetchLine({ status: 'pending', fetchStatus: 'done' }, true)).toBeNull();
+    expect(fetchLine({ status: 'pending', fetchStatus: 'skipped' }, true)).toBeNull();
+    expect(fetchLine({ status: 'pending' }, true)).toBeNull();
+    expect(fetchLine({ status: 'archived', fetchStatus: 'failed', fetchError: '读不到' }, false)).toBeNull();
+  });
+
+  it('失败原因太长就截断', () => {
+    const long = '原'.repeat(100);
+    const text = plainFetchError(long);
+    expect(Array.from(text).length).toBe(61);
+    expect(text.endsWith('…')).toBe(true);
+    expect(plainFetchError('第一行\n第二行')).toBe('第一行 第二行');
+  });
+
+  it('摘要折成一行，空的或和标题相同的不显示', () => {
+    expect(inboxExcerpt({ title: '标题', excerpt: '第一行\n\n  第二行' })).toBe('第一行 第二行');
+    expect(inboxExcerpt({ title: '标题', excerpt: '' })).toBeNull();
+    expect(inboxExcerpt({ title: '标题', excerpt: ' 标题 ' })).toBeNull();
+    expect(inboxExcerpt({ title: '标题' })).toBeNull();
+  });
+
+  it('有没有还没读的链接：GitHub 仓库和已归档的不算', () => {
+    expect(hasUnfetched([{ status: 'pending', itemType: 'webpage', fetchStatus: 'pending' }])).toBe(true);
+    expect(hasUnfetched([{ status: 'pending', itemType: 'github_repository', fetchStatus: 'pending' }])).toBe(false);
+    expect(hasUnfetched([{ status: 'archived', itemType: 'webpage', fetchStatus: 'pending' }])).toBe(false);
+    expect(hasUnfetched([{ status: 'pending', itemType: 'webpage', fetchStatus: 'done' }])).toBe(false);
+    expect(hasUnfetched([{ status: 'pending', itemType: 'webpage' }])).toBe(false);
+    expect(hasUnfetched([])).toBe(false);
+  });
+
+  it('作者放在来源前面', () => {
+    expect(inboxByline('张三', '微信群 · 3 天前')).toBe('张三 · 微信群 · 3 天前');
+    expect(inboxByline(undefined, '微信群')).toBe('微信群');
+    expect(inboxByline(' 张三 ', '')).toBe('张三');
+    expect(inboxByline('', '')).toBe('');
   });
 });

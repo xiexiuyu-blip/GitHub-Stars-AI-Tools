@@ -244,3 +244,51 @@ export function plainBlockedReason(reason: string): string {
   if (/内网|本机|云元数据|localhost|127\.0\.0\.1|metadata/i.test(text)) return '这是你电脑本机或公司内网的地址，不是公开网页，不收';
   return text;
 }
+
+export type FetchLine = { tone: 'gray' | 'red'; text: string; spinning?: boolean; retry?: boolean };
+
+/**
+ * 收集箱一条在「读取内容」上要说的话（后台联网读公开页面的标题和摘要）。
+ * 读到了、不需要读、没有这项信息（旧版后台）、已归档，都没什么可说的，返回 null。
+ * 还没读时：正在读就转圈，没在读（比如命令没法用）也不说话，免得让人以为它一直在忙。
+ */
+export function fetchLine(
+  item: Pick<InboxItem, 'status' | 'fetchStatus' | 'fetchError'>,
+  fetching: boolean,
+): FetchLine | null {
+  if (item.status === 'archived') return null;
+  if (item.fetchStatus === 'failed') {
+    return { tone: 'red', text: plainFetchError(item.fetchError ?? ''), retry: true };
+  }
+  if (item.fetchStatus === 'pending' && fetching) {
+    return { tone: 'gray', text: '正在读取内容…', spinning: true };
+  }
+  return null;
+}
+
+/** 后台写的失败原因本来就是人话；这里只补空的、压长的。 */
+export function plainFetchError(reason: string): string {
+  const text = reason.replace(/\s+/g, ' ').trim();
+  if (!text) return '读不到内容';
+  return charLength(text) > 60 ? `${Array.from(text).slice(0, 60).join('')}…` : text;
+}
+
+/** 摘要：折成一行；没有、或和标题一模一样（没有额外信息）就不显示。 */
+export function inboxExcerpt(item: Pick<InboxItem, 'excerpt' | 'title'>): string | null {
+  const text = (item.excerpt ?? '').replace(/\s+/g, ' ').trim();
+  if (!text) return null;
+  if (text === item.title.trim()) return null;
+  return text;
+}
+
+/** 还有没读过的链接吗（GitHub 仓库、已归档的不算）。 */
+export function hasUnfetched(items: readonly Pick<InboxItem, 'status' | 'itemType' | 'fetchStatus'>[]): boolean {
+  return items.some((item) => item.fetchStatus === 'pending' && item.status !== 'archived' && !REPO_KINDS.has(item.itemType));
+}
+
+/** 作者放在来源前面：「张三 · 微信群 · 3 天前」。 */
+export function inboxByline(author: string | undefined, context: string): string {
+  const name = (author ?? '').trim();
+  if (name && context) return `${name} · ${context}`;
+  return name || context;
+}

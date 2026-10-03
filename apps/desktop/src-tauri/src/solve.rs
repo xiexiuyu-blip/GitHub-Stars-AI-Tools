@@ -12,7 +12,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::time::Duration;
 
-const BASE_LEXICON: &[&str] = &[
+pub(crate) const BASE_LEXICON: &[&str] = &[
     "小红书",
     "公众号",
     "抖音",
