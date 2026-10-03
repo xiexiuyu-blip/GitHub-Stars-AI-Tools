@@ -4949,6 +4949,52 @@ mod tests {
     }
 
     #[test]
+    fn anthropic_requests_are_accounted_like_openai_ones() {
+        // 同一个 execute_json_post：被拒绝 / 快速失败退回，慢失败和重试成功都要记，不能因为换了服务商就漏
+        const ANTHROPIC_REPLY: &str = r#"{"content":[{"type":"text","text":"好的"}],"usage":{"input_tokens":700,"output_tokens":50}}"#;
+        let ask_anthropic = |url: String| {
+            request_anthropic(
+                &AiRequestConfig {
+                    provider: "anthropic".to_owned(),
+                    api_key: "ant-test".to_owned(),
+                    base_url: Some(url),
+                    model: "claude-test".to_owned(),
+                },
+                &prompt_of_1000_tokens(),
+                ANTHROPIC_SUMMARY_MAX_TOKENS,
+            )
+        };
+        let run = |slow: bool, steps: Vec<(&'static str, &'static str)>| {
+            let dir = crate::spend_guard::testing::Dir::new();
+            dir.control(SPEND_BUDGET);
+            let _scope = dir.use_in_this_thread();
+            let _slow = slow.then(SlowFailures::enter);
+            let (url, server) = spawn_http_sequence_server(steps);
+            let result = ask_anthropic(url);
+            server.join().expect("假服务应正常结束");
+            (result, ledger(&dir))
+        };
+        // 密钥错误：整笔退回
+        let (result, row) = run(
+            true,
+            vec![("401 Unauthorized", r#"{"error":{"message":"bad key"}}"#)],
+        );
+        assert!(result.is_err());
+        assert_eq!(row, ("cancelled".to_owned(), 0, 0));
+        // 持续快速 503：没有计费；持续慢 503：三次尝试都记
+        let (result, row) = run(false, vec![BUSY; AI_API_MAX_ATTEMPTS]);
+        assert!(result.is_err());
+        assert_eq!(row, ("cancelled".to_owned(), 0, 0));
+        let (result, row) = run(true, vec![BUSY; AI_API_MAX_ATTEMPTS]);
+        assert!(result.is_err());
+        assert_eq!(row, ("cancelled".to_owned(), 3 * 1000, 0));
+        // 慢 503 后重试成功：真实用量加上失败那次
+        let (result, row) = run(true, vec![BUSY, ("200 OK", ANTHROPIC_REPLY)]);
+        assert_eq!(result.expect("重试后应成功"), "好的");
+        assert_eq!(row, ("succeeded".to_owned(), 700 + 1000, 50));
+    }
+
+    #[test]
     fn rate_limits_and_server_errors_are_not_mistaken_for_a_too_long_readme() {
         // 429 的「每分钟 token 数」限流、403 / 503 里提到 token 限额：说的是别的限额，不是「README 太长」
         for (code, body) in [
