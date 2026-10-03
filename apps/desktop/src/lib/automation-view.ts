@@ -79,6 +79,73 @@ export function automationState(status: AutomationStatus | null): AutomationStat
   return { label: '已开启，暂时没有要整理的', hue: 148, detail: '有新收藏，或者你点了「排队」，就会自动开始。' };
 }
 
+export type AutomationHint = {
+  hue: number;
+  icon: string;
+  title: string;
+  detail: string;
+  /** 没有动作就不画按钮（比如正在整理中，没什么要你做的） */
+  actionLabel: string | null;
+};
+
+/**
+ * 今日 / 资料库顶上的一行提示：还有 pending 个收藏没有中文说明，为什么，以及你能做什么。
+ * 没有要整理的就不打扰；读不到状态也不打扰。
+ */
+export function automationHint(status: AutomationStatus | null, pending: number): AutomationHint | null {
+  if (!status || !Number.isFinite(pending) || pending <= 0) return null;
+  const lacking = `还有 ${pending} 个收藏没有中文说明`;
+  if (!status.providerConfigured) {
+    return { hue: 36, icon: 'key', title: lacking, detail: '还没配置 AI 服务，配置好才能自动整理。', actionLabel: '去看看' };
+  }
+  if (status.paused) {
+    return {
+      hue: 4,
+      icon: 'pause_circle',
+      title: '自动整理被暂停了',
+      detail: status.pauseReason?.message ?? '点「继续整理」才会接着做。',
+      actionLabel: '去处理',
+    };
+  }
+  if (!status.enabled) {
+    return {
+      hue: 220,
+      icon: 'auto_awesome',
+      title: lacking,
+      detail: '自动整理还没开启，它们先显示 GitHub 上的原文。开启后会在后台逐个整理，每天最多花你设定的额度。',
+      actionLabel: '开启自动整理',
+    };
+  }
+  if (status.budgetRemaining <= 0) {
+    return { hue: 36, icon: 'schedule', title: '今天的整理额度用完了', detail: `还有 ${pending} 个没整理，明天会自动接着做。`, actionLabel: '调整额度' };
+  }
+  if (status.queued + status.running > 0) {
+    return {
+      hue: 148,
+      icon: 'autorenew',
+      title: `正在后台整理，还剩 ${pending} 个`,
+      detail: `今天已用约 ${formatTokens(status.tokens24h)} token，约整理了 ${approxRepos(status.tokens24h)} 个。`,
+      actionLabel: null,
+    };
+  }
+  return { hue: 220, icon: 'playlist_add', title: lacking, detail: '它们还没进整理队列。', actionLabel: '去排队' };
+}
+
+/** 详情里「还没有中文说明」那一块：这个项目为什么还没整理。 */
+export function itemPendingNote(status: AutomationStatus | null): { text: string; actionLabel: string | null } {
+  const original = '先看 GitHub 上的原文：';
+  if (!status) return { text: `整理好之后，这里会出现中文说明、能做什么、怎么试。${original}`, actionLabel: null };
+  if (!status.providerConfigured) return { text: `还没配置 AI 服务，所以没法自动整理。${original}`, actionLabel: '去看看' };
+  if (status.paused) {
+    const reason = status.pauseReason?.message;
+    return { text: `自动整理被暂停了${reason ? `（${reason}）` : ''}。${original}`, actionLabel: '去处理' };
+  }
+  if (!status.enabled) return { text: `自动整理还没开启，所以这里还没有说明。${original}`, actionLabel: '开启自动整理' };
+  if (status.budgetRemaining <= 0) return { text: `今天的整理额度用完了，明天会接着整理。${original}`, actionLabel: '调整额度' };
+  if (status.queued + status.running > 0) return { text: `已经在整理队列里了，整理好会自动出现在这里。${original}`, actionLabel: null };
+  return { text: `整理好之后，这里会出现中文说明、能做什么、怎么试。${original}`, actionLabel: null };
+}
+
 export function formatMinute(iso: string): string {
   const date = new Date(iso);
   if (Number.isNaN(date.getTime())) return iso;

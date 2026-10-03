@@ -1,11 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import {
   approxRepos,
+  automationHint,
   automationState,
   BUDGET_PRESETS,
   formatMinute,
   formatSize,
   formatTokens,
+  itemPendingNote,
   parseDailyBudget,
   TOKENS_PER_REPO,
   type AutomationStatus,
@@ -139,5 +141,65 @@ describe('formatMinute / formatSize', () => {
   it('大小保留一位小数的 MB', () => {
     expect(formatSize(13_100_000)).toBe('12.5 MB');
     expect(formatSize(0)).toBe('0.0 MB');
+  });
+});
+
+describe('automationHint', () => {
+  it('读不到状态、或者没有要整理的：不打扰', () => {
+    expect(automationHint(null, 10)).toBeNull();
+    expect(automationHint(status(), 0)).toBeNull();
+    expect(automationHint(status(), Number.NaN)).toBeNull();
+  });
+
+  it('没配置 AI 服务 > 暂停 > 没开启 > 额度用完 > 整理中 > 没排队，按这个顺序挑', () => {
+    expect(automationHint(status({ providerConfigured: false, paused: true, enabled: false }), 5)?.icon).toBe('key');
+    expect(automationHint(status({ paused: true, enabled: false }), 5)?.title).toBe('自动整理被暂停了');
+    expect(automationHint(status({ enabled: false, budgetRemaining: 0 }), 5)?.actionLabel).toBe('开启自动整理');
+    expect(automationHint(status({ budgetRemaining: 0, queued: 3 }), 5)?.title).toBe('今天的整理额度用完了');
+    expect(automationHint(status({ queued: 3 }), 5)?.title).toBe('正在后台整理，还剩 5 个');
+    expect(automationHint(status(), 5)?.actionLabel).toBe('去排队');
+  });
+
+  it('没开启时明说数量和原因，并给「开启自动整理」', () => {
+    const hint = automationHint(status({ enabled: false, dailyBudgetTokens: 0, budgetRemaining: 0 }), 318);
+    expect(hint?.title).toBe('还有 318 个收藏没有中文说明');
+    expect(hint?.detail).toContain('还没开启');
+    expect(hint?.actionLabel).toBe('开启自动整理');
+  });
+
+  it('暂停时带上原因', () => {
+    const hint = automationHint(
+      status({ paused: true, pauseReason: { kind: 'auth', message: '密钥无效', at: '2026-10-03T00:00:00Z' } }),
+      5,
+    );
+    expect(hint?.detail).toBe('密钥无效');
+  });
+
+  it('整理中显示今天用了多少，没有按钮', () => {
+    const hint = automationHint(status({ queued: 2, tokens24h: 40_000 }), 7);
+    expect(hint?.detail).toBe('今天已用约 4 万 token，约整理了 10 个。');
+    expect(hint?.actionLabel).toBeNull();
+  });
+});
+
+describe('itemPendingNote', () => {
+  it('每种状态都说得清楚，而且都带「GitHub 上的原文」的衔接', () => {
+    expect(itemPendingNote(null).text).toContain('GitHub 上的原文');
+    expect(itemPendingNote(status({ providerConfigured: false })).actionLabel).toBe('去看看');
+    expect(itemPendingNote(status({ paused: true })).text).toContain('暂停');
+    expect(itemPendingNote(status({ enabled: false })).text).toContain('还没开启');
+    expect(itemPendingNote(status({ budgetRemaining: 0 })).text).toContain('明天');
+    expect(itemPendingNote(status({ queued: 1 })).text).toContain('整理队列');
+  });
+
+  it('暂停原因放在括号里', () => {
+    const note = itemPendingNote(status({ paused: true, pauseReason: { kind: 'x', message: '密钥无效', at: '' } }));
+    expect(note.text).toContain('（密钥无效）');
+  });
+
+  it('只有需要你动手的状态才有按钮', () => {
+    expect(itemPendingNote(status({ queued: 1 })).actionLabel).toBeNull();
+    expect(itemPendingNote(status()).actionLabel).toBeNull();
+    expect(itemPendingNote(status({ enabled: false })).actionLabel).toBe('开启自动整理');
   });
 });

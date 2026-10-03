@@ -28,9 +28,11 @@ import {
   withInitial,
   type LibraryUiState,
 } from '@/lib/library-filters';
+import { automationHint } from '@/lib/automation-view';
+import { useAiAutomation } from '@/hooks/use-ai-automation';
 import { shouldIgnoreKey, useListKeys } from '@/hooks/use-list-keys';
 import { Button, Card, EmptyState, Kbd, PageHeader, Segmented, useToast } from '@/components/kit';
-import { ItemDetail, ItemRow } from '@/components/library';
+import { AutomationBanner, ItemDetail, ItemRow } from '@/components/library';
 import { FilterPanel } from '@/components/library/filter-panel';
 import { Icon } from '@/components/ui/icon';
 import { cn } from '@/lib/utils';
@@ -43,6 +45,8 @@ type LibraryPageProps = {
   /** 预留：从别处带着场景进来。现在没有调用方。 */
   initialScenario?: string | null;
   onOpenSolve?: (query: string) => void;
+  /** 去工具箱（开启 / 调整 AI 自动整理） */
+  onOpenToolbox?: () => void;
 };
 
 type ScenarioStatus = 'loading' | 'ready' | 'error';
@@ -50,6 +54,7 @@ type ListPhase = 'loading' | 'idle' | 'error';
 
 export function LibraryPage(props: LibraryPageProps) {
   const toast = useToast();
+  const { status: automation } = useAiAutomation();
   const [ui, setUi] = useState(() => withInitial(props.initialKeyword, props.initialScenario));
   const [keywordDraft, setKeywordDraft] = useState(() => withInitial(props.initialKeyword, props.initialScenario).keyword);
   const [scenarios, setScenarios] = useState<ScenarioSummary[]>([]);
@@ -494,7 +499,7 @@ export function LibraryPage(props: LibraryPageProps) {
     ? cardStateOptions(counts.cardState)
     : [
       { value: 'done' as const, label: '已整理 …' },
-      { value: 'pending' as const, label: '整理中 …' },
+      { value: 'pending' as const, label: '待整理 …' },
       { value: 'all' as const, label: '全部 …' },
     ];
   const totalText = counts && typeof counts.total === 'number' && Number.isFinite(counts.total)
@@ -503,6 +508,9 @@ export function LibraryPage(props: LibraryPageProps) {
   const subtitle = `你收藏的 ${totalText} 个工具，按你能拿它做什么来找。已整理的有中文说明，其余还没整理。`;
   const showFallbackHint = fallbackHint && !cardStateTouched && ui.cardState === 'all';
   const filtersActive = hasActiveFilters(ui);
+  // 提示说的是整个资料库还有多少没整理；已经按场景 / 关键词筛窄了，数字对不上，就不提示
+  const narrowedDown = Boolean(ui.scenario || ui.reading || ui.form || ui.keyword.trim());
+  const hint = narrowedDown ? null : automationHint(automation, counts?.cardState?.pending ?? 0);
   const moreOffset = nextPageOffset(serverItems.length, resultCount ?? 0, LIBRARY_PAGE_SIZE);
   const hasMore = moreOffset != null && !noMore;
   const matchedDetail = detail && detail.id === selectedId ? detail : null;
@@ -560,6 +568,7 @@ export function LibraryPage(props: LibraryPageProps) {
         {filtersActive ? <Button variant="text" onClick={clearAll}>清除筛选</Button> : null}
         <span className="ml-auto text-xs font-medium text-on-surface-variant">{resultCount == null ? '…' : resultCount} 个</span>
       </div>
+      <AutomationBanner hint={hint} onAction={props.onOpenToolbox} />
       <div className={cn('grid min-h-0 flex-1 gap-3', gridClass)}>
         {layout === 'wide' ? (
           <Card className="flex min-h-0 flex-col overflow-hidden">
@@ -600,6 +609,7 @@ export function LibraryPage(props: LibraryPageProps) {
             onReadingChange={(group) => { if (selectedId) void changeReading(selectedId, group); }}
             onConfirm={() => { if (selectedId) void confirmCard(selectedId); }}
             onRegenerate={() => { if (selectedId) void regenerateCard(selectedId); }}
+            onOpenToolbox={props.onOpenToolbox}
             onCopyCodex={() => { if (selectedId) void copyForCodex(selectedId); }}
             onCopyHow={(text) => {
               void writeClipboard(text).then((copied) => {

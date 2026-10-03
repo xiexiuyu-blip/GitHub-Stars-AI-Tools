@@ -11,6 +11,7 @@ import type {
   SolveResult,
   TodayView,
 } from '@/lib/contracts';
+import type { AutomationStatus } from '@/lib/automation-view';
 import type { GitHubAuthState } from '@/types';
 
 /**
@@ -161,6 +162,11 @@ export async function getRepositoryReadme(repositoryId: string): Promise<Reposit
   const raw = view?.readme?.rawMarkdown;
   if (typeof raw !== 'string' || !raw.trim()) return null;
   return { rawMarkdown: raw, sourcePath: view?.readme?.sourcePath ?? 'README.md' };
+}
+
+/** AI 自动整理现在的状态（预算、队列、有没有暂停）。只读，不花钱。 */
+export function getAiAutomation(): Promise<AutomationStatus> {
+  return call<AutomationStatus>('get_ai_automation');
 }
 
 export function getGithubAuthState(): Promise<GitHubAuthState> {

@@ -195,20 +195,20 @@ describe('筛选栏的联动计数', () => {
     expect(formOptions(null)).toEqual([]);
   });
 
-  it('整理状态三个选项，全部是已整理加整理中', () => {
+  it('整理状态三个选项，全部是已整理加待整理', () => {
     expect(cardStateOptions({ done: 3, pending: 2 })).toEqual([
       { value: 'done', label: '已整理 3' },
-      { value: 'pending', label: '整理中 2' },
+      { value: 'pending', label: '待整理 2' },
       { value: 'all', label: '全部 5' },
     ]);
     expect(cardStateOptions(null)).toEqual([
       { value: 'done', label: '已整理 0' },
-      { value: 'pending', label: '整理中 0' },
+      { value: 'pending', label: '待整理 0' },
       { value: 'all', label: '全部 0' },
     ]);
     expect(cardStateOptions({ done: Number.NaN, pending: Number.POSITIVE_INFINITY }).map((item) => item.label)).toEqual([
       '已整理 0',
-      '整理中 0',
+      '待整理 0',
       '全部 0',
     ]);
   });

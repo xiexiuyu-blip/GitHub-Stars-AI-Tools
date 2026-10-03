@@ -2,6 +2,8 @@ import { useMemo, useState } from 'react';
 import type { LibraryDetail, ReadingGroup, ScenarioSummary } from '@/lib/contracts';
 import { cleanHowToTry, clipText, firstSentences, monthDay, relativeDays, splitRepoName } from '@/lib/item-format';
 import { extractInstallSteps, extractPreviewImages, hasDownloadHint } from '@/lib/repo-assets';
+import { itemPendingNote } from '@/lib/automation-view';
+import { useAiAutomation } from '@/hooks/use-ai-automation';
 import { useRepoReadme } from '@/hooks/use-repo-readme';
 import { Button, CoverImage, EmptyState, LangDot, RepoAvatar, ScenarioChip, StarCount, Tag } from '@/components/kit';
 import { Icon } from '@/components/ui/icon';
@@ -26,6 +28,8 @@ export function ItemDetail(props: {
   onReadingChange: (group: ReadingGroup) => void;
   onConfirm: () => void;
   onRegenerate: () => void;
+  /** 去工具箱（开启 / 调整 AI 自动整理）。不传就不画这个按钮。 */
+  onOpenToolbox?: () => void;
   onCopyCodex: () => void;
   onCopyHow: (text: string) => void;
   /** 复制一段「给 Codex 的话」（安装请求、查别人怎么用）。不传就用 onCopyHow。 */
@@ -149,11 +153,7 @@ function DetailBody(props: Parameters<typeof ItemDetail>[0] & { detail: LibraryD
               </div>
             </div>
           ) : (
-            <div className="mt-4 rounded-xl bg-accent px-4 py-3.5">
-              <div className="flex items-center gap-1.5 text-xs font-medium text-accent-foreground">还没有中文说明</div>
-              <p className="mt-1.5 text-sm text-on-surface-variant">整理好之后，这里会出现中文说明、能做什么、怎么试。现在先看 GitHub 上的原文：</p>
-              <p className="mt-1.5 text-[15px] leading-[1.75] text-foreground">{detail.description?.trim() || '—'}</p>
-            </div>
+            <PendingNote description={detail.description} onOpenToolbox={props.onOpenToolbox} />
           )}
 
           <div role="tablist" aria-label="项目详情" className="mt-5 flex gap-1 border-b border-border">
@@ -315,6 +315,25 @@ function DetailSkeleton() {
         <div className="h-4 w-full animate-pulse rounded-md bg-muted" />
         <div className="h-4 w-5/6 animate-pulse rounded-md bg-muted" />
       </div>
+    </div>
+  );
+}
+
+/** 还没有中文说明：说清为什么（没开启 / 暂停 / 额度用完 / 在排队），需要你动手时给一个去工具箱的入口，下面先显示 GitHub 原文。 */
+function PendingNote(props: { description: string | null | undefined; onOpenToolbox?: () => void }) {
+  const { status } = useAiAutomation();
+  const note = itemPendingNote(status);
+  return (
+    <div className="mt-4 rounded-lg bg-accent px-4 py-3.5">
+      <div className="flex items-center gap-1.5 text-xs font-medium text-accent-foreground">
+        <Icon name="hourglass_top" size={14} fill />
+        还没有中文说明
+        {note.actionLabel && props.onOpenToolbox ? (
+          <Button variant="text" size="sm" className="ml-auto h-6 px-1 text-xs" onClick={props.onOpenToolbox}>{note.actionLabel}</Button>
+        ) : null}
+      </div>
+      <p className="mt-1.5 text-sm text-on-surface-variant">{note.text}</p>
+      <p className="mt-1.5 text-[15px] leading-[1.75] text-foreground">{props.description?.trim() || '—'}</p>
     </div>
   );
 }

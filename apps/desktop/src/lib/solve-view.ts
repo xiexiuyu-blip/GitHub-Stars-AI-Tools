@@ -79,7 +79,7 @@ export function crossNote(result: SolveResult, scenarios: readonly ScenarioSumma
 
 export function pendingNote(result: SolveResult): string | null {
   if (!Number.isFinite(result.pendingMatches) || result.pendingMatches <= 0) return null;
-  return `另有 ${result.pendingMatches} 个还在整理，整理完可能对得上。`;
+  return `另有 ${result.pendingMatches} 个还没整理，整理好后可能对得上。`;
 }
 
 /** why 去掉空白后为空，或和一句话完全一样时，不再单独写一行。 */

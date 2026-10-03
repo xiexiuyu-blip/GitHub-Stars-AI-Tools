@@ -145,7 +145,7 @@ export function formOptions(forms: Readonly<Record<string, number>> | null | und
   return rows;
 }
 
-/** 「全部」是已整理加整理中：这两个数本身已经按其他筛选联动过，不按卡片状态再筛一次。 */
+/** 「全部」是已整理加待整理：这两个数本身已经按其他筛选联动过，不按卡片状态再筛一次。 */
 export function cardStateOptions(
   cardState: { done?: number; pending?: number } | null | undefined,
 ): CardStateOption[] {
@@ -153,7 +153,7 @@ export function cardStateOptions(
   const pending = asCount(cardState?.pending);
   return [
     { value: 'done', label: `已整理 ${done}` },
-    { value: 'pending', label: `整理中 ${pending}` },
+    { value: 'pending', label: `待整理 ${pending}` },
     { value: 'all', label: `全部 ${done + pending}` },
   ];
 }

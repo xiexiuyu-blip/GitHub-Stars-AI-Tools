@@ -300,7 +300,7 @@ function AppContent() {
   function renderCurrentPage() {
     switch (currentPage) {
       case 'today':
-        return <TodayPage onOpenLibrary={() => setCurrentPage('library')} onOpenCapture={() => setCurrentPage('capture')} onOpenSolve={() => setCurrentPage('solve')} />;
+        return <TodayPage onOpenLibrary={() => setCurrentPage('library')} onOpenCapture={() => setCurrentPage('capture')} onOpenSolve={() => setCurrentPage('solve')} onOpenToolbox={() => setCurrentPage('toolbox')} />;
       case 'capture':
         return <CapturePage />;
       case 'library':
@@ -311,6 +311,7 @@ function AppContent() {
               setSolveQuestion(query);
               setCurrentPage('solve');
             }}
+            onOpenToolbox={() => setCurrentPage('toolbox')}
           />
         );
       case 'map':
