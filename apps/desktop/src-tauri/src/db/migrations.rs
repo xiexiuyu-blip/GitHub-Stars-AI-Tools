@@ -196,10 +196,39 @@ const MIGRATIONS: &[Migration] = &[
         name: "scenarios",
         sql: include_str!("../../../../../packages/storage/migrations/fox/030_scenarios.sql"),
     },
+    Migration {
+        version: "031",
+        name: "web_content",
+        sql: include_str!("../../../../../packages/storage/migrations/fox/031_web_content.sql"),
+    },
 ];
 
 pub fn latest_migration() -> &'static Migration {
     MIGRATIONS.last().expect("迁移清单不能为空")
+}
+
+/// 测试夹具用。业务模块的测试不写凭据列名，账号行集中在这里造。
+#[cfg(test)]
+pub(crate) fn insert_test_account(path: &Path) {
+    let connection = Connection::open(path).expect("应能打开测试库");
+    connection
+        .execute(
+            "INSERT INTO github_accounts(id, login, token_ref) VALUES ('acct', 'fox', 'test')",
+            [],
+        )
+        .expect("应能写入测试账号");
+}
+
+/// 第二个测试账号。`updated_at` 固定在很早，避免它变成「最近更新」的账号。
+#[cfg(test)]
+pub(crate) fn insert_named_test_account(path: &Path, id: &str, login: &str) {
+    let connection = Connection::open(path).expect("应能打开测试库");
+    connection
+        .execute(
+            "INSERT INTO github_accounts(id, login, token_ref, updated_at) VALUES (?1, ?2, 'test', '2000-01-01T00:00:00Z')",
+            rusqlite::params![id, login],
+        )
+        .expect("应能写入测试账号");
 }
 
 pub fn migrate_database(database_path: &Path) -> Result<MigrationReport, String> {
@@ -441,6 +470,83 @@ mod tests {
     }
 
     #[test]
+    fn web_content_tables_exist_and_second_migrate_is_idempotent() {
+        let path = temp_db("web-content");
+        let report = migrate_database(&path).expect("空库应能迁到 031");
+        assert_eq!(report.applied.len(), MIGRATIONS.len());
+        assert_eq!(MIGRATIONS.len(), 31);
+        assert_eq!(latest_migration().version, "031");
+        assert_eq!(latest_migration().name, "web_content");
+        assert!(report.applied.iter().any(|item| item == "031 web_content"));
+        assert!(report.backup_path.is_none());
+        for table in [
+            "discover_candidates",
+            "discover_runs",
+            "repo_community_cache",
+        ] {
+            assert_eq!(
+                count_query(
+                    &path,
+                    &format!(
+                        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = '{table}'"
+                    )
+                ),
+                1,
+                "{table}"
+            );
+        }
+        assert_eq!(
+            count_query(
+                &path,
+                "SELECT COUNT(*) FROM sqlite_master WHERE name = 'idx_discover_candidates_scenario'"
+            ),
+            1
+        );
+
+        let connection = Connection::open(&path).expect("应能打开已迁移的库");
+        connection
+            .execute(
+                "INSERT INTO discover_candidates(scenario_id, full_name, html_url, fetched_at) VALUES ('scn-xhs', 'a/b', 'https://github.com/a/b', '2026-10-03T00:00:00Z')",
+                [],
+            )
+            .expect("应能写入发现候选");
+        connection
+            .execute(
+                "INSERT INTO discover_runs(scenario_id, last_fetched_at) VALUES ('scn-xhs', '2026-10-03T00:00:00Z')",
+                [],
+            )
+            .expect("应能写入发现刷新记录");
+        connection
+            .execute(
+                "INSERT INTO repo_community_cache(repo_id, source, payload_json, fetched_at) VALUES ('r1', 'hn', '[]', '2026-10-03T00:00:00Z')",
+                [],
+            )
+            .expect("应能写入社区缓存");
+        let rejected = connection.execute(
+            "INSERT INTO repo_community_cache(repo_id, source, payload_json, fetched_at) VALUES ('r1', 'other', '[]', '2026-10-03T00:00:00Z')",
+            [],
+        );
+        assert!(rejected.is_err(), "来源只能是 hn 或 github_issue");
+        drop(connection);
+
+        let again = migrate_database(&path).expect("第二次迁移应幂等");
+        assert!(again.applied.is_empty());
+        assert!(again.backup_path.is_none());
+        assert_eq!(
+            count_query(&path, "SELECT COUNT(*) FROM discover_candidates"),
+            1
+        );
+        assert_eq!(count_query(&path, "SELECT COUNT(*) FROM discover_runs"), 1);
+        assert_eq!(
+            count_query(&path, "SELECT COUNT(*) FROM repo_community_cache"),
+            1
+        );
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_file(format!("{}-wal", path.display()));
+        let _ = fs::remove_file(format!("{}-shm", path.display()));
+    }
+
+    #[test]
     fn wrong_migration_name_refuses_startup() {
         let path = temp_db("mismatch");
         migrate_database(&path).expect("先建立 001–020");
@@ -628,7 +734,7 @@ INSERT INTO ai_task_items(id, run_id, repository_id, full_name, status, reason) 
             &path,
             "SELECT MAX(CAST(version AS INTEGER)) FROM schema_migrations",
         );
-        assert_eq!(version, 29);
+        assert_eq!(version, 31);
     }
 
     #[test]
