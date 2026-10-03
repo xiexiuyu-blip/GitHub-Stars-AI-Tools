@@ -1,8 +1,10 @@
 //! AI 任务队列的消费者。不依赖 Tauri，也不调用任何会花钱的接口。
 //!
 //! 默认预算是 0：控制文件不存在，或没有 `dailyBudgetTokens` 时，花钱的任务不会被认领。
-//! 用量按滚动 24 小时计算（避开时区）。检查发生在认领之前，正在跑的任务可以把总量撑过预算，
-//! 结束后才停；并发时每个工作线程都可能再领走一个，因为用量要等任务写完才入账。
+//! 用量按滚动 24 小时计算（避开时区）。认领是预算的硬门：在一个 `BEGIN IMMEDIATE` 里检查
+//! 「已用 + 这一条的预留 ≤ 额度」，并把预留（`CLAIM_RESERVE_TOKENS`）写进这条任务自己的行，
+//! 后一次认领一定看得见前一次的预留；任务结束时预留换成真实用量（失败按种类记）。
+//! 取消、崩溃、被打断的任务保留预留，账不会消失。旧版 AI 功能不走队列，由 `spend_guard` 记进同一本账。
 //!
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
