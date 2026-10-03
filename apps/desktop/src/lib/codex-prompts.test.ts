@@ -60,8 +60,10 @@ describe('buildInstallPrompt', () => {
     expect(text).toContain(ABOUT_ME);
   });
 
-  it('先给计划等「确认」、不用 sudo、不跑 curl | bash、不读密钥、不替我登录发布', () => {
-    expect(text).toContain('我回「确认」你再动手');
+  it('直接装进独立环境并汇报（只有管理员权限 / 付费或登录 / 安全风险 / 很耗时才停下问）、不用 sudo、不跑 curl | bash、不读密钥、不替我登录发布', () => {
+    expect(text).toContain('就直接装');
+    expect(text).toContain('管理员权限');
+    expect(text).not.toContain('我回「确认」');
     expect(text).toContain('不用 sudo');
     expect(text).toContain('curl | bash');
     expect(text).toContain('不要读取也不要打印');
