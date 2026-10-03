@@ -10,6 +10,10 @@
   - apps/desktop/src/components/ui/**
   - apps/desktop/src/lib/nav.ts
   - apps/desktop/src/lib/nav.test.ts
+  - apps/desktop/src/providers/settings-provider.tsx
+  - apps/desktop/src/types-settings.ts
+  - apps/desktop/src/lib/theme-vars.ts
+  - apps/desktop/src/lib/theme-vars.test.ts
 ---
 
 # 卡 01 · 新外壳：换肤 + 窄导航条 + 5 项导航

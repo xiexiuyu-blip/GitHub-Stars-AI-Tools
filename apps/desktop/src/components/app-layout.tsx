@@ -1,6 +1,7 @@
 import { FormEvent, ReactNode, useEffect, useRef, useState } from 'react';
 import { BrandIcon } from '@/components/ui/brand-icon';
 import { Icon } from '@/components/ui/icon';
+import { NAV_ITEMS, SETTINGS_ITEM, navKeyFor, type NavItem } from '@/lib/nav';
 import type { AppPage, GitHubUser, StarSyncSummary, TaskProgressEvent } from '@/types';
 
 type AppLayoutProps = {
@@ -30,23 +31,12 @@ type AppLayoutProps = {
   onOpenCommandPalette: () => void;
 };
 
-const NAV_ITEMS: { key: AppPage; icon: string; label: string }[] = [
-  { key: 'today', icon: 'home', label: '今日' },
-  { key: 'capture', icon: 'add_link', label: '收集' },
-  { key: 'library', icon: 'folder_special', label: '资料库' },
-  { key: 'map', icon: 'hub', label: '地图' },
-  { key: 'solve', icon: 'psychology', label: '找方案' },
-  { key: 'packs', icon: 'inventory_2', label: '参考包' },
-  { key: 'discover', icon: 'leaderboard', label: '发现与榜单' },
-  { key: 'toolbox', icon: 'construction', label: '工具箱' },
-];
 export function AppLayout(props: AppLayoutProps) {
   const [searchQuery, setSearchQuery] = useState('');
-  const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
   const [isNotificationOpen, setIsNotificationOpen] = useState(false);
   const [isQuickActionsOpen, setIsQuickActionsOpen] = useState(false);
-  const searchInputRef = useRef<HTMLInputElement | null>(null);
   const topbarActionsRef = useRef<HTMLDivElement | null>(null);
+  const activeNav = navKeyFor(props.currentPage);
 
   useEffect(() => {
     if (props.notificationOpenSignal <= 0) {
@@ -67,7 +57,7 @@ export function AppLayout(props: AppLayoutProps) {
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, []);
+  }, [props.onOpenCommandPalette]);
 
   useEffect(() => {
     if (!isQuickActionsOpen && !isNotificationOpen) {
@@ -98,333 +88,201 @@ export function AppLayout(props: AppLayoutProps) {
     if (!query) {
       return;
     }
+    setIsQuickActionsOpen(false);
     props.onGlobalSearch(query);
   }
 
-  return (
-    <div className="app-layout flex h-full min-w-0 overflow-hidden">
-      {/* 侧边导航栏 */}
-      <aside
-        className={`glass-sidebar fixed bottom-0 left-0 top-0 z-40 hidden flex-col gap-stack-gap p-4 transition-[width] duration-200 lg:flex ${
-          isSidebarCollapsed ? 'w-[72px]' : 'w-[clamp(250px,21vw,300px)]'
-        }`}
-      >
-        {/* 标题区 */}
-        <div className={`mb-2 flex items-center gap-3 py-4 ${isSidebarCollapsed ? 'justify-center px-0' : 'px-2'}`}>
-          <BrandIcon
-            title="Fox Stars Lab"
-            className={isSidebarCollapsed ? 'h-10 w-10' : 'h-11 w-11'}
-          />
-          {!isSidebarCollapsed && (
-          <div className="min-w-0 leading-tight">
-            <h1 className="truncate text-[17px] font-semibold leading-5 text-on-surface" title="Fox Stars Lab">
-              Fox Stars Lab
-            </h1>
-            <p className="truncate font-label-sm text-[11px] text-on-surface-variant opacity-85">
-              FSL 本地知识库
-            </p>
-          </div>
-          )}
-        </div>
+  const syncText = props.isSyncing
+    ? '正在同步…'
+    : props.user
+      ? (props.syncSummary ? '已同步' : '尚未同步')
+      : '未连接';
+  const syncDotState = props.isSyncing ? 'syncing' : props.user ? 'ok' : 'off';
 
+  return (
+    <div className="app-layout flex h-full min-h-0 min-w-0 flex-col overflow-hidden">
+      <header className="app-topbar">
+        <div className="app-brand">
+          <BrandIcon
+            tone="brand"
+            title="Fox Stars Lab"
+            className="app-brand-icon-compact size-[22px]"
+          />
+          <h1 className="app-brand-name" title="Fox Stars Lab">Fox Stars Lab</h1>
+        </div>
         <button
           type="button"
-          onClick={() => setIsSidebarCollapsed((current) => !current)}
-          className="flex h-10 items-center justify-center gap-2 rounded-lg border border-outline-variant/30 bg-surface text-sm text-on-surface-variant transition-colors hover:border-primary/40 hover:text-primary"
-          title={isSidebarCollapsed ? '展开侧边栏' : '收起侧边栏'}
-          aria-label={isSidebarCollapsed ? '展开侧边栏' : '收起侧边栏'}
+          className="app-search"
+          onClick={props.onOpenCommandPalette}
+          title="打开命令面板（⌘K）"
+          aria-label="打开命令面板"
+          aria-keyshortcuts="Meta+K"
         >
-          <Icon name={isSidebarCollapsed ? 'left_panel_open' : 'left_panel_close'} size={20} />
-          {!isSidebarCollapsed && <span>收起侧栏</span>}
+          <Icon name="search" size={16} />
+          <span className="app-search-label">搜索仓库、标签或内容</span>
+          <kbd>⌘K</kbd>
         </button>
-
-        {/* 导航标签 */}
-        <nav className="flex-1 flex flex-col gap-1">
-          {NAV_ITEMS.map((item) => (
-            <button
-              key={item.key}
-              onClick={() => props.onNavigate(item.key)}
-              title={item.label}
-              className={`flex items-center rounded-lg py-2.5 transition-all duration-200 active:scale-[0.98] group ${
-                isSidebarCollapsed ? 'justify-center px-0' : 'gap-3 px-3'
-              } ${
-                props.currentPage === item.key
-                  ? 'bg-primary/10 text-primary font-semibold'
-                  : 'text-on-surface-variant hover:text-on-surface hover:bg-surface-container-low hover:scale-[1.02] hover:brightness-110'
-              }`}
-            >
-              <Icon
-                name={item.icon}
-                size={24}
-                fill={props.currentPage === item.key}
-                className="group-hover:scale-110 transition-transform"
-              />
-              {!isSidebarCollapsed && <span className="font-body-md text-body-md">{item.label}</span>}
-            </button>
-          ))}
-        </nav>
-
-        {props.taskProgress && !isSidebarCollapsed && (
-          <TaskProgressCard
-            progress={props.taskProgress}
-            onRetry={props.onRetryTask}
-            retryLabel={props.retryTaskLabel}
-            isRetrying={props.isRetryingTask}
-          />
-        )}
-
-        {/* 同步数据入口 */}
-        <button
-          onClick={() => (props.user ? props.onSyncStars() : props.onNavigate('settings'))}
-          disabled={props.isSyncing}
-          title={props.user ? '同步 GitHub Stars' : '请先连接 GitHub 账号'}
-          className={`interactive-btn mb-2 flex w-full items-center justify-center gap-2 rounded-lg bg-primary font-body-md text-body-md font-semibold text-white shadow-[0_10px_22px_-14px_var(--color-primary)] hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-60 ${
-            isSidebarCollapsed ? 'h-10 px-0' : 'py-2.5'
-          }`}
-        >
-          <Icon name={props.isSyncing ? 'progress_activity' : 'sync'} size={18} className={`text-white ${props.isSyncing ? 'animate-spin' : ''}`} />
-          {!isSidebarCollapsed && (props.isSyncing ? '同步中...' : props.user ? '同步数据' : '连接 GitHub')}
-        </button>
-
-        {/* 底部操作区 */}
-        <div className="flex flex-col gap-1 pt-4 border-t border-card-border">
+        <div ref={topbarActionsRef} className="app-top-actions">
+          <span className="app-sync">
+            <span className="app-sync-dot" data-state={syncDotState} aria-hidden="true" />
+            <span className="app-sync-text">{syncText}</span>
+          </span>
           <button
-            onClick={() => props.onNavigate('settings')}
-            title="设置"
-            className={`flex items-center rounded-lg py-2 text-sm transition-colors ${
-              isSidebarCollapsed ? 'justify-center px-0' : 'gap-3 px-3'
-            } ${
-              props.currentPage === 'settings'
-                ? 'bg-primary/10 text-primary font-semibold'
-                : 'text-on-surface-variant hover:text-on-surface hover:bg-surface-container-low'
-            }`}
+            type="button"
+            className="app-sync-button"
+            onClick={() => (props.user ? props.onSyncStars() : props.onNavigate('settings'))}
+            disabled={props.isSyncing}
+            title={props.user ? '同步 GitHub Stars' : '请先连接 GitHub 账号'}
           >
-            <Icon name="settings" size={20} />
-            {!isSidebarCollapsed && <span className="font-body-md text-body-md">设置</span>}
+            {props.isSyncing ? '同步中' : '同步'}
           </button>
           <button
-            onClick={() => props.onNavigate('profile')}
-            title="个人主页"
-            className={`flex items-center rounded-lg py-2 text-sm transition-colors ${
-              isSidebarCollapsed ? 'justify-center px-0' : 'gap-3 px-3'
-            } ${
-              props.currentPage === 'profile'
-                ? 'bg-primary/10 text-primary font-semibold'
-                : 'text-on-surface-variant hover:text-on-surface hover:bg-surface-container-low'
-            }`}
+            type="button"
+            className="app-icon-button"
+            onClick={() => {
+              setIsQuickActionsOpen((current) => !current);
+              setIsNotificationOpen(false);
+            }}
+            title="快速操作"
+            aria-label="快速操作"
+            aria-expanded={isQuickActionsOpen}
           >
-            <Icon name="person" size={20} />
-            {!isSidebarCollapsed && <span className="font-body-md text-body-md">个人主页</span>}
+            <Icon name="bolt" size={18} />
+          </button>
+          {isQuickActionsOpen && (
+            <TopbarQuickActionsMenu
+              hasGitHubUser={Boolean(props.user)}
+              isSyncing={props.isSyncing}
+              onSyncStars={props.onSyncStars}
+              onOpenSettings={() => {
+                setIsQuickActionsOpen(false);
+                props.onNavigate('settings');
+              }}
+              onFetchReadmes={() => {
+                setIsQuickActionsOpen(false);
+                props.onFetchReadmes();
+              }}
+              isFetchingReadmes={props.isFetchingReadmes}
+              onBatchGenerateAiDocuments={() => {
+                setIsQuickActionsOpen(false);
+                props.onBatchGenerateAiDocuments();
+              }}
+              isBatchGeneratingAiDocuments={props.isBatchGeneratingAiDocuments}
+              onGenerateAiTagNetwork={() => {
+                setIsQuickActionsOpen(false);
+                props.onGenerateAiTagNetwork();
+              }}
+              isGeneratingTagNetwork={props.isGeneratingTagNetwork}
+              onCheckForUpdate={() => {
+                setIsQuickActionsOpen(false);
+                props.onCheckForUpdate();
+              }}
+              isCheckingUpdate={props.isCheckingUpdate}
+              searchQuery={searchQuery}
+              onSearchQueryChange={setSearchQuery}
+              onGlobalSearchSubmit={handleSearchSubmit}
+            />
+          )}
+          <button
+            type="button"
+            className="app-icon-button"
+            onClick={() => {
+              setIsNotificationOpen((current) => !current);
+              setIsQuickActionsOpen(false);
+            }}
+            title="查看通知和任务状态"
+            aria-label="查看通知和任务状态"
+            aria-expanded={isNotificationOpen}
+          >
+            <Icon name="notifications" size={18} />
+            {(props.syncSummary || props.taskProgress || props.statusMessage || props.errorMessage) && (
+              <span className="absolute right-1.5 top-1.5 size-2 rounded-full border border-card bg-error" />
+            )}
+          </button>
+          {isNotificationOpen && (
+            <TopbarNotificationPanel
+              syncSummary={props.syncSummary}
+              taskProgress={props.taskProgress}
+              statusMessage={props.statusMessage}
+              errorMessage={props.errorMessage}
+              onOpenDashboard={() => {
+                setIsNotificationOpen(false);
+                props.onNavigate('dashboard');
+              }}
+            />
+          )}
+          <button
+            type="button"
+            className="app-avatar"
+            onClick={() => props.onNavigate('profile')}
+            title={props.user?.login ?? '个人主页'}
+            aria-label={props.user ? `打开 ${props.user.login} 的个人主页` : '打开个人主页'}
+          >
+            {props.user?.avatarUrl ? (
+              <img src={props.user.avatarUrl} alt="" />
+            ) : (
+              props.user?.login?.[0]?.toUpperCase() ?? 'F'
+            )}
           </button>
         </div>
-      </aside>
+      </header>
 
-      {/* 主内容区域 */}
-      <div
-        className={`flex h-full min-w-0 flex-1 flex-col transition-[margin-left] duration-200 ${
-          isSidebarCollapsed ? 'lg:ml-[72px]' : 'lg:ml-[clamp(250px,21vw,300px)]'
-        }`}
-      >
-        {/* 顶部导航栏 */}
-        <header className="glass-topbar sticky top-0 z-30 flex min-h-16 w-full flex-wrap items-center justify-between gap-3 px-3 py-2 sm:px-4 lg:flex-nowrap lg:px-gutter">
-          <div className="flex min-w-0 items-center gap-2 lg:hidden">
-            <BrandIcon title="Fox Stars Lab" className="h-9 w-9" />
-            <div className="min-w-0">
-              <h1 className="truncate text-[16px] font-semibold leading-5 text-on-surface" title="Fox Stars Lab">
-                Fox Stars Lab
-              </h1>
-              <p className="truncate font-label-sm text-[11px] text-on-surface-variant">
-                Stars 知识库
-              </p>
-            </div>
-          </div>
-
-          {/* 搜索 */}
-          <form className="group relative order-3 w-full min-w-0 sm:order-none sm:flex-1 lg:max-w-[420px]" onSubmit={handleSearchSubmit}>
-            <Icon
-              name="search"
-              size={20}
-              className="absolute left-3 top-1/2 z-10 -translate-y-1/2 transition-colors"
-              style={{ color: 'var(--color-on-surface-variant)', opacity: 0.95 }}
-            />
-            <input
-              ref={searchInputRef}
-              type="text"
-              value={searchQuery}
-              onChange={(event) => setSearchQuery(event.target.value)}
-              placeholder="搜索仓库、标签或内容..."
-              className="w-full bg-surface-container-low/80 border border-card-border rounded-full pl-10 pr-12 py-2 font-body-md text-body-md text-on-surface placeholder:text-outline focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary/50 transition-all backdrop-blur-md"
-            />
-            <div className="absolute right-3 top-1/2 -translate-y-1/2 flex items-center gap-1">
-              <kbd className="font-label-sm text-[10px] text-outline bg-surface px-1.5 rounded border border-card-border">
-                ⌘
-              </kbd>
-              <kbd className="font-label-sm text-[10px] text-outline bg-surface px-1.5 rounded border border-card-border">
-                K
-              </kbd>
-            </div>
-          </form>
-
-          {/* 右侧操作区 */}
-          <div ref={topbarActionsRef} className="flex min-w-0 shrink-0 items-center gap-1 sm:gap-2">
-            <button
-              type="button"
-              onClick={() => (props.user ? props.onSyncStars() : props.onNavigate('settings'))}
-              disabled={props.isSyncing}
-              className="flex h-9 w-9 items-center justify-center rounded-full text-on-surface-variant transition-colors hover:bg-surface-container-low hover:text-on-surface disabled:cursor-not-allowed disabled:opacity-60"
-              title={props.user ? '同步 GitHub Stars' : '请先连接 GitHub 账号'}
-              aria-label={props.user ? '同步 GitHub Stars' : '连接 GitHub 账号'}
-            >
-              <Icon name={props.isSyncing ? 'progress_activity' : 'sync'} size={20} className={props.isSyncing ? 'animate-spin' : ''} />
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                setIsQuickActionsOpen((current) => !current);
-                setIsNotificationOpen(false);
-              }}
-              className="w-9 h-9 flex items-center justify-center rounded-full hover:bg-surface-container-low text-on-surface-variant hover:text-on-surface transition-colors relative"
-              title="快速操作"
-              aria-label="快速操作"
-              aria-expanded={isQuickActionsOpen}
-            >
-              <Icon name="bolt" size={20} />
-            </button>
-            {isQuickActionsOpen && (
-              <TopbarQuickActionsMenu
-                hasGitHubUser={Boolean(props.user)}
-                isSyncing={props.isSyncing}
-                onSyncStars={props.onSyncStars}
-                onOpenSettings={() => {
-                  setIsQuickActionsOpen(false);
-                  props.onNavigate('settings');
-                }}
-                onFetchReadmes={() => {
-                  setIsQuickActionsOpen(false);
-                  props.onFetchReadmes();
-                }}
-                isFetchingReadmes={props.isFetchingReadmes}
-                onBatchGenerateAiDocuments={() => {
-                  setIsQuickActionsOpen(false);
-                  props.onBatchGenerateAiDocuments();
-                }}
-                isBatchGeneratingAiDocuments={props.isBatchGeneratingAiDocuments}
-                onGenerateAiTagNetwork={() => {
-                  setIsQuickActionsOpen(false);
-                  props.onGenerateAiTagNetwork();
-                }}
-                isGeneratingTagNetwork={props.isGeneratingTagNetwork}
-                onCheckForUpdate={() => {
-                  setIsQuickActionsOpen(false);
-                  props.onCheckForUpdate();
-                }}
-                isCheckingUpdate={props.isCheckingUpdate}
-              />
-            )}
-            <button
-              type="button"
-              onClick={() => {
-                setIsNotificationOpen((current) => !current);
-                setIsQuickActionsOpen(false);
-              }}
-              className="w-9 h-9 flex items-center justify-center rounded-full hover:bg-surface-container-low text-on-surface-variant hover:text-on-surface transition-colors relative"
-              title="查看通知和任务状态"
-              aria-label="查看通知和任务状态"
-              aria-expanded={isNotificationOpen}
-            >
-              <Icon name="notifications" size={20} />
-              {(props.syncSummary || props.taskProgress || props.statusMessage || props.errorMessage) && (
-                <span className="absolute top-2 right-2 w-2 h-2 bg-error rounded-full border border-surface" />
-              )}
-            </button>
-            {isNotificationOpen && (
-              <TopbarNotificationPanel
-                syncSummary={props.syncSummary}
-                taskProgress={props.taskProgress}
-                statusMessage={props.statusMessage}
-                errorMessage={props.errorMessage}
-                onOpenDashboard={() => {
-                  setIsNotificationOpen(false);
-                  props.onNavigate('dashboard');
-                }}
-              />
-            )}
-            <div className="h-6 w-px bg-card-border mx-1" />
-            <button
-              type="button"
-              onClick={() => props.onNavigate('profile')}
-              className="flex items-center gap-2 hover:bg-surface-container-low p-1 sm:pr-3 rounded-full transition-colors border border-transparent hover:border-card-border"
-            >
-              {props.user?.avatarUrl ? (
-                <img
-                  src={props.user.avatarUrl}
-                  alt={props.user.login}
-                  className="w-8 h-8 rounded-full object-cover border border-card-border"
-                />
-              ) : (
-                <div className="w-8 h-8 rounded-full bg-primary-container/20 flex items-center justify-center border border-primary/20">
-                  <span className="font-headline-md text-sm text-primary">
-                    {props.user?.login?.[0]?.toUpperCase() ?? 'U'}
-                  </span>
-                </div>
-              )}
-              <span className="hidden max-w-28 truncate font-body-md text-sm font-medium text-on-surface sm:block">
-                {props.user?.login ?? '未连接'}
-              </span>
-            </button>
-          </div>
-
-          <nav className="order-4 flex w-full gap-2 overflow-x-auto pb-1 lg:hidden">
+      <div className="app-body">
+        <aside className="app-rail">
+          <nav className="app-rail-nav" aria-label="主导航">
             {NAV_ITEMS.map((item) => (
-              <button
+              <RailButton
                 key={item.key}
+                item={item}
+                active={activeNav === item.key}
                 onClick={() => props.onNavigate(item.key)}
-                className={`flex shrink-0 items-center gap-1.5 rounded-lg px-3 py-2 text-sm transition-colors ${
-                  props.currentPage === item.key
-                    ? 'bg-primary/10 text-primary font-semibold'
-                    : 'text-on-surface-variant hover:bg-surface-container-low hover:text-on-surface'
-                }`}
-              >
-                <Icon name={item.icon} size={18} fill={props.currentPage === item.key} />
-                {item.label}
-              </button>
+              />
             ))}
-            <button
-              onClick={() => props.onNavigate('settings')}
-              className={`flex shrink-0 items-center gap-1.5 rounded-lg px-3 py-2 text-sm transition-colors ${
-                props.currentPage === 'settings'
-                  ? 'bg-primary/10 text-primary font-semibold'
-                  : 'text-on-surface-variant hover:bg-surface-container-low hover:text-on-surface'
-              }`}
-            >
-              <Icon name="settings" size={18} />
-              设置
-            </button>
-          </nav>
-        </header>
-
-        {(props.errorMessage || props.statusMessage) && (
-          <GlobalStatusBanner
-            type={props.errorMessage ? 'error' : 'success'}
-            message={props.errorMessage ?? props.statusMessage ?? ''}
-          />
-        )}
-
-        {props.taskProgress && (
-          <div className="shrink-0 border-b border-card-border bg-surface/90 px-3 py-2 backdrop-blur-md sm:px-4 lg:hidden">
-            <TaskProgressCard
-              progress={props.taskProgress}
-              onRetry={props.onRetryTask}
-              retryLabel={props.retryTaskLabel}
-              isRetrying={props.isRetryingTask}
+            <div className="app-rail-spacer" />
+            <RailButton
+              item={SETTINGS_ITEM}
+              active={activeNav === SETTINGS_ITEM.key}
+              onClick={() => props.onNavigate(SETTINGS_ITEM.key)}
             />
-          </div>
-        )}
-
-        {/* 页面内容 */}
-        <main className="flex-1 overflow-hidden">{props.children}</main>
+          </nav>
+        </aside>
+        <div className="app-content">
+          {(props.errorMessage || props.statusMessage) && (
+            <GlobalStatusBanner
+              type={props.errorMessage ? 'error' : 'success'}
+              message={props.errorMessage ?? props.statusMessage ?? ''}
+            />
+          )}
+          {props.taskProgress && (
+            <div className="shrink-0 border-b border-border bg-card px-3 py-2 sm:px-4">
+              <TaskProgressCard
+                progress={props.taskProgress}
+                onRetry={props.onRetryTask}
+                retryLabel={props.retryTaskLabel}
+                isRetrying={props.isRetryingTask}
+              />
+            </div>
+          )}
+          <main className="app-main">{props.children}</main>
+        </div>
       </div>
     </div>
+  );
+}
+
+function RailButton(props: { item: NavItem; active: boolean; onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      className="app-rail-item"
+      data-active={props.active ? 'true' : undefined}
+      aria-current={props.active ? 'page' : undefined}
+      title={props.item.label}
+      onClick={props.onClick}
+    >
+      <Icon name={props.item.icon} size={20} fill={props.active} />
+      <span>{props.item.label}</span>
+    </button>
   );
 }
 
@@ -432,7 +290,7 @@ function GlobalStatusBanner(props: { type: 'success' | 'error'; message: string 
   const isError = props.type === 'error';
 
   return (
-    <div className="shrink-0 border-b border-card-border bg-surface/90 px-3 py-2 backdrop-blur-md sm:px-4 lg:px-gutter">
+    <div className="shrink-0 border-b border-border bg-card px-3 py-2 sm:px-4">
       <div
         className={`flex min-w-0 items-start gap-2 rounded-lg border px-3 py-2 text-sm ${
           isError
@@ -461,12 +319,25 @@ function TopbarQuickActionsMenu(props: {
   isGeneratingTagNetwork: boolean;
   onCheckForUpdate: () => void;
   isCheckingUpdate: boolean;
+  searchQuery: string;
+  onSearchQueryChange: (value: string) => void;
+  onGlobalSearchSubmit: (event: FormEvent<HTMLFormElement>) => void;
 }) {
   const needsGitHub = !props.hasGitHubUser;
 
   return (
-    <div className="fixed right-3 top-[58px] z-50 w-[calc(100vw-1.5rem)] max-w-[360px] rounded-xl border border-card-border bg-surface p-2 shadow-xl shadow-black/15 backdrop-blur-md sm:right-4">
-      <div className="px-2 pb-2 pt-1">
+    <div className="fixed right-3 top-[46px] z-50 w-[calc(100vw-1.5rem)] max-w-[360px] rounded-lg border border-border bg-card p-2 shadow-lg sm:right-4">
+      <form className="border-b border-border px-2 pb-2" onSubmit={props.onGlobalSearchSubmit}>
+        <p className="px-0.5 pb-1 text-xs font-medium text-on-surface">全局搜索</p>
+        <input
+          value={props.searchQuery}
+          onChange={(event) => props.onSearchQueryChange(event.target.value)}
+          placeholder="在全部仓库中搜索"
+          aria-label="全局搜索"
+          className="h-8 w-full rounded-md border border-input bg-card px-2 text-sm text-on-surface outline-none focus:border-primary"
+        />
+      </form>
+      <div className="px-2 pb-2 pt-2">
         <p className="font-body-md text-sm font-semibold text-on-surface">快速操作</p>
         <p className="mt-0.5 text-xs text-on-surface-variant">常用批量任务会在后台执行。</p>
       </div>
@@ -490,7 +361,7 @@ function TopbarQuickActionsMenu(props: {
         <QuickActionMenuItem
           icon="auto_awesome"
           label="增量 AI 解析"
-          description="为已有 README 生成摘要、关键词和推荐标签。"
+          description="为已有 README 生成摘要、关键词和推荐标签。（会消耗 AI 额度）"
           disabled={needsGitHub || props.isBatchGeneratingAiDocuments}
           loading={props.isBatchGeneratingAiDocuments}
           onClick={props.onBatchGenerateAiDocuments}
@@ -498,7 +369,7 @@ function TopbarQuickActionsMenu(props: {
         <QuickActionMenuItem
           icon="hub"
           label="生成标签网络"
-          description="用 AI 分析仓库之间的标签关系。"
+          description="用 AI 分析仓库之间的标签关系。（会消耗 AI 额度）"
           disabled={needsGitHub || props.isGeneratingTagNetwork}
           loading={props.isGeneratingTagNetwork}
           onClick={props.onGenerateAiTagNetwork}
@@ -562,7 +433,7 @@ function TopbarNotificationPanel(props: {
   const hasContent = props.syncSummary || props.taskProgress || props.statusMessage || props.errorMessage;
 
   return (
-    <div className="fixed right-3 top-[58px] z-50 w-[calc(100vw-1.5rem)] max-w-sm rounded-xl border border-card-border bg-surface p-3 shadow-xl shadow-black/15 backdrop-blur-md sm:right-4">
+    <div className="fixed right-3 top-[46px] z-50 w-[calc(100vw-1.5rem)] max-w-sm rounded-lg border border-border bg-card p-3 shadow-lg sm:right-4">
       <div className="mb-2 flex items-center justify-between gap-3">
         <p className="font-body-md text-sm font-semibold text-on-surface">通知和任务</p>
         <button
@@ -674,7 +545,7 @@ function TaskProgressCard(props: {
         : 'sync';
 
   return (
-    <div className="rounded-lg border border-card-border bg-surface/70 p-3 shadow-sm">
+    <div className="rounded-lg border border-border bg-card p-3">
       <div className="flex items-start gap-2">
         <span
           className={`mt-0.5 flex size-7 items-center justify-center rounded-lg ${

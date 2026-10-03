@@ -70,7 +70,7 @@ export type RuntimeSettings = {
 export const DEFAULT_SETTINGS: AppSettings = {
   theme: {
     mode: 'system',
-    brandColor: '#3b82f6',
+    brandColor: '#2E6BF0',
     fontSize: 'medium',
     colorPreset: 'blue',
   },
@@ -106,7 +106,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
 };
 
 export const COLOR_PRESETS = [
-  { name: 'blue', label: '知识蓝', color: '#3b82f6' },
+  { name: 'blue', label: '知识蓝', color: '#2E6BF0' },
   { name: 'purple', label: '紫罗兰', color: '#8b5cf6' },
   { name: 'green', label: '自然绿', color: '#10b981' },
   { name: 'orange', label: '活力橙', color: '#f97316' },

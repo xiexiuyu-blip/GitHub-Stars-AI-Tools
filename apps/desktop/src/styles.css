@@ -4,38 +4,38 @@
 @custom-variant dark (&:is(.dark *));
 
 @theme {
-  /* --- 表面层 (Material Design 3 surface hierarchy) --- */
-  --color-surface: #faf8ff;
-  --color-surface-dim: #d9d9e5;
-  --color-surface-bright: #faf8ff;
-  --color-surface-container-lowest: #ffffff;
-  --color-surface-container-low: #f3f3fe;
-  --color-surface-container: #ededf9;
-  --color-surface-container-high: #e7e7f3;
-  --color-surface-container-highest: #e1e2ed;
-  --color-surface-variant: #e1e2ed;
-  --color-surface-tint: #0053db;
+  /* --- 表面层：页面浅灰，卡片白，悬停与浅灰块为实色 --- */
+  --color-surface: #F2F3F5;
+  --color-surface-dim: #E6E7E9;
+  --color-surface-bright: #FFFFFF;
+  --color-surface-container-lowest: #FFFFFF;
+  --color-surface-container-low: #F5F6F7;
+  --color-surface-container: #EFF0F1;
+  --color-surface-container-high: #E4E5E7;
+  --color-surface-container-highest: #D0D3D6;
+  --color-surface-variant: #EFF0F1;
+  --color-surface-tint: #2E6BF0;
 
   /* --- 前景色 --- */
-  --color-on-surface: #191b23;
-  --color-on-surface-variant: #434655;
-  --color-inverse-surface: #2e3039;
-  --color-inverse-on-surface: #f0f0fb;
+  --color-on-surface: #1F2329;
+  --color-on-surface-variant: #646A73;
+  --color-inverse-surface: #1F2329;
+  --color-inverse-on-surface: #F2F3F5;
 
   /* --- 轮廓 --- */
-  --color-outline: #737686;
-  --color-outline-variant: #c3c6d7;
+  --color-outline: #D0D3D6;
+  --color-outline-variant: #E4E5E7;
 
-  /* --- 主色 (知识蓝) --- */
-  --color-primary: oklch(0.48 0.14 240);
-  --color-on-primary: #ffffff;
-  --color-primary-container: #2563eb;
-  --color-on-primary-container: #eeefff;
-  --color-inverse-primary: #b4c5ff;
-  --color-primary-fixed: #dbe1ff;
-  --color-primary-fixed-dim: #b4c5ff;
-  --color-on-primary-fixed: #00174b;
-  --color-on-primary-fixed-variant: #003ea8;
+  /* --- 主色 --- */
+  --color-primary: #2E6BF0;
+  --color-on-primary: #FFFFFF;
+  --color-primary-container: #2558D8;
+  --color-on-primary-container: #FFFFFF;
+  --color-inverse-primary: #4C88FF;
+  --color-primary-fixed: #E1EAFF;
+  --color-primary-fixed-dim: #C9D8FF;
+  --color-on-primary-fixed: #245BDB;
+  --color-on-primary-fixed-variant: #245BDB;
 
   /* --- 次要色 --- */
   --color-secondary: #5c5f60;
@@ -58,69 +58,71 @@
   --color-on-tertiary-fixed-variant: #7d2d00;
 
   /* --- 功能色 --- */
-  --color-error: #ba1a1a;
-  --color-on-error: #ffffff;
-  --color-error-container: #ffdad6;
-  --color-on-error-container: #93000a;
-  --color-success: oklch(0.55 0.15 145);
+  --color-error: #D83931;
+  --color-on-error: #FFFFFF;
+  --color-error-container: #FDE2E2;
+  --color-on-error-container: #C02A26;
+  --color-success: #34C724;
   --color-warning: oklch(0.68 0.16 75);
-  --color-destructive: oklch(0.58 0.22 25);
+  --color-destructive: #D83931;
 
-  /* --- 背景 / 卡片 / 静默 --- */
-  --color-background: oklch(0.985 0.002 90 / 0.85);
-  --color-on-background: #191b23;
-  --color-foreground: oklch(0.18 0.008 90);
-  --color-card: oklch(1 0 0 / 0.7);
-  --color-card-foreground: oklch(0.18 0.008 90);
-  --color-card-border: oklch(1 0 0 / 0.1);
-  --color-muted: oklch(0.97 0.005 90 / 0.5);
-  --color-muted-foreground: oklch(0.52 0.015 90);
+  /* --- 背景 / 卡片 / 静默（不透明实色） --- */
+  --color-background: #F2F3F5;
+  --color-on-background: #1F2329;
+  --color-foreground: #1F2329;
+  --color-card: #FFFFFF;
+  --color-card-foreground: #1F2329;
+  --color-card-border: #E4E5E7;
+  --color-muted: #EFF0F1;
+  --color-muted-foreground: #646A73;
 
   /* shadcn 兼容别名 */
-  --color-popover: #ffffff;
-  --color-popover-foreground: oklch(0.18 0.008 90);
-  --color-accent: oklch(0.95 0.02 240);
-  --color-accent-foreground: oklch(0.28 0.08 240);
-  --color-border: oklch(0.92 0.005 90);
-  --color-input: oklch(0.96 0.005 90);
-  --color-ring: oklch(0.48 0.14 240);
-  --color-primary-foreground: #ffffff;
-  --color-secondary-foreground: oklch(0.32 0.05 240);
-  --color-success-foreground: #ffffff;
-  --color-warning-foreground: oklch(0.18 0.008 90);
-  --color-destructive-foreground: #ffffff;
+  --color-popover: #FFFFFF;
+  --color-popover-foreground: #1F2329;
+  --color-accent: #E1EAFF;
+  --color-accent-foreground: #245BDB;
+  --color-border: #E4E5E7;
+  --color-input: #D0D3D6;
+  --color-ring: #2E6BF0;
+  --color-primary-foreground: #FFFFFF;
+  --color-secondary-foreground: #1F2329;
+  --color-success-foreground: #FFFFFF;
+  --color-warning-foreground: #1F2329;
+  --color-destructive-foreground: #FFFFFF;
 
   /* --- 间距 token --- */
-  --spacing-sidebar-width: 260px;
+  --spacing-sidebar-width: 72px;
   --spacing-margin-page: 2rem;
   --spacing-gutter: 1.5rem;
   --spacing-stack-gap: 1rem;
 
-  /* --- 圆角 --- */
-  --radius: 0.5rem;
-  --radius-lg: 0.5rem;
-  --radius-xl: 0.75rem;
+  /* --- 圆角：标签 4px，按钮和输入框 6px，卡片 8px --- */
+  --radius-sm: 4px;
+  --radius: 6px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+  --radius-xl: 8px;
 
-  /* --- 字体族 --- */
-  --font-body-md: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
-  --font-body-lg: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
-  --font-headline-md: 'Manrope', -apple-system, BlinkMacSystemFont, sans-serif;
-  --font-headline-lg: 'Manrope', -apple-system, BlinkMacSystemFont, sans-serif;
-  --font-label-sm: 'JetBrains Mono', 'SF Mono', Monaco, monospace;
-  --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+  /* --- 字体族：系统中文栈；数字用 Inter，没装就回落 --- */
+  --font-body-md: "PingFang SC", "Noto Sans SC", -apple-system, system-ui, sans-serif;
+  --font-body-lg: "PingFang SC", "Noto Sans SC", -apple-system, system-ui, sans-serif;
+  --font-headline-md: "PingFang SC", "Noto Sans SC", -apple-system, system-ui, sans-serif;
+  --font-headline-lg: "PingFang SC", "Noto Sans SC", -apple-system, system-ui, sans-serif;
+  --font-label-sm: "Inter", "PingFang SC", system-ui, sans-serif;
+  --font-sans: "PingFang SC", "Noto Sans SC", -apple-system, system-ui, sans-serif;
 
-  /* --- 字号 token (设计模板的 body-md / headline-md 等) --- */
+  /* --- 字号：12 / 14 / 16 / 20 / 28 --- */
   --text-body-md: 14px;
   --text-body-md--line-height: 20px;
   --text-body-md--font-weight: 400;
   --text-body-lg: 16px;
   --text-body-lg--line-height: 24px;
   --text-body-lg--font-weight: 400;
-  --text-headline-md: 24px;
-  --text-headline-md--line-height: 32px;
+  --text-headline-md: 20px;
+  --text-headline-md--line-height: 28px;
   --text-headline-md--font-weight: 600;
-  --text-headline-lg: 30px;
-  --text-headline-lg--line-height: 38px;
+  --text-headline-lg: 28px;
+  --text-headline-lg--line-height: 36px;
   --text-headline-lg--font-weight: 700;
   --text-label-sm: 12px;
   --text-label-sm--line-height: 16px;
@@ -132,38 +134,50 @@
 }
 
 .dark {
-  --color-surface: #111318;
-  --color-surface-dim: #0d0f14;
-  --color-surface-bright: #252830;
-  --color-surface-container-lowest: #0b0d11;
-  --color-surface-container-low: #171a21;
-  --color-surface-container: #1d2028;
-  --color-surface-container-high: #282c35;
-  --color-surface-container-highest: #343945;
-  --color-surface-variant: #343945;
-  --color-on-surface: #f2f4fb;
-  --color-on-surface-variant: #c6cad6;
-  --color-inverse-surface: #e4e7f0;
-  --color-inverse-on-surface: #1b1d24;
-  --color-outline: #8d92a1;
-  --color-outline-variant: #434958;
-  --color-on-primary-container: #f8f9ff;
-  --color-primary-fixed: rgb(59 130 246 / 0.22);
-  --color-primary-fixed-dim: rgb(59 130 246 / 0.32);
-  --color-background: #0d0f14;
-  --color-on-background: #f2f4fb;
-  --color-foreground: #f2f4fb;
-  --color-card: rgb(23 26 33 / 0.78);
-  --color-card-foreground: #f2f4fb;
-  --color-card-border: rgb(255 255 255 / 0.1);
-  --color-muted: rgb(52 57 69 / 0.6);
-  --color-muted-foreground: #a8adbb;
-  --color-popover: #171a21;
-  --color-popover-foreground: #f2f4fb;
-  --color-accent: rgb(59 130 246 / 0.18);
-  --color-accent-foreground: #d8e5ff;
-  --color-border: #343945;
-  --color-input: #252830;
+  --color-surface: #161617;
+  --color-surface-dim: #0B0B0C;
+  --color-surface-bright: #1F1F21;
+  --color-surface-container-lowest: #1F1F21;
+  --color-surface-container-low: #262629;
+  --color-surface-container: #2A2A2D;
+  --color-surface-container-high: #2E2E31;
+  --color-surface-container-highest: #3A3A3E;
+  --color-surface-variant: #2A2A2D;
+  --color-surface-tint: #4C88FF;
+  --color-on-surface: #EBEBEC;
+  --color-on-surface-variant: #A6A7AB;
+  --color-inverse-surface: #EBEBEC;
+  --color-inverse-on-surface: #161617;
+  --color-outline: #3A3A3E;
+  --color-outline-variant: #2E2E31;
+  --color-primary: #4C88FF;
+  --color-primary-container: #6C9DFF;
+  --color-on-primary-container: #161617;
+  --color-inverse-primary: #2E6BF0;
+  --color-primary-fixed: #1C2840;
+  --color-primary-fixed-dim: #243656;
+  --color-on-primary-fixed: #8DB2FF;
+  --color-on-primary-fixed-variant: #8DB2FF;
+  --color-ring: #4C88FF;
+  --color-error: #F76964;
+  --color-error-container: #4A2A28;
+  --color-on-error-container: #FF8F8A;
+  --color-destructive: #F76964;
+  --color-success: #3FD15A;
+  --color-background: #161617;
+  --color-on-background: #EBEBEC;
+  --color-foreground: #EBEBEC;
+  --color-card: #1F1F21;
+  --color-card-foreground: #EBEBEC;
+  --color-card-border: #2E2E31;
+  --color-muted: #2A2A2D;
+  --color-muted-foreground: #A6A7AB;
+  --color-popover: #1F1F21;
+  --color-popover-foreground: #EBEBEC;
+  --color-accent: #1C2840;
+  --color-accent-foreground: #8DB2FF;
+  --color-border: #2E2E31;
+  --color-input: #3A3A3E;
 }
 
 :root {
@@ -192,22 +206,16 @@ body {
   overflow: hidden;
   font-family: var(--font-sans);
   color: var(--color-on-surface);
-  background-color: #ffffff;
-  background-image:
-    radial-gradient(at 0% 0%, hsla(240, 100%, 98%, 0.5) 0px, transparent 50%),
-    radial-gradient(at 100% 100%, hsla(240, 100%, 98%, 0.5) 0px, transparent 50%);
-  background-attachment: fixed;
+  background-color: var(--color-background);
+  background-image: none;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   text-rendering: optimizeLegibility;
 }
 
 .dark body {
-  background-color: #0d0f14;
-  background-image:
-    radial-gradient(at 0% 0%, rgb(37 99 235 / 0.12) 0px, transparent 42%),
-    radial-gradient(at 100% 0%, rgb(148 55 0 / 0.08) 0px, transparent 36%),
-    linear-gradient(180deg, rgb(23 26 33 / 0.98), rgb(13 15 20 / 1));
+  background-color: var(--color-background);
+  background-image: none;
 }
 
 button,
@@ -389,7 +397,7 @@ textarea {
   border-radius: 0.35rem;
   background: var(--color-surface-container-high);
   padding: 0.12rem 0.35rem;
-  font-family: var(--font-label-sm);
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
   font-size: 0.9em;
 }
 
@@ -964,8 +972,6 @@ textarea {
 .ai-search-page .glass-panel,
 .ai-search-page .glass-card {
   background: var(--color-surface-container-lowest);
-  backdrop-filter: none;
-  -webkit-backdrop-filter: none;
   border-color: var(--color-card-border);
   box-shadow: none;
 }
@@ -973,8 +979,6 @@ textarea {
 /* 设置页使用安静的实体表面，避免表单区与弹窗遮罩叠加模糊。 */
 .settings-page .glass-panel {
   background: var(--color-surface-container-lowest);
-  backdrop-filter: none;
-  -webkit-backdrop-filter: none;
   box-shadow: none;
 }
 
@@ -1036,8 +1040,6 @@ textarea {
 .repositories-page .glass-panel,
 .repositories-page .glass-card {
   background: var(--color-surface-container-lowest);
-  backdrop-filter: none;
-  -webkit-backdrop-filter: none;
   border-color: var(--color-card-border);
 }
 
@@ -1089,7 +1091,353 @@ textarea {
 .rankings-page .glass-panel,
 .rankings-page .glass-card {
   background: var(--color-surface-container-lowest);
-  backdrop-filter: none;
-  -webkit-backdrop-filter: none;
   border-color: var(--color-card-border);
+}
+
+/* ===========================================================================
+ * 外壳：顶栏 46px，窄导航 72px；窗口窄于 900px 时导航沉到底部
+ * =========================================================================*/
+.app-layout {
+  background: var(--color-background);
+  color: var(--color-on-surface);
+}
+
+.app-topbar {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  height: 46px;
+  min-width: 0;
+  flex: none;
+  padding: 0 12px 0 16px;
+  background: var(--color-card);
+  border-bottom: 1px solid var(--color-border);
+  position: relative;
+  z-index: 30;
+}
+
+.app-brand {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+  min-width: 0;
+}
+
+.app-brand-name {
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.2;
+  white-space: nowrap;
+  color: var(--color-on-surface);
+}
+
+.app-brand-icon.app-brand-icon-compact {
+  border-radius: 6px;
+  box-shadow: none;
+}
+
+.app-search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: min(460px, 42%);
+  min-width: 0;
+  height: 30px;
+  margin: 0 auto;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 6px;
+  background: var(--color-background);
+  color: var(--color-muted-foreground);
+  font-size: 14px;
+  text-align: left;
+}
+
+.app-search:hover {
+  background: var(--color-surface-container);
+}
+
+.app-search-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.app-search kbd {
+  flex: none;
+  border: 1px solid var(--color-outline);
+  border-radius: 4px;
+  background: var(--color-card);
+  padding: 0 4px;
+  font-size: 11px;
+  line-height: 16px;
+  color: var(--color-muted-foreground);
+}
+
+.app-top-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+  position: relative;
+}
+
+.app-sync {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-right: 2px;
+  color: var(--color-muted-foreground);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.app-sync-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--color-success);
+  flex: none;
+}
+
+.app-sync-dot[data-state='off'] {
+  background: var(--color-outline);
+}
+
+.app-sync-dot[data-state='syncing'] {
+  animation: app-sync-blink 1s infinite;
+}
+
+@keyframes app-sync-blink {
+  50% { opacity: 0.3; }
+}
+
+.app-sync-button,
+.app-icon-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 28px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--color-on-surface-variant);
+}
+
+.app-sync-button {
+  padding: 0 10px;
+  border-color: var(--color-outline);
+  background: var(--color-card);
+  color: var(--color-on-surface);
+  font-size: 12px;
+}
+
+.app-icon-button {
+  position: relative;
+  width: 32px;
+}
+
+.app-sync-button:hover,
+.app-icon-button:hover {
+  background: var(--color-surface-container-low);
+  color: var(--color-on-surface);
+}
+
+.app-sync-button:disabled,
+.app-icon-button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.app-avatar {
+  width: 28px;
+  height: 28px;
+  margin-left: 6px;
+  border: 0;
+  border-radius: 50%;
+  padding: 0;
+  overflow: hidden;
+  background: var(--color-primary);
+  color: var(--color-on-primary);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.app-avatar img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.app-body {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex: 1;
+}
+
+.app-rail {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  width: 72px;
+  flex: none;
+  min-height: 0;
+  padding: 10px 0;
+  overflow: auto;
+  background: var(--color-card);
+  border-right: 1px solid var(--color-border);
+}
+
+.app-rail-nav {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  width: 100%;
+  min-height: 0;
+  flex: 1;
+}
+
+.app-rail-spacer {
+  flex: 1;
+}
+
+.app-rail-item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  width: 58px;
+  padding: 7px 0 6px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--color-on-surface-variant);
+  font-size: 12px;
+  line-height: 1.2;
+}
+
+.app-rail-item:hover {
+  background: var(--color-surface-container-low);
+  color: var(--color-on-surface);
+}
+
+.app-rail-item[data-active='true'] {
+  background: var(--color-accent);
+  color: var(--color-accent-foreground);
+}
+
+.app-content {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  flex: 1;
+}
+
+.app-main {
+  min-width: 0;
+  min-height: 0;
+  flex: 1;
+  overflow: hidden;
+}
+
+.app-subtabs-frame {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+
+.app-subtabs-bar {
+  flex: none;
+  padding: 12px 20px 0;
+}
+
+.app-subtabs-page {
+  min-height: 0;
+  flex: 1;
+  overflow: hidden;
+}
+
+.sub-tabs {
+  display: inline-flex;
+  max-width: 100%;
+  gap: 2px;
+  padding: 2px;
+  border-radius: 6px;
+  background: var(--color-surface-container);
+}
+
+.sub-tabs button {
+  height: 28px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--color-on-surface-variant);
+  font-size: 14px;
+  white-space: nowrap;
+}
+
+.sub-tabs button:hover {
+  color: var(--color-on-surface);
+}
+
+.sub-tabs button[aria-selected='true'] {
+  background: var(--color-card);
+  color: var(--color-on-surface);
+  box-shadow: 0 1px 2px rgba(31, 35, 41, 0.12);
+  font-weight: 500;
+}
+
+@media (max-width: 900px) {
+  .app-brand-name,
+  .app-sync-text {
+    display: none;
+  }
+
+  .app-search {
+    width: auto;
+    flex: 1;
+    margin: 0;
+  }
+
+  .app-body {
+    flex-direction: column;
+  }
+
+  .app-rail {
+    order: 2;
+    flex-direction: row;
+    justify-content: space-around;
+    width: 100%;
+    height: 56px;
+    padding: 4px 8px;
+    overflow: hidden;
+    border-right: 0;
+    border-top: 1px solid var(--color-border);
+  }
+
+  .app-rail-nav {
+    flex-direction: row;
+    align-items: stretch;
+    height: 100%;
+  }
+
+  .app-rail-spacer {
+    display: none;
+  }
+
+  .app-rail-item {
+    width: auto;
+    flex: 1;
+    padding: 4px 0;
+  }
 }
