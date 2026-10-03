@@ -3,11 +3,12 @@
 //! 联网必须走 `PageFetcher`。测试注入假实现；真正的 `SafePageFetcher` 每一跳先检查链接，
 //! 再把主机解析成 IP，拒绝内网后用 `curl --resolve` 把这次解析结果固定住。
 
-use crate::capture::{ip_is_blocked, url_is_safe};
+use crate::capture::{extract_links_from_text, ip_is_blocked, url_is_safe};
 use crate::web_fetch::url_encode;
 use rusqlite::{params, Connection, OpenFlags, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::HashSet;
 use std::net::{IpAddr, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -22,6 +23,10 @@ const TITLE_CHARS: usize = 120;
 const AUTHOR_CHARS: usize = 200;
 const ERROR_CHARS: usize = 500;
 const X_TITLE_CHARS: usize = 40;
+/// 一篇文章里最多留下的仓库数。再多就丢掉后面的，保持第一次出现的顺序。
+const MAX_PAGE_REPOS: usize = 30;
+/// 与 `page_repos` 列的 CHECK 一致。超了就从末尾丢元素，不能让写库失败。
+const PAGE_REPOS_MAX_CHARS: usize = 8000;
 
 const UA_OEMBED: &str = "fox-stars-lab";
 const UA_SAFARI: &str = concat!(
@@ -174,6 +179,7 @@ enum Outcome {
         title: String,
         author: String,
         excerpt: String,
+        repos: Vec<String>,
     },
     Failed {
         reason: String,
@@ -302,6 +308,7 @@ fn fetch_html(fetcher: &dyn PageFetcher, url: &str) -> Outcome {
         title: extracted.title,
         author: extracted.author,
         excerpt: extracted.excerpt,
+        repos: github_repos_in(&page.body, url),
     }
 }
 
@@ -678,6 +685,7 @@ fn read_x_body(body: &str) -> Outcome {
         title,
         author,
         excerpt,
+        repos: Vec::new(),
     }
 }
 
@@ -710,6 +718,7 @@ fn read_youtube_body(body: &str) -> Outcome {
         title,
         author,
         excerpt: String::new(),
+        repos: Vec::new(),
     }
 }
 
@@ -768,6 +777,122 @@ fn extract_web(raw: &str, page_url: &str) -> WebPage {
         excerpt,
         failure: None,
     }
+}
+
+/// 从正文里找出 GitHub 仓库，输出 `"owner/name"`。
+/// 解析不了就返回空数组，不报错。页面本身在 github.com 上时也不抽。
+fn github_repos_in(raw_html: &str, page_url: &str) -> Vec<String> {
+    if page_host_is_github(page_url) {
+        return Vec::new();
+    }
+    let cleaned = remove_hidden(raw_html);
+    let region = content_html_for_repos(&cleaned, page_url);
+    repos_from_text(&repo_scan_text(region))
+}
+
+fn page_host_is_github(page_url: &str) -> bool {
+    match url::Url::parse(page_url) {
+        Ok(parsed) => bare_host(&parsed) == "github.com",
+        Err(_) => false,
+    }
+}
+
+/// 公众号只看 `js_content`。别的页面依次用 article、main、body。
+/// 都没有就用去掉脚本和样式后的整页，这样导航、页脚、侧栏里的站点链接进不来。
+fn content_html_for_repos<'a>(cleaned: &'a str, page_url: &str) -> &'a str {
+    let chosen = if is_wechat_url(page_url) {
+        element_by_id(cleaned, "js_content")
+    } else {
+        element_inner(cleaned, "article")
+            .or_else(|| element_inner(cleaned, "main"))
+            .or_else(|| element_inner(cleaned, "body"))
+    };
+    match chosen {
+        Some(inner) => inner,
+        None => cleaned,
+    }
+}
+
+/// 按文档顺序拼出 href（先留着实体）和可见文字，最后统一做一次实体解码。
+fn repo_scan_text(html: &str) -> String {
+    let bytes = html.as_bytes();
+    let mut raw = String::new();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] != b'<' {
+            let start = index;
+            index += 1;
+            while index < bytes.len() && bytes[index] != b'<' {
+                index += 1;
+            }
+            raw.push_str(&html[start..index]);
+            continue;
+        }
+        if let Some(tag) = parse_tag_at(html, index) {
+            if let Some(href) = attr(&tag, "href") {
+                if !href.is_empty() {
+                    raw.push('\n');
+                    raw.push_str(href);
+                    raw.push('\n');
+                }
+            }
+            index = tag.end;
+            continue;
+        }
+        raw.push('<');
+        index += 1;
+    }
+    decode_entities(&raw)
+}
+
+fn repos_from_text(text: &str) -> Vec<String> {
+    let mut found = Vec::new();
+    let mut seen = HashSet::new();
+    for link in extract_links_from_text(text) {
+        if link.kind != "github_repo" {
+            continue;
+        }
+        let Some(owner) = link.owner.as_deref().filter(|value| !value.is_empty()) else {
+            continue;
+        };
+        let Some(name) = link.name.as_deref().filter(|value| !value.is_empty()) else {
+            continue;
+        };
+        if !is_github_owner(owner) || !is_github_repo_name(name) || is_hex_32(name) {
+            continue;
+        }
+        let key = format!(
+            "{}/{}",
+            owner.to_ascii_lowercase(),
+            name.to_ascii_lowercase()
+        );
+        if !seen.insert(key) {
+            continue;
+        }
+        found.push(format!("{owner}/{name}"));
+        if found.len() == MAX_PAGE_REPOS {
+            break;
+        }
+    }
+    found
+}
+
+/// GitHub 用户名只有字母、数字和连字符。仓库名另外允许 `.` 和 `_`。
+fn is_github_owner(value: &str) -> bool {
+    value
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || ch == '-')
+}
+
+fn is_github_repo_name(value: &str) -> bool {
+    value
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
+}
+
+/// 公众号页面里有 `repository/<32 位哈希>` 这种内部链接，不是仓库。
+fn is_hex_32(value: &str) -> bool {
+    value.len() == 32 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 fn pick_title(cleaned: &str, metas: &[(String, String)]) -> String {
@@ -1655,6 +1780,22 @@ fn count_pending(connection: &Connection) -> Result<i64, String> {
         .map_err(|error| format!("收集箱计数失败：{error}"))
 }
 
+/// 超长就从末尾丢仓库，直到 JSON 放得进列。空数组一定放得下。
+fn page_repos_json(repos: &[String]) -> String {
+    let mut kept = repos.to_vec();
+    loop {
+        match serde_json::to_string(&kept) {
+            Ok(json) if json.chars().count() <= PAGE_REPOS_MAX_CHARS => return json,
+            Ok(_) => {
+                if kept.pop().is_none() {
+                    return "[]".to_owned();
+                }
+            }
+            Err(_) => return "[]".to_owned(),
+        }
+    }
+}
+
 fn write_outcome(path: &Path, id: &str, outcome: &Outcome) -> Result<(), String> {
     let mut connection = open_write(path)?;
     let tx = connection
@@ -1665,10 +1806,12 @@ fn write_outcome(path: &Path, id: &str, outcome: &Outcome) -> Result<(), String>
             title,
             author,
             excerpt,
+            repos,
         } => {
             let author = truncate_chars(&strip_controls(author), AUTHOR_CHARS);
             let excerpt = truncate_chars(&strip_controls(excerpt), EXCERPT_CHARS);
             let title = truncate_chars(&strip_controls(title), 500);
+            let page_repos = page_repos_json(repos);
             if title.is_empty() {
                 tx.execute(
                     "UPDATE inbox_items
@@ -1676,9 +1819,10 @@ fn write_outcome(path: &Path, id: &str, outcome: &Outcome) -> Result<(), String>
                          fetch_error = '',
                          fetched_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
                          page_author = ?1,
-                         page_excerpt = ?2
-                     WHERE id = ?3",
-                    params![author, excerpt, id],
+                         page_excerpt = ?2,
+                         page_repos = ?3
+                     WHERE id = ?4",
+                    params![author, excerpt, page_repos, id],
                 )
             } else {
                 tx.execute(
@@ -1688,12 +1832,13 @@ fn write_outcome(path: &Path, id: &str, outcome: &Outcome) -> Result<(), String>
                          fetched_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
                          page_author = ?1,
                          page_excerpt = ?2,
+                         page_repos = ?3,
                          title = CASE
-                             WHEN title = original_url OR title = normalized_url THEN ?3
+                             WHEN title = original_url OR title = normalized_url THEN ?4
                              ELSE title
                          END
-                     WHERE id = ?4",
-                    params![author, excerpt, title, id],
+                     WHERE id = ?5",
+                    params![author, excerpt, page_repos, title, id],
                 )
             }
         }
@@ -1871,6 +2016,7 @@ mod tests {
         page_author: String,
         page_excerpt: String,
         fetched_at: String,
+        page_repos: String,
     }
 
     fn insert_item(
@@ -1895,7 +2041,7 @@ mod tests {
         let connection = Connection::open(&db.path).expect("应能打开测试库");
         connection
             .query_row(
-                "SELECT title, status, user_note, source_context, raw_excerpt, updated_at, fetch_status, fetch_error, page_author, page_excerpt, ifnull(fetched_at, '')
+                "SELECT title, status, user_note, source_context, raw_excerpt, updated_at, fetch_status, fetch_error, page_author, page_excerpt, ifnull(fetched_at, ''), page_repos
                  FROM inbox_items WHERE id = ?1",
                 params![id],
                 |row| {
@@ -1911,6 +2057,7 @@ mod tests {
                         page_author: row.get(8)?,
                         page_excerpt: row.get(9)?,
                         fetched_at: row.get(10)?,
+                        page_repos: row.get(11)?,
                     })
                 },
             )
@@ -1940,6 +2087,7 @@ mod tests {
                 title,
                 author,
                 excerpt,
+                ..
             } => {
                 assert_eq!(author, "Fox");
                 assert_eq!(excerpt, "今天天气不错");
@@ -1976,6 +2124,7 @@ mod tests {
                 author,
                 excerpt,
                 title,
+                ..
             } => {
                 assert_eq!(author, "A & B");
                 assert_eq!(excerpt, "A & B <C> ' \"中\"");
@@ -2008,6 +2157,7 @@ mod tests {
                 title,
                 excerpt,
                 author,
+                ..
             } => {
                 assert_eq!(author, "作者");
                 assert_eq!(excerpt.chars().count(), 2000);
@@ -2067,6 +2217,7 @@ mod tests {
                 title,
                 author,
                 excerpt,
+                ..
             } => {
                 assert_eq!(title, "演示视频");
                 assert_eq!(author, "频道甲");
@@ -2956,5 +3107,347 @@ Content-Type: text/html; charset=utf-8\r\n\
             js_assigned_string("<a data-x-nickname=\"丙\">", "nickname"),
             None
         );
+    }
+
+    fn set_page_repos(db: &TempDb, id: &str, value: &str) {
+        let connection = Connection::open(&db.path).expect("应能打开测试库");
+        connection
+            .execute(
+                "UPDATE inbox_items SET page_repos = ?1 WHERE id = ?2",
+                params![value, id],
+            )
+            .expect("应能写入 page_repos");
+    }
+
+    #[test]
+    fn wechat_js_content_collects_href_text_and_ignores_chrome() {
+        let html = concat!(
+            "<script>var tpl = '<script src=\"x.js\"><\\/script>'; document.write(\"<script>\"); var hidden = \"https://github.com/hidden/script-repo\";</script>",
+            "<nav><a href=\"https://github.com/site/nav-link\">导航</a></nav>",
+            "<aside>侧栏 github.com/site/side-link</aside>",
+            "<div class=\"rich_media_content\" id=\"js_content\" style=\"visibility: hidden;\">",
+            "<p>推荐 <a href=\"https://github.com/a/b\">项目 A</a></p>",
+            "<p>纯文字 github.com/c/d 看看</p>",
+            "<p>项目地址：https://github.com/e/f。</p>",
+            "<script>var inside = \"https://github.com/hidden/inside-script\";</script>",
+            "</div>",
+            "<footer>页脚 https://github.com/site/footer-link</footer>",
+        );
+        let found = github_repos_in(html, "https://mp.weixin.qq.com/s/abc");
+        assert_eq!(
+            serde_json::to_string(&found).expect("应能序列化"),
+            r#"["a/b","c/d","e/f"]"#
+        );
+    }
+
+    #[test]
+    fn href_and_text_entities_are_decoded() {
+        let html = "\
+<article>
+  <a href=\"https://github.com/amp-user/amp-repo&#63;x=1&amp;y=2\">看</a>
+  <p>地址 github.com&#47;text-owner&#47;text-repo</p>
+</article>";
+        assert_eq!(
+            github_repos_in(html, "https://example.com/amp"),
+            vec![
+                "amp-user/amp-repo".to_owned(),
+                "text-owner/text-repo".to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn git_tree_fragment_and_punctuation_still_name_the_repo() {
+        let html = "\
+<article>
+https://github.com/o/n.git
+https://github.com/p/q/tree/main
+https://github.com/r/s#readme
+https://github.com/t/u。
+（https://github.com/v/w）
+</article>";
+        assert_eq!(
+            github_repos_in(html, "https://example.com/forms"),
+            vec![
+                "o/n".to_owned(),
+                "p/q".to_owned(),
+                "r/s".to_owned(),
+                "t/u".to_owned(),
+                "v/w".to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn same_repo_keeps_the_first_spelling_only() {
+        let html = "<article>https://github.com/OpenAI/Codex https://github.com/openai/codex.git https://github.com/OPENAI/Codex/tree/main</article>";
+        assert_eq!(
+            github_repos_in(html, "https://example.com/case"),
+            vec!["OpenAI/Codex".to_owned()]
+        );
+    }
+
+    #[test]
+    fn repos_keep_first_seen_order() {
+        let html = "\
+<article>
+github.com/first/one
+<a href=\"https://github.com/second/two\">x</a>
+https://github.com/third/three
+</article>";
+        assert_eq!(
+            github_repos_in(html, "https://example.com/order"),
+            vec![
+                "first/one".to_owned(),
+                "second/two".to_owned(),
+                "third/three".to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn repos_keep_only_the_first_thirty() {
+        let mut html = String::from("<article>");
+        for index in 0..31 {
+            html.push_str(&format!("https://github.com/owner/repo-{index:02} "));
+        }
+        html.push_str("</article>");
+        let found = github_repos_in(&html, "https://example.com/many");
+        assert_eq!(found.len(), 30);
+        assert_eq!(found[0], "owner/repo-00");
+        assert_eq!(found[29], "owner/repo-29");
+        assert!(!found.iter().any(|name| name == "owner/repo-30"));
+    }
+
+    #[test]
+    fn hex_names_and_illegal_owners_are_dropped() {
+        let hash = "0123456789abcdef".repeat(2);
+        assert_eq!(hash.len(), 32);
+        let letters = "z".repeat(32);
+        let html = format!(
+            "<article>
+https://github.com/bad_owner/ok
+https://github.com/ok.owner/repo
+https://github.com/good/my.repo_name
+https://github.com/repository/{hash}
+https://github.com/good/{letters}
+</article>"
+        );
+        assert_eq!(
+            github_repos_in(&html, "https://mp.weixin.qq.com/s/hash"),
+            vec!["good/my.repo_name".to_owned(), format!("good/{letters}"),]
+        );
+    }
+
+    #[test]
+    fn feature_and_topic_paths_are_not_repos() {
+        let html = "\
+<article>
+https://github.com/features
+https://github.com/features/copilot
+https://github.com/topics/x
+https://github.com/topics/rust
+https://github.com/real/repo
+</article>";
+        assert_eq!(
+            github_repos_in(html, "https://example.com/reserved"),
+            vec!["real/repo".to_owned()]
+        );
+    }
+
+    #[test]
+    fn github_page_returns_empty() {
+        let html = "<article><a href=\"https://github.com/a/b\">a</a> github.com/c/d</article>";
+        for url in [
+            "https://github.com/someone/else",
+            "https://www.github.com/someone/else",
+            "https://GITHUB.com/topics/rust",
+        ] {
+            assert!(
+                github_repos_in(html, url).is_empty(),
+                "{url} 是 GitHub 页面，不应抽取"
+            );
+        }
+        assert_eq!(
+            github_repos_in(html, "https://example.com/p"),
+            vec!["a/b".to_owned(), "c/d".to_owned()]
+        );
+    }
+
+    #[test]
+    fn ordinary_pages_prefer_article_then_main_then_body() {
+        let article = "\
+<nav><a href=\"https://github.com/nav/only\">n</a></nav>
+<article><a href=\"https://github.com/in/article\">a</a></article>
+<footer>https://github.com/foot/only</footer>";
+        assert_eq!(
+            github_repos_in(article, "https://blog.example/p"),
+            vec!["in/article".to_owned()]
+        );
+        let main = "<nav>https://github.com/nav/only</nav><main>https://github.com/in/main</main>";
+        assert_eq!(
+            github_repos_in(main, "https://blog.example/m"),
+            vec!["in/main".to_owned()]
+        );
+        let body =
+            "<nav>https://github.com/out/nav</nav><body><p>https://github.com/in/body</p></body>";
+        assert_eq!(
+            github_repos_in(body, "https://blog.example/b"),
+            vec!["in/body".to_owned()]
+        );
+        let whole = "<div>https://github.com/whole/page</div>";
+        assert_eq!(
+            github_repos_in(whole, "https://blog.example/w"),
+            vec!["whole/page".to_owned()]
+        );
+    }
+
+    #[test]
+    fn page_without_github_repos_returns_empty() {
+        assert!(github_repos_in(
+            "<article><p>今天没有项目</p></article>",
+            "https://example.com/p"
+        )
+        .is_empty());
+        assert!(github_repos_in("", "https://example.com/p").is_empty());
+        assert!(github_repos_in("<<<<不是标签", ":::").is_empty());
+    }
+
+    #[test]
+    fn successful_fetch_writes_page_repos_without_touching_user_fields() {
+        let db = TempDb::new("repos-ok");
+        let url = "https://example.com/post";
+        insert_item(&db, "w", url, url, "webpage", "2026-10-01T00:00:00.000Z");
+        let fetcher = SeqFetcher::new(vec![Ok(html_page(
+            "<title>真正的标题</title><article><a href=\"https://github.com/a/b\">A</a> github.com/c/d</article>",
+        ))]);
+        let summary = fetch_pending(&db.path, &fetcher, None, 20).expect("应能读取");
+        assert_eq!(summary.done, 1);
+        let row = stored(&db, "w");
+        assert_eq!(row.fetch_status, "done");
+        assert_eq!(row.page_repos, r#"["a/b","c/d"]"#);
+        assert_user_fields_untouched(&row);
+    }
+
+    #[test]
+    fn failed_or_skipped_fetch_does_not_change_page_repos() {
+        let db = TempDb::new("repos-keep");
+        insert_item(
+            &db,
+            "f",
+            "https://example.com/missing",
+            "https://example.com/missing",
+            "webpage",
+            "2026-10-01T00:00:00.000Z",
+        );
+        insert_item(
+            &db,
+            "s",
+            "http://example.com/a",
+            "http://example.com/a",
+            "webpage",
+            "2026-10-02T00:00:00.000Z",
+        );
+        set_page_repos(&db, "f", r#"["keep/me"]"#);
+        set_page_repos(&db, "s", r#"["keep/me"]"#);
+        let fetcher = SeqFetcher::new(vec![Ok(page(404, "text/html", "gone", None))]);
+        let summary = fetch_pending(&db.path, &fetcher, None, 20).expect("应能处理");
+        assert_eq!(summary.failed, 1);
+        assert_eq!(summary.skipped, 1);
+        let failed = stored(&db, "f");
+        assert_eq!(failed.fetch_status, "failed");
+        assert_eq!(failed.page_repos, r#"["keep/me"]"#);
+        assert_user_fields_untouched(&failed);
+        let skipped = stored(&db, "s");
+        assert_eq!(skipped.fetch_status, "skipped");
+        assert_eq!(skipped.page_repos, r#"["keep/me"]"#);
+        assert_user_fields_untouched(&skipped);
+    }
+
+    #[test]
+    fn oversized_repo_list_drops_tail_and_still_writes() {
+        let db = TempDb::new("repos-long");
+        let url = "https://example.com/long";
+        insert_item(&db, "w", url, url, "webpage", "2026-10-01T00:00:00.000Z");
+        let repos: Vec<String> = (0..120)
+            .map(|index| format!("owner/r{index:04}{}", "x".repeat(80)))
+            .collect();
+        write_outcome(
+            &db.path,
+            "w",
+            &Outcome::Done {
+                title: "标题".to_owned(),
+                author: "作者".to_owned(),
+                excerpt: "摘要".to_owned(),
+                repos: repos.clone(),
+            },
+        )
+        .expect("超长也应写成功");
+        let row = stored(&db, "w");
+        assert_user_fields_untouched(&row);
+        assert!(row.page_repos.chars().count() <= 8000);
+        let parsed: Vec<String> =
+            serde_json::from_str(&row.page_repos).expect("page_repos 应是 JSON 数组");
+        assert!(!parsed.is_empty());
+        assert!(parsed.len() < repos.len());
+        assert_eq!(parsed.as_slice(), &repos[..parsed.len()]);
+        let mut one_more = parsed.clone();
+        one_more.push(repos[parsed.len()].clone());
+        let overflow = serde_json::to_string(&one_more).expect("应能序列化");
+        assert!(overflow.chars().count() > 8000);
+
+        write_outcome(
+            &db.path,
+            "w",
+            &Outcome::Done {
+                title: "标题".to_owned(),
+                author: String::new(),
+                excerpt: String::new(),
+                repos: vec![format!("owner/{}", "y".repeat(9000))],
+            },
+        )
+        .expect("单条超长也不应让写库失败");
+        let again = stored(&db, "w");
+        assert_eq!(again.page_repos, "[]");
+        assert_user_fields_untouched(&again);
+    }
+
+    #[test]
+    fn oembed_success_stores_empty_repo_list() {
+        let db = TempDb::new("repos-oembed");
+        insert_item(
+            &db,
+            "x",
+            "https://x.com/fox/status/42",
+            "https://x.com/fox/status/42",
+            "webpage",
+            "2026-10-01T00:00:00.000Z",
+        );
+        insert_item(
+            &db,
+            "y",
+            "https://www.youtube.com/watch?v=abc123",
+            "https://www.youtube.com/watch?v=abc123",
+            "webpage",
+            "2026-10-02T00:00:00.000Z",
+        );
+        set_page_repos(&db, "x", r#"["old/one"]"#);
+        set_page_repos(&db, "y", r#"["old/two"]"#);
+        let x_body = x_json("Fox", "<p>正文里有 https://github.com/should/ignore</p>");
+        let y_body = json!({ "title": "演示", "author_name": "频道" }).to_string();
+        let fetcher = SeqFetcher::new(vec![
+            Ok(page(200, "application/json", &x_body, None)),
+            Ok(page(200, "application/json", &y_body, None)),
+        ]);
+        let summary = fetch_pending(&db.path, &fetcher, None, 20).expect("应能读取");
+        assert_eq!(summary.done, 2);
+        let x_row = stored(&db, "x");
+        assert_eq!(x_row.fetch_status, "done");
+        assert_eq!(x_row.page_repos, "[]");
+        assert_user_fields_untouched(&x_row);
+        let y_row = stored(&db, "y");
+        assert_eq!(y_row.fetch_status, "done");
+        assert_eq!(y_row.page_repos, "[]");
+        assert_user_fields_untouched(&y_row);
     }
 }

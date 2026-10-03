@@ -211,6 +211,11 @@ const MIGRATIONS: &[Migration] = &[
         name: "inbox_fetch",
         sql: include_str!("../../../../../packages/storage/migrations/fox/033_inbox_fetch.sql"),
     },
+    Migration {
+        version: "034",
+        name: "inbox_repos",
+        sql: include_str!("../../../../../packages/storage/migrations/fox/034_inbox_repos.sql"),
+    },
 ];
 
 pub fn latest_migration() -> &'static Migration {
@@ -484,12 +489,13 @@ mod tests {
         let path = temp_db("web-content");
         let report = migrate_database(&path).expect("空库应能迁到 031");
         assert_eq!(report.applied.len(), MIGRATIONS.len());
-        assert_eq!(MIGRATIONS.len(), 33);
-        assert_eq!(latest_migration().version, "033");
-        assert_eq!(latest_migration().name, "inbox_fetch");
+        assert_eq!(MIGRATIONS.len(), 34);
+        assert_eq!(latest_migration().version, "034");
+        assert_eq!(latest_migration().name, "inbox_repos");
         assert!(report.applied.iter().any(|item| item == "031 web_content"));
         assert!(report.applied.iter().any(|item| item == "032 repo_license"));
         assert!(report.applied.iter().any(|item| item == "033 inbox_fetch"));
+        assert!(report.applied.iter().any(|item| item == "034 inbox_repos"));
         assert!(report.backup_path.is_none());
         for table in [
             "discover_candidates",
@@ -725,8 +731,9 @@ INSERT INTO ai_task_items(id, run_id, repository_id, full_name, status, reason) 
         let report = migrate_database(&path).expect("空库应能迁到 032");
         assert!(report.applied.iter().any(|item| item == "032 repo_license"));
         assert!(report.applied.iter().any(|item| item == "033 inbox_fetch"));
-        assert_eq!(latest_migration().version, "033");
-        assert_eq!(latest_migration().name, "inbox_fetch");
+        assert!(report.applied.iter().any(|item| item == "034 inbox_repos"));
+        assert_eq!(latest_migration().version, "034");
+        assert_eq!(latest_migration().name, "inbox_repos");
         let columns = license_columns(&path);
         assert_eq!(columns.len(), 2);
         for name in ["license_spdx", "license_name"] {
@@ -771,10 +778,14 @@ INSERT INTO repositories(id, account_id, owner, name, full_name, topics_json, ht
             assert_eq!(count_query(&path, "SELECT COUNT(*) FROM repositories"), 2);
         }
 
-        let report = migrate_database(&path).expect("031 库应能升到 033");
+        let report = migrate_database(&path).expect("031 库应能升到 034");
         assert_eq!(
             report.applied,
-            vec!["032 repo_license".to_owned(), "033 inbox_fetch".to_owned()]
+            vec![
+                "032 repo_license".to_owned(),
+                "033 inbox_fetch".to_owned(),
+                "034 inbox_repos".to_owned(),
+            ]
         );
         assert_eq!(count_query(&path, "SELECT COUNT(*) FROM repositories"), 2);
         assert_eq!(
@@ -831,10 +842,13 @@ INSERT INTO inbox_items(id, account_id, original_url, normalized_url, title, ite
             assert!(columns.is_empty(), "032 的库还没有读取列");
         }
 
-        let report = migrate_database(&path).expect("032 库应能升到 033");
-        assert_eq!(report.applied, vec!["033 inbox_fetch".to_owned()]);
-        assert_eq!(latest_migration().version, "033");
-        assert_eq!(latest_migration().name, "inbox_fetch");
+        let report = migrate_database(&path).expect("032 库应能升到 034");
+        assert_eq!(
+            report.applied,
+            vec!["033 inbox_fetch".to_owned(), "034 inbox_repos".to_owned()]
+        );
+        assert_eq!(latest_migration().version, "034");
+        assert_eq!(latest_migration().name, "inbox_repos");
         assert!(MIGRATIONS
             .iter()
             .any(|migration| migration.version == "033" && migration.name == "inbox_fetch"));
@@ -872,6 +886,14 @@ INSERT INTO inbox_items(id, account_id, original_url, normalized_url, title, ite
         assert_eq!(webpage.0, "pending");
         assert_eq!(webpage.1, "");
         assert_eq!(webpage.2, "");
+        let page_repos: String = connection
+            .query_row(
+                "SELECT page_repos FROM inbox_items WHERE id = 'w1'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("旧网页应有 page_repos");
+        assert_eq!(page_repos, "[]");
         let rejected = connection.execute(
             "UPDATE inbox_items SET fetch_status = 'nope' WHERE id = 'w1'",
             [],
@@ -885,6 +907,122 @@ INSERT INTO inbox_items(id, account_id, original_url, normalized_url, title, ite
             count_query(
                 &path,
                 "SELECT COUNT(*) FROM inbox_items WHERE id = 'g1' AND fetch_status = 'skipped'"
+            ),
+            1
+        );
+
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_file(format!("{}-wal", path.display()));
+        let _ = fs::remove_file(format!("{}-shm", path.display()));
+        if let Some(backup) = report.backup_path {
+            let _ = fs::remove_file(backup);
+        }
+    }
+
+    #[test]
+    fn upgrade_from_033_adds_empty_page_repos() {
+        let path = temp_db("inbox-repos-033");
+        {
+            let mut connection = Connection::open(&path).expect("应能创建 033 夹具");
+            connection
+                .execute_batch("PRAGMA foreign_keys = ON;")
+                .expect("应能打开外键");
+            for migration in MIGRATIONS
+                .iter()
+                .filter(|migration| migration.version <= "033")
+            {
+                apply_one(&mut connection, migration).expect("夹具迁移应成功");
+            }
+            connection
+                .execute_batch(
+                    "
+INSERT INTO github_accounts(id, login, token_ref) VALUES ('acct', 'fox', 'test');
+INSERT INTO inbox_items(id, account_id, original_url, normalized_url, title, item_type, user_note, status, source_context, raw_excerpt, fetch_status) VALUES
+  ('g1', 'acct', 'https://github.com/a/b', 'https://github.com/a/b', 'a/b', 'github_repository', '备注', 'ready', '群聊', '原话', 'skipped'),
+  ('w1', 'acct', 'https://mp.weixin.qq.com/s/a', 'https://mp.weixin.qq.com/s/a', '一篇文章', 'webpage', '网页备注', 'pending', '群聊', '网页原话', 'done');
+",
+                )
+                .expect("夹具数据应能写入");
+            let columns: Vec<String> = {
+                let mut statement = connection
+                    .prepare("PRAGMA table_info(inbox_items)")
+                    .expect("应能读取表结构");
+                statement
+                    .query_map([], |row| row.get::<_, String>(1))
+                    .expect("应能遍历列")
+                    .map(|row| row.expect("应能读取列名"))
+                    .collect()
+            };
+            assert!(
+                !columns.iter().any(|name| name == "page_repos"),
+                "033 的库还没有 page_repos"
+            );
+        }
+
+        let report = migrate_database(&path).expect("033 库应能升到 034");
+        assert_eq!(report.applied, vec!["034 inbox_repos".to_owned()]);
+        assert_eq!(latest_migration().version, "034");
+        assert_eq!(latest_migration().name, "inbox_repos");
+        assert!(MIGRATIONS
+            .iter()
+            .any(|migration| { migration.version == "034" && migration.name == "inbox_repos" }));
+
+        let connection = Connection::open(&path).expect("应能打开升级后的库");
+        let column: (String, i64, Option<String>) = connection
+            .query_row(
+                "SELECT type, \"notnull\", dflt_value FROM pragma_table_info('inbox_items') WHERE name = 'page_repos'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("应有 page_repos 列");
+        assert_eq!(column.0.to_ascii_uppercase(), "TEXT");
+        assert_eq!(column.1, 1, "page_repos 不可空");
+        assert_eq!(column.2.as_deref(), Some("'[]'"));
+
+        let kept: (String, String, String, String, String, String) = connection
+            .query_row(
+                "SELECT page_repos, fetch_status, title, user_note, source_context, raw_excerpt FROM inbox_items WHERE id = 'w1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)),
+            )
+            .expect("旧网页应还在");
+        assert_eq!(kept.0, "[]");
+        assert_eq!(kept.1, "done");
+        assert_eq!(kept.2, "一篇文章");
+        assert_eq!(kept.3, "网页备注");
+        assert_eq!(kept.4, "群聊");
+        assert_eq!(kept.5, "网页原话");
+        let github: (String, String) = connection
+            .query_row(
+                "SELECT page_repos, fetch_status FROM inbox_items WHERE id = 'g1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("旧仓库条目应还在");
+        assert_eq!(github.0, "[]");
+        assert_eq!(github.1, "skipped");
+
+        let fit = "x".repeat(8000);
+        connection
+            .execute(
+                "UPDATE inbox_items SET page_repos = ?1 WHERE id = 'w1'",
+                [fit],
+            )
+            .expect("8000 个字符应能写入");
+        let too_long = "x".repeat(8001);
+        let rejected = connection.execute(
+            "UPDATE inbox_items SET page_repos = ?1 WHERE id = 'w1'",
+            [too_long],
+        );
+        assert!(rejected.is_err(), "超过 8000 个字符必须被拒绝");
+        drop(connection);
+
+        let again = migrate_database(&path).expect("第二次迁移应幂等");
+        assert!(again.applied.is_empty());
+        assert_eq!(
+            count_query(
+                &path,
+                "SELECT COUNT(*) FROM inbox_items WHERE id = 'w1' AND length(page_repos) = 8000"
             ),
             1
         );
