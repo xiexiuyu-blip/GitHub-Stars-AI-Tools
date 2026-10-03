@@ -3,7 +3,9 @@ import { invoke } from '@tauri-apps/api/core';
 import { AppLayout } from '@/components/app-layout';
 import { CommandPalette } from '@/components/command-palette';
 import { AppUpdateDialog } from '@/components/app-update-panel';
+import { SubTabs } from '@/components/sub-tabs';
 import { Icon } from '@/components/ui/icon';
+import { subTabsFor } from '@/lib/nav';
 import { WelcomeFlow } from '@/components/welcome-flow';
 import { WorkspaceProvider, useWorkspace } from '@/providers/workspace-provider';
 import { SettingsProvider, useAppSettings } from '@/providers/settings-provider';
@@ -295,8 +297,7 @@ function AppContent() {
     );
   }
 
-  // 渲染当前页面
-  function renderPage() {
+  function renderCurrentPage() {
     switch (currentPage) {
       case 'today':
         return <TodayPage onOpenLibrary={() => setCurrentPage('library')} onOpenCapture={() => setCurrentPage('capture')} onOpenSolve={() => setCurrentPage('solve')} />;
@@ -356,6 +357,22 @@ function AppContent() {
           />
         );
     }
+  }
+
+  function renderPage() {
+    const page = renderCurrentPage();
+    const tabs = subTabsFor(currentPage);
+    if (!tabs) {
+      return page;
+    }
+    return (
+      <div className="app-subtabs-frame">
+        <div className="app-subtabs-bar">
+          <SubTabs tabs={tabs} active={currentPage} onSelect={setCurrentPage} />
+        </div>
+        <div className="app-subtabs-page">{page}</div>
+      </div>
+    );
   }
 
   function handleOpenUpdateDialog() {
@@ -428,7 +445,7 @@ function AppContent() {
 
 function StartupUpdateNotice(props: { version: string; onOpenUpdate: () => void; onDismiss: () => void }) {
   return (
-    <div className="fixed bottom-4 right-4 z-50 w-[calc(100vw-2rem)] max-w-sm rounded-xl border border-primary/20 bg-surface p-4 shadow-xl shadow-black/15 backdrop-blur-md">
+    <div className="fixed bottom-4 right-4 z-50 w-[calc(100vw-2rem)] max-w-sm rounded-lg border border-border bg-card p-4 shadow-lg max-[900px]:bottom-[72px]">
       <div className="flex items-start gap-3">
         <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
           <Icon name="system_update_alt" size={20} />
