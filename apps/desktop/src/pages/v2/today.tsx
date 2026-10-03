@@ -509,12 +509,12 @@ function emptyCopy(filter: TodayFilter): { title: string; description: string } 
   if (filter === 'want') {
     return {
       title: '还没有标成「想试」的工具',
-      description: '在右边点「想试」，它就会出现在这里',
+      description: '先回到「今天值得先看」，看到想试的就点它的「想试」（资料库里也行），就会出现在这里',
     };
   }
   return {
     title: '这里没有内容',
-    description: '在右边点「想试」，它就会出现在这里',
+    description: '先回到「今天值得先看」，看到想试的就点它的「想试」，就会出现在这里',
   };
 }
 
