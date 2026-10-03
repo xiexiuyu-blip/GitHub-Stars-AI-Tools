@@ -1704,6 +1704,23 @@ mod tests {
         assert!(!content.contains("参考项目"), "{content}");
     }
 
+    /// 「关于我」和七条工作约定在前端（复制单个项目时用）和这里（参考包）各有一份，必须逐字一致。
+    /// 前端文件是编译期读进来的：路径变了这里会编译失败，不会悄悄不检查。
+    #[test]
+    fn prompt_constants_match_the_frontend_copy() {
+        let frontend = include_str!("../../src/lib/codex-prompts.ts");
+        assert!(
+            frontend.contains(&format!("'{ABOUT_ME}'")),
+            "ABOUT_ME 和 codex-prompts.ts 不一致：{ABOUT_ME}"
+        );
+        for rule in WORK_RULES {
+            assert!(
+                frontend.contains(&format!("'{rule}'")),
+                "这条工作约定和 codex-prompts.ts 不一致：{rule}"
+            );
+        }
+    }
+
     #[test]
     fn first_sentence_keeps_short_chinese_sentence() {
         assert_eq!(first_sentence("你好世界。后面不要", 20), "你好世界。");
