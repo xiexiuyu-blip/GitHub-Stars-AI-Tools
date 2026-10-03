@@ -1,5 +1,6 @@
 mod ai;
 mod auth;
+mod backup;
 mod capture;
 mod db;
 mod dev_guard;
@@ -1143,6 +1144,128 @@ fn create_dev_backup(app_handle: tauri::AppHandle) -> Result<String, String> {
         .join("backups");
     let path = v2_ops::backup_database_file(storage.database_path(), &backup_dir)?;
     Ok(path.display().to_string())
+}
+
+fn backup_locations(
+    app_handle: &tauri::AppHandle,
+) -> Result<(std::path::PathBuf, std::path::PathBuf, std::path::PathBuf), String> {
+    let storage = AppStorage::from_app_handle(app_handle)?;
+    let database_path = storage.database_path().to_path_buf();
+    let data_dir = database_path
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .ok_or_else(|| "数据库路径没有父目录".to_owned())?;
+    Ok((data_dir.clone(), data_dir.join("backups"), database_path))
+}
+
+fn app_max_schema_version() -> Result<u32, String> {
+    db::migrations::latest_migration()
+        .version
+        .parse()
+        .map_err(|_| "读不出本应用的迁移版本".to_owned())
+}
+
+fn delete_expired_backups(backups_dir: &Path) {
+    let now = time::OffsetDateTime::now_utc();
+    for file_name in backup::plan_retention(&backup::list_backups(backups_dir), now) {
+        if file_name.contains('/') || file_name.contains('\\') || file_name.contains("..") {
+            continue;
+        }
+        let path = backups_dir.join(&file_name);
+        if path.is_file() {
+            if let Err(error) = fs::remove_file(&path) {
+                eprintln!("清理旧自动备份失败：{file_name}：{error}");
+            }
+        }
+    }
+}
+
+#[tauri::command]
+fn list_backups(app_handle: tauri::AppHandle) -> Result<Vec<backup::BackupInfo>, String> {
+    let (_data_dir, backups_dir, _database_path) = backup_locations(&app_handle)?;
+    Ok(backup::list_backups(&backups_dir))
+}
+
+#[tauri::command]
+fn create_backup_now(app_handle: tauri::AppHandle) -> Result<backup::BackupInfo, String> {
+    let (_data_dir, backups_dir, database_path) = backup_locations(&app_handle)?;
+    let info = backup::create_backup(&database_path, &backups_dir, backup::BackupKind::Manual)?;
+    delete_expired_backups(&backups_dir);
+    Ok(info)
+}
+
+#[tauri::command]
+fn request_restore_backup(app_handle: tauri::AppHandle, file_name: String) -> Result<(), String> {
+    let (data_dir, backups_dir, _database_path) = backup_locations(&app_handle)?;
+    backup::request_restore(
+        &data_dir,
+        &backups_dir,
+        &file_name,
+        app_max_schema_version()?,
+    )
+}
+
+#[tauri::command]
+fn get_backup_status(app_handle: tauri::AppHandle) -> Result<backup::BackupStatus, String> {
+    let (data_dir, backups_dir, _database_path) = backup_locations(&app_handle)?;
+    Ok(backup::backup_status(
+        &data_dir,
+        &backups_dir,
+        time::OffsetDateTime::now_utc(),
+    ))
+}
+
+const AUTO_BACKUP_INITIAL_DELAY: Duration = Duration::from_secs(60);
+const AUTO_BACKUP_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
+
+fn run_auto_backup_once(app_handle: &tauri::AppHandle) -> Result<(), String> {
+    let (data_dir, backups_dir, database_path) = backup_locations(app_handle)?;
+    if !database_path.is_file() {
+        return Err("数据库文件还不存在，这次自动备份已跳过".to_owned());
+    }
+    let now = time::OffsetDateTime::now_utc();
+    let last_auto = backup::backup_status(&data_dir, &backups_dir, now)
+        .last_auto_at
+        .as_deref()
+        .and_then(backup::parse_rfc3339);
+    if !backup::auto_backup_due(last_auto, now) {
+        return Ok(());
+    }
+    backup::create_backup(&database_path, &backups_dir, backup::BackupKind::Auto)?;
+    delete_expired_backups(&backups_dir);
+    Ok(())
+}
+
+fn start_auto_backup(app_handle: tauri::AppHandle) {
+    thread::spawn(move || {
+        thread::sleep(AUTO_BACKUP_INITIAL_DELAY);
+        loop {
+            if let Err(error) = run_auto_backup_once(&app_handle) {
+                eprintln!("自动备份失败：{error}");
+            }
+            thread::sleep(AUTO_BACKUP_INTERVAL);
+        }
+    });
+}
+
+fn apply_pending_restore_at_startup(
+    app: &tauri::AppHandle,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let data_dir = app.path().app_data_dir().map_err(|error| {
+        format!("应用数据目录解析失败，已停止启动，避免在恢复前误开数据库：{error}")
+    })?;
+    dev_guard::refuse_if_production_data_dir(
+        cfg!(debug_assertions),
+        app.config().identifier.as_str(),
+        &data_dir,
+    )?;
+    let backups_dir = data_dir.join("backups");
+    if let Some(report) = backup::apply_pending_restore(&data_dir, &backups_dir) {
+        if let Some(error) = &report.error {
+            eprintln!("启动恢复没有完成：{error}");
+        }
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -6650,6 +6773,8 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         .setup(|app| {
             enforce_dev_data_isolation(app.handle())?;
+            // 恢复必须在任何数据库连接之前：后面的嵌入维护和 AppStorage 都会开库。
+            apply_pending_restore_at_startup(app.handle())?;
             if dev_guard::is_dev_identifier(&app.config().identifier) {
                 if let Some(window) = app.get_webview_window("main") {
                     let _ = window.set_title("Fox Stars Lab Dev");
@@ -6659,6 +6784,7 @@ pub fn run() {
             if let Ok(storage) = AppStorage::from_app_handle(app.handle()) {
                 let _ = local_api::start_if_enabled(storage.database_path());
             }
+            start_auto_backup(app.handle().clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -6687,6 +6813,10 @@ pub fn run() {
             build_reference_pack_v2,
             copy_item_for_codex,
             create_dev_backup,
+            list_backups,
+            create_backup_now,
+            request_restore_backup,
+            get_backup_status,
             export_library_markdown,
             log_repository_usage,
             list_ranking_board,
