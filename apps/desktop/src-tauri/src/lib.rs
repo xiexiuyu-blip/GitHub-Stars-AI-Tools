@@ -3839,6 +3839,11 @@ fn sync_github_stars_worker(app_handle: tauri::AppHandle) -> Result<StarSyncSumm
     if let Err(error) = card_handler::enqueue_new_stars(storage.database_path(), &created_ids) {
         eprintln!("新收藏的仓库入队失败：{error}");
     }
+    // 同样只给新增的仓库做规则归类（补种子 + 归类），失败只记日志。
+    if let Err(error) = scenarios::classify_new_repositories(storage.database_path(), &created_ids)
+    {
+        eprintln!("新收藏的场景归类失败：{error}");
+    }
 
     Ok(StarSyncSummary {
         account_login: user.login,
@@ -6982,6 +6987,19 @@ pub fn run() {
                 }));
                 let worker = jobs::start_worker(&database_path, vec![Arc::new(handler)]);
                 app.manage(worker);
+                // 场景：补种子，库里还没有规则归类时给全部有效仓库做一次（不联网、不读钥匙串、不花钱）。
+                // 放在后台线程里，失败只记日志，不挡启动。
+                let scenarios_db = database_path.clone();
+                std::thread::spawn(move || {
+                    match scenarios::ensure_initial_classification(&scenarios_db) {
+                        Ok(Some(stats)) => eprintln!(
+                            "场景首次归类完成：{} 个仓库，写入 {} 条",
+                            stats.repositories, stats.assigned
+                        ),
+                        Ok(None) => {}
+                        Err(error) => eprintln!("场景首次归类没有完成：{error}"),
+                    }
+                });
             }
             start_auto_backup(app.handle().clone());
             Ok(())
