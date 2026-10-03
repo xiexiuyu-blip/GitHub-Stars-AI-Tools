@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "fox-stars-lab/ai-card/v2",
-  "title": "理解卡 v1（仓库 / 投喂条目 / 工具 通用）",
+  "title": "理解卡 v2（仓库 / 投喂条目 / 工具 通用）",
   "type": "object",
   "additionalProperties": false,
   "required": ["one_liner_zh", "what_it_is", "form", "primary_category", "capabilities", "problems_solved", "how_to_try", "maturity", "zh_friendly", "confidence"],
