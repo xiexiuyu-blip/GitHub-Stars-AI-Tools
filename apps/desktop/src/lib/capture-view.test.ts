@@ -15,6 +15,7 @@ import {
   inboxByline,
   inboxContext,
   inboxExcerpt,
+  inboxQuote,
   inboxFilterOptions,
   inboxHeading,
   inboxMeta,
@@ -454,5 +455,14 @@ describe('收集箱读取内容的状态', () => {
     expect(inboxByline(undefined, '微信群')).toBe('微信群');
     expect(inboxByline(' 张三 ', '')).toBe('张三');
     expect(inboxByline('', '')).toBe('');
+  });
+});
+
+describe('收集箱条目的原话', () => {
+  it('折成一行；没有或全是空白就不显示', () => {
+    expect(inboxQuote({ quote: '这个能自动出封面，\n试试  看' })).toBe('这个能自动出封面， 试试 看');
+    expect(inboxQuote({ quote: '' })).toBeNull();
+    expect(inboxQuote({ quote: '  \n ' })).toBeNull();
+    expect(inboxQuote({})).toBeNull();
   });
 });

@@ -63,6 +63,8 @@ pub struct InboxItem {
     pub page_author: String,
     /// `page_excerpt` 的前 400 个字符。超过时在末尾加「…」。
     pub excerpt: String,
+    /// 收进来时的原话（比如微信群里那条消息）：`raw_excerpt` 的前 200 个字符，超过加「…」。粘贴收集没有原话，是空串。
+    pub quote: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -333,7 +335,7 @@ fn load_items(
     offset: i64,
 ) -> Result<Vec<InboxItem>, String> {
     let sql = format!(
-        "SELECT id, original_url, normalized_url, title, item_type, source_platform, source_context, user_note, status, repository_id, created_at, fetch_status, fetch_error, page_author, page_excerpt
+        "SELECT id, original_url, normalized_url, title, item_type, source_platform, source_context, user_note, status, repository_id, created_at, fetch_status, fetch_error, page_author, page_excerpt, raw_excerpt
          FROM inbox_items
          WHERE account_id = ?1 AND {}
          ORDER BY created_at DESC, id ASC
@@ -369,15 +371,19 @@ fn read_inbox_item(row: &rusqlite::Row<'_>) -> rusqlite::Result<InboxItem> {
         fetch_status: row.get(11)?,
         fetch_error: row.get(12)?,
         page_author: row.get(13)?,
-        excerpt: clip_excerpt(&row.get::<_, String>(14)?),
+        excerpt: clip_chars(&row.get::<_, String>(14)?, EXCERPT_LIST_CHARS),
+        quote: clip_chars(&row.get::<_, String>(15)?, QUOTE_LIST_CHARS),
     })
 }
 
-/// 列表只给前 400 个字符。按字符截，不用字节；超过才加省略号。
-fn clip_excerpt(page_excerpt: &str) -> String {
+const EXCERPT_LIST_CHARS: usize = 400;
+const QUOTE_LIST_CHARS: usize = 200;
+
+/// 列表只给前 `limit` 个字符。按字符截，不用字节；超过才加省略号。
+fn clip_chars(text: &str, limit: usize) -> String {
     let mut clipped = String::new();
-    for (index, ch) in page_excerpt.chars().enumerate() {
-        if index == 400 {
+    for (index, ch) in text.chars().enumerate() {
+        if index == limit {
             clipped.push('…');
             break;
         }
@@ -1134,6 +1140,40 @@ https://github.com/someone/else";
     }
 
     #[test]
+    fn list_inbox_carries_the_original_words_clipped_to_200_chars() {
+        let db = prepare_list();
+        let connection = Connection::open(db.path()).expect("应能打开测试库");
+        let exactly: String = "话".repeat(200);
+        let longer: String = "话".repeat(201);
+        connection
+            .execute(
+                "UPDATE inbox_items SET raw_excerpt = ?1 WHERE id = 'b'",
+                params![exactly],
+            )
+            .expect("应能写入原话");
+        connection
+            .execute(
+                "UPDATE inbox_items SET raw_excerpt = ?1 WHERE id = 'c'",
+                params![longer],
+            )
+            .expect("应能写入超长原话");
+        drop(connection);
+        let page = list_inbox(db.path(), Some("all"), None, None).expect("列表应成功");
+        let find = |id: &str| {
+            page.items
+                .iter()
+                .find(|item| item.id == id)
+                .expect("应有这条")
+        };
+        assert_eq!(find("b").quote, exactly);
+        assert!(!find("b").quote.ends_with('…'));
+        assert_eq!(find("c").quote.chars().count(), 201);
+        assert!(find("c").quote.ends_with('…'));
+        // 没有原话（粘贴收集）就是空串
+        assert_eq!(find("a").quote, "");
+    }
+
+    #[test]
     fn list_inbox_clips_excerpt_by_chars_not_bytes() {
         let db = prepare_list();
         let connection = Connection::open(db.path()).expect("应能打开测试库");
@@ -1322,6 +1362,7 @@ https://github.com/someone/else";
             fetch_error: "".to_owned(),
             page_author: "作者".to_owned(),
             excerpt: "摘要".to_owned(),
+            quote: "原话".to_owned(),
         };
         let page = InboxPage {
             items: vec![item],
@@ -1393,6 +1434,7 @@ https://github.com/someone/else";
                 "originalUrl",
                 "pageAuthor",
                 "platform",
+                "quote",
                 "repositoryId",
                 "sourceContext",
                 "status",
@@ -1415,6 +1457,7 @@ https://github.com/someone/else";
             "fetchError",
             "pageAuthor",
             "excerpt",
+            "quote",
         ] {
             assert!(item_json[key].is_string(), "{key} 应是字符串");
         }
@@ -1422,6 +1465,7 @@ https://github.com/someone/else";
         assert_eq!(item_json["fetchError"], "");
         assert_eq!(item_json["pageAuthor"], "作者");
         assert_eq!(item_json["excerpt"], "摘要");
+        assert_eq!(item_json["quote"], "原话");
         assert!(item_json["repositoryId"].is_null());
         assert_eq!(item_json["status"], "pending");
         assert_eq!(item_json["platform"], "wechat");

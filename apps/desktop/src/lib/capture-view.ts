@@ -281,6 +281,12 @@ export function inboxExcerpt(item: Pick<InboxItem, 'excerpt' | 'title'>): string
   return text;
 }
 
+/** 收进来时的原话（微信群里那条消息）：折成一行；没有就不显示。 */
+export function inboxQuote(item: Pick<InboxItem, 'quote'>): string | null {
+  const text = (item.quote ?? '').replace(/\s+/g, ' ').trim();
+  return text || null;
+}
+
 /** 还有没读过的链接吗（GitHub 仓库、已归档的不算）。 */
 export function hasUnfetched(items: readonly Pick<InboxItem, 'status' | 'itemType' | 'fetchStatus'>[]): boolean {
   return items.some((item) => item.fetchStatus === 'pending' && item.status !== 'archived' && !REPO_KINDS.has(item.itemType));

@@ -16,6 +16,7 @@ import {
   inboxFilterOptions,
   inboxHeading,
   inboxMeta,
+  inboxQuote,
   inboxStatusTag,
   kindIcon,
   type InboxFilter,
@@ -148,6 +149,7 @@ function InboxRow(props: {
     ),
   );
   const excerpt = inboxExcerpt(props.item);
+  const quote = inboxQuote(props.item);
   const fetchNote = fetchLine(props.item, props.fetching);
   const tag = inboxStatusTag(props.item.status);
   const action = archiveAction(props.item.status);
@@ -176,6 +178,11 @@ function InboxRow(props: {
       <div className="min-w-0">
         <b className="block truncate text-sm font-medium text-foreground" title={title}>{title}</b>
         {excerpt ? <p className="mt-0.5 mb-0 line-clamp-2 text-xs leading-[1.6] text-on-surface-variant">{excerpt}</p> : null}
+        {quote ? (
+          <p className="mt-0.5 mb-0 line-clamp-2 border-l-2 border-muted pl-2 text-xs leading-[1.6] text-on-surface-variant" title={quote}>
+            {quote}
+          </p>
+        ) : null}
         {meta ? <div className="truncate text-xs text-subtle">{meta}</div> : null}
         {fetchNote ? (
           <div className={cn('mt-0.5 flex items-center gap-1.5 text-xs', fetchNote.tone === 'red' ? 'text-error' : 'text-on-surface-variant')}>

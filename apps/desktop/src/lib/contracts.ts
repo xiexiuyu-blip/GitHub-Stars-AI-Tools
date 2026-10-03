@@ -213,6 +213,8 @@ export type InboxItem = {
   pageAuthor?: string;
   /** 页面摘要的前 400 个字符 */
   excerpt?: string;
+  /** 收进来时的原话（比如微信群里那条消息）的前 200 个字符；粘贴收集没有，是空串 */
+  quote?: string;
 };
 
 /** 命令 `fetch_inbox_pending({ id? })`：联网读取还没读过的收集箱链接，只读公开内容、不登录。带 `id` 时只读这一条（失败过的也会重试）。
