@@ -819,10 +819,12 @@ INSERT INTO repositories (
   forks_count,
   starred_at,
   pushed_at,
+  license_spdx,
+  license_name,
   sync_status,
   updated_at
 )
-VALUES ({id}, {account_id}, {owner}, {name}, {full_name}, {description}, {language}, {topics_json}, {html_url}, {stars_count}, {forks_count}, {starred_at}, {pushed_at}, 'active', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+VALUES ({id}, {account_id}, {owner}, {name}, {full_name}, {description}, {language}, {topics_json}, {html_url}, {stars_count}, {forks_count}, {starred_at}, {pushed_at}, {license_spdx}, {license_name}, 'active', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 ON CONFLICT(id) DO UPDATE SET
   account_id = excluded.account_id,
   owner = excluded.owner,
@@ -836,6 +838,8 @@ ON CONFLICT(id) DO UPDATE SET
   forks_count = excluded.forks_count,
   starred_at = excluded.starred_at,
   pushed_at = excluded.pushed_at,
+  license_spdx = excluded.license_spdx,
+  license_name = excluded.license_name,
   sync_status = 'active',
   updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
 ON CONFLICT(account_id, full_name) DO UPDATE SET
@@ -849,6 +853,8 @@ ON CONFLICT(account_id, full_name) DO UPDATE SET
   forks_count = excluded.forks_count,
   starred_at = excluded.starred_at,
   pushed_at = excluded.pushed_at,
+  license_spdx = excluded.license_spdx,
+  license_name = excluded.license_name,
   sync_status = 'active',
   updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now');
 
@@ -871,6 +877,8 @@ WHERE account_id = {account_id}
                 forks_count = repository.forks_count,
                 starred_at = sql_text(&repository.starred_at),
                 pushed_at = sql_optional_text(repository.pushed_at.as_deref()),
+                license_spdx = sql_optional_text(repository.license_spdx.as_deref()),
+                license_name = sql_optional_text(repository.license_name.as_deref()),
             ));
         }
 
@@ -5342,6 +5350,8 @@ INSERT INTO github_accounts (id, login, token_ref) VALUES ('1001', 'alice', 'tes
             forks_count: 10,
             starred_at: "2026-01-01T00:00:00Z".to_owned(),
             pushed_at: Some("2026-01-02T00:00:00Z".to_owned()),
+            license_spdx: None,
+            license_name: None,
         };
         storage
             .upsert_repositories(&[repository])
@@ -5361,6 +5371,8 @@ INSERT INTO github_accounts (id, login, token_ref) VALUES ('1001', 'alice', 'tes
             forks_count: 12,
             starred_at: "2026-01-01T00:00:00Z".to_owned(),
             pushed_at: Some("2026-01-03T00:00:00Z".to_owned()),
+            license_spdx: None,
+            license_name: None,
         };
         storage
             .upsert_repositories(&[renamed_repository])
@@ -5373,6 +5385,145 @@ INSERT INTO github_accounts (id, login, token_ref) VALUES ('1001', 'alice', 'tes
         assert_eq!(repositories[0].id, "1001:42");
         assert_eq!(repositories[0].full_name, "new-owner/new-name");
 
+        let _ = remove_sqlite_database_files(&database_path);
+    }
+
+    fn starred_for_license(id: &str, full_name: &str) -> StarredRepository {
+        let name = full_name
+            .split_once('/')
+            .map(|(_, name)| name)
+            .unwrap_or(full_name);
+        StarredRepository {
+            id: id.to_owned(),
+            account_id: "1001".to_owned(),
+            owner: "owner".to_owned(),
+            name: name.to_owned(),
+            full_name: full_name.to_owned(),
+            description: None,
+            language: None,
+            topics_json: "[]".to_owned(),
+            html_url: format!("https://github.com/{full_name}"),
+            stars_count: 1,
+            forks_count: 0,
+            starred_at: "2026-01-01T00:00:00Z".to_owned(),
+            pushed_at: None,
+            license_spdx: None,
+            license_name: None,
+        }
+    }
+
+    fn license_cell(storage: &AppStorage, id: &str) -> String {
+        storage
+            .query_sql(&format!(
+                "
+.mode list
+SELECT ifnull(license_spdx, '<null>') || ',' || ifnull(license_name, '<null>')
+FROM repositories
+WHERE id = '{id}';
+"
+            ))
+            .expect("应能读回许可证")
+            .trim()
+            .to_owned()
+    }
+
+    fn prepare_license_storage(label: &str) -> (AppStorage, PathBuf) {
+        let (storage, database_path) = temp_storage(label);
+        storage
+            .execute_sql(
+                "
+PRAGMA foreign_keys = ON;
+INSERT INTO github_accounts (id, login, token_ref) VALUES ('1001', 'alice', 'test');
+",
+            )
+            .expect("写入测试账号");
+        (storage, database_path)
+    }
+
+    #[test]
+    fn upsert_repositories_writes_license_and_reads_it_back() {
+        let (storage, database_path) = prepare_license_storage("license-write");
+        let mut repository = starred_for_license("1001:1", "owner/one");
+        repository.license_spdx = Some("MIT".to_owned());
+        repository.license_name = Some("MIT License".to_owned());
+        storage
+            .upsert_repositories(&[repository])
+            .expect("应能写入许可证");
+        assert_eq!(license_cell(&storage, "1001:1"), "MIT,MIT License");
+        let _ = remove_sqlite_database_files(&database_path);
+    }
+
+    #[test]
+    fn upsert_repositories_updates_license_on_both_conflicts() {
+        let (storage, database_path) = prepare_license_storage("license-update");
+        let mut first = starred_for_license("1001:1", "owner/one");
+        first.license_spdx = Some("MIT".to_owned());
+        first.license_name = Some("MIT License".to_owned());
+        storage.upsert_repositories(&[first]).expect("应能首次写入");
+
+        let mut same_id = starred_for_license("1001:1", "owner/one");
+        same_id.license_spdx = Some("Apache-2.0".to_owned());
+        same_id.license_name = Some("Apache License 2.0".to_owned());
+        storage
+            .upsert_repositories(&[same_id])
+            .expect("同 id 冲突应更新许可证");
+        assert_eq!(
+            license_cell(&storage, "1001:1"),
+            "Apache-2.0,Apache License 2.0"
+        );
+
+        let mut other_name = starred_for_license("1001:2", "owner/two");
+        other_name.license_spdx = Some("MIT".to_owned());
+        other_name.license_name = Some("MIT License".to_owned());
+        storage
+            .upsert_repositories(&[other_name])
+            .expect("应能写入第二条");
+        let mut renamed_id = starred_for_license("1001:9", "owner/two");
+        renamed_id.license_spdx = Some("GPL-3.0".to_owned());
+        renamed_id.license_name = Some("GNU General Public License v3.0".to_owned());
+        storage
+            .upsert_repositories(&[renamed_id])
+            .expect("同 full_name 冲突应更新许可证");
+        assert_eq!(
+            license_cell(&storage, "1001:2"),
+            "GPL-3.0,GNU General Public License v3.0"
+        );
+        let count = storage
+            .query_sql(
+                "
+.mode list
+SELECT COUNT(*) FROM repositories WHERE account_id = '1001' AND full_name = 'owner/two';
+",
+            )
+            .expect("应能计数");
+        assert_eq!(count.trim(), "1");
+        let _ = remove_sqlite_database_files(&database_path);
+    }
+
+    #[test]
+    fn upsert_repositories_clears_license_when_github_returns_null() {
+        let (storage, database_path) = prepare_license_storage("license-clear");
+        let mut first = starred_for_license("1001:1", "owner/one");
+        first.license_spdx = Some("MIT".to_owned());
+        first.license_name = Some("MIT License".to_owned());
+        storage.upsert_repositories(&[first]).expect("应能写入");
+        let cleared = starred_for_license("1001:1", "owner/one");
+        storage
+            .upsert_repositories(&[cleared])
+            .expect("同 id 返回空许可证应清空");
+        assert_eq!(license_cell(&storage, "1001:1"), "<null>,<null>");
+
+        let mut other = starred_for_license("1001:2", "owner/two");
+        other.license_spdx = Some("AGPL-3.0".to_owned());
+        other.license_name = Some("GNU Affero General Public License v3.0".to_owned());
+        storage
+            .upsert_repositories(&[other])
+            .expect("应能写入第二条");
+        let cleared_other = starred_for_license("1001:8", "owner/two");
+        storage
+            .upsert_repositories(&[cleared_other])
+            .expect("同 full_name 返回空许可证应清空");
+        assert_eq!(license_cell(&storage, "1001:2"), "<null>,<null>");
         let _ = remove_sqlite_database_files(&database_path);
     }
 
@@ -6151,6 +6302,8 @@ INSERT INTO github_accounts (id, login, token_ref) VALUES ('1001', 'alice', 'tes
                 forks_count: 7,
                 starred_at: "2026-02-02T00:00:00Z".to_owned(),
                 pushed_at: Some("2026-02-03T00:00:00Z".to_owned()),
+                license_spdx: None,
+                license_name: None,
             }])
             .expect("真实 GitHub 同步应按 fullName 合并导入仓库");
 

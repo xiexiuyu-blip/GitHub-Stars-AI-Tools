@@ -21,6 +21,7 @@ mod local_scan;
 mod packs;
 mod ranking_query;
 mod rankings_live;
+mod repo_facts;
 mod scenarios;
 mod solve;
 mod storage;
