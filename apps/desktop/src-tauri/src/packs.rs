@@ -198,6 +198,8 @@ pub fn build_pack(
     })
 }
 
+/// 不带任务的旧入口，只有测试在用（命令走 `render_item_for_codex_with`）。
+#[cfg(test)]
 pub fn render_item_for_codex(conn: &Connection, repo_id: &str) -> Result<String, String> {
     render_item_for_codex_with(conn, repo_id, None)
 }
