@@ -43,7 +43,7 @@ function AppContent() {
   const appUpdate = useAppUpdate();
   const [currentPage, setCurrentPage] = useState<AppPage>('today');
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
-  const [solveQuestion, setSolveQuestion] = useState('我想整理群聊里的工具链接');
+  const [solveQuestion, setSolveQuestion] = useState('');
   const [libraryKeyword, setLibraryKeyword] = useState('');
   const [showWelcome, setShowWelcome] = useState(false);
   const [hasDismissedWelcome, setHasDismissedWelcome] = useState(false);
@@ -316,7 +316,7 @@ function AppContent() {
       case 'map':
         return <MapPage />;
       case 'solve':
-        return <SolvePage initialQuestion={solveQuestion} onCreatePack={(question) => { setSolveQuestion(question); setCurrentPage('packs'); }} />;
+        return <SolvePage initialQuestion={solveQuestion} onOpenDiscover={(scenarioId) => { void scenarioId; setCurrentPage('discover'); }} />;
       case 'packs':
         return <PacksPage question={solveQuestion} />;
       case 'toolbox':
