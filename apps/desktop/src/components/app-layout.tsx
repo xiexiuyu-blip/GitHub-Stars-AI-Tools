@@ -97,7 +97,8 @@ export function AppLayout(props: AppLayoutProps) {
     : props.user
       ? (props.syncSummary ? '已同步' : '尚未同步')
       : '未连接';
-  const syncDotState = props.isSyncing ? 'syncing' : props.user ? 'ok' : 'off';
+  // 绿点只给「真的同步过」：连着账号但还没同步是灰点
+  const syncDotState = props.isSyncing ? 'syncing' : props.user && props.syncSummary ? 'ok' : 'off';
 
   return (
     <div className="app-layout flex h-full min-h-0 min-w-0 flex-col overflow-hidden">

@@ -97,7 +97,7 @@ function HoverButton(props: { label: string; icon: string; onClick: () => void }
   return (
     <button
       type="button"
-      className="inline-grid size-7 place-items-center rounded-md text-on-surface-variant hover:bg-surface-container-low hover:text-foreground"
+      className="inline-grid size-8 place-items-center rounded-md text-on-surface-variant hover:bg-surface-container-low hover:text-foreground"
       title={props.label}
       aria-label={props.label}
       onClick={handleClick}

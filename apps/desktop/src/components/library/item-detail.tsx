@@ -156,8 +156,8 @@ function DetailBody(props: Parameters<typeof ItemDetail>[0] & { detail: LibraryD
                 ) : (
                   <>
                     说得对吗？
-                    <Button variant="text" size="sm" className="h-6 px-1 text-xs" onClick={props.onConfirm}>对</Button>
-                    <Button variant="text" size="sm" className="h-6 px-1 text-xs" onClick={props.onRegenerate}>不对，重新整理</Button>
+                    <Button variant="text" size="sm" className="h-7 px-1.5 text-xs" onClick={props.onConfirm}>对</Button>
+                    <Button variant="text" size="sm" className="h-7 px-1.5 text-xs" onClick={props.onRegenerate}>不对，重新整理</Button>
                   </>
                 )}
               </div>

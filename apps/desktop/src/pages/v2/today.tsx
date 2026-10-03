@@ -7,6 +7,7 @@ import {
   codexFallbackText,
   greetingFor,
   itemsForReadingFilter,
+  pickReason,
   pickWhyLine,
   readingGroupLabel,
 } from '@/lib/item-format';
@@ -27,7 +28,7 @@ import { useAiAutomation } from '@/hooks/use-ai-automation';
 import { useRegenerate } from '@/hooks/use-regenerate';
 import { useListKeys } from '@/hooks/use-list-keys';
 import { Button, Card, EmptyState, Kbd, PageHeader, StatCard, useToast } from '@/components/kit';
-import { AutomationBanner, ItemDetail, ItemRow, PickCard } from '@/components/library';
+import { AutomationBanner, ItemDetail, ItemRow, PickCard, scenarioChipsOf } from '@/components/library';
 import { cn } from '@/lib/utils';
 
 type TodayPageProps = {
@@ -57,6 +58,7 @@ export function TodayPage(props: TodayPageProps) {
   const toast = useToast();
   const { status: automation } = useAiAutomation();
   const regenerateCard = useRegenerate(props.onOpenToolbox);
+  const listScrollRef = useRef<HTMLDivElement | null>(null);
   const [name, setName] = useState('Fox');
   const [phase, setPhase] = useState<'loading' | 'ready' | 'error'>('loading');
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -339,6 +341,7 @@ export function TodayPage(props: TodayPageProps) {
 
   function choose(next: TodayFilter) {
     setFilter(next);
+    if (listScrollRef.current) listScrollRef.current.scrollTop = 0;
     if (narrow) setDetailOpen(false);
   }
 
@@ -392,7 +395,7 @@ export function TodayPage(props: TodayPageProps) {
       <AutomationBanner hint={hint} onAction={props.onOpenToolbox} />
       <div className="grid min-h-0 flex-1 grid-cols-1 gap-3 min-[900px]:grid-cols-[minmax(340px,460px)_minmax(0,1fr)]">
         <Card className={cn('flex min-h-0 flex-col overflow-hidden', hideList && 'hidden')}>
-          <div className="min-h-0 flex-1 overflow-auto py-1">
+          <div ref={listScrollRef} className="min-h-0 flex-1 overflow-auto py-1">
             {renderListBody()}
           </div>
           <div className="flex shrink-0 flex-wrap gap-2.5 border-t border-muted px-4 py-2.5 text-xs text-on-surface-variant">
@@ -461,6 +464,7 @@ export function TodayPage(props: TodayPageProps) {
                 item={item}
                 selected={item.id === selectedId}
                 why={pickWhyLine(item)}
+                reason={pickReason(scenarioChipsOf(item, scenarios).map((scenario) => scenario.nameZh))}
                 scenarios={scenarios}
                 onSelect={() => pickRow(item.id)}
                 onWant={() => void changeReading(item.id, 'want')}
@@ -515,10 +519,10 @@ function emptyCopy(filter: TodayFilter): { title: string; description: string } 
 
 function GroupHeader(props: { title: string; count: number; hint?: string }) {
   return (
-    <div className="flex flex-wrap items-center gap-1.5 px-4 pt-3 pb-1 text-xs text-on-surface-variant">
-      <span>{props.title}</span>
-      <span className="font-medium">{props.count}</span>
-      {props.hint ? <span>· {props.hint}</span> : null}
+    <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5 px-4 pt-3.5 pb-1.5">
+      <span className="text-[15px] font-semibold text-foreground">{props.title}</span>
+      <span className="text-xs font-medium text-on-surface-variant">{props.count}</span>
+      {props.hint ? <span className="text-xs text-subtle">{props.hint}</span> : null}
     </div>
   );
 }

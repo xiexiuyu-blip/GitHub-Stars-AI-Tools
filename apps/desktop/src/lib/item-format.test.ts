@@ -13,6 +13,7 @@ import {
   itemsForReadingFilter,
   maturityLabel,
   monthDay,
+  pickReason,
   pickWhyLine,
   readingGroupLabel,
   relativeDays,
@@ -284,5 +285,17 @@ describe('cleanDescription', () => {
 
   it('正常文字原样', () => {
     expect(cleanDescription('Python tool for converting files to Markdown.')).toBe('Python tool for converting files to Markdown.');
+  });
+});
+
+describe('pickReason', () => {
+  it('取所属的第一个方向写成推荐理由', () => {
+    expect(pickReason(['小红书', '抖音·短视频'])).toBe('你常做「小红书」，这个还没看过');
+    expect(pickReason(['  ', '电商'])).toBe('你常做「电商」，这个还没看过');
+  });
+
+  it('没有所属方向就不编', () => {
+    expect(pickReason([])).toBeNull();
+    expect(pickReason([' ', ''])).toBeNull();
   });
 });

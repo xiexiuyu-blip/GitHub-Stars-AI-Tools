@@ -174,6 +174,16 @@ export function pickWhyLine(item: { oneLiner?: string | null; highlight?: string
   return `适合：${highlight}`;
 }
 
+/**
+ * 「为什么今天推荐给你」：它所属的第一个方向 + 你还没看过。今天值得先看里的项目都是「还没看过」的，
+ * 而且按你常做的方向挑，所以这句是真话。没有所属方向就返回 null（不编）。
+ */
+export function pickReason(scenarioNames: readonly string[]): string | null {
+  const name = scenarioNames.map((item) => item.trim()).find(Boolean);
+  if (!name) return null;
+  return `你常做「${name}」，这个还没看过`;
+}
+
 export function applyReadingOverrides<T extends { id: string; readingGroup: string }>(
   items: readonly T[],
   overrides: Readonly<Record<string, string>>,

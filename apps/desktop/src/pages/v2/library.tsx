@@ -59,6 +59,7 @@ export function LibraryPage(props: LibraryPageProps) {
   const toast = useToast();
   const { status: automation } = useAiAutomation();
   const regenerateCard = useRegenerate(props.onOpenToolbox);
+  const listScrollRef = useRef<HTMLDivElement | null>(null);
   const [ui, setUi] = useState(() => withInitial(props.initialKeyword, props.initialScenario, props.initialPreset));
   const [keywordDraft, setKeywordDraft] = useState(() => withInitial(props.initialKeyword, props.initialScenario, props.initialPreset).keyword);
   const [scenarios, setScenarios] = useState<ScenarioSummary[]>([]);
@@ -115,6 +116,10 @@ export function LibraryPage(props: LibraryPageProps) {
   const items = useMemo(() => projectItems(serverItems, overrides, ui.reading), [serverItems, overrides, ui.reading]);
   const orderedKey = items.map((item) => item.id).join('\u0001');
   const previousQueryKey = useRef(queryKey);
+  // 换了筛选或搜索词：列表回到顶部，别停在上一个结果的中间
+  useEffect(() => {
+    if (listScrollRef.current) listScrollRef.current.scrollTop = 0;
+  }, [queryKey]);
   const initialStamp = `${props.initialKeyword ?? ''}\u0001${props.initialScenario ?? ''}`;
   const seenInitial = useRef(initialStamp);
 
@@ -537,8 +542,22 @@ export function LibraryPage(props: LibraryPageProps) {
             placeholder="搜工具、说明、关键词"
             aria-label="搜索资料库"
             autoComplete="off"
-            className="h-9 w-full rounded-md border border-input bg-card pr-3 pl-9 text-sm text-foreground outline-none placeholder:text-on-surface-variant focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-primary"
+            className="h-9 w-full rounded-md border border-input bg-card pr-9 pl-9 text-sm text-foreground outline-none placeholder:text-on-surface-variant focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-primary"
           />
+          {keywordDraft ? (
+            <button
+              type="button"
+              className="absolute top-1/2 right-1.5 grid size-7 -translate-y-1/2 place-items-center rounded-md text-on-surface-variant hover:bg-surface-container-low hover:text-foreground"
+              aria-label="清除搜索词"
+              title="清除"
+              onClick={() => {
+                setKeywordDraft('');
+                searchRef.current?.focus();
+              }}
+            >
+              <Icon name="close" size={16} />
+            </button>
+          ) : null}
         </div>
         {layout !== 'wide' ? (
           <div ref={filterRootRef} className="relative">
@@ -578,7 +597,7 @@ export function LibraryPage(props: LibraryPageProps) {
               AI 还没整理出理解卡，先显示全部收藏。
             </p>
           ) : null}
-          <div className="min-h-0 flex-1 overflow-auto">
+          <div ref={listScrollRef} className="min-h-0 flex-1 overflow-auto">
             {renderListBody()}
             {hasMore ? (
               <div className="flex justify-center px-4 py-3">
