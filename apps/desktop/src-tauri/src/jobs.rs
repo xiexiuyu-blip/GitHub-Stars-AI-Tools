@@ -4,10 +4,6 @@
 //! 用量按滚动 24 小时计算（避开时区）。检查发生在认领之前，正在跑的任务可以把总量撑过预算，
 //! 结束后才停；并发时每个工作线程都可能再领走一个，因为用量要等任务写完才入账。
 //!
-//! 处理器要到下一张卡才注册，`cargo check` 又不编译测试，所以认领、收尾、工作线程
-//! 这些公开接口在本卡里看起来像没人用。先关掉 dead_code，避免把基线警告数抬高。
-#![allow(dead_code)]
-
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -154,6 +150,8 @@ impl Default for WorkerConfig {
     }
 }
 
+/// 测试要看线程有没有停。`cargo check` 不编译测试，所以单独放开。
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WorkerStatus {
     pub stopped: bool,
@@ -171,7 +169,8 @@ struct WorkerInner {
 
 pub struct Worker {
     inner: Arc<WorkerInner>,
-    joins: Vec<JoinHandle<()>>,
+    /// `JoinHandle` 不是 `Sync`。放进锁里，工作线程才能作为 Tauri 托管状态留下来。
+    joins: Mutex<Vec<JoinHandle<()>>>,
 }
 
 pub fn queue_control_path(database_path: &Path) -> PathBuf {
@@ -492,14 +491,21 @@ impl Worker {
                 Err(_) => break,
             }
         }
-        Self { inner, joins }
+        Self {
+            inner,
+            joins: Mutex::new(joins),
+        }
     }
 
     /// 不再认领新任务，并等正在跑的任务自己结束。处理器的网络超时由处理器自己管。
-    pub fn stop(mut self) {
+    /// 应用退出走 `Drop`。这个方法给测试主动停机，`cargo check` 看不见测试调用。
+    #[allow(dead_code)]
+    pub fn stop(self) {
         self.signal_and_join();
     }
 
+    /// 测试要确认线程已经起来。应用本身不读这个状态。
+    #[allow(dead_code)]
     pub fn status(&self) -> WorkerStatus {
         WorkerStatus {
             stopped: self.inner.stop.load(Ordering::SeqCst),
@@ -507,10 +513,11 @@ impl Worker {
         }
     }
 
-    fn signal_and_join(&mut self) {
+    fn signal_and_join(&self) {
         self.inner.stop.store(true, Ordering::SeqCst);
         self.inner.wake.notify_all();
-        for handle in self.joins.drain(..) {
+        let mut joins = self.joins.lock().unwrap_or_else(|error| error.into_inner());
+        for handle in joins.drain(..) {
             let _ = handle.join();
         }
     }
@@ -522,9 +529,9 @@ impl Drop for Worker {
     }
 }
 
-/// 目前没有处理器，所以不启动线程，也不可能花钱。下一张卡在这里注册处理器。
-pub fn start_default_worker(_db_path: &Path) -> Option<Worker> {
-    None
+/// 用调用方给的处理器启动工作线程。预算仍只看控制文件，默认是 0，这里不写预算、也不调用处理器。
+pub fn start_worker(db_path: &Path, handlers: Vec<Arc<dyn JobHandler>>) -> Worker {
+    Worker::start(db_path.to_path_buf(), handlers, WorkerConfig::default())
 }
 
 fn recover_running_jobs(conn: &Connection, now: &str) -> Result<usize, String> {
@@ -2289,8 +2296,10 @@ mod tests {
     }
 
     #[test]
-    fn start_default_worker_does_nothing_without_handlers() {
-        let db = TestDb::new("default-worker");
-        assert!(start_default_worker(db.path()).is_none());
+    fn start_worker_starts_threads_for_the_given_handlers() {
+        let db = TestDb::new("start-worker");
+        let worker = start_worker(db.path(), Vec::new());
+        assert!(!worker.status().stopped);
+        worker.stop();
     }
 }
