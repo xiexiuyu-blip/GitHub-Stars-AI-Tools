@@ -5,6 +5,7 @@ import {
   pushToast,
   removeToast,
   toastDuration,
+  TOAST_HOVER_GRACE_MS,
   type ToastInput,
   type ToastRecord,
 } from './toast-state';
@@ -56,6 +57,17 @@ export function ToastProvider(props: { children: ReactNode }) {
     }
   }, [dismiss]);
 
+  // 鼠标放上去就暂停计时，移开后再留一小会儿
+  const pause = useCallback((id: string) => {
+    const timer = timersRef.current.get(id);
+    if (timer != null) window.clearTimeout(timer);
+    timersRef.current.delete(id);
+  }, []);
+  const resume = useCallback((id: string) => {
+    if (timersRef.current.has(id)) return;
+    timersRef.current.set(id, window.setTimeout(() => dismiss(id), TOAST_HOVER_GRACE_MS));
+  }, [dismiss]);
+
   useEffect(() => {
     const timers = timersRef.current;
     return () => {
@@ -73,6 +85,8 @@ export function ToastProvider(props: { children: ReactNode }) {
             key={item.id}
             role="status"
             className="pointer-events-auto flex max-w-full items-center gap-2.5 rounded-lg bg-card py-2.5 pr-2.5 pl-3.5 text-sm text-foreground shadow-lg"
+            onMouseEnter={() => pause(item.id)}
+            onMouseLeave={() => resume(item.id)}
           >
             <Icon name="check_circle" size={18} className="shrink-0 text-accent-foreground" />
             <div className="min-w-0">

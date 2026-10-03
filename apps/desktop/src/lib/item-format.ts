@@ -62,6 +62,45 @@ export function cleanHowToTry(text: string | null | undefined): string {
   return text;
 }
 
+const MATURITY_LABEL: Record<string, string> = {
+  usable: '可用',
+  mature: '成熟',
+  stable: '稳定',
+  production: '可上生产',
+  beta: '测试版',
+  alpha: '早期',
+  experimental: '实验中',
+  prototype: '原型',
+};
+
+/**
+ * 「成熟度」做成短标签：认识的英文换成中文；已经是短词（不超过 6 个字）的原样；整句话
+ * （「开源项目，提供安装脚本和文档，需自行部署。」）不显示——截半句只会误导，这些信息 AI 说明里已经有了。
+ */
+export function maturityLabel(raw: string | null | undefined): string | null {
+  const text = raw?.trim();
+  if (!text) return null;
+  const mapped = MATURITY_LABEL[text.toLowerCase()];
+  if (mapped) return mapped;
+  return Array.from(text).length <= 6 ? text : null;
+}
+
+const EMOJI = /[\p{Extended_Pictographic}\u200d\ufe0f]/gu;
+const SHORTCODE = /:[a-z0-9_+-]{2,}:/gi;
+const URL_TEXT = /https?:\/\/\S+/gi;
+
+/** GitHub 描述里常有表情、:shortcode:、链接：列表里读起来像噪音，去掉；折成一行。 */
+export function cleanDescription(raw: string | null | undefined): string {
+  if (!raw) return '';
+  return raw
+    .replace(URL_TEXT, ' ')
+    .replace(SHORTCODE, ' ')
+    .replace(EMOJI, '')
+    .replace(/[\s\u3000]+/g, ' ')
+    .replace(/^[\s|｜·\-–—:：]+/, '')
+    .trim();
+}
+
 export function readingGroupLabel(group: ReadingGroup): string {
   return READING_LABEL[group] ?? '没看';
 }

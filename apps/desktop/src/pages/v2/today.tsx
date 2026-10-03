@@ -22,6 +22,7 @@ import {
   setLibraryReading,
 } from '@/lib/api';
 import { automationHint } from '@/lib/automation-view';
+import type { LibraryPreset } from '@/lib/library-filters';
 import { useAiAutomation } from '@/hooks/use-ai-automation';
 import { useRegenerate } from '@/hooks/use-regenerate';
 import { useListKeys } from '@/hooks/use-list-keys';
@@ -30,7 +31,7 @@ import { AutomationBanner, ItemDetail, ItemRow, PickCard } from '@/components/li
 import { cn } from '@/lib/utils';
 
 type TodayPageProps = {
-  onOpenLibrary: () => void;
+  onOpenLibrary: (preset?: LibraryPreset) => void;
   onOpenCapture: () => void;
   onOpenSolve: () => void;
   /** 去工具箱（开启 / 调整 AI 自动整理） */
@@ -362,6 +363,22 @@ export function TodayPage(props: TodayPageProps) {
   const hideDetail = narrow && !detailOpen;
   const empty = emptyCopy(filter);
   const hint = automationHint(automation, today?.counts?.cardsPending ?? 0);
+  // 统计卡上写的是全部，列表最多列一屏：差多少就老实说，并给一个去资料库看全部的入口
+  const listedTotal = filter === 'pending'
+    ? today?.counts?.cardsPending ?? 0
+    : filter === 'want'
+      ? readingCounts?.want ?? 0
+      : filter === 'in_use'
+        ? readingCounts?.inUse ?? 0
+        : 0;
+  const viewAllPreset: LibraryPreset | null = filter === 'pending'
+    ? { cardState: 'pending' }
+    : filter === 'want'
+      ? { reading: 'want' }
+      : filter === 'in_use'
+        ? { reading: 'in_use' }
+        : null;
+  const hiddenCount = viewAllPreset ? Math.max(0, listedTotal - ordered.length) : 0;
 
   return (
     <section className="flex h-full min-h-0 flex-col gap-3 overflow-hidden px-5 pt-4 pb-5 max-[899px]:px-4 max-[899px]:pt-3 max-[899px]:pb-4">
@@ -467,6 +484,16 @@ export function TodayPage(props: TodayPageProps) {
               />
             ))}
           </>
+        ) : null}
+        {hiddenCount > 0 && viewAllPreset ? (
+          <button
+            type="button"
+            className="mx-3 my-2.5 flex w-[calc(100%-24px)] items-center justify-between rounded-lg border border-dashed border-border px-3.5 py-2.5 text-left text-sm text-on-surface-variant hover:bg-surface-container-low"
+            onClick={() => props.onOpenLibrary(viewAllPreset)}
+          >
+            <span>这里只列了前 {ordered.length} 个，还有 {hiddenCount} 个</span>
+            <span className="shrink-0 text-accent-foreground">去资料库看全部 →</span>
+          </button>
         ) : null}
       </>
     );

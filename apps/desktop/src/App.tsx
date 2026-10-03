@@ -6,6 +6,7 @@ import { AppUpdateDialog } from '@/components/app-update-panel';
 import { SubTabs } from '@/components/sub-tabs';
 import { Icon } from '@/components/ui/icon';
 import { subTabsFor } from '@/lib/nav';
+import type { LibraryPreset } from '@/lib/library-filters';
 import { WelcomeFlow } from '@/components/welcome-flow';
 import { WorkspaceProvider, useWorkspace } from '@/providers/workspace-provider';
 import { SettingsProvider, useAppSettings } from '@/providers/settings-provider';
@@ -46,6 +47,11 @@ function AppContent() {
   const [solveQuestion, setSolveQuestion] = useState('');
   const [discoverScenario, setDiscoverScenario] = useState<string | null>(null);
   const [libraryKeyword, setLibraryKeyword] = useState('');
+  const [libraryPreset, setLibraryPreset] = useState<LibraryPreset | null>(null);
+  // 离开资料库就忘掉带进来的条件：下次从导航点进去是干净的
+  useEffect(() => {
+    if (currentPage !== 'library') setLibraryPreset(null);
+  }, [currentPage]);
   const [showWelcome, setShowWelcome] = useState(false);
   const [hasDismissedWelcome, setHasDismissedWelcome] = useState(false);
   const [hasDismissedUpdateNotice, setHasDismissedUpdateNotice] = useState(false);
@@ -301,13 +307,14 @@ function AppContent() {
   function renderCurrentPage() {
     switch (currentPage) {
       case 'today':
-        return <TodayPage onOpenLibrary={() => setCurrentPage('library')} onOpenCapture={() => setCurrentPage('capture')} onOpenSolve={() => setCurrentPage('solve')} onOpenToolbox={() => setCurrentPage('toolbox')} />;
+        return <TodayPage onOpenLibrary={(preset) => { setLibraryPreset(preset ?? null); setCurrentPage('library'); }} onOpenCapture={() => setCurrentPage('capture')} onOpenSolve={() => setCurrentPage('solve')} onOpenToolbox={() => setCurrentPage('toolbox')} />;
       case 'capture':
         return <CapturePage />;
       case 'library':
         return (
           <V2LibraryPage
             initialKeyword={libraryKeyword}
+            initialPreset={libraryPreset}
             onOpenSolve={(query) => {
               setSolveQuestion(query);
               setCurrentPage('solve');

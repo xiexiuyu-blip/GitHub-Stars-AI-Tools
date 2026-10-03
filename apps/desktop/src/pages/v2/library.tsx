@@ -25,6 +25,7 @@ import {
   toggleScenario,
   visibleScenarios,
   withInitial,
+  type LibraryPreset,
   type LibraryUiState,
 } from '@/lib/library-filters';
 import { automationHint } from '@/lib/automation-view';
@@ -44,6 +45,8 @@ type LibraryPageProps = {
   initialKeyword?: string;
   /** 预留：从别处带着场景进来。现在没有调用方。 */
   initialScenario?: string | null;
+  /** 从别处带着整理状态 / 我的状态进来 */
+  initialPreset?: LibraryPreset | null;
   onOpenSolve?: (query: string) => void;
   /** 去工具箱（开启 / 调整 AI 自动整理） */
   onOpenToolbox?: () => void;
@@ -56,8 +59,8 @@ export function LibraryPage(props: LibraryPageProps) {
   const toast = useToast();
   const { status: automation } = useAiAutomation();
   const regenerateCard = useRegenerate(props.onOpenToolbox);
-  const [ui, setUi] = useState(() => withInitial(props.initialKeyword, props.initialScenario));
-  const [keywordDraft, setKeywordDraft] = useState(() => withInitial(props.initialKeyword, props.initialScenario).keyword);
+  const [ui, setUi] = useState(() => withInitial(props.initialKeyword, props.initialScenario, props.initialPreset));
+  const [keywordDraft, setKeywordDraft] = useState(() => withInitial(props.initialKeyword, props.initialScenario, props.initialPreset).keyword);
   const [scenarios, setScenarios] = useState<ScenarioSummary[]>([]);
   const [scenarioStatus, setScenarioStatus] = useState<ScenarioStatus>('loading');
   const [scenarioError, setScenarioError] = useState<string | null>(null);
@@ -491,14 +494,14 @@ export function LibraryPage(props: LibraryPageProps) {
   const cardOptions = counts
     ? cardStateOptions(counts.cardState)
     : [
+      { value: 'all' as const, label: '全部 …' },
       { value: 'done' as const, label: '已整理 …' },
       { value: 'pending' as const, label: '待整理 …' },
-      { value: 'all' as const, label: '全部 …' },
     ];
   const totalText = counts && typeof counts.total === 'number' && Number.isFinite(counts.total)
     ? String(counts.total)
     : '…';
-  const subtitle = `你收藏的 ${totalText} 个工具，按你能拿它做什么来找。已整理的有中文说明，其余还没整理。`;
+  const subtitle = `你收藏的 ${totalText} 个工具，按你能拿它做什么来找。整理好的有中文说明，其余先显示 GitHub 上的原文。`;
   const showFallbackHint = fallbackHint && !cardStateTouched && ui.cardState === 'all';
   const filtersActive = hasActiveFilters(ui);
   // 提示说的是整个资料库还有多少没整理；已经按场景 / 关键词筛窄了，数字对不上，就不提示
@@ -513,10 +516,11 @@ export function LibraryPage(props: LibraryPageProps) {
   const detailLoading = Boolean(selectedId) && !shownDetail && detailPhase !== 'error';
   const hideList = layout === 'narrow' && detailOpen;
   const hideDetail = layout === 'narrow' && !detailOpen;
+  // 详情栏要比列表宽或一样宽：封面、标签页、README 都在这里，太窄会被裁
   const gridClass = layout === 'wide'
-    ? 'grid-cols-[200px_minmax(0,1fr)_minmax(340px,440px)]'
+    ? 'grid-cols-[200px_minmax(320px,1fr)_minmax(440px,560px)]'
     : layout === 'medium'
-      ? 'grid-cols-[minmax(0,1fr)_minmax(340px,440px)]'
+      ? 'grid-cols-[minmax(300px,1fr)_minmax(420px,520px)]'
       : 'grid-cols-1';
 
   return (

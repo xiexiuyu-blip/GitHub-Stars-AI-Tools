@@ -1,6 +1,6 @@
 import type { MouseEvent } from 'react';
 import type { LibraryItem, ReadingGroup, ScenarioSummary } from '@/lib/contracts';
-import { readingGroupLabel, splitRepoName } from '@/lib/item-format';
+import { cleanDescription, readingGroupLabel, splitRepoName } from '@/lib/item-format';
 import { LangDot, RepoAvatar, ScenarioChip, StarCount, Tag } from '@/components/kit';
 import { Icon } from '@/components/ui/icon';
 import { cn } from '@/lib/utils';
@@ -27,7 +27,7 @@ export function ItemRow(props: {
 }) {
   const { owner, repo } = splitRepoName(props.item.fullName);
   const chips = scenarioChipsOf(props.item, props.scenarios);
-  const text = props.item.oneLiner?.trim() || props.item.description?.trim() || '';
+  const text = props.item.oneLiner?.trim() || cleanDescription(props.item.description);
 
   return (
     <div
@@ -54,7 +54,6 @@ export function ItemRow(props: {
           {chips.map((scenario) => (
             <ScenarioChip key={scenario.id} name={scenario.nameZh} scenarioKey={scenario.slug || scenario.id} />
           ))}
-          {!props.item.oneLiner ? <Tag>待整理</Tag> : null}
         </div>
         {props.why ? (
           <div className="why-line mt-1.5 flex items-start gap-1 text-xs leading-[1.5]">

@@ -122,6 +122,11 @@ const HTML_ALT = /\balt\s*=\s*["']([^"']*)["']/i;
 /** 徽章、统计图、分隔线之类，不是「这个工具长什么样」。 */
 const NOT_A_PREVIEW =
   /(shields\.io|badge|badgen|travis|codecov|circleci|\/actions\/|\/workflows\/|star-history|trendshift|hits\.seeyoufarm|visitor-badge|komarev|contrib\.rocks|opencollective|capsule-render|readme-stats|api\.star|rainbow|divider|separator|spacer|\/line[._-]|[._-]line\.|emoji|sponsor)/i;
+/** 赞助、赞赏、收款二维码、广告：就算在 README 里，也不是这个工具长什么样。看文件名、alt、链接。 */
+const AD_LIKE =
+  /(sponsor|donat|buymeacoffee|buy-me-a-coffee|patreon|ko-fi|kofi|afdian|paypal|alipay|wechatpay|wxpay|reward|coffee|qrcode|qr[-_ ]?code|赞助|赞赏|打赏|捐赠|捐助|收款|支付宝|微信支付|二维码|扫码|proxies|proxy|serpapi|brightdata|bright data|oxylabs|(^|[^a-z])ads?([^a-z]|$))/i;
+/** 这些小标题下面的图都不要：赞助商、赞赏、贡献者、联系方式…… */
+const AD_HEADING = /(sponsor|donat|backers?|support (us|me|the)|buy me|contributors?|赞助|赞赏|打赏|捐赠|捐助|支持(我们|我|本项目)|请我喝|交流群|联系(我们|作者)|加入(我们|群)|扫码)/i;
 /** 只在没有别的图时才用：logo、图标。 */
 const LOGO_LIKE = /(logo|icon|favicon|avatar|banner-small)/i;
 
@@ -147,20 +152,33 @@ export function resolveAssetUrl(raw: string, fullName: string): string | null {
   return `https://raw.githubusercontent.com/${fullName}/HEAD/${path}`;
 }
 
-type RawImage = { url: string; alt: string };
+type RawImage = { url: string; alt: string; heading: string };
+
+/** 每个位置之前最近的一个 Markdown 小标题（# …）。图片在「Sponsors」之类的小节里就不当截图。 */
+function headingAt(markdown: string, at: number, headings: Array<{ at: number; text: string }>): string {
+  let current = '';
+  for (const heading of headings) {
+    if (heading.at > at) break;
+    current = heading.text;
+  }
+  return current;
+}
 
 function rawImages(markdown: string): RawImage[] {
+  const headings = Array.from(markdown.matchAll(/^#{1,6}[ \t]+(.+)$/gm), (match) => ({ at: match.index ?? 0, text: match[1] ?? '' }));
   const found: Array<RawImage & { at: number }> = [];
   for (const match of markdown.matchAll(MD_IMAGE)) {
-    found.push({ url: match[2], alt: match[1] ?? '', at: match.index ?? 0 });
+    const at = match.index ?? 0;
+    found.push({ url: match[2], alt: match[1] ?? '', at, heading: headingAt(markdown, at, headings) });
   }
   for (const match of markdown.matchAll(HTML_IMAGE)) {
     const tag = match[0];
     const src = tag.match(HTML_SRC)?.[1];
     if (!src) continue;
-    found.push({ url: src, alt: tag.match(HTML_ALT)?.[1] ?? '', at: match.index ?? 0 });
+    const at = match.index ?? 0;
+    found.push({ url: src, alt: tag.match(HTML_ALT)?.[1] ?? '', at, heading: headingAt(markdown, at, headings) });
   }
-  return found.sort((a, b) => a.at - b.at).map(({ url, alt }) => ({ url, alt }));
+  return found.sort((a, b) => a.at - b.at).map(({ url, alt, heading }) => ({ url, alt, heading }));
 }
 
 /** 按 README 里出现的顺序取前几张「像截图的图」。去掉徽章和 svg；一张都没有时才放宽到 logo。 */
@@ -172,6 +190,7 @@ export function extractPreviewImages(markdown: string, fullName: string, limit =
     const resolved = resolveAssetUrl(image.url, fullName);
     if (!resolved || seen.has(resolved)) continue;
     if (NOT_A_PREVIEW.test(resolved) || /\.svg(\?|$)/i.test(resolved)) continue;
+    if (AD_LIKE.test(resolved) || AD_LIKE.test(image.alt) || AD_HEADING.test(image.heading)) continue;
     seen.add(resolved);
     const entry = { url: resolved, alt: image.alt.trim() };
     (LOGO_LIKE.test(resolved) ? loose : strict).push(entry);

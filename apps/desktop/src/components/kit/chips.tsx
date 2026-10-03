@@ -14,13 +14,13 @@ export function ScenarioChip(props: { name: string; scenarioKey?: string | null;
   );
 }
 
-/** 编程语言：一个小圆点（GitHub 上同一种颜色）加语言名。不认识的语言用灰点。 */
+/** 编程语言：一个小方块（GitHub 上同一种颜色）加语言名；用方块是为了和场景标签前的圆点分开。不认识的语言用灰块。 */
 export function LangDot(props: { language: string | null | undefined; className?: string }) {
   const language = props.language?.trim();
   if (!language) return null;
   return (
     <span className={cn('inline-flex items-center gap-1 text-xs text-on-surface-variant', props.className)}>
-      <span className="size-2 rounded-full" style={{ background: languageColor(language) ?? 'var(--color-outline)' }} aria-hidden="true" />
+      <span className="size-2 rounded-[2px]" style={{ background: languageColor(language) ?? 'var(--color-outline)' }} aria-hidden="true" />
       {language}
     </span>
   );
