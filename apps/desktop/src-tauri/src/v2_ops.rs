@@ -419,7 +419,9 @@ pub fn daily_budget(database_path: &Path) -> u64 {
     crate::jobs::read_control(&queue_control_path(database_path)).daily_budget_tokens
 }
 
-/// 把失败的任务重新排队。确定性的失败不跟着重试：内容太大、模型回了空内容，再试一百次也一样，只会白花 token。
+/// 把失败的任务重新排队。确定性的失败不跟着重试：内容超过模型上下文、模型回了空内容，再试一百次也一样，只会白花 token。
+/// 按错误信息判断，不按 `error_kind`：被服务商拒绝的请求（模型名 / 参数不对）也记成 `content_too_large`，
+/// 配置修好之后要能重试。
 /// 一条一条改，`OR IGNORE`：这个仓库已经有一条新的排队 / 在跑的任务时（唯一索引），旧的失败那条留着不动，
 /// 不让整批重试因为一条冲突全部回滚。
 pub fn retry_failed_jobs(path: &Path) -> Result<usize, String> {
@@ -429,7 +431,7 @@ pub fn retry_failed_jobs(path: &Path) -> Result<usize, String> {
             .prepare(
                 "SELECT id FROM ai_jobs
                  WHERE status = 'failed'
-                   AND IFNULL(error_kind, '') <> 'content_too_large'
+                   AND IFNULL(error_message, '') NOT LIKE '%超过模型上下文%'
                    AND IFNULL(error_message, '') NOT LIKE '%没有可用内容%'",
             )
             .map_err(|error| format!("失败任务读取失败：{error}"))?;
@@ -1624,6 +1626,7 @@ mod tests {
                 "INSERT INTO ai_jobs(id, account_id, job_type, target_type, target_id, status, attempts, error_kind, error_message, finished_at) VALUES
                    ('retry-me', 'acct', 'repo_card', 'repository', 'r1', 'failed', 3, 'bad_json', '模型两次都没有返回可解析的 JSON', '2026-10-03T00:00:00.000Z'),
                    ('too-big', 'acct', 'repo_card', 'repository', 'r2', 'failed', 1, 'content_too_large', '内容超过模型上下文', '2026-10-03T00:00:00.000Z'),
+                   ('rejected', 'acct', 'repo_card', 'repository', 'r5', 'failed', 1, 'content_too_large', 'AI 接口请求失败（HTTP 422）：请求被拒绝', '2026-10-03T00:00:00.000Z'),
                    ('empty', 'acct', 'repo_card', 'repository', 'r3', 'failed', 1, 'other', 'OpenAI 响应中没有可用内容', '2026-10-03T00:00:00.000Z'),
                    ('conflict-old', 'acct', 'repo_card', 'repository', 'r4', 'failed', 3, 'timeout', '超时', '2026-10-03T00:00:00.000Z');
                  INSERT INTO ai_jobs(id, account_id, job_type, target_type, target_id, status) VALUES
@@ -1632,7 +1635,7 @@ mod tests {
             .unwrap();
         drop(connection);
         // 这个仓库已经有新的排队任务（唯一索引）：旧的失败那条留着，不能让整批重试因此一条都不成
-        assert_eq!(retry_failed_jobs(&path).unwrap(), 1);
+        assert_eq!(retry_failed_jobs(&path).unwrap(), 2);
         let connection = open_db(&path).unwrap();
         let status = |id: &str| -> (String, i64) {
             connection
@@ -1644,6 +1647,11 @@ mod tests {
                 .unwrap()
         };
         assert_eq!(status("retry-me"), ("queued".to_owned(), 0));
+        assert_eq!(
+            status("rejected"),
+            ("queued".to_owned(), 0),
+            "被服务商拒绝的（配置修好之后）要能重试，哪怕记成了 content_too_large"
+        );
         assert_eq!(status("too-big").0, "failed", "内容太大再试也一样");
         assert_eq!(
             status("empty").0,

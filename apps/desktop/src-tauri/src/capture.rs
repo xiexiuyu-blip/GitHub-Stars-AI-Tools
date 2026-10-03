@@ -112,9 +112,32 @@ pub fn extract_links_from_text(text: &str) -> Vec<ExtractedLink> {
     extract_links_limited(text, MAX_LINKS_PER_TEXT)
 }
 
-/// 读网页正文用：不限制链接条数（调用方自己在找到够多的仓库后停）。
-pub(crate) fn extract_links_unlimited(text: &str) -> Vec<ExtractedLink> {
-    extract_links_limited(text, usize::MAX)
+/// 读网页正文用：按出现顺序找 GitHub 仓库链接，`accept` 决定这一条算不算（调用方自己的校验和去重），
+/// 够 `max` 条就停。不先把整页的链接都建出来：一个 6 MB 的页面可以有四十多万条链接（实测 110 MB 内存），
+/// 而文章里提取仓库只要前 30 个；也不受聊天粘贴的「最多 300 条链接」限制，
+/// 排在前面的几百个网站链接不能把后面的仓库挤掉。
+pub(crate) fn find_github_repo_links(
+    text: &str,
+    max: usize,
+    mut accept: impl FnMut(&ExtractedLink) -> bool,
+) -> Vec<ExtractedLink> {
+    let mut found = Vec::new();
+    let mut seen = HashSet::new();
+    for raw in candidates(text) {
+        if found.len() >= max {
+            break;
+        }
+        let Some(link) = build_link(&raw) else {
+            continue;
+        };
+        if link.kind != "github_repo" || !seen.insert(link.normalized_url.clone()) {
+            continue;
+        }
+        if accept(&link) {
+            found.push(link);
+        }
+    }
+    found
 }
 
 fn extract_links_limited(text: &str, limit: usize) -> Vec<ExtractedLink> {

@@ -18,7 +18,7 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 const MAX_DAILY_BUDGET: u64 = 2_000_000;
-const DAY_SECS: i64 = 24 * 60 * 60;
+pub(crate) const DAY_SECS: i64 = 24 * 60 * 60;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorKind {
@@ -629,6 +629,14 @@ pub fn start_worker(db_path: &Path, handlers: Vec<Arc<dyn JobHandler>>) -> Worke
 /// `updated_at` 不改：那次请求发生在认领的时候，预留按那个时间进 24 小时窗口。改成现在，
 /// 几天前就停在 running 的旧行会把预留「重新记到今天」。
 fn recover_running_jobs(conn: &Connection, now: &str) -> Result<usize, String> {
+    // 旧版 AI 功能（`spend_guard`）发请求前在账本里留的预留行也是 running：程序崩了、被关掉时它们留下来。
+    // 它们不是队列任务，不能放回队列（没有处理器认领，会一直占着「排队中」）；记成已取消，预留的用量照旧计入窗口。
+    conn.execute(
+        "UPDATE ai_jobs SET status = 'cancelled', finished_at = updated_at
+         WHERE status = 'running' AND target_id LIKE 'legacy-%'",
+        [],
+    )
+    .map_err(|error| format!("中断任务恢复失败：{error}"))?;
     let not_before = shift_db_time(now, INTERRUPTED_RETRY_DELAY_SECS)?;
     let changed = conn
         .execute(
@@ -865,7 +873,7 @@ fn retry_delay_secs(attempt: i64, retry_after_secs: Option<u64>, jitter: f64) ->
     scaled.round().max(0.0) as u64
 }
 
-fn tokens_used_since(conn: &Connection, cutoff: &str) -> Result<i64, String> {
+pub(crate) fn tokens_used_since(conn: &Connection, cutoff: &str) -> Result<i64, String> {
     conn.query_row(
         "SELECT COALESCE(SUM(input_tokens + output_tokens), 0)
          FROM ai_jobs
@@ -908,8 +916,9 @@ pub(crate) fn add_charge(db_path: &Path, id: &str, tokens: u64) -> Result<(), St
     Ok(())
 }
 
-/// 最近 24 小时已用的 token。和队列认领、状态显示是同一个口径（含在跑任务的预留、已取消的任务），
-/// 旧版 AI 功能的闸门（`spend_guard`）也用它。
+/// 最近 24 小时已用的 token。和队列认领、状态显示是同一个口径（含在跑任务的预留、已取消的任务）。
+/// 只给测试用：生产代码在自己的事务里直接调 `tokens_used_since`。
+#[cfg(test)]
 pub(crate) fn tokens_used_in_last_day(db_path: &Path, now: &str) -> Result<i64, String> {
     let conn = open_db(db_path)?;
     let cutoff = shift_db_time(now, -DAY_SECS)?;
@@ -1099,7 +1108,7 @@ fn parse_db_time(text: &str) -> Result<time::OffsetDateTime, String> {
     Ok(time::PrimitiveDateTime::new(date, clock).assume_utc())
 }
 
-fn shift_db_time(now: &str, seconds: i64) -> Result<String, String> {
+pub(crate) fn shift_db_time(now: &str, seconds: i64) -> Result<String, String> {
     let parsed = parse_db_time(now)?;
     let next = parsed
         .checked_add(time::Duration::seconds(seconds))
@@ -2954,5 +2963,34 @@ mod tests {
             status.tokens_24h, 0,
             "几天前的预留不能被恢复动作重新记到今天"
         );
+    }
+
+    #[test]
+    fn recovery_cancels_orphaned_legacy_reservations_instead_of_queueing_them() {
+        let db = TestDb::new("recover-legacy");
+        let conn = db.conn();
+        let now = now_db_time();
+        conn.execute(
+            "INSERT INTO ai_jobs(id, account_id, job_type, target_type, target_id, status, attempts, input_tokens, started_at, created_at, updated_at)
+             VALUES ('legacy-run', 'acct', 'problem_answer', 'query', 'legacy-abc', 'running', 1, 4000, ?1, ?1, ?1)",
+            [&now],
+        )
+        .unwrap();
+        insert_running(&conn, "card-run", 1, 3);
+        assert_eq!(
+            recover_running_jobs(&conn, NOW).unwrap(),
+            1,
+            "只有队列任务被放回队列"
+        );
+        let legacy = snap(&conn, "legacy-run");
+        assert_eq!(
+            legacy.status, "cancelled",
+            "旧功能的预留行没有处理器认领，放回队列会一直占着「排队中」"
+        );
+        assert_eq!(legacy.input_tokens, 4000);
+        assert_eq!(snap(&conn, "card-run").status, "queued");
+        drop(conn);
+        // 预留的用量照旧计入窗口
+        assert_eq!(queue_status(db.path()).unwrap().tokens_24h, 4000);
     }
 }

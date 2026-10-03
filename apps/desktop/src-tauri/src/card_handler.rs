@@ -403,18 +403,17 @@ fn map_card_error(error: CardRunError) -> JobFailure {
             kind: ErrorKind::Other,
             message,
         },
-        // 请求被服务商直接拒绝（模型名 / 地址不对、参数不支持）：没有计费，也不会因为重试变好。
+        // 请求被服务商直接拒绝（模型名 / 地址不对、参数不支持、余额不足）：没有计费，也不会因为重试变好。
         // 以前当成普通的「其他」错误：每次尝试记 4k、重试 3 次，8 个任务就把 10 万额度「用完」了，什么也没花。
-        // 404 是模型或地址配错了：停下整条队列让人去改，别一个个失败；别的 4xx 只让这一条失败，不重试、不记用量。
-        CardRunErrorKind::Other if http_status_in(&message) == Some(404) => {
+        // 402（余额不足）和 404（模型或地址配错了）是整条队列都会遇到的：停下来让人去处理，别一个个失败；
+        // 别的 4xx 只让这一条失败，不重试、不记用量。（401 / 403 / 408 / 429 有各自的种类，不会走到这里。）
+        CardRunErrorKind::Other if matches!(http_status_in(&message), Some(402 | 404)) => {
             JobFailure::PauseQueue {
                 kind: ErrorKind::Other,
                 message,
             }
         }
-        CardRunErrorKind::Other
-            if matches!(http_status_in(&message), Some(400 | 405 | 415 | 422)) =>
-        {
+        CardRunErrorKind::Other if matches!(http_status_in(&message), Some(400..=499)) => {
             JobFailure::Fatal {
                 kind: ErrorKind::ContentTooLarge,
                 message,
@@ -2054,16 +2053,21 @@ mod tests {
             retry_after_secs: None,
             spent_tokens: 0,
         };
-        // 404：模型名或请求地址配错了，停下整条队列让人去改
-        assert!(matches!(
-            map_card_error(rejected(404)),
-            JobFailure::PauseQueue {
-                kind: ErrorKind::Other,
-                ..
-            }
-        ));
-        // 400 / 422 等：只让这一条失败，用「不计费」的种类，不重试
-        for status in [400, 405, 415, 422] {
+        // 402（余额不足）/ 404（模型名或请求地址配错了）：停下整条队列让人去处理
+        for status in [402, 404] {
+            assert!(
+                matches!(
+                    map_card_error(rejected(status)),
+                    JobFailure::PauseQueue {
+                        kind: ErrorKind::Other,
+                        ..
+                    }
+                ),
+                "HTTP {status}"
+            );
+        }
+        // 别的 4xx（400、405、409、410、413、415、422、451 ……）：只让这一条失败，用「不计费」的种类，不重试
+        for status in [400, 405, 409, 410, 413, 415, 422, 451] {
             assert!(
                 matches!(
                     map_card_error(rejected(status)),

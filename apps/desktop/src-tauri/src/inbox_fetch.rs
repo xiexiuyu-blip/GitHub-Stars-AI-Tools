@@ -3,7 +3,7 @@
 //! 联网必须走 `PageFetcher`。测试注入假实现；真正的 `SafePageFetcher` 每一跳先检查链接，
 //! 再把主机解析成 IP，拒绝内网后用 `curl --resolve` 把这次解析结果固定住。
 
-use crate::capture::{extract_links_unlimited, ip_is_blocked, url_is_safe};
+use crate::capture::{find_github_repo_links, ip_is_blocked, url_is_safe};
 use crate::web_fetch::url_encode;
 use encoding_rs::{Encoding, UTF_8};
 use flate2::read::{DeflateDecoder, GzDecoder, ZlibDecoder};
@@ -1350,20 +1350,16 @@ fn is_inline_tag(name: &str) -> bool {
 fn repos_from_text(text: &str) -> Vec<String> {
     let mut found = Vec::new();
     let mut seen = HashSet::new();
-    // 文章里的链接数不设上限（一篇文章可以有几百个链接，排在前面的网站链接不能把后面的仓库挤掉）；
-    // 找到 MAX_PAGE_REPOS 个仓库就停。聊天里粘贴的文字才有「最多 300 条」的限制。
-    for link in extract_links_unlimited(text) {
-        if link.kind != "github_repo" {
-            continue;
-        }
+    // 文章里的链接数不设上限、找到 MAX_PAGE_REPOS 个仓库就停（见 `find_github_repo_links`）。
+    find_github_repo_links(text, MAX_PAGE_REPOS, |link| {
         let Some(owner) = link.owner.as_deref().filter(|value| !value.is_empty()) else {
-            continue;
+            return false;
         };
         let Some(name) = link.name.as_deref().filter(|value| !value.is_empty()) else {
-            continue;
+            return false;
         };
         if !is_github_owner(owner) || !is_github_repo_name(name) || is_hex_32(name) {
-            continue;
+            return false;
         }
         let key = format!(
             "{}/{}",
@@ -1371,13 +1367,11 @@ fn repos_from_text(text: &str) -> Vec<String> {
             name.to_ascii_lowercase()
         );
         if !seen.insert(key) {
-            continue;
+            return false;
         }
         found.push(format!("{owner}/{name}"));
-        if found.len() == MAX_PAGE_REPOS {
-            break;
-        }
-    }
+        true
+    });
     found
 }
 
