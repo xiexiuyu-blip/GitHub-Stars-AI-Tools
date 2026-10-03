@@ -266,6 +266,15 @@ fn call(work: &Path, cmd: &str, args: &serde_json::Value) -> Result<serde_json::
             inbox_view::set_inbox_note(work, &arg_str(args, "id")?, &arg_str(args, "note")?)?;
             Ok(Value::Null)
         }
+        "fetch_inbox_pending" => {
+            let id = args.get("id").and_then(Value::as_str);
+            ser(to_value(crate::inbox_fetch::fetch_pending(
+                work,
+                &crate::inbox_fetch::SafePageFetcher,
+                id,
+                20,
+            )?))
+        }
         "copy_item_for_codex" => {
             let connection = Connection::open(work).map_err(|e| e.to_string())?;
             let problem = args.get("problem").and_then(Value::as_str);
