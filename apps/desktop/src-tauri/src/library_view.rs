@@ -20,7 +20,42 @@ const WEEK_LIMIT: i64 = 60;
 const MAX_READING_BATCH: usize = 200;
 const README_EXCERPT_CHARS: usize = 1500;
 
-const FILTER_WHERE: &str = r#"
+/// 关键词的一个词项：在名称 / 描述 / 一句话 / 摘要 / 关键词 / 话题里至少一处出现。几个词项之间是「并且」，
+/// 所以「小红书 封面」「封面 小红书」「小红书封面」都能找到名称里有一个、描述里有另一个的项目。
+macro_rules! keyword_term {
+    ($p:literal) => {
+        concat!(
+            "AND (\n  ",
+            $p,
+            " = ''\n",
+            "  OR r.full_name LIKE ",
+            $p,
+            " ESCAPE '\\'\n",
+            "  OR IFNULL(r.description, '') LIKE ",
+            $p,
+            " ESCAPE '\\'\n",
+            "  OR IFNULL(d.one_liner_zh, '') LIKE ",
+            $p,
+            " ESCAPE '\\'\n",
+            "  OR IFNULL(d.summary_zh, '') LIKE ",
+            $p,
+            " ESCAPE '\\'\n",
+            "  OR IFNULL(d.keywords_json, '') LIKE ",
+            $p,
+            " ESCAPE '\\'\n",
+            "  OR IFNULL(r.topics_json, '') LIKE ",
+            $p,
+            " ESCAPE '\\'\n",
+            ")\n"
+        )
+    };
+}
+
+/// 最多支持几个关键词词项（超出的忽略）。
+const MAX_KEYWORD_TERMS: usize = 4;
+
+const FILTER_WHERE: &str = concat!(
+    r#"
 r.sync_status = 'active'
 AND (
   :scenario = ''
@@ -56,16 +91,12 @@ AND (
     END
   ) = :form
 )
-AND (
-  :pattern = ''
-  OR r.full_name LIKE :pattern ESCAPE '\'
-  OR IFNULL(r.description, '') LIKE :pattern ESCAPE '\'
-  OR IFNULL(d.one_liner_zh, '') LIKE :pattern ESCAPE '\'
-  OR IFNULL(d.summary_zh, '') LIKE :pattern ESCAPE '\'
-  OR IFNULL(d.keywords_json, '') LIKE :pattern ESCAPE '\'
-  OR IFNULL(r.topics_json, '') LIKE :pattern ESCAPE '\'
-)
-"#;
+"#,
+    keyword_term!(":pattern"),
+    keyword_term!(":pattern1"),
+    keyword_term!(":pattern2"),
+    keyword_term!(":pattern3"),
+);
 
 const JOINS: &str = "
 FROM repositories r
@@ -207,7 +238,8 @@ struct Normalized {
     reading: String,
     card: String,
     form: String,
-    pattern: String,
+    /// 关键词拆成的词项（LIKE 模式），不足四个的补空串（空串 = 这一项不限制）
+    patterns: [String; MAX_KEYWORD_TERMS],
     order_sql: &'static str,
     limit: i64,
     offset: i64,
@@ -460,7 +492,7 @@ fn normalize(filters: &LibraryFilters) -> Result<Normalized, String> {
         reading: reading_raw.to_owned(),
         card: card.to_owned(),
         form: filters.form.as_deref().unwrap_or("").trim().to_owned(),
-        pattern: like_pattern(filters.keyword.as_deref().unwrap_or("")),
+        patterns: like_patterns(filters.keyword.as_deref().unwrap_or("")),
         order_sql,
         limit: filters.limit.unwrap_or(80).clamp(1, 200),
         offset: filters.offset.unwrap_or(0).max(0),
@@ -493,16 +525,60 @@ impl Normalized {
     }
 }
 
-fn like_pattern(keyword: &str) -> String {
-    let trimmed = keyword.trim();
-    if trimmed.is_empty() {
-        return String::new();
-    }
-    let escaped = trimmed
+fn escape_like(term: &str) -> String {
+    let escaped = term
         .replace('\\', "\\\\")
         .replace('%', "\\%")
         .replace('_', "\\_");
     format!("%{escaped}%")
+}
+
+/// 一段只由已知任务词（小红书、封面、字幕……）连起来的中文，拆成这些词：「小红书封面」→「小红书」「封面」。
+/// 拆不干净（夹着不认识的字）就原样不拆，免得把正常的词切碎。
+fn split_known_words(term: &str) -> Vec<String> {
+    let lower = term.to_lowercase();
+    if lower.chars().count() < 4
+        || !lower
+            .chars()
+            .any(|ch| ('\u{4e00}'..='\u{9fff}').contains(&ch))
+    {
+        return vec![term.to_owned()];
+    }
+    let mut words: Vec<&str> = crate::solve::BASE_LEXICON.to_vec();
+    words.sort_by_key(|word| std::cmp::Reverse(word.chars().count()));
+    let mut rest = lower.as_str();
+    let mut found: Vec<String> = Vec::new();
+    'outer: while !rest.is_empty() {
+        for word in &words {
+            if rest.starts_with(word) {
+                found.push((*word).to_owned());
+                rest = &rest[word.len()..];
+                continue 'outer;
+            }
+        }
+        return vec![term.to_owned()];
+    }
+    if found.len() >= 2 {
+        found
+    } else {
+        vec![term.to_owned()]
+    }
+}
+
+/// 关键词 → 最多四个词项（空格分开的、或一段连着的已知任务词拆开的），每项一个 LIKE 模式；不足的补空串。
+fn like_patterns(keyword: &str) -> [String; MAX_KEYWORD_TERMS] {
+    let mut terms: Vec<String> = Vec::new();
+    for part in keyword
+        .split(|ch: char| ch.is_whitespace())
+        .filter(|part| !part.is_empty())
+    {
+        terms.extend(split_known_words(part));
+    }
+    let mut patterns: [String; MAX_KEYWORD_TERMS] = Default::default();
+    for (slot, term) in patterns.iter_mut().zip(terms.iter()) {
+        *slot = escape_like(term);
+    }
+    patterns
 }
 
 fn open_read(path: &Path) -> Result<Connection, String> {
@@ -529,7 +605,10 @@ macro_rules! filter_params {
             ":reading": $filters.reading,
             ":card": $filters.card,
             ":form": $filters.form,
-            ":pattern": $filters.pattern,
+            ":pattern": $filters.patterns[0],
+            ":pattern1": $filters.patterns[1],
+            ":pattern2": $filters.patterns[2],
+            ":pattern3": $filters.patterns[3],
         }
     };
 }
@@ -563,7 +642,10 @@ fn query_items(connection: &Connection, filters: &Normalized) -> Result<Vec<Libr
                 ":reading": filters.reading,
                 ":card": filters.card,
                 ":form": filters.form,
-                ":pattern": filters.pattern,
+                ":pattern": filters.patterns[0],
+                ":pattern1": filters.patterns[1],
+                ":pattern2": filters.patterns[2],
+                ":pattern3": filters.patterns[3],
                 ":limit": filters.limit,
                 ":offset": filters.offset,
             },
@@ -1641,6 +1723,86 @@ mod tests {
                 "{keyword}"
             );
         }
+    }
+
+    #[test]
+    fn keyword_terms_may_sit_in_different_columns_in_any_order() {
+        let lab = Lab::new("keyword-terms");
+        lab.with(|conn| {
+            // 「小红书」在名称里、「封面」在描述里：整句子串对不上，但每个词都对得上
+            let mut both = Repo::new("both");
+            both.full_name = "foo/xiaohongshu-tool".to_owned();
+            both.description = Some("批量生成封面".to_owned());
+            both.one_liner = Some("填充".to_owned());
+            both.save(conn);
+            let mut only_one = Repo::new("only-one");
+            only_one.description = Some("只和封面有关".to_owned());
+            only_one.one_liner = Some("填充".to_owned());
+            only_one.save(conn);
+            let mut other = Repo::new("other");
+            other.description = Some("和这个词都无关".to_owned());
+            other.one_liner = Some("填充".to_owned());
+            other.save(conn);
+        });
+        for keyword in [
+            "xiaohongshu 封面",
+            "封面 xiaohongshu",
+            "  xiaohongshu   封面  ",
+        ] {
+            let mut filters = LibraryFilters::default();
+            filters.keyword = Some(keyword.to_owned());
+            assert_eq!(
+                page_ids(&lab.path, filters),
+                vec!["both".to_owned()],
+                "{keyword:?}"
+            );
+        }
+        // 只写一个词时行为不变
+        let mut single = LibraryFilters::default();
+        single.keyword = Some("封面".to_owned());
+        let mut ids = page_ids(&lab.path, single);
+        ids.sort();
+        assert_eq!(ids, vec!["both".to_owned(), "only-one".to_owned()]);
+    }
+
+    #[test]
+    fn a_compound_of_known_task_words_is_split_into_terms() {
+        let lab = Lab::new("keyword-compound");
+        lab.with(|conn| {
+            let mut both = Repo::new("both");
+            both.full_name = "foo/xhs-helper".to_owned();
+            both.description = Some("做小红书笔记和封面图".to_owned());
+            both.one_liner = Some("填充".to_owned());
+            both.save(conn);
+            let mut other = Repo::new("other");
+            other.description = Some("只做小红书运营".to_owned());
+            other.one_liner = Some("填充".to_owned());
+            other.save(conn);
+        });
+        // 「小红书封面」整串不是任何一处的子串，但拆成「小红书」「封面」就都对上了
+        let mut filters = LibraryFilters::default();
+        filters.keyword = Some("小红书封面".to_owned());
+        assert_eq!(page_ids(&lab.path, filters), vec!["both".to_owned()]);
+        // 夹着不认识的字就不拆（整串当子串找）
+        let mut unknown = LibraryFilters::default();
+        unknown.keyword = Some("小红书火箭封面".to_owned());
+        assert!(page_ids(&lab.path, unknown).is_empty());
+    }
+
+    #[test]
+    fn like_patterns_split_escape_and_cap_at_four_terms() {
+        let patterns = like_patterns("a_b c%d");
+        assert_eq!(patterns[0], "%a\\_b%");
+        assert_eq!(patterns[1], "%c\\%d%");
+        assert_eq!(patterns[2], "");
+        assert_eq!(like_patterns("1 2 3 4 5 6")[3], "%4%");
+        assert_eq!(like_patterns("   ")[0], "");
+        assert_eq!(
+            split_known_words("小红书封面"),
+            vec!["小红书".to_owned(), "封面".to_owned()]
+        );
+        assert_eq!(split_known_words("封面"), vec!["封面".to_owned()]);
+        assert_eq!(split_known_words("openai"), vec!["openai".to_owned()]);
     }
 
     #[test]
