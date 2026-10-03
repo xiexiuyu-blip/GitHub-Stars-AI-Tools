@@ -1235,7 +1235,7 @@ fn problem_title(problem: &str) -> String {
 }
 
 fn with_stop(text: &str) -> String {
-    if text.ends_with(['。', '！', '？']) {
+    if text.ends_with(['。', '！', '？', '.', '!', '?']) {
         text.to_owned()
     } else {
         format!("{text}。")
@@ -1733,6 +1733,18 @@ mod tests {
                 "这条工作约定和 codex-prompts.ts 不一致：{rule}"
             );
         }
+    }
+
+    #[test]
+    fn with_stop_does_not_double_the_full_stop() {
+        assert_eq!(with_stop("一句话"), "一句话。");
+        assert_eq!(with_stop("一句话。"), "一句话。");
+        assert_eq!(with_stop("What it does."), "What it does.");
+        assert_eq!(with_stop("Really?"), "Really?");
+        assert_eq!(
+            with_stop("（GitHub 原文）A tool!"),
+            "（GitHub 原文）A tool!"
+        );
     }
 
     #[test]
