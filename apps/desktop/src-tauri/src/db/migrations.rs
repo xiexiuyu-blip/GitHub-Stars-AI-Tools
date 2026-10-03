@@ -206,6 +206,11 @@ const MIGRATIONS: &[Migration] = &[
         name: "repo_license",
         sql: include_str!("../../../../../packages/storage/migrations/fox/032_repo_license.sql"),
     },
+    Migration {
+        version: "033",
+        name: "inbox_fetch",
+        sql: include_str!("../../../../../packages/storage/migrations/fox/033_inbox_fetch.sql"),
+    },
 ];
 
 pub fn latest_migration() -> &'static Migration {
@@ -479,11 +484,12 @@ mod tests {
         let path = temp_db("web-content");
         let report = migrate_database(&path).expect("空库应能迁到 031");
         assert_eq!(report.applied.len(), MIGRATIONS.len());
-        assert_eq!(MIGRATIONS.len(), 32);
-        assert_eq!(latest_migration().version, "032");
-        assert_eq!(latest_migration().name, "repo_license");
+        assert_eq!(MIGRATIONS.len(), 33);
+        assert_eq!(latest_migration().version, "033");
+        assert_eq!(latest_migration().name, "inbox_fetch");
         assert!(report.applied.iter().any(|item| item == "031 web_content"));
         assert!(report.applied.iter().any(|item| item == "032 repo_license"));
+        assert!(report.applied.iter().any(|item| item == "033 inbox_fetch"));
         assert!(report.backup_path.is_none());
         for table in [
             "discover_candidates",
@@ -718,8 +724,9 @@ INSERT INTO ai_task_items(id, run_id, repository_id, full_name, status, reason) 
         let path = temp_db("license-fresh");
         let report = migrate_database(&path).expect("空库应能迁到 032");
         assert!(report.applied.iter().any(|item| item == "032 repo_license"));
-        assert_eq!(latest_migration().version, "032");
-        assert_eq!(latest_migration().name, "repo_license");
+        assert!(report.applied.iter().any(|item| item == "033 inbox_fetch"));
+        assert_eq!(latest_migration().version, "033");
+        assert_eq!(latest_migration().name, "inbox_fetch");
         let columns = license_columns(&path);
         assert_eq!(columns.len(), 2);
         for name in ["license_spdx", "license_name"] {
@@ -764,8 +771,11 @@ INSERT INTO repositories(id, account_id, owner, name, full_name, topics_json, ht
             assert_eq!(count_query(&path, "SELECT COUNT(*) FROM repositories"), 2);
         }
 
-        let report = migrate_database(&path).expect("031 库应能升到 032");
-        assert_eq!(report.applied, vec!["032 repo_license".to_owned()]);
+        let report = migrate_database(&path).expect("031 库应能升到 033");
+        assert_eq!(
+            report.applied,
+            vec!["032 repo_license".to_owned(), "033 inbox_fetch".to_owned()]
+        );
         assert_eq!(count_query(&path, "SELECT COUNT(*) FROM repositories"), 2);
         assert_eq!(
             count_query(
@@ -791,6 +801,118 @@ INSERT INTO repositories(id, account_id, owner, name, full_name, topics_json, ht
         if let Some(backup) = report.backup_path {
             let _ = fs::remove_file(backup);
         }
+    }
+
+    #[test]
+    fn upgrade_from_032_adds_inbox_fetch_and_skips_existing_github() {
+        let path = temp_db("inbox-fetch-032");
+        {
+            let mut connection = Connection::open(&path).expect("应能创建 032 夹具");
+            connection
+                .execute_batch("PRAGMA foreign_keys = ON;")
+                .expect("应能打开外键");
+            for migration in MIGRATIONS
+                .iter()
+                .filter(|migration| migration.version <= "032")
+            {
+                apply_one(&mut connection, migration).expect("夹具迁移应成功");
+            }
+            connection
+                .execute_batch(
+                    "
+INSERT INTO github_accounts(id, login, token_ref) VALUES ('acct', 'fox', 'test');
+INSERT INTO inbox_items(id, account_id, original_url, normalized_url, title, item_type, user_note, status, source_context, raw_excerpt) VALUES
+  ('g1', 'acct', 'https://github.com/a/b', 'https://github.com/a/b', 'a/b', 'github_repository', '备注', 'ready', '群聊', '原话'),
+  ('w1', 'acct', 'https://example.com/a', 'https://example.com/a', 'https://example.com/a', 'webpage', '网页备注', 'pending', '群聊', '网页原话');
+",
+                )
+                .expect("夹具数据应能写入");
+            let columns = inbox_fetch_columns(&path);
+            assert!(columns.is_empty(), "032 的库还没有读取列");
+        }
+
+        let report = migrate_database(&path).expect("032 库应能升到 033");
+        assert_eq!(report.applied, vec!["033 inbox_fetch".to_owned()]);
+        assert_eq!(latest_migration().version, "033");
+        assert_eq!(latest_migration().name, "inbox_fetch");
+        assert!(MIGRATIONS
+            .iter()
+            .any(|migration| migration.version == "033" && migration.name == "inbox_fetch"));
+        let columns = inbox_fetch_columns(&path);
+        for name in [
+            "fetch_status",
+            "fetch_error",
+            "fetched_at",
+            "page_author",
+            "page_excerpt",
+        ] {
+            assert!(columns.iter().any(|column| column == name), "缺少列 {name}");
+        }
+
+        let connection = Connection::open(&path).expect("应能打开升级后的库");
+        let github: (String, String, String, String, String) = connection
+            .query_row(
+                "SELECT fetch_status, fetch_error, title, user_note, raw_excerpt FROM inbox_items WHERE id = 'g1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+            )
+            .expect("旧的仓库条目应还在");
+        assert_eq!(github.0, "skipped");
+        assert_eq!(github.1, "");
+        assert_eq!(github.2, "a/b");
+        assert_eq!(github.3, "备注");
+        assert_eq!(github.4, "原话");
+        let webpage: (String, String, String) = connection
+            .query_row(
+                "SELECT fetch_status, fetch_error, ifnull(fetched_at, '') FROM inbox_items WHERE id = 'w1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("旧的网页条目应还在");
+        assert_eq!(webpage.0, "pending");
+        assert_eq!(webpage.1, "");
+        assert_eq!(webpage.2, "");
+        let rejected = connection.execute(
+            "UPDATE inbox_items SET fetch_status = 'nope' WHERE id = 'w1'",
+            [],
+        );
+        assert!(rejected.is_err(), "读取状态只能是规定的四个值");
+        drop(connection);
+
+        let again = migrate_database(&path).expect("第二次迁移应幂等");
+        assert!(again.applied.is_empty());
+        assert_eq!(
+            count_query(
+                &path,
+                "SELECT COUNT(*) FROM inbox_items WHERE id = 'g1' AND fetch_status = 'skipped'"
+            ),
+            1
+        );
+
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_file(format!("{}-wal", path.display()));
+        let _ = fs::remove_file(format!("{}-shm", path.display()));
+        if let Some(backup) = report.backup_path {
+            let _ = fs::remove_file(backup);
+        }
+    }
+
+    fn inbox_fetch_columns(path: &Path) -> Vec<String> {
+        let connection = Connection::open(path).expect("应能打开测试库");
+        let mut statement = connection
+            .prepare("PRAGMA table_info(inbox_items)")
+            .expect("应能读取表结构");
+        statement
+            .query_map([], |row| row.get::<_, String>(1))
+            .expect("应能遍历列")
+            .map(|row| row.expect("应能读取列名"))
+            .filter(|name| {
+                matches!(
+                    name.as_str(),
+                    "fetch_status" | "fetch_error" | "fetched_at" | "page_author" | "page_excerpt"
+                )
+            })
+            .collect()
     }
 
     #[test]
