@@ -5,8 +5,6 @@
 # 用内核级禁令挡住敏感位置：被禁的路径连 bash、grep 都读不到、改不了。
 [profiles.fsl-dev]
 extends = "workspace"
-restrict_network = true # macOS 上不生效，留给以后
-
 deny = [
   # Fox Stars Lab 的数据：正式库；开发库（含设置、备份、本地接口令牌）
   "/Users/fox/Library/Application Support/com.foxwork.fox-stars-lab",
