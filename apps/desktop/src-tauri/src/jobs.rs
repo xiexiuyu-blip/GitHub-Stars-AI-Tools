@@ -217,6 +217,18 @@ pub fn set_daily_budget(path: &Path, tokens: u64) -> Result<u64, String> {
     })
 }
 
+/// 同一个优先级里谁先做（只对仓库类任务有区别）：先做打了业务场景标签的，再做没打标签的；
+/// 同一档里最近收藏的先做，最后才按入队顺序。预算一天只够整理十几个仓库，先花在最可能用得上的那些上。
+/// 被拒绝的场景标签不算数。别的任务没有对应的仓库，这两项都是常量，不改变原来的顺序。
+/// 优先级 5 和 6 都是「后台补课」（旧失败项 6、手动补缺 6、老入口 5），认领时合成一档再按上面的规矩排；
+/// 0–4 是用户点的重做、新收藏这类，照旧排在前面。
+const ORDER_WITHIN_PRIORITY: &str = "CASE WHEN ai_jobs.target_type = 'repository' AND EXISTS (
+        SELECT 1 FROM entity_scenarios es
+        WHERE es.entity_type = 'repository' AND es.entity_id = ai_jobs.target_id AND es.status != 'rejected'
+    ) THEN 0 ELSE 1 END ASC,
+    IFNULL((SELECT r.starred_at FROM repositories r WHERE ai_jobs.target_type = 'repository' AND r.id = ai_jobs.target_id), '') DESC,
+    ai_jobs.created_at ASC, ai_jobs.id ASC";
+
 /// 在一个 `BEGIN IMMEDIATE` 里认领下一条任务，两个连接不会领到同一条。
 ///
 /// 暂停时一条都不领，包括不花钱的任务。花钱的任务还要预算大于 0，且最近 24 小时
@@ -269,7 +281,9 @@ pub fn claim_next(
             .collect::<Vec<_>>()
             .join(", "),
     );
-    sql.push_str(") ORDER BY priority ASC, created_at ASC, id ASC LIMIT 1");
+    sql.push_str(") ORDER BY MIN(ai_jobs.priority, 5) ASC, ");
+    sql.push_str(ORDER_WITHIN_PRIORITY);
+    sql.push_str(" LIMIT 1");
 
     let mut bound: Vec<String> = Vec::with_capacity(1 + eligible.len());
     bound.push(now.to_owned());
@@ -1254,6 +1268,72 @@ mod tests {
         assert_eq!(row.status, "running");
         assert_eq!(row.started_at.as_deref(), Some(NOW));
         assert_eq!(row.attempts, 1);
+    }
+
+    #[test]
+    fn claim_prefers_tagged_then_recent_repos_within_a_priority() {
+        let db = TestDb::new("order-relevance");
+        let conn = db.conn();
+        conn.execute(
+            "INSERT INTO scenarios(id, account_id, slug, name_zh) VALUES ('sc-xhs', 'acct', 'xhs', '小红书')",
+            [],
+        )
+        .unwrap();
+        // (仓库 id 同时也是任务 id, 收藏时间, 场景标签状态, 优先级)
+        let repos = [
+            ("old-untagged", "2026-06-01T00:00:00Z", None, 6),
+            ("new-untagged", "2026-10-01T00:00:00Z", None, 6),
+            ("old-tagged", "2026-07-01T00:00:00Z", Some("suggested"), 5),
+            ("new-tagged", "2026-09-20T00:00:00Z", Some("confirmed"), 6),
+            ("rejected-tag", "2026-09-30T00:00:00Z", Some("rejected"), 6),
+            ("urgent", "2026-05-01T00:00:00Z", None, 2),
+        ];
+        for (id, starred_at, tag, priority) in repos {
+            conn.execute(
+                "INSERT INTO repositories(id, account_id, owner, name, full_name, html_url, starred_at, sync_status)
+                 VALUES (?1, 'acct', 'fox', ?1, 'fox/' || ?1, 'https://github.com/fox/' || ?1, ?2, 'active')",
+                params![id, starred_at],
+            )
+            .unwrap();
+            insert_job(
+                &conn,
+                id,
+                "repo_card",
+                priority,
+                "2026-10-03T08:00:00.000Z",
+                None,
+                "queued",
+            );
+            if let Some(status) = tag {
+                conn.execute(
+                    "INSERT INTO entity_scenarios(account_id, entity_type, entity_id, scenario_id, origin, status)
+                     VALUES ('acct', 'repository', ?1, 'sc-xhs', 'rule', ?2)",
+                    params![id, status],
+                )
+                .unwrap();
+            }
+        }
+        drop(conn);
+        let handled = vec![ClaimCandidate {
+            job_type: "repo_card".to_owned(),
+            spends_tokens: false,
+        }];
+        let mut conn = db.conn();
+        let mut order = Vec::new();
+        while let Some(job) = claim_one(&mut conn, &handled, &gate(false, 0)) {
+            order.push(job.id);
+        }
+        assert_eq!(
+            order,
+            [
+                "urgent",
+                "new-tagged",
+                "old-tagged",
+                "new-untagged",
+                "rejected-tag",
+                "old-untagged"
+            ]
+        );
     }
 
     #[test]
