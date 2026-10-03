@@ -2,8 +2,8 @@
 //!
 //! 打分移植自原型 `template.html` 的 `tokens` / `idf` / `LEX` / `concepts` /
 //! `fieldScore` / `search`。`Math.log` 就是自然对数。
-//! 和原型不同的地方只限任务卡列出的几条：只返回有理解卡的仓库、关键词块、
-//! 场景动态词表、并列时按 id 升序、`why` 取值更完整。
+//! 和原型不同的地方：场景名只加分、不算「对上」；没有理解卡的仓库也能进结果；
+//! 中文意图词认英文同义词；话题参与打分；`why` 写明哪个词对在哪个字段。
 
 use rusqlite::{Connection, OpenFlags};
 use serde::Serialize;
@@ -103,6 +103,74 @@ const STOP_WORDS: &[&str] = &[
 
 const WHY_LIMIT: usize = 80;
 const HIT_LIMIT: usize = 8;
+const ONE_LINER_LIMIT: usize = 120;
+
+/// 中文意图词 → 英文同义词（全小写）。只在内容字段没有直接命中时用来补「对上」。
+/// 长度 ≤ 3 的词，以及任务卡点名的 `i18n`，匹配时要词边界。
+const SYNONYMS: &[(&str, &[&str])] = &[
+    (
+        "字幕",
+        &["subtitle", "subtitles", "caption", "captions", "srt"],
+    ),
+    ("封面", &["cover", "thumbnail", "poster"]),
+    ("海报", &["poster", "banner"]),
+    (
+        "配图",
+        &[
+            "illustration",
+            "infographic",
+            "image generation",
+            "text-to-image",
+        ],
+    ),
+    ("图片", &["image", "images", "picture"]),
+    ("视频", &["video", "videos"]),
+    (
+        "短视频",
+        &[
+            "short video",
+            "short-video",
+            "shorts",
+            "reels",
+            "tiktok",
+            "douyin",
+        ],
+    ),
+    (
+        "剪辑",
+        &["video editing", "video editor", "clip", "cut", "edit video"],
+    ),
+    (
+        "配音",
+        &[
+            "voiceover",
+            "voice-over",
+            "tts",
+            "text-to-speech",
+            "dubbing",
+        ],
+    ),
+    ("口播", &["talking head", "voiceover"]),
+    ("小红书", &["xiaohongshu", "xhs", "rednote"]),
+    ("抖音", &["douyin", "tiktok"]),
+    ("公众号", &["wechat", "weixin", "official account"]),
+    ("微信", &["wechat", "weixin"]),
+    (
+        "电商",
+        &["ecommerce", "e-commerce", "shopify", "taobao", "amazon"],
+    ),
+    ("详情页", &["detail page", "product page", "listing"]),
+    ("主图", &["product image", "main image"]),
+    ("文案", &["copywriting", "copy writing", "marketing copy"]),
+    ("ppt", &["slides", "presentation", "pptx", "powerpoint"]),
+    ("文档", &["document", "documents", "docx"]),
+    ("翻译", &["translate", "translation", "i18n"]),
+    ("采集", &["crawler", "scraper", "scraping", "spider"]),
+    ("爬虫", &["crawler", "scraper", "scraping", "spider"]),
+    ("总结", &["summarize", "summary"]),
+    ("知识库", &["knowledge base", "rag"]),
+    ("自动化", &["automation", "workflow"]),
+];
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -154,6 +222,7 @@ struct TextBlocks {
     scenarios: String,
     summary: String,
     description: String,
+    topics: String,
 }
 
 struct RepoRecord {
@@ -168,6 +237,8 @@ struct RepoRecord {
     scenario_ids: Vec<String>,
     blocks: TextBlocks,
     has_card: bool,
+    /// GitHub 描述原文。没有理解卡时，命中的「一句话」取它的第一句。
+    github_description: String,
 }
 
 struct CardBits {
@@ -187,14 +258,15 @@ impl TextBlocks {
         if token.is_empty() {
             return false;
         }
+        // 场景块不参与 idf。只挂在场景上的仓库不再抬高文档频率。
         self.name.contains(token)
             || self.one_liner.contains(token)
             || self.capabilities.contains(token)
             || self.problems.contains(token)
             || self.keywords.contains(token)
-            || self.scenarios.contains(token)
             || self.summary.contains(token)
             || self.description.contains(token)
+            || self.topics.contains(token)
     }
 }
 
@@ -218,11 +290,13 @@ pub fn solve_query(db_path: &Path, query: &str) -> Result<SolveResult, String> {
             scored.push((index, parts));
         }
     }
+    // 同分：有卡的在前，再比星数，最后按 id，结果稳定。
     scored.sort_by(|left, right| {
         right
             .1
             .score
             .total_cmp(&left.1.score)
+            .then_with(|| repos[right.0].has_card.cmp(&repos[left.0].has_card))
             .then_with(|| repos[right.0].stars.cmp(&repos[left.0].stars))
             .then_with(|| repos[left.0].id.cmp(&repos[right.0].id))
     });
@@ -230,32 +304,29 @@ pub fn solve_query(db_path: &Path, query: &str) -> Result<SolveResult, String> {
     let mut terms = main.clone();
     terms.extend(extra.iter().cloned());
     let mut hits = Vec::new();
-    for (index, parts) in scored
-        .into_iter()
-        .filter(|(index, _)| repos[*index].has_card)
-        .take(HIT_LIMIT)
-    {
+    for (index, parts) in scored.into_iter().take(HIT_LIMIT) {
         let repo = &repos[index];
         // 没有意图词时不知道用户要什么，不能说「全部对上」。
         let full_match = !main.is_empty() && parts.missing.is_empty();
+        let why = why_text(repo, &main, &parts.matched, &extra);
         hits.push(SolveHit {
             id: repo.id.clone(),
             full_name: repo.full_name.clone(),
             html_url: repo.html_url.clone(),
             stars_count: repo.stars,
-            one_liner: if repo.one_liner.trim().is_empty() {
-                None
+            one_liner: hit_one_liner(repo),
+            form: if repo.has_card {
+                repo.form.clone()
             } else {
-                Some(repo.one_liner.clone())
+                None
             },
-            form: repo.form.clone(),
             scenario_ids: repo.scenario_ids.clone(),
             matched: parts.matched,
             missing: parts.missing,
-            why: why_text(repo, &terms),
+            why,
             score: parts.score,
             full_match,
-            has_card: true,
+            has_card: repo.has_card,
         });
     }
 
@@ -276,7 +347,11 @@ pub fn solve_query(db_path: &Path, query: &str) -> Result<SolveResult, String> {
         .map(|hit| hit.id.clone())
         .collect::<Vec<_>>();
     let full_match_count = hits.iter().filter(|hit| hit.full_match).count() as i64;
-    // 名称整段包含全部意图，或描述整段包含全部意图。不把两个字段拼在一起凑。
+    // 没进前 8、没有卡、且名称或描述单独含全部意图词。两个字段拼在一起不算。
+    let hit_ids = hits
+        .iter()
+        .map(|hit| hit.id.as_str())
+        .collect::<HashSet<_>>();
     let pending_matches = if main.is_empty() {
         0
     } else {
@@ -284,6 +359,7 @@ pub fn solve_query(db_path: &Path, query: &str) -> Result<SolveResult, String> {
             .iter()
             .filter(|repo| {
                 !repo.has_card
+                    && !hit_ids.contains(repo.id.as_str())
                     && (contains_all(&repo.blocks.name, &main)
                         || contains_all(&repo.blocks.description, &main))
             })
@@ -423,7 +499,8 @@ fn load_repos(
                     IFNULL(repo_ai_documents.one_liner_zh, ''),
                     IFNULL(repo_ai_documents.summary_zh, ''),
                     IFNULL(repo_ai_documents.keywords_json, '[]'),
-                    IFNULL(repo_ai_documents.card_json, '')
+                    IFNULL(repo_ai_documents.card_json, ''),
+                    IFNULL(repositories.topics_json, '[]')
              FROM repositories
              LEFT JOIN repo_ai_documents ON repo_ai_documents.repo_id = repositories.id
              WHERE repositories.sync_status = 'active'",
@@ -441,6 +518,7 @@ fn load_repos(
                 row.get::<_, String>(6)?,
                 row.get::<_, String>(7)?,
                 row.get::<_, String>(8)?,
+                row.get::<_, String>(9)?,
             ))
         })
         .map_err(|error| format!("找方案仓库查询失败：{error}"))?;
@@ -457,25 +535,26 @@ fn load_repos(
             summary,
             keywords_json,
             card_json,
+            topics_json,
         ) = row.map_err(|error| format!("找方案仓库行读取失败：{error}"))?;
         let parsed = read_card_json(&card_json);
         let shown = crate::card_view::display_one_liner(Some(one_liner.as_str()), &parsed)
             .unwrap_or_default();
         let card = parse_card(&parsed);
         let keywords = parse_json_strings(&keywords_json);
+        let topics = parse_json_strings(&topics_json);
         let links = grouped.get(&id).cloned().unwrap_or_default();
         let scenario_ids = links
             .iter()
             .map(|(_, scenario_id)| scenario_id.clone())
             .collect::<Vec<_>>();
-        let scenario_names = scenario_ids
-            .iter()
-            .filter_map(|scenario_id| {
-                by_id
-                    .get(scenario_id.as_str())
-                    .map(|item| item.name_zh.clone())
-            })
-            .collect::<Vec<_>>();
+        let mut scenario_bits = Vec::new();
+        for scenario_id in &scenario_ids {
+            if let Some(item) = by_id.get(scenario_id.as_str()) {
+                scenario_bits.push(item.name_zh.clone());
+                scenario_bits.extend(item.keywords.iter().cloned());
+            }
+        }
         let has_card = !one_liner.trim().is_empty();
         repos.push(RepoRecord {
             id,
@@ -486,15 +565,17 @@ fn load_repos(
             form: card.form,
             scenario_ids,
             has_card,
+            github_description: description.clone(),
             blocks: TextBlocks {
                 name: full_name.to_lowercase(),
                 one_liner: shown.to_lowercase(),
                 capabilities: join_lower(&card.capabilities),
                 problems: join_lower(&card.problems),
                 keywords: join_lower(&keywords),
-                scenarios: join_lower(&scenario_names),
+                scenarios: join_lower(&scenario_bits),
                 summary: summary.to_lowercase(),
                 description: description.to_lowercase(),
+                topics: join_lower(&topics),
             },
             full_name,
             one_liner: shown,
@@ -515,9 +596,21 @@ fn score_repo(
     let mut missing = Vec::new();
     for intent in main {
         let weight = cached_idf(cache, intent, repos);
-        let gained = field_score(&repo.blocks, intent, weight);
+        let content = field_score(&repo.blocks, intent, weight);
+        // 内容里没有中文词时，英文同义词按「描述」那一档（1.0 × idf）算对上。
+        let gained = if content > 0.0 {
+            content
+        } else if synonym_matches(&repo.blocks, intent) {
+            weight
+        } else {
+            0.0
+        };
         if gained > 0.0 {
             matched.push(intent.clone());
+            // 内容已经对上之后，场景名或场景关键词再含这个词，只加一小档。
+            if repo.blocks.scenarios.contains(intent) {
+                score += 0.5 * weight;
+            }
             score += gained;
         } else {
             missing.push(intent.clone());
@@ -593,16 +686,82 @@ fn field_score(blocks: &TextBlocks, token: &str, idf_weight: f64) -> f64 {
     if blocks.capabilities.contains(token) || blocks.problems.contains(token) {
         max = max.max(2.0 * idf_weight);
     }
-    if blocks.scenarios.contains(token) {
-        max = max.max(2.0 * idf_weight);
-    }
     if blocks.summary.contains(token) {
         max = max.max(1.5 * idf_weight);
     }
-    if blocks.description.contains(token) {
+    // 话题和 GitHub 描述同一档。场景名不在这里计分。
+    if blocks.description.contains(token) || blocks.topics.contains(token) {
         max = max.max(idf_weight);
     }
     max
+}
+
+fn synonym_list(intent: &str) -> Option<&'static [&'static str]> {
+    SYNONYMS
+        .iter()
+        .find(|(word, _)| *word == intent)
+        .map(|(_, words)| *words)
+}
+
+fn synonym_needs_boundary(word: &str) -> bool {
+    // `i18n` 有 4 个字符，任务卡仍要求词边界，避免命中 i18next。
+    word.chars().count() <= 3 || word == "i18n"
+}
+
+fn synonym_matches(blocks: &TextBlocks, intent: &str) -> bool {
+    let Some(words) = synonym_list(intent) else {
+        return false;
+    };
+    let fields = [
+        blocks.name.as_str(),
+        blocks.description.as_str(),
+        blocks.topics.as_str(),
+        blocks.summary.as_str(),
+        blocks.keywords.as_str(),
+    ];
+    words
+        .iter()
+        .any(|word| fields.iter().any(|field| field_has_synonym(field, word)))
+}
+
+fn field_has_synonym(field: &str, word: &str) -> bool {
+    if word.is_empty() {
+        return false;
+    }
+    if synonym_needs_boundary(word) {
+        contains_word(field, word)
+    } else {
+        field.contains(word)
+    }
+}
+
+/// 短同义词要整词命中：`cut` 不能命中 `execute`。汉字不算字母，可以紧贴英文词。
+fn contains_word(haystack: &str, word: &str) -> bool {
+    if word.is_empty() || haystack.is_empty() {
+        return false;
+    }
+    let word_chars: Vec<char> = word.chars().collect();
+    let hay: Vec<char> = haystack.chars().collect();
+    let width = word_chars.len();
+    if width > hay.len() {
+        return false;
+    }
+    for start in 0..=hay.len() - width {
+        if hay[start..start + width] != word_chars[..] {
+            continue;
+        }
+        let before_ok = start == 0 || !is_latin_word_char(hay[start - 1]);
+        let after = start + width;
+        let after_ok = after == hay.len() || !is_latin_word_char(hay[after]);
+        if before_ok && after_ok {
+            return true;
+        }
+    }
+    false
+}
+
+fn is_latin_word_char(ch: char) -> bool {
+    ch.is_ascii_alphanumeric()
 }
 
 fn lexicon(scenarios: &[ScenarioRecord]) -> Vec<String> {
@@ -735,7 +894,19 @@ fn is_stop(word: &str) -> bool {
     STOP_WORDS.iter().any(|stop| *stop == word)
 }
 
-fn why_text(repo: &RepoRecord, terms: &[String]) -> String {
+fn why_text(repo: &RepoRecord, main: &[String], matched: &[String], extra: &[String]) -> String {
+    if main.is_empty() {
+        return why_text_legacy(repo, extra);
+    }
+    let parts = matched
+        .iter()
+        .map(|intent| format!("{intent}（{}）", match_label(repo, intent)))
+        .collect::<Vec<_>>();
+    join_why_parts(&parts)
+}
+
+/// 没有意图词、只有额外词时，沿用原来的取句：问题、能力、一句话里第一处含这些词的原文。
+fn why_text_legacy(repo: &RepoRecord, terms: &[String]) -> String {
     let mut fields = Vec::new();
     for problem in &repo.problems {
         fields.push(problem.as_str());
@@ -762,6 +933,164 @@ fn why_text(repo: &RepoRecord, terms: &[String]) -> String {
         .map(String::as_str)
         .unwrap_or("");
     truncate_chars(fallback, WHY_LIMIT)
+}
+
+fn match_label(repo: &RepoRecord, intent: &str) -> String {
+    if repo.blocks.name.contains(intent) {
+        return "名称".to_owned();
+    }
+    if let Some(item) = find_containing(&repo.capabilities, intent) {
+        return format!("能力：{}", snippet20(item));
+    }
+    if let Some(item) = find_containing(&repo.problems, intent) {
+        return format!("问题：{}", snippet20(item));
+    }
+    if repo.blocks.one_liner.contains(intent) {
+        return "一句话".to_owned();
+    }
+    if repo.blocks.keywords.contains(intent) {
+        return "关键词".to_owned();
+    }
+    if repo.blocks.summary.contains(intent) {
+        return "摘要".to_owned();
+    }
+    if repo.blocks.description.contains(intent) {
+        return "描述".to_owned();
+    }
+    if repo.blocks.topics.contains(intent) {
+        return "话题".to_owned();
+    }
+    synonym_label(repo, intent).unwrap_or_else(|| "描述".to_owned())
+}
+
+fn find_containing<'a>(items: &'a [String], intent: &str) -> Option<&'a str> {
+    items
+        .iter()
+        .find(|item| item.to_lowercase().contains(intent))
+        .map(String::as_str)
+}
+
+fn snippet20(text: &str) -> String {
+    text.chars().take(20).collect()
+}
+
+fn synonym_label(repo: &RepoRecord, intent: &str) -> Option<String> {
+    let words = synonym_list(intent)?;
+    let fields = [
+        (repo.blocks.name.as_str(), "名称"),
+        (repo.blocks.description.as_str(), "描述"),
+        (repo.blocks.keywords.as_str(), "关键词"),
+        (repo.blocks.summary.as_str(), "摘要"),
+        (repo.blocks.topics.as_str(), "话题"),
+    ];
+    for (field, label) in fields {
+        if words.iter().any(|word| field_has_synonym(field, word)) {
+            return Some(label.to_owned());
+        }
+    }
+    None
+}
+
+fn join_why_parts(parts: &[String]) -> String {
+    if parts.is_empty() {
+        return "对上：".to_owned();
+    }
+    let mut kept: Vec<&str> = Vec::new();
+    for part in parts {
+        kept.push(part.as_str());
+        if format_why(&kept).chars().count() > WHY_LIMIT {
+            kept.pop();
+            break;
+        }
+    }
+    if kept.is_empty() {
+        return shrink_one_why_part(&parts[0]);
+    }
+    format_why(&kept)
+}
+
+fn format_why(parts: &[&str]) -> String {
+    format!("对上：{}", parts.join("、"))
+}
+
+/// 单条说明本身超过 80 字时，丢掉能力/问题附注，保留完整意图词，不从词中间切开。
+fn shrink_one_why_part(part: &str) -> String {
+    let full = format!("对上：{part}");
+    if full.chars().count() <= WHY_LIMIT {
+        return full;
+    }
+    if let Some((intent, _)) = part.split_once('（') {
+        let short = format!("对上：{intent}");
+        if short.chars().count() <= WHY_LIMIT {
+            return short;
+        }
+    }
+    full.chars().take(WHY_LIMIT).collect()
+}
+
+fn hit_one_liner(repo: &RepoRecord) -> Option<String> {
+    if repo.has_card {
+        if repo.one_liner.trim().is_empty() {
+            None
+        } else {
+            Some(repo.one_liner.clone())
+        }
+    } else {
+        let line = first_sentence(&repo.github_description);
+        if line.is_empty() {
+            None
+        } else {
+            Some(line)
+        }
+    }
+}
+
+/// 折成一行，取第一句。中文句号、叹号、问号，或英文句号后接空白（或结尾）处停。
+fn first_sentence(description: &str) -> String {
+    let folded = description.split_whitespace().collect::<Vec<_>>().join(" ");
+    if folded.is_empty() {
+        return String::new();
+    }
+    let chars: Vec<char> = folded.chars().collect();
+    let mut end = chars.len();
+    for index in 0..chars.len() {
+        let ch = chars[index];
+        if matches!(ch, '。' | '！' | '？') {
+            end = index + 1;
+            break;
+        }
+        if ch == '.' {
+            let at_boundary = match chars.get(index + 1) {
+                None => true,
+                Some(next) => next.is_whitespace(),
+            };
+            if at_boundary {
+                end = index + 1;
+                break;
+            }
+        }
+    }
+    let sentence: String = chars[..end].iter().collect();
+    truncate_at_clause(&sentence, ONE_LINER_LIMIT)
+}
+
+/// 超过上限时，在上限内最后一个逗号、分号、顿号或空格处截断，并加上省略号。
+fn truncate_at_clause(text: &str, limit: usize) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    if chars.len() <= limit {
+        return text.to_owned();
+    }
+    let mut break_at = None;
+    let window = limit.min(chars.len());
+    for index in 1..window {
+        if matches!(chars[index], '，' | '；' | '、' | ' ') {
+            break_at = Some(index);
+        }
+    }
+    let cut = break_at.unwrap_or(window);
+    let mut out: String = chars[..cut].iter().collect();
+    out.push('…');
+    out
 }
 
 fn truncate_chars(text: &str, limit: usize) -> String {
@@ -909,6 +1238,7 @@ mod tests {
             scenarios: scenarios.to_owned(),
             summary: summary.to_owned(),
             description: description.to_owned(),
+            topics: String::new(),
         }
     }
 
@@ -994,6 +1324,14 @@ mod tests {
             )
             .unwrap_or_else(|error| panic!("插入理解卡 {} 失败：{error}", repo.id));
         }
+    }
+
+    fn set_topics(conn: &Connection, id: &str, topics_json: &str) {
+        conn.execute(
+            "UPDATE repositories SET topics_json = ?1 WHERE id = ?2",
+            params![topics_json, id],
+        )
+        .unwrap_or_else(|error| panic!("更新话题 {id} 失败：{error}"));
     }
 
     fn insert_scenario(
@@ -1205,13 +1543,16 @@ mod tests {
             doc("封面", "", "", "", "封面", "", "", ""),
             doc("", "", "", "", "", "", "其他", ""),
             doc("", "", "", "", "", "", "", "无"),
-            doc("", "", "", "", "设计", "", "", ""),
+            doc("", "", "", "", "设计", "封面", "", ""),
         ];
         let df_cover = docs
             .iter()
             .filter(|item| item.contains_token("封面"))
             .count();
-        assert_eq!(df_cover, 1, "同一仓库的多块命中只算 1 个 df");
+        assert_eq!(
+            df_cover, 1,
+            "同一仓库的多块命中只算 1 个 df，场景块里的封面不计入"
+        );
         let cover = idf_from_counts(docs.len(), df_cover);
         let missing = idf_from_counts(docs.len(), 0);
         // N=4，df(封面)=1 → ln(1 + 4/2) = ln(3)
@@ -1247,8 +1588,12 @@ mod tests {
         );
         assert_eq!(
             field_score(&doc("", "", "", "", "", "封面", "", ""), "封面", weight),
-            4.0
+            0.0,
+            "场景名单独出现不算内容分"
         );
+        let mut topics_only = doc("", "", "", "", "", "", "", "");
+        topics_only.topics = "封面".to_owned();
+        assert_eq!(field_score(&topics_only, "封面", weight), 2.0);
         assert_eq!(
             field_score(&doc("", "", "", "", "", "", "封面", ""), "封面", weight),
             3.0
@@ -1623,23 +1968,40 @@ mod tests {
                 .iter()
                 .map(|hit| hit.id.as_str())
                 .collect::<Vec<_>>(),
-            vec!["r01", "r03", "r02"]
+            vec!["r01", "r12", "r02", "r03"]
         );
         assert!(q1.hits[0].full_match);
-        assert_eq!(q1.hits[0].why, "想快速做小红书封面");
+        assert_eq!(
+            q1.hits[0].why,
+            "对上：小红书（能力：生成小红书封面）、封面（能力：生成小红书封面）"
+        );
+        assert_ne!(
+            q1.hits[0].why,
+            q1.hits[0].one_liner.as_deref().unwrap_or("")
+        );
         assert_eq!(q1.hits[0].form.as_deref(), Some("app"));
         assert_eq!(q1.hits[0].one_liner.as_deref(), Some("帮你做小红书封面"));
         assert!(q1.hits[0].has_card);
         assert_eq!(q1.hits[0].stars_count, 5200);
         assert_eq!(q1.hits[0].scenario_ids, vec!["sc-xhs".to_owned()]);
         assert_eq!(q1.hits[0].html_url, "https://github.com/fox/xhs-cover");
-        assert_eq!(q1.full_match_count, 1);
+        assert_eq!(q1.full_match_count, 2);
         assert!(q1.gap_intents.is_empty());
-        assert_eq!(q1.preselected, vec!["r01".to_owned()]);
-        assert_eq!(q1.pending_matches, 1);
+        assert_eq!(q1.preselected, vec!["r01".to_owned(), "r12".to_owned()]);
+        assert_eq!(q1.pending_matches, 0);
         assert_eq!(q1.suggested_scenario_id.as_deref(), Some("sc-xhs"));
         assert_eq!(q1.suggested_scenario_count, Some(2));
-        assert!(!q1.hits.iter().any(|hit| hit.id == "r12"));
+        let pending = q1
+            .hits
+            .iter()
+            .find(|hit| hit.id == "r12")
+            .expect("没卡的 r12 应进结果");
+        assert!(!pending.has_card);
+        assert!(pending.full_match);
+        assert_eq!(
+            pending.one_liner.as_deref(),
+            Some("小红书封面素材包，还没写理解卡")
+        );
 
         let q2 = &results[1];
         assert_eq!(
@@ -1680,7 +2042,11 @@ mod tests {
         );
         assert_eq!(q5.full_match_count, 0);
         assert!(q5.preselected.is_empty());
-        assert_eq!(q5.gap_intents, vec!["图片".to_owned()]);
+        assert!(
+            q5.gap_intents.is_empty(),
+            "图片应能靠描述里的 image 对上：{:?}",
+            q5.gap_intents
+        );
         assert!(q5.hits.iter().all(|hit| !hit.full_match));
         assert_eq!(q5.suggested_scenario_id.as_deref(), Some("sc-ec"));
         assert_eq!(q5.suggested_scenario_count, Some(2));
@@ -1851,13 +2217,21 @@ mod tests {
             );
         });
         let result = run(&db, "做小红书封面");
-        assert_eq!(result.pending_matches, 2);
-        assert_eq!(result.hits.len(), 1);
-        assert_eq!(result.hits[0].id, "card");
-        assert!(!result
+        // 没卡的仓库现在直接进结果。这四条都在前 8 里，所以 pending 为 0。
+        assert_eq!(result.pending_matches, 0);
+        let ids = result
             .hits
             .iter()
-            .any(|hit| hit.id == "desc" || hit.id == "name" || hit.id == "split"));
+            .map(|hit| hit.id.as_str())
+            .collect::<Vec<_>>();
+        assert!(ids.contains(&"card"));
+        assert!(ids.contains(&"desc"));
+        assert!(ids.contains(&"name"));
+        assert!(ids.contains(&"split"));
+        assert!(result
+            .hits
+            .iter()
+            .any(|hit| hit.id == "desc" && !hit.has_card && hit.full_match));
         let extra_only = run(&db, "zzqq");
         assert!(extra_only.intents.is_empty());
         assert_eq!(extra_only.pending_matches, 0);
@@ -1939,16 +2313,16 @@ mod tests {
                 .find(|hit| hit.id == id)
                 .unwrap_or_else(|| panic!("缺少 {id}"))
         };
-        assert_eq!(find("order").why, "这里有封面");
-        assert_eq!(find("fallback").why, "第一条问题");
-        let truncated = &find("long").why;
-        assert_eq!(truncated.chars().count(), 81);
-        assert!(truncated.ends_with('…'));
-        assert_eq!(
-            truncated.chars().take(80).collect::<String>(),
-            long.chars().take(80).collect::<String>()
-        );
-        assert_eq!(find("exact").why, exact);
+        assert_eq!(find("order").why, "对上：封面（问题：这里有封面）");
+        assert_eq!(find("fallback").why, "对上：封面（关键词）");
+        let explained = &find("long").why;
+        assert!(explained.starts_with("对上：封面（问题："));
+        assert!(explained.chars().count() <= 80);
+        assert!(!explained.ends_with('…'));
+        let prefix: String = long.chars().take(20).collect();
+        assert!(explained.contains(&prefix));
+        assert_ne!(find("exact").why, exact);
+        assert!(find("exact").why.starts_with("对上：封面（问题："));
     }
 
     #[test]
@@ -2083,13 +2457,13 @@ mod tests {
         assert_eq!(result.hits.len(), 8);
         let good = result.hits.iter().find(|hit| hit.id == "good").unwrap();
         assert_eq!(good.form.as_deref(), Some("cli"));
-        assert_eq!(good.why, "封面问题");
+        assert_eq!(good.why, "对上：封面（能力：封面能力）");
         let partial_hit = result.hits.iter().find(|hit| hit.id == "partial").unwrap();
         assert_eq!(partial_hit.form.as_deref(), Some("app"));
-        assert_eq!(partial_hit.why, "封面问题");
+        assert_eq!(partial_hit.why, "对上：封面（能力：封面能力）");
         let types = result.hits.iter().find(|hit| hit.id == "types").unwrap();
         assert!(types.form.is_none());
-        assert_eq!(types.why, "封面类型不对");
+        assert_eq!(types.why, "对上：封面（一句话）");
     }
 
     #[test]
@@ -2153,10 +2527,17 @@ mod tests {
             );
         });
         let result = run(&db, "封面");
-        assert_eq!(result.hits.len(), 1);
+        assert_eq!(result.hits.len(), 2);
         assert_eq!(result.hits[0].id, "keep");
         assert_eq!(result.hits[0].stars_count, 10);
-        assert_eq!(result.pending_matches, 1);
+        assert_eq!(result.hits[1].id, "pending");
+        assert!(!result.hits[1].has_card);
+        assert!(result
+            .hits
+            .iter()
+            .all(|hit| hit.id != "removed" && hit.id != "gone"));
+        // 没卡的那条已经出现在 hits 里，不再计入 pending。
+        assert_eq!(result.pending_matches, 0);
         let weight = (1.0_f64 + 2.0 / 3.0).ln();
         approx(result.hits[0].score, 3.0 * weight);
     }
@@ -2677,5 +3058,585 @@ mod tests {
         ] {
             assert!(!json.contains(phrase), "不该出现「{phrase}」");
         }
+    }
+
+    fn bare_repo<'a>(
+        id: &'a str,
+        full_name: &'a str,
+        description: &'a str,
+        stars: i64,
+    ) -> NewRepo<'a> {
+        NewRepo {
+            id,
+            full_name,
+            description,
+            stars,
+            status: "active",
+            one_liner: None,
+            summary: "",
+            keywords_json: "[]",
+            card_json: None,
+        }
+    }
+
+    fn card_repo<'a>(
+        id: &'a str,
+        full_name: &'a str,
+        description: &'a str,
+        stars: i64,
+        one_liner: &'a str,
+    ) -> NewRepo<'a> {
+        NewRepo {
+            id,
+            full_name,
+            description,
+            stars,
+            status: "active",
+            one_liner: Some(one_liner),
+            summary: "",
+            keywords_json: "[]",
+            card_json: None,
+        }
+    }
+
+    #[test]
+    fn contains_word_rejects_partial_latin() {
+        assert!(!contains_word("execute", "cut"));
+        assert!(!contains_word("precut", "cut"));
+        assert!(!contains_word("cutting", "cut"));
+        assert!(contains_word("cut", "cut"));
+        assert!(contains_word("cut the clip", "cut"));
+        assert!(contains_word("a-cut-b", "cut"));
+        assert!(contains_word("please cut.", "cut"));
+        assert!(!contains_word("consrt", "srt"));
+        assert!(!contains_word("srtfile", "srt"));
+        assert!(contains_word("demo.srt", "srt"));
+        assert!(contains_word("导出 srt 字幕", "srt"));
+        assert!(contains_word("生成srt字幕", "srt"));
+        assert!(!contains_word("i18next", "i18n"));
+        assert!(contains_word("use-i18n-kit", "i18n"));
+        assert!(!contains_word("", "cut"));
+        assert!(!contains_word("cut", ""));
+        assert!(!contains_word("ragtime", "rag"));
+        assert!(contains_word("local rag index", "rag"));
+    }
+
+    #[test]
+    fn scenario_alone_does_not_count_as_match() {
+        let db = prepare("scenario-only", |conn| {
+            insert_scenario(conn, "dy", "dy", "抖音·短视频", "[\"字幕\",\"下载\"]", 1, 0);
+            insert_repo(
+                conn,
+                &bare_repo("crawler", "lab/page-fetcher", "download saved pages", 99),
+            );
+            link_scenario(conn, "crawler", "dy", "confirmed");
+            set_topics(conn, "crawler", r#"["http"]"#);
+            insert_repo(
+                conn,
+                &card_repo("sub", "lab/sub-only", "只写了字幕", 2, "给视频加字幕"),
+            );
+            link_scenario(conn, "sub", "dy", "confirmed");
+        });
+        let result = run(&db, "短视频加字幕");
+        assert!(
+            result.hits.iter().all(|hit| hit.id != "crawler"),
+            "只挂在场景上的爬虫不该出现：{:?}",
+            result
+                .hits
+                .iter()
+                .map(|hit| hit.id.as_str())
+                .collect::<Vec<_>>()
+        );
+        let sub = result
+            .hits
+            .iter()
+            .find(|hit| hit.id == "sub")
+            .expect("字幕仓库应出现");
+        assert!(!sub.full_match);
+        assert_eq!(sub.matched, vec!["字幕".to_owned()]);
+        assert!(sub.missing.iter().any(|word| word == "短视频"));
+        assert!(!sub.matched.iter().any(|word| word == "短视频"));
+    }
+
+    #[test]
+    fn scenario_bonus_ranks_above_content_only() {
+        let db = prepare("scenario-bonus", |conn| {
+            insert_scenario(conn, "cap", "cap", "封面工坊", "[\"封面\"]", 1, 0);
+            insert_repo(conn, &card_repo("both", "lab/封面甲", "", 5, "有卡"));
+            insert_repo(conn, &card_repo("text", "lab/封面乙", "", 5, "有卡"));
+            link_scenario(conn, "both", "cap", "confirmed");
+        });
+        let result = run(&db, "封面");
+        assert_eq!(
+            result
+                .hits
+                .iter()
+                .map(|hit| hit.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["both", "text"]
+        );
+        assert!(result.hits[0].score > result.hits[1].score);
+        let weight = (1.0_f64 + 2.0 / 3.0).ln();
+        approx(result.hits[0].score, 3.5 * weight);
+        approx(result.hits[1].score, 3.0 * weight);
+        assert!((result.hits[0].score - result.hits[1].score - 0.5 * weight).abs() < 1e-9);
+    }
+
+    #[test]
+    fn scenario_keyword_bonus_needs_content_first() {
+        let db = prepare("scenario-kw", |conn| {
+            insert_scenario(conn, "video", "video", "影像", "[\"字幕\"]", 1, 0);
+            insert_repo(conn, &card_repo("hit", "lab/字幕工具", "", 3, "有卡"));
+            insert_repo(
+                conn,
+                &card_repo("miss", "lab/plain", "没有这个词", 9, "有卡"),
+            );
+            link_scenario(conn, "hit", "video", "confirmed");
+            link_scenario(conn, "miss", "video", "confirmed");
+        });
+        let result = run(&db, "字幕");
+        assert_eq!(result.hits.len(), 1);
+        assert_eq!(result.hits[0].id, "hit");
+        let weight = (1.0_f64 + 2.0 / 2.0).ln();
+        // 名称命中 3.0，场景关键词再加 0.5。另一个仓库只有场景关键词，不进结果。
+        approx(result.hits[0].score, 3.5 * weight);
+    }
+
+    #[test]
+    fn cardless_english_subtitle_enters_hits() {
+        let db = prepare("autoclip", |conn| {
+            let repo = bare_repo(
+                "auto",
+                "lab/autoclip-subtitle",
+                "AI video clipping with subtitle generation",
+                12,
+            );
+            insert_repo(conn, &repo);
+            set_topics(conn, "auto", r#"["video-editing"]"#);
+        });
+        let result = run(&db, "短视频加字幕");
+        assert_eq!(result.hits.len(), 1);
+        let hit = &result.hits[0];
+        assert_eq!(hit.id, "auto");
+        assert!(!hit.has_card);
+        assert!(hit.form.is_none());
+        assert_eq!(
+            hit.one_liner.as_deref(),
+            Some("AI video clipping with subtitle generation")
+        );
+        assert_eq!(hit.matched, vec!["字幕".to_owned()]);
+        assert!(hit.missing.iter().any(|word| word == "短视频"));
+        assert!(!hit.full_match);
+        assert!(hit.why.contains("对上："));
+        assert!(hit.why.contains("字幕（名称）"));
+        assert_ne!(hit.why, hit.one_liner.as_deref().unwrap_or(""));
+    }
+
+    #[test]
+    fn synonym_cover_matches_thumbnail() {
+        let db = prepare("syn-cover", |conn| {
+            insert_repo(
+                conn,
+                &bare_repo("thumb", "lab/thumb", "export a thumbnail for the post", 4),
+            );
+        });
+        let result = run(&db, "封面");
+        assert_eq!(result.hits.len(), 1);
+        assert_eq!(result.hits[0].matched, vec!["封面".to_owned()]);
+        assert!(result.hits[0].full_match);
+        assert!(result.hits[0].why.contains("（描述）"));
+        let weight = (1.0_f64 + 1.0 / 1.0).ln();
+        approx(result.hits[0].score, weight);
+    }
+
+    #[test]
+    fn synonym_ecommerce_matches_shopify() {
+        let db = prepare("syn-ec", |conn| {
+            insert_repo(
+                conn,
+                &bare_repo("shop", "lab/shop", "a shopify helper for listings", 4),
+            );
+        });
+        let result = run(&db, "电商");
+        assert_eq!(result.hits.len(), 1);
+        assert_eq!(result.hits[0].matched, vec!["电商".to_owned()]);
+        assert!(result.hits[0].why.starts_with("对上：电商（"));
+        assert!(!result.hits[0].has_card);
+    }
+
+    #[test]
+    fn synonym_poster_group_matches_banner() {
+        let db = prepare("syn-poster", |conn| {
+            insert_repo(
+                conn,
+                &bare_repo("banner", "lab/banner", "event banner maker", 2),
+            );
+        });
+        let result = run(&db, "海报");
+        assert_eq!(result.hits.len(), 1);
+        assert_eq!(result.hits[0].matched, vec!["海报".to_owned()]);
+    }
+
+    #[test]
+    fn short_synonym_cut_and_srt_need_boundaries() {
+        let db = prepare("boundary", |conn| {
+            insert_repo(
+                conn,
+                &bare_repo("exec", "lab/exec", "execute the daily job", 5),
+            );
+            insert_repo(conn, &bare_repo("cut", "lab/cut", "please cut now", 4));
+            insert_repo(conn, &bare_repo("stuck", "lab/stuck", "consrt file", 3));
+            insert_repo(
+                conn,
+                &bare_repo("srt", "lab/srt", "render demo.srt tonight", 2),
+            );
+        });
+        let cut = run(&db, "剪辑");
+        assert_eq!(
+            cut.hits
+                .iter()
+                .map(|hit| hit.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["cut"]
+        );
+        assert_eq!(cut.hits[0].matched, vec!["剪辑".to_owned()]);
+        let srt = run(&db, "字幕");
+        assert_eq!(
+            srt.hits
+                .iter()
+                .map(|hit| hit.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["srt"]
+        );
+        assert!(srt.hits.iter().all(|hit| hit.id != "stuck"));
+    }
+
+    #[test]
+    fn preselected_caps_at_three_full_matches() {
+        let db = prepare("pre-cap", |conn| {
+            for index in 0..5 {
+                let id = format!("p{index}");
+                let full_name = format!("lab/封面{index}");
+                insert_repo(
+                    conn,
+                    &card_repo(&id, &full_name, "", 10 - index as i64, "有卡"),
+                );
+            }
+        });
+        let result = run(&db, "封面");
+        assert_eq!(result.full_match_count, 5);
+        assert_eq!(
+            result.preselected,
+            vec!["p0".to_owned(), "p1".to_owned(), "p2".to_owned()]
+        );
+        assert!(result.hits.iter().all(|hit| hit.full_match));
+    }
+
+    #[test]
+    fn preselected_can_include_cardless_full_match() {
+        let db = prepare("pre-cardless", |conn| {
+            insert_repo(
+                conn,
+                &bare_repo("free", "lab/短视频字幕", "短视频字幕工具", 8),
+            );
+        });
+        let result = run(&db, "短视频加字幕");
+        assert_eq!(result.hits.len(), 1);
+        assert!(!result.hits[0].has_card);
+        assert!(result.hits[0].full_match);
+        assert_eq!(result.preselected, vec!["free".to_owned()]);
+    }
+
+    #[test]
+    fn preselected_empty_when_nothing_fully_matches() {
+        let db = prepare("pre-empty", |conn| {
+            insert_repo(conn, &card_repo("sub", "lab/sub", "", 3, "只有字幕"));
+            insert_repo(conn, &card_repo("short", "lab/short", "", 9, "只有短视频"));
+        });
+        let result = run(&db, "短视频加字幕");
+        assert_eq!(result.hits.len(), 2);
+        assert!(result.hits.iter().all(|hit| !hit.full_match));
+        assert!(result.preselected.is_empty());
+        assert_eq!(result.full_match_count, 0);
+    }
+
+    #[test]
+    fn pending_matches_ignore_cardless_already_in_hits() {
+        let db = prepare("pending-out", |conn| {
+            insert_repo(conn, &card_repo("card", "lab/小红书封面卡", "", 0, "有卡"));
+            for index in 1..=9 {
+                let id = format!("n{index:02}");
+                let full_name = format!("lab/小红书封面{index:02}");
+                insert_repo(conn, &bare_repo(&id, &full_name, "", index as i64));
+            }
+            insert_repo(conn, &bare_repo("split", "lab/小红书xx", "只有封面", 0));
+        });
+        let result = run(&db, "做小红书封面");
+        assert_eq!(result.hits.len(), 8);
+        assert!(result.hits.iter().any(|hit| hit.id == "card"));
+        assert!(result.hits.iter().all(|hit| hit.id != "split"));
+        assert!(result
+            .hits
+            .iter()
+            .all(|hit| hit.id != "n01" && hit.id != "n02"));
+        // 排在 8 名外的两条名称全中；split 没有任何一个字段同时含两个意图词。
+        assert_eq!(result.pending_matches, 2);
+        let no_intent = run(&db, "zzqq");
+        assert!(no_intent.intents.is_empty());
+        assert_eq!(no_intent.pending_matches, 0);
+    }
+
+    #[test]
+    fn why_points_at_name_before_capability() {
+        let card = card_json("app", &["封面能力很长"], &["封面问题"]);
+        let db = prepare("why-name", |conn| {
+            insert_repo(
+                conn,
+                &NewRepo {
+                    id: "named",
+                    full_name: "lab/封面库",
+                    description: "封面描述",
+                    stars: 1,
+                    status: "active",
+                    one_liner: Some("这是一句完整的话"),
+                    summary: "封面摘要",
+                    keywords_json: "[\"封面\"]",
+                    card_json: Some(&card),
+                },
+            );
+        });
+        let result = run(&db, "封面");
+        assert_eq!(result.hits[0].why, "对上：封面（名称）");
+        assert_ne!(
+            result.hits[0].why,
+            result.hits[0].one_liner.as_deref().unwrap_or("")
+        );
+        assert!(result.hits[0].why.contains("对上："));
+        assert!(result.hits[0].why.contains("（名称）"));
+    }
+
+    #[test]
+    fn why_truncates_at_last_complete_separator() {
+        let cap = format!("小红书封面字幕{}", "补".repeat(20));
+        assert!(cap.chars().count() > 20);
+        let card = card_json("app", &[&cap], &[]);
+        let db = prepare("why-cut", |conn| {
+            insert_repo(
+                conn,
+                &NewRepo {
+                    id: "long",
+                    full_name: "lab/tool",
+                    description: "",
+                    stars: 1,
+                    status: "active",
+                    one_liner: Some("有卡"),
+                    summary: "",
+                    keywords_json: "[]",
+                    card_json: Some(&card),
+                },
+            );
+        });
+        let result = run(&db, "小红书封面字幕");
+        let why = &result.hits[0].why;
+        assert!(why.starts_with("对上："));
+        assert!(
+            why.chars().count() <= 80,
+            "{why} 有 {} 字",
+            why.chars().count()
+        );
+        assert!(!why.contains("字幕（能力"));
+        assert!(why.contains("、"));
+        assert!(!why.ends_with('、'));
+        assert!(!why.ends_with('…'));
+        let snippet: String = cap.chars().take(20).collect();
+        assert!(why.contains(&snippet));
+        assert_ne!(why, result.hits[0].one_liner.as_deref().unwrap_or(""));
+    }
+
+    #[test]
+    fn extras_only_why_keeps_legacy_wording() {
+        let card = card_json("app", &["用不上"], &["zzqq 问题说明"]);
+        let db = prepare("why-extra", |conn| {
+            insert_repo(
+                conn,
+                &NewRepo {
+                    id: "zz",
+                    full_name: "lab/zzqq-tool",
+                    description: "",
+                    stars: 1,
+                    status: "active",
+                    one_liner: Some("一句话本身"),
+                    summary: "",
+                    keywords_json: "[]",
+                    card_json: Some(&card),
+                },
+            );
+        });
+        let result = run(&db, "zzqq");
+        assert!(result.intents.is_empty());
+        assert_eq!(result.extras, vec!["zzqq".to_owned()]);
+        assert_eq!(result.hits[0].why, "zzqq 问题说明");
+        assert!(!result.hits[0].why.starts_with("对上："));
+        assert!(!result.hits[0].full_match);
+        assert!(result.preselected.is_empty());
+    }
+
+    #[test]
+    fn topics_match_without_a_card() {
+        let db = prepare("topics", |conn| {
+            insert_repo(conn, &bare_repo("topic", "lab/plain", "nothing here", 6));
+            set_topics(conn, "topic", r#"["Subtitle"]"#);
+        });
+        let result = run(&db, "字幕");
+        assert_eq!(result.hits.len(), 1);
+        assert!(!result.hits[0].has_card);
+        assert_eq!(result.hits[0].matched, vec!["字幕".to_owned()]);
+        assert_eq!(result.hits[0].why, "对上：字幕（话题）");
+        assert_eq!(result.hits[0].one_liner.as_deref(), Some("nothing here"));
+    }
+
+    #[test]
+    fn cardless_one_liner_is_first_sentence() {
+        assert_eq!(first_sentence("第一句。第二句"), "第一句。");
+        assert_eq!(first_sentence("好！下一句"), "好！");
+        assert_eq!(first_sentence("吗？后面"), "吗？");
+        assert_eq!(
+            first_sentence("First sentence. Second sentence."),
+            "First sentence."
+        );
+        assert_eq!(first_sentence("版本 3.5 可用。后面"), "版本 3.5 可用。");
+        assert_eq!(first_sentence("line1\nline2。后面"), "line1 line2。");
+        assert_eq!(first_sentence("  没有句号的短句  "), "没有句号的短句");
+        assert_eq!(first_sentence("Hello."), "Hello.");
+        assert_eq!(first_sentence("Hello.World stays"), "Hello.World stays");
+        assert!(first_sentence("").is_empty());
+        assert!(first_sentence(" \n\t ").is_empty());
+
+        let short = "甲，乙".repeat(10);
+        assert!(short.chars().count() < 120);
+        assert_eq!(first_sentence(&short), short);
+        assert!(!first_sentence(&short).contains('…'));
+
+        let long = format!("{}{}", "甲，".repeat(80), "尾巴");
+        assert!(long.chars().count() > 120);
+        let cut = first_sentence(&long);
+        assert!(cut.ends_with('…'));
+        assert!(cut.chars().count() <= 121);
+        assert!(!cut.contains('尾'));
+
+        let hard = "字".repeat(130);
+        let hard_cut = first_sentence(&hard);
+        assert_eq!(hard_cut.chars().count(), 121);
+        assert!(hard_cut.ends_with('…'));
+        assert_eq!(hard_cut.chars().next().unwrap(), '字');
+    }
+
+    #[test]
+    fn equal_scores_put_cards_before_stars() {
+        let db = prepare("tie-card", |conn| {
+            insert_repo(conn, &bare_repo("free", "lab/封面无卡", "", 100));
+            insert_repo(conn, &card_repo("card", "lab/封面有卡", "", 1, "有卡"));
+        });
+        let result = run(&db, "封面");
+        assert_eq!(
+            result
+                .hits
+                .iter()
+                .map(|hit| hit.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["card", "free"]
+        );
+        approx(result.hits[0].score, result.hits[1].score);
+        assert!(result.hits[0].has_card);
+        assert!(!result.hits[1].has_card);
+        assert!(result.hits[1].stars_count > result.hits[0].stars_count);
+    }
+
+    #[test]
+    fn gibberish_query_does_not_preselect_or_full_match() {
+        let db = prepare("gibberish", |conn| {
+            insert_repo(
+                conn,
+                &card_repo("one", "lab/one", "普通描述", 3, "一条普通的理解卡"),
+            );
+        });
+        let result = run(&db, "xyzzyfoobar 随便说说");
+        assert!(result.intents.is_empty(), "{:?}", result.intents);
+        assert!(result.hits.iter().all(|hit| !hit.full_match));
+        assert!(result.preselected.is_empty());
+        assert_eq!(result.full_match_count, 0);
+        assert_eq!(result.pending_matches, 0);
+    }
+
+    #[test]
+    fn evidence_short_video_subtitle_fixture() {
+        let card = card_json("skill", &["自动剪口播并生成字幕"], &["口播没有字幕"]);
+        let db = prepare("evidence", |conn| {
+            insert_scenario(conn, "dy", "dy", "抖音·短视频", "[\"下载\"]", 1, 0);
+            insert_repo(
+                conn,
+                &bare_repo("crawler", "lab/page-fetcher", "download saved pages", 80),
+            );
+            link_scenario(conn, "crawler", "dy", "confirmed");
+            set_topics(conn, "crawler", r#"["http"]"#);
+            insert_repo(
+                conn,
+                &NewRepo {
+                    id: "jianying",
+                    full_name: "lab/jianying-skill",
+                    description: "editor",
+                    stars: 40,
+                    status: "active",
+                    one_liner: Some("给短视频加字幕"),
+                    summary: "字幕工具",
+                    keywords_json: "[\"短视频\",\"字幕\"]",
+                    card_json: Some(&card),
+                },
+            );
+            insert_repo(
+                conn,
+                &bare_repo(
+                    "autoclip",
+                    "lab/autoclip-subtitle",
+                    "AI video clipping with subtitle generation",
+                    15,
+                ),
+            );
+            set_topics(conn, "autoclip", r#"["video-editing"]"#);
+        });
+        let result = run(&db, "短视频加字幕");
+        assert!(result.hits.iter().all(|hit| hit.id != "crawler"));
+        let tool = result
+            .hits
+            .iter()
+            .find(|hit| hit.id == "jianying")
+            .expect("有卡的字幕工具应出现");
+        let auto = result
+            .hits
+            .iter()
+            .find(|hit| hit.id == "autoclip")
+            .expect("英文没卡仓库应出现");
+        assert_eq!(tool.matched, vec!["短视频".to_owned(), "字幕".to_owned()]);
+        assert!(tool.missing.is_empty());
+        assert!(tool.full_match);
+        assert!(tool.has_card);
+        assert_eq!(
+            tool.why,
+            "对上：短视频（一句话）、字幕（能力：自动剪口播并生成字幕）"
+        );
+        assert_eq!(auto.matched, vec!["字幕".to_owned()]);
+        assert_eq!(auto.missing, vec!["短视频".to_owned()]);
+        assert!(!auto.full_match);
+        assert!(!auto.has_card);
+        assert_eq!(auto.why, "对上：字幕（名称）");
+        assert_eq!(
+            auto.one_liner.as_deref(),
+            Some("AI video clipping with subtitle generation")
+        );
+        let weight = (1.0_f64 + 3.0 / 2.0).ln();
+        approx(tool.score, 8.0 * weight);
+        approx(auto.score, weight);
+        assert!(tool.score > auto.score);
+        assert_eq!(result.hits[0].id, "jianying");
     }
 }
