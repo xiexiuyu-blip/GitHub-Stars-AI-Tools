@@ -1,11 +1,14 @@
 import { invoke as tauriInvoke } from '@tauri-apps/api/core';
 import type {
   CapturePreview,
+  DiscoverRefreshReport,
+  DiscoverView,
   InboxPage,
   LibraryDetail,
   LibraryFilters,
   LibraryPage,
   ReadingGroup,
+  RepoCommunity,
   ScenarioSummary,
   SetInboxStatusRequest,
   SolveResult,
@@ -164,6 +167,21 @@ export async function getRepositoryReadme(repositoryId: string): Promise<Reposit
   return { rawMarkdown: raw, sourcePath: view?.readme?.sourcePath ?? 'README.md' };
 }
 
+/** 发现：某个场景下缓存的候选。只读本地缓存，瞬间返回。scenarioId 为空时后端挑「偏少」排第一的场景。 */
+export function listDiscover(scenarioId?: string | null): Promise<DiscoverView> {
+  return call<DiscoverView>('list_discover', { scenarioId: scenarioId ?? null });
+}
+
+/** 发现：联网去 GitHub 搜这个场景（不登录，几秒到十几秒），结果写进缓存。 */
+export function refreshDiscover(scenarioId: string): Promise<DiscoverRefreshReport> {
+  return call<DiscoverRefreshReport>('refresh_discover', { scenarioId });
+}
+
+/** 社区：别人怎么用。refresh 为 false 只读缓存；为 true 才联网（Hacker News + GitHub Issues）。 */
+export function getRepoCommunity(id: string, refresh = false): Promise<RepoCommunity> {
+  return call<RepoCommunity>('get_repo_community', { id, refresh });
+}
+
 /** AI 自动整理现在的状态（预算、队列、有没有暂停）。只读，不花钱。 */
 export function getAiAutomation(): Promise<AutomationStatus> {
   return call<AutomationStatus>('get_ai_automation');
@@ -182,6 +200,11 @@ export function describeInvokeError(reason: unknown): string {
   const chars = Array.from(cleaned);
   if (chars.length > 180) return `${chars.slice(0, 180).join('')}…`;
   return cleaned;
+}
+
+/** 后端还没有这个命令（比如前端先发布、后台下次更新才带上）。 */
+export function isMissingCommandError(reason: unknown): boolean {
+  return isMissingCommand(readErrorMessage(reason));
 }
 
 function readErrorMessage(reason: unknown): string {

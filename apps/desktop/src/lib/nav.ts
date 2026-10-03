@@ -19,7 +19,7 @@ export const NAV_ITEMS: NavItem[] = [
   { key: 'library', label: '资料库', icon: 'folder_special' },
   { key: 'solve', label: '找方案', icon: 'psychology' },
   { key: 'capture', label: '收集', icon: 'add_link' },
-  { key: 'discover', label: '发现', icon: 'leaderboard' },
+  { key: 'discover', label: '发现', icon: 'explore' },
 ];
 
 export const SETTINGS_ITEM: NavItem = {
