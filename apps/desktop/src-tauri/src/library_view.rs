@@ -366,7 +366,11 @@ WHERE r.id = ?1
     let scenario_ids = scenario_ids_for(&connection, &[raw.id.clone()])?;
     let topics = parse_string_list(topics_json);
     let mut item = into_item(raw, scenario_ids.get(id).cloned().unwrap_or_default());
-    if item.form.is_none() {
+    if item
+        .form
+        .as_deref()
+        .map_or(true, crate::repo_facts::is_unspecific_form)
+    {
         item.form =
             crate::repo_facts::infer_form(&topics, &item.full_name, item.description.as_deref())
                 .map(str::to_owned);
@@ -3376,7 +3380,7 @@ mod tests {
         const SUMMARY_CHATCUT: &str = "ChatCut Agent Plugin 是一个连接 Codex 与 ChatCut 的插件，支持通过 AI 辅助编辑 ChatCut 视频项目，具体功能包括导入媒体、修改时间线、创建动态图形、生成素材、音频转录、添加字幕、导出视频以及验证编辑可见性。";
         const LINE_AWESOME: &str =
             "Awesome LLM Apps 是一个可运行的 LLM 应用模板集合，包含100+ AI Agent和RAG应用。";
-        const LINE_CHATCUT: &str = "ChatCut Agent Plugin 是一个连接 Codex 与 ChatCut 的插件…";
+        const LINE_CHATCUT: &str = "ChatCut Agent Plugin 是一个连接 Codex 与 ChatCut 的插件，支持通过 AI 辅助编辑 ChatCut 视频项目，具体功能包括导入媒体、修改时间线、创建动态图形…";
         let lab = Lab::new("legacy-card");
         lab.with(|conn| {
             for (id, summary) in [("awesome", SUMMARY_AWESOME), ("chatcut", SUMMARY_CHATCUT)] {

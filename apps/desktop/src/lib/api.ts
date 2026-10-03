@@ -123,8 +123,9 @@ export function buildReferencePack(
   });
 }
 
-export function copyItemForCodex(id: string): Promise<string> {
-  return call<string>('copy_item_for_codex', { repoId: id });
+/** `problem` 是这次想做的事（找方案里那句话）：带上，Codex 才知道装这个工具是为了做什么。 */
+export function copyItemForCodex(id: string, problem?: string): Promise<string> {
+  return call<string>('copy_item_for_codex', definedArgs({ repoId: id, problem: problem?.trim() || undefined }));
 }
 
 export function previewCapture(text: string): Promise<CapturePreview> {

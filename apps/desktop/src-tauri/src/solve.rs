@@ -103,6 +103,16 @@ const STOP_WORDS: &[&str] = &[
 
 const WHY_LIMIT: usize = 80;
 const HIT_LIMIT: usize = 8;
+/// README 只看前面这么多字符：再往后多半是更新日志、赞助名单，提到的词不代表这个项目是做什么的。
+const README_SCAN_CHARS: i64 = 60_000;
+/// 只出现 1 次多半是顺带一提（「也支持小红书」），不算证据。
+const README_MIN_HITS: usize = 2;
+/// 提到这么多次就算「充分」，再多不再加分。
+const README_FULL_HITS: f64 = 16.0;
+/// 理解卡 / 简介里已经对上时，README 提到得多再加一点（最多这个倍数 × 词的区分度）。
+const README_BOOST: f64 = 1.5;
+/// 理解卡 / 简介里都没对上，只有 README 里反复出现：算对上，但最多只给这个倍数（比「描述」那一档略高，比一句话低）。
+const README_ONLY: f64 = 1.5;
 const ONE_LINER_LIMIT: usize = 120;
 
 /// 中文意图词 → 英文同义词（全小写）。只在内容字段没有直接命中时用来补「对上」。
@@ -253,6 +263,30 @@ struct ScoreParts {
     missing: Vec<String>,
 }
 
+/// 一个仓库 README 里各意图词出现了几次（含同义词），以及 README 有多长。
+struct ReadmeStats {
+    /// 千字数，至少 3：很短的 README 不会因为「密度」被抬高。
+    kb: f64,
+    hits: HashMap<String, usize>,
+}
+
+impl ReadmeStats {
+    fn hits_of(&self, token: &str) -> usize {
+        self.hits.get(token).copied().unwrap_or(0)
+    }
+
+    /// 0 到 1：提到得越多、占比越高越接近 1；不足 `README_MIN_HITS` 次是 0。
+    fn evidence(&self, token: &str) -> f64 {
+        let hits = self.hits_of(token);
+        if hits < README_MIN_HITS {
+            return 0.0;
+        }
+        let presence = ((1.0 + hits as f64).ln() / (1.0 + README_FULL_HITS).ln()).min(1.0);
+        let density = hits as f64 / self.kb;
+        presence * (0.35 + 0.65 * density.min(1.0))
+    }
+}
+
 impl TextBlocks {
     fn contains_token(&self, token: &str) -> bool {
         if token.is_empty() {
@@ -283,10 +317,18 @@ pub fn solve_query(db_path: &Path, query: &str) -> Result<SolveResult, String> {
     }
 
     let repos = load_repos(&connection, &scenarios)?;
+    let readme = load_readme_stats(&connection, &main)?;
     let mut cache = HashMap::new();
     let mut scored = Vec::new();
     for (index, repo) in repos.iter().enumerate() {
-        if let Some(parts) = score_repo(repo, &main, &extra, &repos, &mut cache) {
+        if let Some(parts) = score_repo(
+            repo,
+            &main,
+            &extra,
+            &repos,
+            &mut cache,
+            readme.get(&repo.id),
+        ) {
             scored.push((index, parts));
         }
     }
@@ -308,18 +350,14 @@ pub fn solve_query(db_path: &Path, query: &str) -> Result<SolveResult, String> {
         let repo = &repos[index];
         // 没有意图词时不知道用户要什么，不能说「全部对上」。
         let full_match = !main.is_empty() && parts.missing.is_empty();
-        let why = why_text(repo, &main, &parts.matched, &extra);
+        let why = why_text(repo, &main, &parts.matched, &extra, readme.get(&repo.id));
         hits.push(SolveHit {
             id: repo.id.clone(),
             full_name: repo.full_name.clone(),
             html_url: repo.html_url.clone(),
             stars_count: repo.stars,
             one_liner: hit_one_liner(repo),
-            form: if repo.has_card {
-                repo.form.clone()
-            } else {
-                None
-            },
+            form: repo.form.clone(),
             scenario_ids: repo.scenario_ids.clone(),
             matched: parts.matched,
             missing: parts.missing,
@@ -562,7 +600,13 @@ fn load_repos(
             stars,
             problems: card.problems.clone(),
             capabilities: card.capabilities.clone(),
-            form: card.form,
+            form: card
+                .form
+                .filter(|form| !crate::repo_facts::is_unspecific_form(form))
+                .or_else(|| {
+                    crate::repo_facts::infer_form(&topics, &full_name, Some(description.as_str()))
+                        .map(str::to_owned)
+                }),
             scenario_ids,
             has_card,
             github_description: description.clone(),
@@ -590,6 +634,7 @@ fn score_repo(
     extra: &[String],
     repos: &[RepoRecord],
     cache: &mut HashMap<String, f64>,
+    readme: Option<&ReadmeStats>,
 ) -> Option<ScoreParts> {
     let mut score = 0.0;
     let mut matched = Vec::new();
@@ -597,11 +642,15 @@ fn score_repo(
     for intent in main {
         let weight = cached_idf(cache, intent, repos);
         let content = field_score(&repo.blocks, intent, weight);
+        let evidence = readme.map_or(0.0, |stats| stats.evidence(intent));
         // 内容里没有中文词时，英文同义词按「描述」那一档（1.0 × idf）算对上。
+        // README 里反复提到：已经对上的再加一点；只有 README 提到的也算对上，但分很低（补召回，不抢排名）。
         let gained = if content > 0.0 {
-            content
+            content + README_BOOST * evidence * weight
         } else if synonym_matches(&repo.blocks, intent) {
-            weight
+            weight + README_BOOST * evidence * weight
+        } else if evidence > 0.0 {
+            README_ONLY * evidence * weight
         } else {
             0.0
         };
@@ -648,6 +697,91 @@ fn score_repo(
     } else {
         None
     }
+}
+
+/// 读出每个仓库 README 开头一段，数一数各意图词（和它的英文同义词）出现的次数。没有意图词时不读。
+fn load_readme_stats(
+    connection: &Connection,
+    intents: &[String],
+) -> Result<HashMap<String, ReadmeStats>, String> {
+    let mut stats = HashMap::new();
+    if intents.is_empty() {
+        return Ok(stats);
+    }
+    let mut statement = connection
+        .prepare(
+            "SELECT repo_readmes.repo_id, substr(repo_readmes.raw_markdown, 1, ?1)
+             FROM repo_readmes
+             JOIN repositories ON repositories.id = repo_readmes.repo_id
+             WHERE repositories.sync_status = 'active'",
+        )
+        .map_err(|error| format!("找方案 README 读取失败：{error}"))?;
+    let rows = statement
+        .query_map([README_SCAN_CHARS], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+        })
+        .map_err(|error| format!("找方案 README 查询失败：{error}"))?;
+    for row in rows {
+        let (repo_id, text) = row.map_err(|error| format!("找方案 README 行读取失败：{error}"))?;
+        let Some(text) = text else { continue };
+        if text.trim().is_empty() {
+            continue;
+        }
+        let lower = text.to_lowercase();
+        let mut hits = HashMap::new();
+        for intent in intents {
+            let count = count_mentions(&lower, intent);
+            if count > 0 {
+                hits.insert(intent.clone(), count);
+            }
+        }
+        if hits.is_empty() {
+            continue;
+        }
+        let kb = (lower.chars().count() as f64 / 1000.0).max(3.0);
+        stats.insert(repo_id, ReadmeStats { kb, hits });
+    }
+    Ok(stats)
+}
+
+/// 意图词本身加上它的英文同义词在文本里一共出现几次（文本已转小写）。
+/// 短同义词要整词命中（`cut` 不能命中 `execute`），和 `field_has_synonym` 同一个规矩。
+fn count_mentions(lower: &str, intent: &str) -> usize {
+    let mut total = count_plain(lower, intent);
+    if let Some(words) = synonym_list(intent) {
+        for word in words {
+            total += if synonym_needs_boundary(word) {
+                count_whole_word(lower, word)
+            } else {
+                count_plain(lower, word)
+            };
+        }
+    }
+    total
+}
+
+fn count_plain(haystack: &str, needle: &str) -> usize {
+    if needle.is_empty() {
+        return 0;
+    }
+    haystack.matches(needle).count()
+}
+
+/// 数整词出现的次数：前后不能紧贴英文字母或数字（汉字不算字母，可以紧贴）。
+fn count_whole_word(haystack: &str, word: &str) -> usize {
+    if word.is_empty() {
+        return 0;
+    }
+    let bytes = haystack.as_bytes();
+    haystack
+        .match_indices(word)
+        .filter(|(start, _)| {
+            let before_ok = *start == 0 || !bytes[*start - 1].is_ascii_alphanumeric();
+            let end = start + word.len();
+            let after_ok = end >= bytes.len() || !bytes[end].is_ascii_alphanumeric();
+            before_ok && after_ok
+        })
+        .count()
 }
 
 fn cached_idf(cache: &mut HashMap<String, f64>, token: &str, repos: &[RepoRecord]) -> f64 {
@@ -894,13 +1028,22 @@ fn is_stop(word: &str) -> bool {
     STOP_WORDS.iter().any(|stop| *stop == word)
 }
 
-fn why_text(repo: &RepoRecord, main: &[String], matched: &[String], extra: &[String]) -> String {
+fn why_text(
+    repo: &RepoRecord,
+    main: &[String],
+    matched: &[String],
+    extra: &[String],
+    readme: Option<&ReadmeStats>,
+) -> String {
     if main.is_empty() {
         return why_text_legacy(repo, extra);
     }
     let parts = matched
         .iter()
-        .map(|intent| format!("{intent}（{}）", match_label(repo, intent)))
+        .map(|intent| {
+            let hits = readme.map_or(0, |stats| stats.hits_of(intent));
+            format!("{intent}（{}）", match_label(repo, intent, hits))
+        })
         .collect::<Vec<_>>();
     join_why_parts(&parts)
 }
@@ -935,32 +1078,43 @@ fn why_text_legacy(repo: &RepoRecord, terms: &[String]) -> String {
     truncate_chars(fallback, WHY_LIMIT)
 }
 
-fn match_label(repo: &RepoRecord, intent: &str) -> String {
+/// 说明这个词在哪里对上的。`readme_hits` 是 README 里提到的次数：只在 README 里对上就写它；
+/// 别处已经对上、README 里也提到得多（5 次以上）时，在后面补一句。
+fn match_label(repo: &RepoRecord, intent: &str, readme_hits: usize) -> String {
+    match field_label(repo, intent) {
+        Some(label) if readme_hits >= 5 => format!("{label}·README 提到 {readme_hits} 次"),
+        Some(label) => label,
+        None if readme_hits >= README_MIN_HITS => format!("README 提到 {readme_hits} 次"),
+        None => "描述".to_owned(),
+    }
+}
+
+fn field_label(repo: &RepoRecord, intent: &str) -> Option<String> {
     if repo.blocks.name.contains(intent) {
-        return "名称".to_owned();
+        return Some("名称".to_owned());
     }
     if let Some(item) = find_containing(&repo.capabilities, intent) {
-        return format!("能力：{}", snippet20(item));
+        return Some(format!("能力：{}", snippet20(item)));
     }
     if let Some(item) = find_containing(&repo.problems, intent) {
-        return format!("问题：{}", snippet20(item));
+        return Some(format!("问题：{}", snippet20(item)));
     }
     if repo.blocks.one_liner.contains(intent) {
-        return "一句话".to_owned();
+        return Some("一句话".to_owned());
     }
     if repo.blocks.keywords.contains(intent) {
-        return "关键词".to_owned();
+        return Some("关键词".to_owned());
     }
     if repo.blocks.summary.contains(intent) {
-        return "摘要".to_owned();
+        return Some("摘要".to_owned());
     }
     if repo.blocks.description.contains(intent) {
-        return "描述".to_owned();
+        return Some("描述".to_owned());
     }
     if repo.blocks.topics.contains(intent) {
-        return "话题".to_owned();
+        return Some("话题".to_owned());
     }
-    synonym_label(repo, intent).unwrap_or_else(|| "描述".to_owned())
+    synonym_label(repo, intent)
 }
 
 fn find_containing<'a>(items: &'a [String], intent: &str) -> Option<&'a str> {
@@ -2803,7 +2957,9 @@ mod tests {
         const SUMMARY_CHATCUT: &str = "ChatCut Agent Plugin 是一个连接 Codex 与 ChatCut 的插件，支持通过 AI 辅助编辑 ChatCut 视频项目，具体功能包括导入媒体、修改时间线、创建动态图形、生成素材、音频转录、添加字幕、导出视频以及验证编辑可见性。";
         const LINE_AWESOME: &str =
             "Awesome LLM Apps 是一个可运行的 LLM 应用模板集合，包含100+ AI Agent和RAG应用。";
-        const LINE_CHATCUT: &str = "ChatCut Agent Plugin 是一个连接 Codex 与 ChatCut 的插件…";
+        const LINE_CHATCUT: &str = "ChatCut Agent Plugin 是一个连接 Codex 与 ChatCut 的插件，支持通过 AI 辅助编辑 ChatCut 视频项目，具体功能包括导入媒体、修改时间线、创建动态图形…";
+        // 一句话超过 WHY_LIMIT（80）后，为什么仍按原规则硬截，逻辑没改。
+        const WHY_CHATCUT: &str = "ChatCut Agent Plugin 是一个连接 Codex 与 ChatCut 的插件，支持通过 AI 辅助编辑 ChatCut 视频项目，具体功能包括导…";
         let db = prepare("legacy-card", |conn| {
             insert_repo(
                 conn,
@@ -2854,7 +3010,7 @@ mod tests {
         assert_eq!(chatcut.hits.len(), 1);
         assert_eq!(chatcut.hits[0].id, "chatcut");
         assert_eq!(chatcut.hits[0].one_liner.as_deref(), Some(LINE_CHATCUT));
-        assert_eq!(chatcut.hits[0].why, LINE_CHATCUT);
+        assert_eq!(chatcut.hits[0].why, WHY_CHATCUT);
         assert!(!chatcut.hits[0].full_match);
         assert!(chatcut.preselected.is_empty());
 
@@ -3638,5 +3794,156 @@ mod tests {
         approx(auto.score, weight);
         assert!(tool.score > auto.score);
         assert_eq!(result.hits[0].id, "jianying");
+    }
+
+    // ───────────── README 里提到几次：加成、补召回、整词计数 ─────────────
+
+    fn insert_readme(conn: &Connection, repo_id: &str, markdown: &str) {
+        conn.execute(
+            "INSERT INTO repo_readmes(repo_id, raw_markdown, content_hash, source_path, fetched_at)
+             VALUES (?1, ?2, 'hash', 'README.md', '2026-09-01T00:00:00Z')",
+            params![repo_id, markdown],
+        )
+        .unwrap_or_else(|error| panic!("插入 README {repo_id} 失败：{error}"));
+    }
+
+    fn readme_repo<'a>(id: &'a str, full_name: &'a str, description: &'a str) -> NewRepo<'a> {
+        NewRepo {
+            id,
+            full_name,
+            description,
+            stars: 1,
+            status: "active",
+            one_liner: None,
+            summary: "",
+            keywords_json: "[]",
+            card_json: None,
+        }
+    }
+
+    #[test]
+    fn count_whole_word_respects_latin_boundaries_but_not_han() {
+        assert_eq!(count_whole_word("cut the video, then cut again", "cut"), 2);
+        assert_eq!(count_whole_word("execute the cutter", "cut"), 0);
+        assert_eq!(count_whole_word("用cut命令", "cut"), 1);
+        assert_eq!(count_whole_word("cut", "cut"), 1);
+        assert_eq!(count_whole_word("", "cut"), 0);
+        assert_eq!(count_whole_word("cut", ""), 0);
+        assert_eq!(count_whole_word("a cut2 b", "cut"), 0);
+    }
+
+    #[test]
+    fn count_mentions_adds_synonyms_and_uses_boundaries_for_short_ones() {
+        // 封面：本词 2 次 + cover 1 次 + thumbnail 1 次；poster 没有
+        assert_eq!(
+            count_mentions("封面做好了，再换一个封面。cover 和 thumbnail", "封面"),
+            4
+        );
+        // 小红书的同义词 xhs 只有 3 个字母，必须整词：xhsdownloader 不算
+        assert_eq!(
+            count_mentions("xhs 和 xhsdownloader，还有 xiaohongshu", "小红书"),
+            2
+        );
+        // 没有同义词表的词只数自己
+        assert_eq!(count_mentions("发布发布发布", "发布"), 3);
+        assert_eq!(count_mentions("", "封面"), 0);
+    }
+
+    #[test]
+    fn readme_evidence_needs_two_mentions_and_saturates() {
+        let stats = |hits: usize, kb: f64| {
+            let mut map = HashMap::new();
+            map.insert("封面".to_owned(), hits);
+            ReadmeStats { kb, hits: map }
+        };
+        assert_eq!(stats(0, 10.0).evidence("封面"), 0.0);
+        assert_eq!(stats(1, 10.0).evidence("封面"), 0.0, "只提到 1 次不算证据");
+        assert_eq!(stats(5, 10.0).evidence("没有这个词"), 0.0);
+        let few = stats(2, 10.0).evidence("封面");
+        let some = stats(8, 10.0).evidence("封面");
+        let many = stats(16, 10.0).evidence("封面");
+        let lots = stats(400, 10.0).evidence("封面");
+        assert!(0.0 < few && few < some && some < many);
+        assert!(lots <= 1.0 + 1e-9);
+        // 同样的次数，README 越短（占比越高）证据越强；很短的 README 按 3 千字算，不会被无限抬高
+        assert!(stats(10, 3.0).evidence("封面") > stats(10, 60.0).evidence("封面"));
+        assert!((stats(10, 3.0).evidence("封面") - stats(10, 3.0).evidence("封面")).abs() < 1e-12);
+    }
+
+    #[test]
+    fn readme_mentions_lift_a_repo_that_already_matches() {
+        let db = prepare("readme-boost", |conn| {
+            insert_repo(conn, &readme_repo("quiet", "lab/quiet", "封面工具"));
+            insert_repo(conn, &readme_repo("focused", "lab/focused", "封面工具"));
+            insert_readme(conn, "quiet", "# quiet\n一个小工具。");
+            insert_readme(conn, "focused", &"做封面。封面模板。".repeat(10));
+        });
+        let result = run(&db, "封面");
+        assert_eq!(result.hits.len(), 2);
+        assert_eq!(result.hits[0].id, "focused");
+        assert!(result.hits[0].score > result.hits[1].score);
+        assert!(
+            result.hits[0].why.contains("README 提到"),
+            "{}",
+            result.hits[0].why
+        );
+        assert!(
+            !result.hits[1].why.contains("README"),
+            "{}",
+            result.hits[1].why
+        );
+    }
+
+    #[test]
+    fn readme_only_match_is_found_but_ranks_below_a_field_match() {
+        let db = prepare("readme-only", |conn| {
+            let mut direct = readme_repo("direct", "lab/direct", "做封面的工具");
+            direct.one_liner = Some("专门做封面");
+            insert_repo(conn, &direct);
+            insert_repo(conn, &readme_repo("hidden", "lab/hidden", "一个通用工具集"));
+            insert_readme(conn, "direct", "# direct");
+            insert_readme(
+                conn,
+                "hidden",
+                &"支持做封面和海报。封面模板很多。".repeat(6),
+            );
+        });
+        let result = run(&db, "封面");
+        let ids: Vec<&str> = result.hits.iter().map(|hit| hit.id.as_str()).collect();
+        assert_eq!(ids, vec!["direct", "hidden"]);
+        assert!(result.hits[0].score > result.hits[1].score);
+        assert!(
+            result.hits[1].why.contains("README 提到"),
+            "{}",
+            result.hits[1].why
+        );
+        assert!(result.hits[1].full_match);
+    }
+
+    #[test]
+    fn a_single_readme_mention_is_not_a_match() {
+        let db = prepare("readme-once", |conn| {
+            insert_repo(conn, &readme_repo("aside", "lab/aside", "一个通用工具集"));
+            insert_readme(conn, "aside", "也可以顺便做一次封面。其余都是别的内容。");
+        });
+        let result = run(&db, "封面");
+        assert!(result.hits.is_empty());
+    }
+
+    #[test]
+    fn readme_stats_ignore_inactive_repos_and_empty_readmes() {
+        let db = prepare("readme-inactive", |conn| {
+            let mut gone = readme_repo("gone", "lab/gone", "封面");
+            gone.status = "removed";
+            insert_repo(conn, &gone);
+            insert_repo(conn, &readme_repo("blank", "lab/blank", "工具集"));
+            insert_readme(conn, "gone", &"封面。".repeat(20));
+            insert_readme(conn, "blank", "   \n  ");
+        });
+        let connection = open_read(&db.path).unwrap();
+        let stats = load_readme_stats(&connection, &["封面".to_owned()]).unwrap();
+        assert!(stats.is_empty());
+        let none = load_readme_stats(&connection, &[]).unwrap();
+        assert!(none.is_empty());
     }
 }

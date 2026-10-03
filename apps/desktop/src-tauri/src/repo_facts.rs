@@ -55,6 +55,15 @@ pub fn license_label(spdx: Option<&str>, name: Option<&str>) -> LicenseLabel {
     }
 }
 
+/// 旧版导入的占位卡把形态写成 `other`，等于没说。这种值要当成「没有」，改用话题和仓库名推断
+/// （`xxx-skill` 要知道是 Skill，才能告诉 Codex 装到 ~/.agents/skills）。
+pub(crate) fn is_unspecific_form(form: &str) -> bool {
+    matches!(
+        form.trim().to_ascii_lowercase().as_str(),
+        "" | "other" | "unknown" | "none" | "n/a"
+    )
+}
+
 /// 从话题和仓库名推断形态。`description` 先留着不用，避免被简介里的词带偏。
 pub fn infer_form(
     topics: &[String],
@@ -352,5 +361,25 @@ mod tests {
 
     fn topics(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| (*value).to_owned()).collect()
+    }
+
+    #[test]
+    fn unspecific_forms_are_treated_as_missing() {
+        for raw in [
+            "", "  ", "other", "Other", " OTHER ", "unknown", "none", "n/a",
+        ] {
+            assert!(is_unspecific_form(raw), "{raw:?}");
+        }
+        for raw in [
+            "skill",
+            "mcp",
+            "cli",
+            "app",
+            "library",
+            "service",
+            "collection",
+        ] {
+            assert!(!is_unspecific_form(raw), "{raw:?}");
+        }
     }
 }

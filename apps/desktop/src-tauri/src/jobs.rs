@@ -52,6 +52,10 @@ impl ErrorKind {
 /// 估计值取一张理解卡的平均用量（2026-10-04 真模型试跑：每张约 5k token，其中输入约 3k）。
 pub const FAILED_ATTEMPT_TOKEN_ESTIMATE: i64 = 4000;
 
+/// 已经领走、还在跑的任务要等结束才记用量。认领新任务前，先给每个在跑的任务预留这么多，
+/// 免得几个线程同时看到「还有额度」、一起领走，把当天额度冲破（假模型演练里 3 万额度跑到了 3.6 万）。
+pub const IN_FLIGHT_TOKEN_RESERVE: i64 = 5000;
+
 /// 这种失败说明请求已经被模型处理过，应该记一笔估计用量。网络不通、限流、认证失败、内容太大（本地就拦了）、被打断都没有真的花 token。
 fn failure_spends_tokens(kind: ErrorKind) -> bool {
     matches!(
@@ -248,8 +252,15 @@ pub fn claim_next(
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|error| format!("任务认领失败：{error}"))?;
     let used = tokens_used_since(&tx, &cutoff)?.max(0);
+    let spending_types: Vec<&str> = handled_types
+        .iter()
+        .filter(|candidate| candidate.spends_tokens && !candidate.job_type.is_empty())
+        .map(|candidate| candidate.job_type.as_str())
+        .collect();
+    let running = count_running_of(&tx, &spending_types)?;
+    let committed = used.saturating_add(running.saturating_mul(IN_FLIGHT_TOKEN_RESERVE));
     let spending_open =
-        budget_gate.daily_budget_tokens > 0 && (used as u64) < budget_gate.daily_budget_tokens;
+        budget_gate.daily_budget_tokens > 0 && (committed as u64) < budget_gate.daily_budget_tokens;
     let mut eligible: Vec<&str> = Vec::new();
     for candidate in handled_types {
         if candidate.job_type.is_empty() {
@@ -810,6 +821,25 @@ fn tokens_used_since(conn: &Connection, cutoff: &str) -> Result<i64, String> {
     .map_err(|error| format!("用量读取失败：{error}"))
 }
 
+/// 正在跑、而且会花 token 的任务有几个（只看这些类型，不花钱的任务不占额度）。
+fn count_running_of(conn: &Connection, job_types: &[&str]) -> Result<i64, String> {
+    if job_types.is_empty() {
+        return Ok(0);
+    }
+    let placeholders = std::iter::repeat("?")
+        .take(job_types.len())
+        .collect::<Vec<_>>()
+        .join(", ");
+    conn.query_row(
+        &format!(
+            "SELECT COUNT(*) FROM ai_jobs WHERE status = 'running' AND job_type IN ({placeholders})"
+        ),
+        params_from_iter(job_types.iter()),
+        |row| row.get(0),
+    )
+    .map_err(|error| format!("在跑任务计数失败：{error}"))
+}
+
 fn count_status(conn: &Connection, status: &str) -> Result<i64, String> {
     conn.query_row(
         "SELECT COUNT(*) FROM ai_jobs WHERE status = ?1",
@@ -1334,6 +1364,45 @@ mod tests {
                 "old-untagged"
             ]
         );
+    }
+
+    #[test]
+    fn running_jobs_reserve_budget_before_the_next_claim() {
+        let db = TestDb::new("reserve");
+        let conn = db.conn();
+        for id in ["q1", "q2", "q3"] {
+            insert_job(
+                &conn,
+                id,
+                "repo_card",
+                5,
+                "2026-10-03T08:00:00.000Z",
+                None,
+                "queued",
+            );
+        }
+        drop(conn);
+        let handled = vec![ClaimCandidate {
+            job_type: "repo_card".to_owned(),
+            spends_tokens: true,
+        }];
+        // 预算 12000，每个在跑的任务先预留 5000：领第一个时没有在跑的（0 < 12000），
+        // 第二个时 1 个在跑（5000 < 12000），第三个时 2 个在跑（10000 < 12000 仍可），
+        // 所以再把预算压到 10000，第三个就领不到了。
+        let mut conn = db.conn();
+        let gate = gate(false, 10_000);
+        assert!(claim_one(&mut conn, &handled, &gate).is_some());
+        assert!(claim_one(&mut conn, &handled, &gate).is_some());
+        assert!(
+            claim_one(&mut conn, &handled, &gate).is_none(),
+            "两个在跑的任务已预留 10000，额度 10000 不能再领"
+        );
+        // 不花钱的任务不受影响
+        let free = vec![ClaimCandidate {
+            job_type: "repo_card".to_owned(),
+            spends_tokens: false,
+        }];
+        assert!(claim_one(&mut conn, &free, &gate).is_some());
     }
 
     #[test]

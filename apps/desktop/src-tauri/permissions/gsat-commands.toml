@@ -85,6 +85,8 @@ commands.allow = [
   "set_local_api_enabled",
   "get_local_api_token",
   "rotate_local_api_token",
+  "get_local_api_capture_token",
+  "rotate_local_api_capture_token",
   "export_library_csv",
   "prepare_knowledge",
   "commit_capture_batch",
