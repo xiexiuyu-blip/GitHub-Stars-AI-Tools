@@ -5,7 +5,7 @@
 让页面以为自己跑在 Tauri 里：所有 invoke 命令由 shim.js 里的假数据回答。
 这样可以在浏览器里看新界面、读控制台报错、换窗口宽度，不碰 Fox 的开发版、开发库和钥匙串。
 
-用法：python3 tools/dev-ui/mock-host/serve.py [端口，默认 38413] [上游，默认 http://127.0.0.1:1420]
+用法：python3 tools/dev-ui/mock-host/serve.py [端口，默认 38413] [上游，默认 http://127.0.0.1:1420] [真后端桥地址，可选]
 只监听 127.0.0.1。不转发 websocket（热更新在这里不起作用，改完代码刷新页面即可）。
 """
 import http.server
@@ -18,6 +18,8 @@ import urllib.request
 
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 38413
 UPSTREAM = (sys.argv[2] if len(sys.argv) > 2 else "http://127.0.0.1:1420").rstrip("/")
+# 可选第三个参数：真后端桥的地址（见 README「真后端桥」）。有它时页面里的 invoke 先问真后端。
+REAL_URL = (sys.argv[3] if len(sys.argv) > 3 else os.environ.get("FSL_REAL_BACKEND", "")).rstrip("/")
 HERE = os.path.dirname(os.path.abspath(__file__))
 SHIM_URL = "/__mock__/shim.js"
 
@@ -59,6 +61,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if "text/html" in content_type:
             html = body.decode("utf-8")
             tag = f'<script src="{SHIM_URL}"></script>'
+            if REAL_URL:
+                tag = f'<script>window.__FSL_REAL_URL__={REAL_URL!r};</script>' + tag
             if re.search(r"<head[^>]*>", html, re.I):
                 html = re.sub(r"(<head[^>]*>)", r"\1" + tag, html, count=1, flags=re.I)
             else:

@@ -77,7 +77,7 @@ export function greetingFor(hour: number): string {
 }
 
 /** 今日页问候下面那一句。数字按非负整数用；没有推荐时换一句说明。
- *  「AI 正在整理」的全库数量已经在统计卡片里，这里不再重复（它是全库口径，放进「这周」那句里会对不上）。 */
+ *  「待整理」的全库数量已经在统计卡片里，这里不再重复（它是全库口径，放进「这周」那句里会对不上）。 */
 export function buildTodayLead(weekNew: number, pickCount: number): string {
   const week = clampCount(weekNew);
   const picks = clampCount(pickCount);

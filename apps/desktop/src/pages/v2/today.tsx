@@ -37,7 +37,7 @@ type TodayFilter = 'week' | 'pending' | 'want' | 'in_use';
 
 const FILTER_LABEL: Record<TodayFilter, string> = {
   week: '本周新收藏',
-  pending: 'AI 正在整理',
+  pending: '待整理',
   want: '想试',
   in_use: '在用',
 };
@@ -370,7 +370,7 @@ export function TodayPage(props: TodayPageProps) {
       <PageHeader title={`${greetingFor(new Date().getHours())}，${name}`} subtitle={subtitle} />
       <div className="grid shrink-0 grid-cols-2 gap-3 min-[900px]:grid-cols-4">
         <StatCard label="本周新收藏" value={today ? (today.counts?.weekNew ?? 0) : '…'} active={filter === 'week'} onClick={() => choose('week')} />
-        <StatCard label="AI 正在整理" value={today ? (today.counts?.cardsPending ?? 0) : '…'} active={filter === 'pending'} onClick={() => choose('pending')} />
+        <StatCard label="待整理" value={today ? (today.counts?.cardsPending ?? 0) : '…'} active={filter === 'pending'} onClick={() => choose('pending')} />
         <StatCard label="想试" value={readingCounts ? readingCounts.want : '…'} active={filter === 'want'} onClick={() => choose('want')} />
         <StatCard label="在用" value={readingCounts ? readingCounts.inUse : '…'} active={filter === 'in_use'} onClick={() => choose('in_use')} />
       </div>
