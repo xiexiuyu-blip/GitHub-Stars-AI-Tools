@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react';
 import type { LibraryDetail, ReadingGroup, ScenarioSummary } from '@/lib/contracts';
-import { cleanHowToTry, clipText, firstSentences, monthDay, relativeDays, splitRepoName } from '@/lib/item-format';
+import { cleanDescription, cleanHowToTry, clipText, firstSentences, maturityLabel, monthDay, relativeDays, splitRepoName } from '@/lib/item-format';
 import { explainerLinks, extractInstallSteps, extractPreviewImages, hasDownloadHint } from '@/lib/repo-assets';
 import { itemPendingNote } from '@/lib/automation-view';
 import { formLabel } from '@/lib/library-filters';
@@ -80,6 +80,8 @@ function DetailBody(props: Parameters<typeof ItemDetail>[0] & { detail: LibraryD
 
   const { owner, repo } = splitRepoName(detail.fullName);
   const how = cleanHowToTry(detail.howToTry);
+  // 概览里的「怎么试」：AI 卡写的优先；没有就用从 README 里抽到的第一条安装命令（和「安装」页同一个来源，免得这里说没有、那边却有）
+  const tryText = how || steps[0]?.command || '';
   const summarySource = detail.whatItIs?.trim() ? detail.whatItIs : detail.oneLiner;
   const capabilities = detail.capabilities.slice(0, 4).map((item) => clipText(item, 46));
   const scenarioList = detail.scenarioIds
@@ -98,8 +100,8 @@ function DetailBody(props: Parameters<typeof ItemDetail>[0] & { detail: LibraryD
   ];
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col">
-      <div className="min-h-0 flex-1 overflow-auto">
+    <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+      <div className="min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto">
         {/* 封面：README 里的第一张截图，完整显示（四周用它自己模糊的样子垫底）；没有图就只是一条按名字上色的渐变，不放大字母 */}
         <CoverImage
           src={cover}
@@ -126,11 +128,12 @@ function DetailBody(props: Parameters<typeof ItemDetail>[0] & { detail: LibraryD
             <span className="text-xs text-on-surface-variant">收藏于 {monthDay(detail.starredAt)}</span>
           </div>
           <div className="mt-2.5 flex flex-wrap items-center gap-1.5">
-            {scenarioList.map((scenario) => (
+            {scenarioList.slice(0, 3).map((scenario) => (
               <ScenarioChip key={scenario.id} name={scenario.nameZh} scenarioKey={scenario.slug || scenario.id} />
             ))}
+            {scenarioList.length > 3 ? <Tag>+{scenarioList.length - 3}</Tag> : null}
             {formLabel(detail.form) ? <Tag>{formLabel(detail.form)}</Tag> : null}
-            {detail.maturity ? <Tag>{detail.maturity}</Tag> : null}
+            {maturityLabel(detail.maturity) ? <Tag>{maturityLabel(detail.maturity)}</Tag> : null}
             {detail.zhFriendly === true ? <Tag tone="blue">中文友好</Tag> : null}
           </div>
 
@@ -153,8 +156,8 @@ function DetailBody(props: Parameters<typeof ItemDetail>[0] & { detail: LibraryD
                 ) : (
                   <>
                     说得对吗？
-                    <Button variant="text" size="sm" className="h-6 px-1 text-xs" onClick={props.onConfirm}>对</Button>
-                    <Button variant="text" size="sm" className="h-6 px-1 text-xs" onClick={props.onRegenerate}>不对，重新整理</Button>
+                    <Button variant="text" size="sm" className="h-7 px-1.5 text-xs" onClick={props.onConfirm}>对</Button>
+                    <Button variant="text" size="sm" className="h-7 px-1.5 text-xs" onClick={props.onRegenerate}>不对，重新整理</Button>
                   </>
                 )}
               </div>
@@ -163,7 +166,7 @@ function DetailBody(props: Parameters<typeof ItemDetail>[0] & { detail: LibraryD
             <PendingNote fullName={detail.fullName} description={detail.description} onOpenToolbox={props.onOpenToolbox} />
           )}
 
-          <div role="tablist" aria-label="项目详情" className="mt-5 flex gap-1 border-b border-border">
+          <div role="tablist" aria-label="项目详情" className="mt-5 flex gap-0.5 overflow-x-auto border-b border-border [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
             {tabs.map((item) => (
               <button
                 key={item.key}
@@ -172,7 +175,7 @@ function DetailBody(props: Parameters<typeof ItemDetail>[0] & { detail: LibraryD
                 aria-selected={tab === item.key}
                 onClick={() => setTab(item.key)}
                 className={cn(
-                  '-mb-px inline-flex h-9 items-center gap-1.5 border-b-2 px-2.5 text-[13px] whitespace-nowrap transition-colors',
+                  '-mb-px inline-flex h-9 shrink-0 items-center gap-1.5 border-b-2 px-2.5 text-[13px] whitespace-nowrap transition-colors',
                   tab === item.key
                     ? 'border-primary font-semibold text-primary'
                     : 'border-transparent text-on-surface-variant hover:text-foreground',
@@ -218,18 +221,18 @@ function DetailBody(props: Parameters<typeof ItemDetail>[0] & { detail: LibraryD
                   </SoftCard>
                 ) : null}
 
-                {detail.hasCard ? (
+                {detail.hasCard || steps.length > 0 ? (
                   <SoftCard>
                     <SectionTitle icon="play_circle" hue={148}>怎么试</SectionTitle>
-                    {how ? (
+                    {tryText ? (
                       <pre className="code-block relative m-0 rounded-lg px-3 py-2.5 pr-11 text-xs leading-[1.7] break-words whitespace-pre-wrap">
-                        {how}
+                        {tryText}
                         <button
                           type="button"
                           className="absolute top-1.5 right-1.5 inline-grid size-7 place-items-center rounded-md text-white/70 hover:bg-white/10 hover:text-white"
                           title="复制"
                           aria-label="复制安装步骤"
-                          onClick={() => props.onCopyHow(how)}
+                          onClick={() => props.onCopyHow(tryText)}
                         >
                           <Icon name="content_copy" size={16} />
                         </button>
@@ -238,7 +241,7 @@ function DetailBody(props: Parameters<typeof ItemDetail>[0] & { detail: LibraryD
                       <p className="m-0 text-sm leading-[1.6] text-on-surface-variant">{HOW_EMPTY}</p>
                     )}
                     <button type="button" className="mt-2 text-xs text-accent-foreground hover:underline" onClick={() => setTab('install')}>
-                      看完整的安装步骤 →
+                      {tryText ? '看完整的安装步骤 →' : '去「安装」页，让 Codex 帮你装 →'}
                     </button>
                   </SoftCard>
                 ) : null}
@@ -342,7 +345,7 @@ function PendingNote(props: { fullName: string; description: string | null | und
         ) : null}
       </div>
       <p className="mt-1.5 text-sm text-on-surface-variant">{note.text}</p>
-      <p className="mt-1.5 text-[15px] leading-[1.75] text-foreground">{props.description?.trim() || '—'}</p>
+      <p className="mt-1.5 text-[15px] leading-[1.75] text-foreground">{cleanDescription(props.description) || '作者没写简介'}</p>
       {explainers.length > 0 ? (
         <div className="mt-2.5 flex flex-wrap items-center gap-x-3 gap-y-1 border-t border-border/60 pt-2.5 text-xs text-on-surface-variant">
           <span>想先了解它？看别人生成的解读：</span>

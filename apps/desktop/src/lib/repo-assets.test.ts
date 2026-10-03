@@ -227,3 +227,46 @@ describe('explainerLinks', () => {
     expect(explainerLinks('a b/c')).toEqual([]);
   });
 });
+
+describe('extractPreviewImages：广告、赞助、二维码不当封面', () => {
+  it('赞助小节、赞赏二维码、代理广告的图都跳过，真截图留下', () => {
+    const readme = [
+      '# Tool',
+      '![赞赏码](docs/wechat-pay-qrcode.png)',
+      '![Residential Proxies](https://cdn.example.com/brightdata-banner.png)',
+      '![screenshot](docs/screenshot.png)',
+      '## Sponsors',
+      '![sponsor logo](https://example.com/acme.png)',
+      '## 赞助',
+      '<img src="https://example.com/thanks.png" alt="谢谢">',
+      '## Usage',
+      '![demo](docs/demo.png)',
+    ].join('\n');
+    const urls = extractPreviewImages(readme, 'o/r').map((image) => image.url);
+    expect(urls).toEqual([
+      'https://raw.githubusercontent.com/o/r/HEAD/docs/screenshot.png',
+      'https://raw.githubusercontent.com/o/r/HEAD/docs/demo.png',
+    ]);
+  });
+
+  it('小标题回到别的小节后，图又算数了', () => {
+    const readme = '## Sponsors\n![a](a.png)\n## Features\n![b](b.png)';
+    expect(extractPreviewImages(readme, 'o/r').map((image) => image.url)).toEqual([
+      'https://raw.githubusercontent.com/o/r/HEAD/b.png',
+    ]);
+  });
+
+  it('全是广告就没有封面（返回空，界面用渐变）', () => {
+    expect(extractPreviewImages('![sponsor](sponsor.png)\n![qr](qrcode.png)', 'o/r')).toEqual([]);
+  });
+});
+
+describe('extractPreviewImages：广告判断不误伤', () => {
+  it('地址里的 HEAD/、uploads/、headers 不算广告；单独的 ad / ads 才算', () => {
+    const readme = '![a](docs/uploads/shot.png)\n![b](assets/headers/main.png)\n![c](banner/ad-top.png)\n![d](x/ads/y.png)';
+    expect(extractPreviewImages(readme, 'o/r').map((image) => image.url)).toEqual([
+      'https://raw.githubusercontent.com/o/r/HEAD/docs/uploads/shot.png',
+      'https://raw.githubusercontent.com/o/r/HEAD/assets/headers/main.png',
+    ]);
+  });
+});

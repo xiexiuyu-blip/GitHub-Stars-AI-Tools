@@ -127,4 +127,5 @@ commands.allow = [
   "list_discover",
   "refresh_discover",
   "get_repo_community",
+  "scan_local_capabilities",
 ]

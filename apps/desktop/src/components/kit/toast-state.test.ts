@@ -3,6 +3,7 @@ import {
   DEFAULT_TOAST_DURATION_MS,
   pushToast,
   removeToast,
+  ACTION_TOAST_DURATION_MS,
   toastDuration,
   type ToastRecord,
 } from './toast-state';
@@ -38,5 +39,13 @@ describe('toast-state', () => {
     expect(toastDuration({ durationMs: -5 })).toBe(0);
     expect(toastDuration({ durationMs: Number.NaN })).toBe(0);
     expect(toastDuration({ durationMs: 1200 })).toBe(1200);
+  });
+});
+
+describe('带按钮的提示留得更久', () => {
+  it('没写时长：有按钮 9 秒，没按钮 4.6 秒；写了就按写的', () => {
+    expect(toastDuration({ actions: [{ label: '撤销', onClick: () => {} }] })).toBe(ACTION_TOAST_DURATION_MS);
+    expect(toastDuration({ actions: [] })).toBe(DEFAULT_TOAST_DURATION_MS);
+    expect(toastDuration({ durationMs: 2000, actions: [{ label: 'x', onClick: () => {} }] })).toBe(2000);
   });
 });

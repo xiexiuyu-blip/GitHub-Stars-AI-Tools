@@ -14,6 +14,8 @@ export function PickCard(props: {
   item: LibraryItem;
   selected?: boolean;
   why?: string | null;
+  /** 为什么今天推荐给你 */
+  reason?: string | null;
   scenarios?: ScenarioSummary[];
   onSelect: () => void;
   onWant: () => void;
@@ -59,10 +61,15 @@ export function PickCard(props: {
             ))}
           </div>
         ) : null}
-        {props.why ? (
-          <div className="why-line mt-auto flex items-start gap-1 pt-2 text-xs leading-[1.5]">
-            <Icon name="lightbulb" size={14} fill className="mt-px shrink-0" />
-            <span className="min-w-0">{props.why}</span>
+        {props.reason || props.why ? (
+          <div className="why-line mt-auto flex flex-col gap-0.5 pt-2 text-xs leading-[1.5]">
+            {props.reason ? (
+              <div className="flex items-start gap-1 font-medium">
+                <Icon name="lightbulb" size={14} fill className="mt-px shrink-0" />
+                <span className="min-w-0">{props.reason}</span>
+              </div>
+            ) : null}
+            {props.why ? <span className="min-w-0 pl-[18px] opacity-90">{props.why}</span> : null}
           </div>
         ) : null}
       </div>
@@ -78,7 +85,7 @@ function HoverIcon(props: { label: string; icon: string; onClick: () => void }) 
   return (
     <button
       type="button"
-      className="inline-grid size-7 place-items-center rounded-md text-on-surface-variant hover:bg-surface-container-low hover:text-foreground"
+      className="inline-grid size-8 place-items-center rounded-md text-on-surface-variant hover:bg-surface-container-low hover:text-foreground"
       title={props.label}
       aria-label={props.label}
       onClick={(event) => {

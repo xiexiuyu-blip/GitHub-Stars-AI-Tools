@@ -1,4 +1,3 @@
-import { invoke } from '@tauri-apps/api/core';
 import type { ScenarioSummary, SolveHit } from '@/lib/contracts';
 import { formLabel } from '@/lib/library-filters';
 import { matchBadge, whyLine } from '@/lib/solve-view';
@@ -6,12 +5,19 @@ import { RepoAvatar, ScenarioChip, StarCount, Tag } from '@/components/kit';
 import { Icon } from '@/components/ui/icon';
 import { cn } from '@/lib/utils';
 
+/**
+ * 找方案结果里的一行。点这一行（名字、简介任意位置）在右边滑出详情；左边的圆圈只管「放不放进参考包」。
+ * 已勾选的里排第一的是「主参考」，其余可以点「设为主参考」。
+ */
 export function SolveHitRow(props: {
   hit: SolveHit;
   intents: readonly string[];
   pressed: boolean;
+  isMain?: boolean;
   scenarios?: ScenarioSummary[];
   onToggle: () => void;
+  onOpen?: () => void;
+  onMakeMain?: () => void;
 }) {
   const { hit } = props;
   const badge = matchBadge(hit, props.intents);
@@ -24,33 +30,39 @@ export function SolveHitRow(props: {
     .slice(0, 2);
 
   return (
-    <div className="grid grid-cols-[18px_40px_minmax(0,1fr)] items-start gap-3 border-t border-muted px-4 py-3 first:border-t-0">
+    <div
+      className={cn(
+        'group grid grid-cols-[32px_40px_minmax(0,1fr)] items-start gap-2 border-t border-muted px-3 py-3 transition-colors first:border-t-0',
+        props.onOpen && 'cursor-pointer hover:bg-surface-container-low',
+      )}
+      onClick={props.onOpen}
+    >
       <button
         type="button"
-        className={cn(
-          'mt-[5px] grid size-[18px] shrink-0 place-items-center rounded-full border-[1.5px]',
-          'focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-primary',
-          props.pressed
-            ? 'border-primary bg-primary text-on-primary'
-            : 'border-input bg-card text-transparent hover:border-primary',
-        )}
+        className="grid size-8 shrink-0 place-items-center rounded-full focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-primary"
         aria-pressed={props.pressed}
         aria-label={props.pressed ? `从参考包移除 ${hit.fullName}` : `选入参考包 ${hit.fullName}`}
-        onClick={props.onToggle}
+        title={props.pressed ? '从参考包移除' : '放进参考包'}
+        onClick={(event) => {
+          event.stopPropagation();
+          props.onToggle();
+        }}
       >
-        <Icon name="check" size={11} />
+        <span
+          className={cn(
+            'grid size-[18px] place-items-center rounded-full border-[1.5px] transition-colors',
+            props.pressed ? 'border-primary bg-primary text-on-primary' : 'border-input bg-card text-transparent group-hover:border-primary',
+          )}
+        >
+          <Icon name="check" size={11} />
+        </span>
       </button>
       <RepoAvatar name={hit.fullName} size="md" />
       <div className="min-w-0">
         <div className="flex min-w-0 flex-wrap items-baseline gap-2">
-          <button
-            type="button"
-            className="text-left text-sm font-medium break-words text-foreground hover:text-accent-foreground [overflow-wrap:anywhere]"
-            onClick={() => openOnGitHub(hit)}
-          >
-            {hit.fullName}
-          </button>
+          <span className="text-left text-sm font-semibold break-words text-foreground [overflow-wrap:anywhere]">{hit.fullName}</span>
           <StarCount value={hit.starsCount} />
+          {props.pressed && props.isMain ? <Tag tone="blue">主参考</Tag> : null}
           {form ? <Tag>{form}</Tag> : null}
           {hit.hasCard === false ? <Tag>待整理</Tag> : null}
           {badge ? <Tag tone={badge.tone}>{badge.text}</Tag> : null}
@@ -59,7 +71,7 @@ export function SolveHitRow(props: {
           ))}
         </div>
         {oneLiner ? (
-          <p className={cn('mt-0.5 mb-0 text-sm leading-relaxed', hit.hasCard === false ? 'text-on-surface-variant' : 'text-foreground')}>
+          <p className={cn('mt-0.5 mb-0 line-clamp-3 text-sm leading-relaxed', hit.hasCard === false ? 'text-on-surface-variant' : 'text-foreground')}>
             {hit.hasCard === false ? <span className="mr-1 text-xs text-subtle">GitHub 原文</span> : null}
             {oneLiner}
           </p>
@@ -70,19 +82,19 @@ export function SolveHitRow(props: {
             {` ${related}`}
           </div>
         ) : null}
+        {props.pressed && !props.isMain && props.onMakeMain ? (
+          <button
+            type="button"
+            className="mt-1 text-xs text-accent-foreground hover:underline hover:underline-offset-[3px]"
+            onClick={(event) => {
+              event.stopPropagation();
+              props.onMakeMain?.();
+            }}
+          >
+            设为主参考
+          </button>
+        ) : null}
       </div>
     </div>
   );
-}
-
-/** 用 App 已有的 open_external_url 在系统浏览器打开。命令不可用时退回 window.open。 */
-function openOnGitHub(hit: SolveHit) {
-  const explicit = hit.htmlUrl?.trim() ?? '';
-  const url = /^https?:\/\//i.test(explicit)
-    ? explicit
-    : `https://github.com/${encodeURI(hit.fullName.trim())}`;
-  if (!/^https?:\/\//i.test(url)) return;
-  void invoke('open_external_url', { url }).catch(() => {
-    window.open(url, '_blank', 'noopener,noreferrer');
-  });
 }

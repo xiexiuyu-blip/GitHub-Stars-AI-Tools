@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { AppPage } from '@/types';
-import { NAV_ITEMS, SETTINGS_ITEM, SUB_TABS, navKeyFor } from './nav';
+import { NAV_ITEMS, SETTINGS_ITEM, SUB_TABS, navKeyFor, subTabsFor } from './nav';
 
 describe('导航数据', () => {
   it('NAV_ITEMS 恰好 5 项，顺序和标签固定', () => {
@@ -68,5 +68,20 @@ describe('导航数据', () => {
     expect(labels).not.toContain('地图');
     expect(labels).not.toContain('参考包');
     expect(labels).not.toContain('工具箱');
+  });
+});
+
+describe('subTabsFor', () => {
+  it('资料库和设置有两个标签，找方案只有一个就不显示标签条', () => {
+    expect(subTabsFor('library')?.map((tab) => tab.key)).toEqual(['library', 'map']);
+    expect(subTabsFor('settings')?.map((tab) => tab.key)).toEqual(['settings', 'toolbox']);
+    expect(subTabsFor('solve')).toBeNull();
+    expect(subTabsFor('packs')).toBeNull();
+  });
+
+  it('不在这三组里的页面没有标签条', () => {
+    expect(subTabsFor('today')).toBeNull();
+    expect(subTabsFor('capture')).toBeNull();
+    expect(subTabsFor('discover')).toBeNull();
   });
 });

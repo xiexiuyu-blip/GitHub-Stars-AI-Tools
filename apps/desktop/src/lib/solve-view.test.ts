@@ -6,6 +6,8 @@ import {
   formatOptions,
   gapNote,
   initialPicks,
+  makeMain,
+  pickLocalCapabilities,
   matchBadge,
   noIntentNote,
   orderedPicks,
@@ -340,5 +342,49 @@ describe('packPlaceholder 和 formatOptions', () => {
   it('格式选项的值和文案', () => {
     expect(formatOptions.map((item) => item.value)).toEqual(['markdown', 'agents', 'json']);
     expect(formatOptions.map((item) => item.label)).toEqual(['Markdown', 'AGENTS.md', 'JSON']);
+  });
+});
+
+describe('makeMain', () => {
+  it('把勾选里的某一项挪到最前，其余顺序不变', () => {
+    expect(makeMain(['a', 'b', 'c'], 'c')).toEqual(['c', 'a', 'b']);
+    expect(makeMain(['a', 'b', 'c'], 'b')).toEqual(['b', 'a', 'c']);
+  });
+
+  it('已经是第一个、或者没勾选，原样返回（新数组）', () => {
+    const picked = ['a', 'b'];
+    expect(makeMain(picked, 'a')).toEqual(['a', 'b']);
+    expect(makeMain(picked, 'a')).not.toBe(picked);
+    expect(makeMain(picked, 'x')).toEqual(['a', 'b']);
+    expect(makeMain([], 'a')).toEqual([]);
+  });
+});
+
+describe('pickLocalCapabilities', () => {
+  const all = [
+    { name: 'ai-draw', oneLiner: 'AI 绘图，生成封面和海报', path: '~/.agents/skills/ai-draw' },
+    { name: 'guizang-social-card-skill', oneLiner: '小红书图文卡片', path: '~/.agents/skills/guizang-social-card-skill' },
+    { name: 'code-review', oneLiner: '代码审查', path: '~/.agents/skills/code-review' },
+    { name: 'gpt-image', oneLiner: 'MCP 工具', path: '~/.codex/config.toml' },
+  ];
+
+  it('名字和选中项目对得上的排在最前（本机已装）', () => {
+    const picked = pickLocalCapabilities(all, [{ fullName: 'op7418/guizang-social-card-skill' }], ['封面']);
+    expect(picked.map((item) => item.name)).toEqual(['guizang-social-card-skill', 'ai-draw']);
+  });
+
+  it('任务词出现在名字或一句话里的算相关，最多 limit 个；不相关的不放', () => {
+    expect(pickLocalCapabilities(all, [], ['封面']).map((item) => item.name)).toEqual(['ai-draw']);
+    expect(pickLocalCapabilities(all, [], ['小红书', '封面'], 1).map((item) => item.name)).toEqual(['ai-draw']);
+    expect(pickLocalCapabilities(all, [], ['数据库'])).toEqual([]);
+  });
+
+  it('没有本机能力、没有任务词，都是空', () => {
+    expect(pickLocalCapabilities([], [{ fullName: 'a/b' }], ['封面'])).toEqual([]);
+    expect(pickLocalCapabilities(all, [], [])).toEqual([]);
+  });
+
+  it('仓库全名或短名（不分大小写）都能对上', () => {
+    expect(pickLocalCapabilities(all, [{ fullName: 'Foo/AI-Draw' }], []).map((item) => item.name)).toEqual(['ai-draw']);
   });
 });

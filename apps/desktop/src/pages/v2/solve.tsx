@@ -1,6 +1,6 @@
-import { FormEvent, useCallback, useEffect, useRef, useState } from 'react';
-import type { PackFormat, PackOutput } from '@/lib/api';
-import { buildReferencePack, describeInvokeError, listScenarios, solveV2 } from '@/lib/api';
+import { FormEvent, Suspense, lazy, useCallback, useEffect, useRef, useState } from 'react';
+import type { LocalCapabilityInput, PackFormat, PackOutput } from '@/lib/api';
+import { buildReferencePack, describeInvokeError, listScenarios, scanLocalCapabilities, solveV2 } from '@/lib/api';
 import type { ScenarioSummary, SolveResult } from '@/lib/contracts';
 import {
   buildPackRequest,
@@ -8,16 +8,25 @@ import {
   formatOptions,
   gapNote,
   initialPicks,
+  makeMain,
   noIntentNote,
+  pickLocalCapabilities,
   orderedPicks,
   packPlaceholder,
   pendingNote,
   todayLocalDate,
   togglePick,
 } from '@/lib/solve-view';
-import { Button, Card, CardHeader, EmptyState, PageHeader, Segmented, Spinner, useToast } from '@/components/kit';
+import { loadSolveDraft, saveSolveDraft } from '@/lib/solve-draft';
+import { useCopy } from '@/hooks/use-copy';
+import { Button, Card, CardHeader, EmptyState, PageHeader, Segmented, Spinner } from '@/components/kit';
 import { Icon } from '@/components/ui/icon';
+import { cn } from '@/lib/utils';
+import { HitDrawer } from '@/components/solve/hit-drawer';
 import { SolveHitRow } from '@/components/solve/solve-hit-row';
+
+// README 渲染器比较大，只有用到参考包预览时才加载
+const ReadmeRenderer = lazy(() => import('@/components/readme-renderer').then((module) => ({ default: module.ReadmeRenderer })));
 
 const EXAMPLES = ['做小红书封面', '给公众号文章配图', '短视频加字幕', '做 PPT 和文档', '做电商详情页图片'];
 
@@ -32,18 +41,26 @@ type PackState = {
 export function SolvePage(props: {
   initialQuestion?: string;
   onOpenDiscover?: (scenarioId: string | null) => void;
+  /** 去工具箱（开启 / 调整 AI 自动整理） */
+  onOpenToolbox?: () => void;
 }) {
-  const toast = useToast();
+  const copy = useCopy();
   const searchSeq = useRef(0);
   const openingQuery = props.initialQuestion?.trim() ?? '';
-  const [query, setQuery] = useState(props.initialQuestion ?? '');
-  const [activeQuery, setActiveQuery] = useState('');
-  const [phase, setPhase] = useState<'idle' | 'loading' | 'error' | 'ready'>(openingQuery ? 'loading' : 'idle');
+  // 切到别的页面再回来：接着上次的问题、结果和勾选，不要白做一遍
+  const draft = openingQuery ? null : loadSolveDraft();
+  const [query, setQuery] = useState(props.initialQuestion || draft?.query || '');
+  const [activeQuery, setActiveQuery] = useState(draft?.activeQuery ?? '');
+  const [phase, setPhase] = useState<'idle' | 'loading' | 'error' | 'ready'>(openingQuery ? 'loading' : draft ? 'ready' : 'idle');
   const [error, setError] = useState<string | null>(null);
-  const [result, setResult] = useState<SolveResult | null>(null);
-  const [picked, setPicked] = useState<string[]>([]);
+  const [result, setResult] = useState<SolveResult | null>(draft?.result ?? null);
+  const [picked, setPicked] = useState<string[]>(draft?.picked ?? []);
   const [scenarios, setScenarios] = useState<ScenarioSummary[]>([]);
-  const [format, setFormat] = useState<PackFormat>('markdown');
+  const [format, setFormat] = useState<PackFormat>(draft?.format ?? 'markdown');
+  const [openedId, setOpenedId] = useState<string | null>(null);
+  const [localCapabilities, setLocalCapabilities] = useState<LocalCapabilityInput[]>([]);
+  const [showRaw, setShowRaw] = useState(false);
+  const lastPack = useRef<PackOutput | null>(null);
   const [packState, setPackState] = useState<PackState | null>(null);
   const [packAttempt, setPackAttempt] = useState(0);
   const [copied, setCopied] = useState(false);
@@ -95,10 +112,28 @@ export function SolvePage(props: {
     };
   }, []);
 
+  // 本机已经装了哪些 Skill / MCP（只读名字）：参考包里要标「本机已装」，Codex 才不会重复装
+  useEffect(() => {
+    let cancelled = false;
+    void scanLocalCapabilities().then((items) => {
+      if (!cancelled) setLocalCapabilities(items);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (result) saveSolveDraft({ query, activeQuery, result, picked, format });
+  }, [query, activeQuery, result, picked, format]);
+
   const selectedHits = result ? orderedPicks(result.hits, picked) : [];
   const packKey = `${format}\u0001${selectedHits.map((hit) => hit.id).join('\u0001')}`;
   const packView = packState && packState.key === packKey ? packState : null;
-  const pack = packView?.output ?? null;
+  if (packView?.output) lastPack.current = packView.output;
+  const loadingPack = selectedHits.length > 0 && !packView?.output && !packView?.error;
+  // 重新生成时先留着上一份，别把预览整块清空
+  const pack = packView?.output ?? (selectedHits.length > 0 ? lastPack.current : null);
   const hasResult = result !== null;
   const canCopy = selectedHits.length > 0 && Boolean(pack?.content);
 
@@ -107,7 +142,11 @@ export function SolvePage(props: {
     const hits = orderedPicks(result.hits, picked);
     if (hits.length === 0) return;
     const key = packKey;
-    const request = buildPackRequest(result.query.trim() || activeQuery, hits);
+    const request = buildPackRequest(
+      result.query.trim() || activeQuery,
+      hits,
+      pickLocalCapabilities(localCapabilities, hits, result.intents),
+    );
     let cancelled = false;
     const timer = window.setTimeout(() => {
       if (cancelled) return;
@@ -123,7 +162,7 @@ export function SolvePage(props: {
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [packKey, result, picked, format, packAttempt, activeQuery]);
+  }, [packKey, result, picked, format, packAttempt, activeQuery, localCapabilities]);
 
   // 复制成功后按钮上显示一会儿「已复制」
   useEffect(() => {
@@ -143,16 +182,8 @@ export function SolvePage(props: {
 
   async function copyToCodex() {
     if (!pack?.content || selectedHits.length === 0) return;
-    const content = pack.content;
     const count = Number.isFinite(pack.itemCount) ? pack.itemCount : selectedHits.length;
-    try {
-      if (!navigator.clipboard?.writeText) throw new Error('clipboard');
-      await navigator.clipboard.writeText(content);
-      setCopied(true);
-      toast.show({ title: '已复制，去 Codex 里粘贴', sub: `${count} 个参考项目` });
-    } catch {
-      toast.show({ title: '浏览器不允许自动复制', sub: '请手动选中后按 ⌘C' });
-    }
+    if (await copy(pack.content, '已复制，去 Codex 里粘贴', `${count} 个参考项目`)) setCopied(true);
   }
 
   function retryPack() {
@@ -201,7 +232,12 @@ export function SolvePage(props: {
             <button
               key={example}
               type="button"
-              className="inline-flex h-7 items-center rounded-full border border-input bg-card px-3 text-sm whitespace-nowrap text-on-surface-variant hover:bg-surface-container-low hover:text-foreground"
+              className={cn(
+                'inline-flex h-8 items-center rounded-full border px-3.5 text-[13px] whitespace-nowrap',
+                activeQuery === example
+                  ? 'border-primary bg-accent text-accent-foreground'
+                  : 'border-input bg-card text-on-surface-variant hover:bg-surface-container-low hover:text-foreground',
+              )}
               onClick={() => {
                 setQuery(example);
                 runSearch(example);
@@ -218,7 +254,7 @@ export function SolvePage(props: {
             title="你已经有的"
             count={result ? result.hits.length : undefined}
             actions={result && result.hits.length > 0 ? (
-              <span className="text-xs text-on-surface-variant">勾选的会进右边的参考包</span>
+              <span className="text-xs text-on-surface-variant">勾选的会放进参考包；点一行看详情</span>
             ) : undefined}
           />
           {result ? <GapBanner result={result} onOpenDiscover={openDiscover} /> : null}
@@ -231,6 +267,8 @@ export function SolvePage(props: {
               result={result}
               picked={picked}
               onToggle={(id) => setPicked((current) => togglePick(current, id))}
+              onOpen={(id) => setOpenedId(id)}
+              onMakeMain={(id) => setPicked((current) => makeMain(current, id))}
               onRetry={() => runSearch(query)}
               onOpenDiscover={openDiscover}
             />
@@ -247,6 +285,11 @@ export function SolvePage(props: {
               {selectedHits.length > 0 && pack?.content ? ` · 约 ${pack.content.length.toLocaleString('zh-CN')} 字` : ''}
             </span>
             <div className="min-w-2 flex-1" />
+            {format !== 'json' && selectedHits.length > 0 ? (
+              <Button variant="text" size="sm" onClick={() => setShowRaw((current) => !current)}>
+                {showRaw ? '看排版' : '看原文'}
+              </Button>
+            ) : null}
             <Segmented
               options={formatOptions}
               value={format}
@@ -254,6 +297,7 @@ export function SolvePage(props: {
               ariaLabel="格式"
             />
           </div>
+          {loadingPack && pack ? <div className="h-0.5 shrink-0 animate-pulse bg-primary/60" role="status" aria-label="正在更新参考包" /> : null}
           {pack && pack.warnings.length > 0 ? (
             <div className="shrink-0 space-y-1 px-4 pt-2.5">
               {pack.warnings.map((warning, index) => (
@@ -272,7 +316,7 @@ export function SolvePage(props: {
               <Button variant="text" onClick={retryPack}>重试</Button>
             </div>
           ) : pack ? (
-            <pre className={PREVIEW_CLASS}>{pack.content}</pre>
+            <PackPreview content={pack.content} format={format} raw={showRaw} />
           ) : (
             <div className="flex flex-1 items-center justify-center" role="status" aria-label="正在整理参考包">
               <Spinner />
@@ -284,7 +328,42 @@ export function SolvePage(props: {
           </div>
         </Card>
       </div>
+      {openedId && result ? (() => {
+        const hit = result.hits.find((item) => item.id === openedId);
+        if (!hit) return null;
+        return (
+          <HitDrawer
+            hit={hit}
+            scenarios={scenarios}
+            picked={picked.includes(hit.id)}
+            isMain={picked[0] === hit.id}
+            onTogglePick={() => setPicked((current) => togglePick(current, hit.id))}
+            onMakeMain={() => setPicked((current) => makeMain(current, hit.id))}
+            onClose={() => setOpenedId(null)}
+            onOpenToolbox={props.onOpenToolbox}
+          />
+        );
+      })() : null}
     </section>
+  );
+}
+
+/** 参考包预览：Markdown / AGENTS.md 排成正常文档，JSON 和「看原文」显示等宽原文（复制的永远是原文）。 */
+function PackPreview(props: { content: string; format: PackFormat; raw: boolean }) {
+  if (props.format === 'json' || props.raw) {
+    return <pre className={PREVIEW_CLASS}>{props.content}</pre>;
+  }
+  return (
+    <div className="min-h-[180px] flex-1 overflow-auto bg-background px-4 py-3.5 max-[899px]:max-h-[70vh] min-[900px]:max-h-none">
+      <Suspense fallback={<div className="flex justify-center py-6"><Spinner /></div>}>
+        <ReadmeRenderer
+          markdown={props.content}
+          repositoryFullName=""
+          sourcePath="参考包.md"
+          className="readme-rendered min-w-0 text-sm text-foreground"
+        />
+      </Suspense>
+    </div>
   );
 }
 
@@ -340,6 +419,8 @@ function ResultBody(props: {
   result: SolveResult | null;
   picked: readonly string[];
   onToggle: (id: string) => void;
+  onOpen: (id: string) => void;
+  onMakeMain: (id: string) => void;
   onRetry: () => void;
   onOpenDiscover: (scenarioId: string | null) => void;
 }) {
@@ -389,7 +470,10 @@ function ResultBody(props: {
           intents={props.result?.intents ?? []}
           scenarios={props.scenarios}
           pressed={picked.has(hit.id)}
+          isMain={props.picked[0] === hit.id}
           onToggle={() => props.onToggle(hit.id)}
+          onOpen={() => props.onOpen(hit.id)}
+          onMakeMain={() => props.onMakeMain(hit.id)}
         />
       ))}
     </>

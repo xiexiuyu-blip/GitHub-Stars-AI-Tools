@@ -29,7 +29,9 @@ export function CommandPalette(props: {
         setHits([]);
         return;
       }
-      void invoke<Hit[]>('search_command_palette', { query }).then(setHits).catch(() => setHits([]));
+      void invoke<Hit[] | null>('search_command_palette', { query })
+        .then((result) => setHits(Array.isArray(result) ? result : []))
+        .catch(() => setHits([]));
     }, 120);
     return () => window.clearTimeout(handle);
   }, [props.open, query]);

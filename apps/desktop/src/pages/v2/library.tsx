@@ -8,7 +8,6 @@ import {
   getLibraryDetail,
   listLibraryView,
   listScenarios,
-  regenerateLibraryCard,
   setLibraryReading,
 } from '@/lib/api';
 import {
@@ -26,10 +25,12 @@ import {
   toggleScenario,
   visibleScenarios,
   withInitial,
+  type LibraryPreset,
   type LibraryUiState,
 } from '@/lib/library-filters';
 import { automationHint } from '@/lib/automation-view';
 import { useAiAutomation } from '@/hooks/use-ai-automation';
+import { useRegenerate } from '@/hooks/use-regenerate';
 import { shouldIgnoreKey, useListKeys } from '@/hooks/use-list-keys';
 import { Button, Card, EmptyState, Kbd, PageHeader, Segmented, useToast } from '@/components/kit';
 import { AutomationBanner, ItemDetail, ItemRow } from '@/components/library';
@@ -44,6 +45,8 @@ type LibraryPageProps = {
   initialKeyword?: string;
   /** 预留：从别处带着场景进来。现在没有调用方。 */
   initialScenario?: string | null;
+  /** 从别处带着整理状态 / 我的状态进来 */
+  initialPreset?: LibraryPreset | null;
   onOpenSolve?: (query: string) => void;
   /** 去工具箱（开启 / 调整 AI 自动整理） */
   onOpenToolbox?: () => void;
@@ -55,8 +58,10 @@ type ListPhase = 'loading' | 'idle' | 'error';
 export function LibraryPage(props: LibraryPageProps) {
   const toast = useToast();
   const { status: automation } = useAiAutomation();
-  const [ui, setUi] = useState(() => withInitial(props.initialKeyword, props.initialScenario));
-  const [keywordDraft, setKeywordDraft] = useState(() => withInitial(props.initialKeyword, props.initialScenario).keyword);
+  const regenerateCard = useRegenerate(props.onOpenToolbox);
+  const listScrollRef = useRef<HTMLDivElement | null>(null);
+  const [ui, setUi] = useState(() => withInitial(props.initialKeyword, props.initialScenario, props.initialPreset));
+  const [keywordDraft, setKeywordDraft] = useState(() => withInitial(props.initialKeyword, props.initialScenario, props.initialPreset).keyword);
   const [scenarios, setScenarios] = useState<ScenarioSummary[]>([]);
   const [scenarioStatus, setScenarioStatus] = useState<ScenarioStatus>('loading');
   const [scenarioError, setScenarioError] = useState<string | null>(null);
@@ -111,6 +116,10 @@ export function LibraryPage(props: LibraryPageProps) {
   const items = useMemo(() => projectItems(serverItems, overrides, ui.reading), [serverItems, overrides, ui.reading]);
   const orderedKey = items.map((item) => item.id).join('\u0001');
   const previousQueryKey = useRef(queryKey);
+  // 换了筛选或搜索词：列表回到顶部，别停在上一个结果的中间
+  useEffect(() => {
+    if (listScrollRef.current) listScrollRef.current.scrollTop = 0;
+  }, [queryKey]);
   const initialStamp = `${props.initialKeyword ?? ''}\u0001${props.initialScenario ?? ''}`;
   const seenInitial = useRef(initialStamp);
 
@@ -426,14 +435,6 @@ export function LibraryPage(props: LibraryPageProps) {
     }
   }
 
-  async function regenerateCard(id: string) {
-    try {
-      await regenerateLibraryCard(id);
-      toast.show({ title: '已排队，整理好会更新' });
-    } catch (reason) {
-      toast.show({ title: describeInvokeError(reason) });
-    }
-  }
 
   changeReadingRef.current = (id, group) => { void changeReading(id, group); };
   copyForCodexRef.current = (id) => { void copyForCodex(id); };
@@ -498,14 +499,14 @@ export function LibraryPage(props: LibraryPageProps) {
   const cardOptions = counts
     ? cardStateOptions(counts.cardState)
     : [
+      { value: 'all' as const, label: '全部 …' },
       { value: 'done' as const, label: '已整理 …' },
       { value: 'pending' as const, label: '待整理 …' },
-      { value: 'all' as const, label: '全部 …' },
     ];
   const totalText = counts && typeof counts.total === 'number' && Number.isFinite(counts.total)
     ? String(counts.total)
     : '…';
-  const subtitle = `你收藏的 ${totalText} 个工具，按你能拿它做什么来找。已整理的有中文说明，其余还没整理。`;
+  const subtitle = `你收藏的 ${totalText} 个工具，按你能拿它做什么来找。整理好的有中文说明，其余先显示 GitHub 上的原文。`;
   const showFallbackHint = fallbackHint && !cardStateTouched && ui.cardState === 'all';
   const filtersActive = hasActiveFilters(ui);
   // 提示说的是整个资料库还有多少没整理；已经按场景 / 关键词筛窄了，数字对不上，就不提示
@@ -520,10 +521,11 @@ export function LibraryPage(props: LibraryPageProps) {
   const detailLoading = Boolean(selectedId) && !shownDetail && detailPhase !== 'error';
   const hideList = layout === 'narrow' && detailOpen;
   const hideDetail = layout === 'narrow' && !detailOpen;
+  // 详情栏要比列表宽或一样宽：封面、标签页、README 都在这里，太窄会被裁
   const gridClass = layout === 'wide'
-    ? 'grid-cols-[200px_minmax(0,1fr)_minmax(340px,440px)]'
+    ? 'grid-cols-[200px_minmax(320px,1fr)_minmax(440px,560px)]'
     : layout === 'medium'
-      ? 'grid-cols-[minmax(0,1fr)_minmax(340px,440px)]'
+      ? 'grid-cols-[minmax(300px,1fr)_minmax(420px,520px)]'
       : 'grid-cols-1';
 
   return (
@@ -540,8 +542,22 @@ export function LibraryPage(props: LibraryPageProps) {
             placeholder="搜工具、说明、关键词"
             aria-label="搜索资料库"
             autoComplete="off"
-            className="h-9 w-full rounded-md border border-input bg-card pr-3 pl-9 text-sm text-foreground outline-none placeholder:text-on-surface-variant focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-primary"
+            className="h-9 w-full rounded-md border border-input bg-card pr-9 pl-9 text-sm text-foreground outline-none placeholder:text-on-surface-variant focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-primary"
           />
+          {keywordDraft ? (
+            <button
+              type="button"
+              className="absolute top-1/2 right-1.5 grid size-7 -translate-y-1/2 place-items-center rounded-md text-on-surface-variant hover:bg-surface-container-low hover:text-foreground"
+              aria-label="清除搜索词"
+              title="清除"
+              onClick={() => {
+                setKeywordDraft('');
+                searchRef.current?.focus();
+              }}
+            >
+              <Icon name="close" size={16} />
+            </button>
+          ) : null}
         </div>
         {layout !== 'wide' ? (
           <div ref={filterRootRef} className="relative">
@@ -581,7 +597,7 @@ export function LibraryPage(props: LibraryPageProps) {
               AI 还没整理出理解卡，先显示全部收藏。
             </p>
           ) : null}
-          <div className="min-h-0 flex-1 overflow-auto">
+          <div ref={listScrollRef} className="min-h-0 flex-1 overflow-auto">
             {renderListBody()}
             {hasMore ? (
               <div className="flex justify-center px-4 py-3">

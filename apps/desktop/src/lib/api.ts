@@ -182,6 +182,16 @@ export function getRepoCommunity(id: string, refresh = false): Promise<RepoCommu
   return call<RepoCommunity>('get_repo_community', { id, refresh });
 }
 
+/** 本机已装的 Skill 和 MCP（只读名字和一句话，不读密钥）。后台还没有这个命令时返回空列表。 */
+export async function scanLocalCapabilities(): Promise<LocalCapabilityInput[]> {
+  try {
+    const list = await call<LocalCapabilityInput[] | null>('scan_local_capabilities');
+    return Array.isArray(list) ? list : [];
+  } catch {
+    return [];
+  }
+}
+
 /** AI 自动整理现在的状态（预算、队列、有没有暂停）。只读，不花钱。 */
 export function getAiAutomation(): Promise<AutomationStatus> {
   return call<AutomationStatus>('get_ai_automation');

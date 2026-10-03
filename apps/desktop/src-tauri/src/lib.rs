@@ -17,6 +17,7 @@ mod jobs;
 mod library;
 mod library_view;
 mod local_api;
+mod local_scan;
 mod packs;
 mod ranking_query;
 mod rankings_live;
@@ -7185,6 +7186,7 @@ pub fn run() {
             fetch_github_recommendation_readme,
             translate_github_recommendation_readme,
             star_github_recommendation_candidate,
+            local_scan::scan_local_capabilities,
         ])
         .run(tauri::generate_context!())
         .expect("Tauri 应用运行失败");
