@@ -56,6 +56,11 @@ export function InboxCard(props: {
           />
         )}
       />
+      {props.filter === 'pending' && props.page && props.page.items.length > 0 ? (
+        <p className="m-0 border-b border-muted bg-surface-container-low px-4 py-2 text-xs leading-[1.6] text-on-surface-variant">
+          这些链接还没有进你的资料库。想留的，在 GitHub 上点 Star，再点顶部「同步」，就会自动进资料库并整理；不想要的点「归档」。
+        </p>
+      ) : null}
       {renderBody()}
       {hasMore ? (
         <div className="flex justify-center border-t border-muted px-4 py-3">
