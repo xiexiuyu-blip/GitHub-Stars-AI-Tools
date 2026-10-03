@@ -129,7 +129,7 @@ Fox 的正式库已经有 001–018。这些文件在 `packages/storage/migratio
 
 规则：
 
-- 新迁移只追加，编号接在最后一个之后（目前最后是 029，下一个是 030），放在 `packages/storage/migrations/fox/`，并在 `apps/desktop/src-tauri/src/db/migrations.rs` 的 `MIGRATIONS` 里登记、补测试。`docs/rebuild/migrations/` 里是 001–018 的冻结副本
+- 新迁移只追加，编号接在最后一个之后（目前最后是 030，下一个是 031），放在 `packages/storage/migrations/fox/`，并在 `apps/desktop/src-tauri/src/db/migrations.rs` 的 `MIGRATIONS` 里登记、补测试。`docs/rebuild/migrations/` 里是 001–018 的冻结副本
 - upstream 以后的迁移改编成新的 Fox 编号，名字加 `upstream_` 前缀
 - runner 必须核对版本号和名称都匹配。名称不符就拒绝启动
 - 每次迁移前自动备份，并做 `PRAGMA integrity_check`
@@ -137,7 +137,7 @@ Fox 的正式库已经有 001–018。这些文件在 `packages/storage/migratio
 - 开发只用 dev 身份：`com.foxwork.fox-stars-lab.dev`，产品名 `Fox Stars Lab Dev`，Keychain 服务名 `fox-stars-lab-dev`
 - debug 构建或 dev 身份如果解析到正式数据目录，必须立即退出
 
-版本化 runner 已经在用（`db/migrations.rs`，001–029 已登记）。何时切换正式库由 Fox 本人在切换日决定（见 `docs/rebuild/接手说明.md`）；在那之前，不要对正式库启动本仓库。
+版本化 runner 已经在用（`db/migrations.rs`，001–030 已登记）。何时切换正式库由 Fox 本人在切换日决定（见 `docs/rebuild/接手说明.md`）；在那之前，不要对正式库启动本仓库。
 
 ### 前端架构约定
 
@@ -186,7 +186,7 @@ Fox 的正式库已经有 001–018。这些文件在 `packages/storage/migratio
 ### 修改数据库 Schema
 
 1. 在 `packages/storage/migrations/fox/` 下新建 `.sql` 文件
-2. 文件名按序号递增，接在最后一个之后（如 `030_add_new_table.sql`），并在 `db/migrations.rs` 的 `MIGRATIONS` 里登记版本号、名称和 `include_str!`
+2. 文件名按序号递增，接在最后一个之后（如 `031_add_new_table.sql`），并在 `db/migrations.rs` 的 `MIGRATIONS` 里登记版本号、名称和 `include_str!`
 3. 更新后端必需表字段检测
 4. 更新 `packages/domain` 中的 TypeScript 类型
 5. 运行 `pnpm build` 和 `cargo check --manifest-path "$PWD/apps/desktop/src-tauri/Cargo.toml"` 检查

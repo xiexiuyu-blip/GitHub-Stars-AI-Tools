@@ -6,11 +6,11 @@
  */
 
 /* ===========================================================================
- * Material Symbols 图标字体配置
+ * Material Symbols 图标字体配置（字体文件随应用本地打包，见 main.tsx，断网也能显示图标）
  * 用法: <span className="material-symbols-outlined">star</span>
  * =========================================================================*/
 .material-symbols-outlined {
-  font-family: 'Material Symbols Outlined';
+  font-family: 'Material Symbols Outlined Variable', 'Material Symbols Outlined';
   font-weight: normal;
   font-style: normal;
   font-size: 24px;

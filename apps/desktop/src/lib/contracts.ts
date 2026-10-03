@@ -1,0 +1,215 @@
+/**
+ * 前后端契约：新界面（今日 / 资料库 / 找方案 / 收集）依赖的后端命令返回值。
+ *
+ * 后端卡（06 场景、07 资料库查询、08 找方案、09 收集）按这里的形状返回 JSON（Rust 端用 serde 的 camelCase）；
+ * 界面卡只从这里导入类型，**不许改这个文件**。形状要变，先找总控改契约。
+ * 命令名与参数写在每个类型上方的注释里。
+ */
+
+/** 「我的状态」五档。库里存的是上游的 8 个状态值，按组归并：
+ *  unseen = unread + later；want = want_to_try + watching；tried = tried + read；in_use = in_use；dropped = deprecated。
+ *  界面上五档的中文：没看 / 想试 / 试过 / 在用 / 不要了。 */
+export type ReadingGroup = 'unseen' | 'want' | 'tried' | 'in_use' | 'dropped';
+
+/** 命令 `list_scenarios()` → ScenarioSummary[]（按 sortOrder 升序，不含已归档的场景） */
+export type ScenarioSummary = {
+  id: string;
+  slug: string;
+  nameZh: string;
+  sortOrder: number;
+  /** 该场景下有效仓库数（sync_status='active'，且归类状态不是 rejected） */
+  count: number;
+  /** 「偏少」：count 不超过种子里的 thin_threshold，且场景在 thin_focus 里 */
+  thin: boolean;
+};
+
+/** 命令 `list_library_view({ filters })` → LibraryPage */
+export type LibraryFilters = {
+  scenario?: string | null;
+  reading?: ReadingGroup | null;
+  /** done = 已有理解卡（卡片一句话非空）；pending = 还没有；all = 不筛。默认 done */
+  cardState?: 'done' | 'pending' | 'all';
+  form?: string | null;
+  keyword?: string;
+  /** starred = 按收藏时间新到旧（默认）；stars = 按星数；updated = 按最近更新 */
+  sort?: 'starred' | 'stars' | 'updated';
+  limit?: number;
+  offset?: number;
+};
+
+export type LibraryItem = {
+  id: string;
+  fullName: string;
+  htmlUrl: string;
+  description: string | null;
+  language: string | null;
+  starsCount: number;
+  /** ISO 时间 */
+  starredAt: string;
+  pushedAt: string | null;
+  /** 理解卡的一句话；还没有卡就是 null */
+  oneLiner: string | null;
+  form: string | null;
+  scenarioIds: string[];
+  /** 库里存的原始状态值（unread / want_to_try / tried / in_use / watching / deprecated / later / read） */
+  readingStatus: string;
+  readingGroup: ReadingGroup;
+  hasCard: boolean;
+  confidence: number | null;
+  /** 理解卡是否被 Fox 确认过；没有卡为 null */
+  cardReview: 'suggested' | 'confirmed' | null;
+};
+
+export type LibraryCounts = {
+  /** 当前账号的有效仓库总数（不受筛选影响） */
+  total: number;
+  /** 各场景下的仓库数（key 是场景 id）；按其他筛选条件（状态、卡片、形态、关键词）算，不按场景本身算 */
+  scenarios: Record<string, number>;
+  /** 各状态组的数量；按其他筛选条件算，不按状态本身算 */
+  reading: Record<ReadingGroup, number>;
+  /** 已整理 / 整理中的数量；按其他筛选条件算，不按卡片状态本身算 */
+  cardState: { done: number; pending: number };
+  forms: Record<string, number>;
+};
+
+export type LibraryPage = {
+  items: LibraryItem[];
+  /** 当前筛选下的总数（用于分页） */
+  totalCount: number;
+  counts: LibraryCounts;
+};
+
+/** 命令 `get_library_detail({ id })` → LibraryDetail */
+export type LibraryDetail = LibraryItem & {
+  /** 理解卡的 what_it_is（先结论） */
+  whatItIs: string | null;
+  capabilities: string[];
+  problemsSolved: string[];
+  useWhen: string[];
+  notFor: string[];
+  howToTry: string | null;
+  integratesWith: string[];
+  alternativesHint: string[];
+  inspirationForFox: string | null;
+  risks: string[];
+  license: string | null;
+  maturity: string | null;
+  zhFriendly: boolean | null;
+  keywords: string[];
+  topics: string[];
+  forksCount: number;
+  /** README 摘录，最多约 1500 个字符，没有 README 为 null */
+  readmeExcerpt: string | null;
+};
+
+/** 命令 `set_library_reading({ ids, group })`：把一批仓库设成某个状态组，返回改了多少个。
+ *  组到库里状态值的写入映射：unseen→unread，want→want_to_try，tried→tried，in_use→in_use，dropped→deprecated。 */
+export type SetReadingRequest = { ids: string[]; group: ReadingGroup };
+
+/** 命令 `get_today_view()` → TodayView */
+export type TodayView = {
+  /** 今天值得先看：从「还没看、已有理解卡」里，按 Fox 常做的方向（场景排序靠前者）挑最多 3 个 */
+  picks: LibraryItem[];
+  /** 本周新收藏（近 7 天），最多 8 个，新到旧 */
+  weekNew: LibraryItem[];
+  counts: {
+    total: number;
+    unseen: number;
+    weekNew: number;
+    /** 还没有理解卡（整理中）的数量 */
+    cardsPending: number;
+    /** 有卡但 Fox 还没确认的数量 */
+    cardsSuggested: number;
+  };
+  /** 最近一次同步时间（ISO），没有就是 null */
+  syncedAt: string | null;
+};
+
+/** 命令 `solve_v2({ query })` → SolveResult。从 Fox 的收藏里按「意图」找能用的项目。 */
+export type SolveHit = {
+  id: string;
+  fullName: string;
+  htmlUrl: string;
+  starsCount: number;
+  oneLiner: string | null;
+  form: string | null;
+  scenarioIds: string[];
+  /** 这条命中对上了哪些意图词 */
+  matched: string[];
+  /** 没对上的意图词 */
+  missing: string[];
+  /** 为什么相关：取理解卡里最相关的一句（能力 / 解决的问题 / 一句话） */
+  why: string;
+  score: number;
+  /** 所有意图都对上了 */
+  fullMatch: boolean;
+  hasCard: boolean;
+};
+
+export type SolveResult = {
+  query: string;
+  /** 从问题里拆出的意图词（比如「做小红书封面」→ 小红书、封面） */
+  intents: string[];
+  /** 意图词之外的零散词 */
+  extras: string[];
+  /** 最多 8 条，按得分从高到低 */
+  hits: SolveHit[];
+  /** 默认勾选：只有「所有意图都对上了」的前 3 条；没有就是空数组，不硬凑 */
+  preselected: string[];
+  fullMatchCount: number;
+  /** 所有命中里都没有对上的意图词 */
+  gapIntents: string[];
+  /** 建议去「发现」看的场景 id（意图词和场景名/关键词对得上的那个），没有就是 null */
+  suggestedScenarioId: string | null;
+  /** 该场景下已收藏的数量，供「你在这个方向收藏了 N 个」使用 */
+  suggestedScenarioCount: number | null;
+  /** 还没有理解卡（整理中）、但名称或描述里就对上了全部意图词的仓库数；界面可以提示「另有 N 个还在整理，整理完可能对上」 */
+  pendingMatches: number;
+};
+
+/** 命令 `preview_capture({ text })` → CapturePreview：在入库前先告诉 Fox 每条链接会怎么处理 */
+export type CapturePreviewRow = {
+  url: string;
+  normalizedUrl: string;
+  /** github_repo / github / x_post / x / web 等，沿用 extract_links_from_text 的取值 */
+  kind: string;
+  platform: string;
+  owner: string | null;
+  name: string | null;
+  blockedReason: string | null;
+  /** new = 会新收；starred = 已在你的 Stars 里；inbox = 已在收集箱；blocked = 将被拦下 */
+  status: 'new' | 'starred' | 'inbox' | 'blocked';
+};
+
+export type CapturePreview = {
+  rows: CapturePreviewRow[];
+  counts: { new: number; starred: number; inbox: number; blocked: number };
+};
+
+/** 命令 `list_inbox({ status, limit, offset })` → InboxPage。收集箱里的条目。 */
+export type InboxItem = {
+  id: string;
+  originalUrl: string;
+  normalizedUrl: string;
+  title: string;
+  /** github_repository / webpage / video / document / other */
+  itemType: string;
+  /** 来源平台：web / github / x / wechat / ... */
+  platform: string;
+  /** 来源说明，比如「微信群」「手动粘贴」 */
+  sourceContext: string;
+  userNote: string;
+  /** pending 待处理 / ready 已整理 / failed 失败 / archived 已归档 */
+  status: 'pending' | 'ready' | 'failed' | 'archived';
+  repositoryId: string | null;
+  createdAt: string;
+};
+
+export type InboxPage = {
+  items: InboxItem[];
+  totalCount: number;
+  counts: { pending: number; ready: number; failed: number; archived: number };
+};
+
+/** 命令 `set_inbox_status({ id, status })`：归档、恢复等；`set_inbox_note({ id, note })`：写备注（最多 500 字） */
+export type SetInboxStatusRequest = { id: string; status: 'pending' | 'ready' | 'archived' };

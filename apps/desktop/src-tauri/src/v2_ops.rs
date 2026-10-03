@@ -343,21 +343,18 @@ pub fn recover_interrupted_jobs(path: &Path) -> Result<usize, String> {
 }
 
 pub fn queue_control_path(database_path: &Path) -> PathBuf {
-    database_path.with_file_name("fox-stars-lab.queue.json")
+    crate::jobs::queue_control_path(database_path)
 }
 
 pub fn set_queue_paused(database_path: &Path, paused: bool) -> Result<(), String> {
-    let payload = json!({ "paused": paused, "dailyBudgetTokens": 200000 });
-    fs::write(queue_control_path(database_path), payload.to_string())
-        .map_err(|error| format!("队列状态写入失败：{error}"))
+    crate::jobs::set_paused(&queue_control_path(database_path), paused)
 }
 
+// 旧的 set_daily_budget 会读它来保住暂停位。预算改写已挪到 jobs，暂停位由那边保留。
+// 签名不能动：测试和以后的调用方还用这个名字。cargo check 不编译测试。
+#[allow(dead_code)]
 pub fn queue_is_paused(database_path: &Path) -> bool {
-    fs::read_to_string(queue_control_path(database_path))
-        .ok()
-        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
-        .and_then(|value| value.get("paused").and_then(Value::as_bool))
-        .unwrap_or(false)
+    crate::jobs::read_control(&queue_control_path(database_path)).paused
 }
 
 #[derive(Debug, Serialize)]
@@ -410,20 +407,11 @@ pub fn cancel_job(path: &Path, id: &str) -> Result<(), String> {
 }
 
 pub fn set_daily_budget(database_path: &Path, tokens: u64) -> Result<u64, String> {
-    let tokens = tokens.clamp(1_000, 2_000_000);
-    let paused = queue_is_paused(database_path);
-    let payload = json!({ "paused": paused, "dailyBudgetTokens": tokens });
-    fs::write(queue_control_path(database_path), payload.to_string())
-        .map_err(|error| format!("每日预算写入失败：{error}"))?;
-    Ok(tokens)
+    crate::jobs::set_daily_budget(&queue_control_path(database_path), tokens)
 }
 
 pub fn daily_budget(database_path: &Path) -> u64 {
-    fs::read_to_string(queue_control_path(database_path))
-        .ok()
-        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
-        .and_then(|value| value.get("dailyBudgetTokens").and_then(Value::as_u64))
-        .unwrap_or(200_000)
+    crate::jobs::read_control(&queue_control_path(database_path)).daily_budget_tokens
 }
 
 pub fn retry_failed_jobs(path: &Path) -> Result<usize, String> {
