@@ -110,6 +110,8 @@ pub struct LibraryItem {
     pub starred_at: String,
     pub pushed_at: Option<String>,
     pub one_liner: Option<String>,
+    /// 列表第三行。为 `None` 时仍序列化成 `null`。
+    pub highlight: Option<String>,
     pub form: Option<String>,
     pub scenario_ids: Vec<String>,
     pub reading_status: String,
@@ -755,6 +757,7 @@ fn into_item(raw: RawItem, scenario_ids: Vec<String>) -> LibraryItem {
         reading_group: reading_group_name(Some(reading_status.as_str())).to_owned(),
         reading_status,
         one_liner,
+        highlight: highlight_of(&card),
         has_card,
         confidence: card_number(&card, "confidence"),
         card_review: card_review(has_card, &card),
@@ -987,6 +990,14 @@ fn card_review(has_card: bool, card: &Value) -> Option<String> {
         Some("suggested") => Some("suggested".to_owned()),
         _ => None,
     }
+}
+
+/// 先取第一条非空的「解决的问题」，没有再取第一条能力名。不和一句话比较。
+fn highlight_of(card: &Value) -> Option<String> {
+    string_array(card, "problems_solved")
+        .into_iter()
+        .next()
+        .or_else(|| capabilities_of(card).into_iter().next())
 }
 
 fn string_array(card: &Value, key: &str) -> Vec<String> {
@@ -2535,6 +2546,115 @@ mod tests {
         assert!(view.week_new.iter().any(|item| item.id == "suggested"));
     }
 
+    fn highlight_of_id(path: &Path, id: &str) -> Option<String> {
+        let mut filters = LibraryFilters::default();
+        filters.card_state = Some("all".to_owned());
+        filters.limit = Some(20);
+        list_library_view(path, &filters)
+            .expect("资料库查询应成功")
+            .items
+            .into_iter()
+            .find(|item| item.id == id)
+            .unwrap_or_else(|| panic!("应能找到 {id}"))
+            .highlight
+    }
+
+    #[test]
+    fn highlight_prefers_first_problem() {
+        let lab = Lab::new("highlight-problem");
+        lab.with(|conn| {
+            let mut repo = Repo::new("repo");
+            repo.one_liner = Some("配图慢".to_owned());
+            repo.card_json = Some(
+                r#"{"problems_solved":["  配图慢  ","另一条"],"capabilities":[{"name_zh":"生成封面"}]}"#
+                    .to_owned(),
+            );
+            repo.save(conn);
+        });
+        assert_eq!(
+            highlight_of_id(&lab.path, "repo").as_deref(),
+            Some("配图慢")
+        );
+        let detail = get_library_detail(&lab.path, "repo").unwrap();
+        assert_eq!(detail.item.highlight.as_deref(), Some("配图慢"));
+        assert_eq!(detail.item.one_liner.as_deref(), Some("配图慢"));
+    }
+
+    #[test]
+    fn highlight_uses_capability_string_when_problems_are_missing() {
+        let lab = Lab::new("highlight-cap-str");
+        lab.with(|conn| {
+            let mut repo = Repo::new("repo");
+            repo.card_json = Some(r#"{"capabilities":["  生成封面  ","第二能力"]}"#.to_owned());
+            repo.save(conn);
+        });
+        assert_eq!(
+            highlight_of_id(&lab.path, "repo").as_deref(),
+            Some("生成封面")
+        );
+    }
+
+    #[test]
+    fn highlight_uses_capability_name_when_problems_are_missing() {
+        let lab = Lab::new("highlight-cap-obj");
+        lab.with(|conn| {
+            let mut repo = Repo::new("repo");
+            repo.card_json = Some(
+                r#"{"problems_solved":[],"capabilities":[{"name_zh":""},{"name_zh":"  做字幕  "},"后面的字符串"]}"#
+                    .to_owned(),
+            );
+            repo.save(conn);
+        });
+        assert_eq!(
+            highlight_of_id(&lab.path, "repo").as_deref(),
+            Some("做字幕")
+        );
+    }
+
+    #[test]
+    fn highlight_skips_blank_or_non_string_problems() {
+        let lab = Lab::new("highlight-skip");
+        lab.with(|conn| {
+            let mut repo = Repo::new("repo");
+            repo.card_json = Some(
+                r#"{"problems_solved":["",1,"   ","配图慢"],"capabilities":[{"name_zh":"不该用这个"}]}"#
+                    .to_owned(),
+            );
+            repo.save(conn);
+        });
+        assert_eq!(
+            highlight_of_id(&lab.path, "repo").as_deref(),
+            Some("配图慢")
+        );
+    }
+
+    #[test]
+    fn highlight_is_null_without_a_usable_card() {
+        let lab = Lab::new("highlight-null");
+        lab.with(|conn| {
+            let mut missing = Repo::new("missing");
+            missing.write_doc = false;
+            missing.one_liner = None;
+            missing.save(conn);
+            let mut broken = Repo::new("broken");
+            broken.card_json = Some("{".to_owned());
+            broken.save(conn);
+            let mut mistyped = Repo::new("mistyped");
+            mistyped.card_json = Some(
+                r#"{"problems_solved":"不是数组","capabilities":{"name_zh":"对象"}}"#.to_owned(),
+            );
+            mistyped.save(conn);
+            let mut empty = Repo::new("empty");
+            empty.card_json = Some(
+                r#"{"problems_solved":["",1],"capabilities":[{"name_zh":"  "},""]}"#.to_owned(),
+            );
+            empty.save(conn);
+        });
+        for id in ["missing", "broken", "mistyped", "empty"] {
+            assert_eq!(highlight_of_id(&lab.path, id), None, "{id}");
+        }
+    }
+
     #[test]
     fn contract_json_keys_and_types_match_typescript() {
         let item = sample_item(None);
@@ -2551,6 +2671,7 @@ mod tests {
                 "starredAt",
                 "pushedAt",
                 "oneLiner",
+                "highlight",
                 "form",
                 "scenarioIds",
                 "readingStatus",
@@ -2565,6 +2686,7 @@ mod tests {
             "language",
             "pushedAt",
             "oneLiner",
+            "highlight",
             "form",
             "confidence",
             "cardReview",
@@ -2659,6 +2781,7 @@ mod tests {
                 "starredAt",
                 "pushedAt",
                 "oneLiner",
+                "highlight",
                 "form",
                 "scenarioIds",
                 "readingStatus",
@@ -2830,6 +2953,7 @@ mod tests {
             starred_at: "2026-10-01T00:00:00Z".to_owned(),
             pushed_at: None,
             one_liner: None,
+            highlight: None,
             form: None,
             scenario_ids: vec!["scn-a".to_owned()],
             reading_status: "in_use".to_owned(),
