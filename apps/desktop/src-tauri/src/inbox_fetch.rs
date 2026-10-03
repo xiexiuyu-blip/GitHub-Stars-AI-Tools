@@ -5,11 +5,14 @@
 
 use crate::capture::{extract_links_from_text, ip_is_blocked, url_is_safe};
 use crate::web_fetch::url_encode;
+use encoding_rs::{Encoding, UTF_8};
+use flate2::read::{DeflateDecoder, GzDecoder, ZlibDecoder};
 use rusqlite::{params, Connection, OpenFlags, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::borrow::Cow;
 use std::collections::HashSet;
+use std::io::Read;
 use std::net::{IpAddr, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -18,6 +21,14 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 /// 公众号文章单篇就有 3.5 MB 上下（正文不大，内联的脚本和样式很大），所以上限放到 6 MB；
 /// 任务卡原来写的 1 MB 会让每一篇公众号都读不了（2026-10-04 真网络演练发现）。
 const MAX_BODY_BYTES: usize = 6_000_000;
+/// 解压后的上限。只多读 1 个字节用来发现「超了」，不能先把整包解出来再比大小。
+const MAX_DECODED_BYTES: usize = 16_000_000;
+const META_CHARSET_BYTES: usize = 4096;
+const GARBLED_SAMPLE_CHARS: usize = 2000;
+/// 替换字符和控制字符占比要超过这个数才判乱码。刚好 20% 仍留下。
+const GARBLED_BAD_PERCENT: usize = 20;
+/// 可见正文达到这个字数就不再当拦截页，免得长文章里的「安全检测」被误伤。
+const CHALLENGE_TEXT_LIMIT: usize = 600;
 const MAX_REDIRECTS: usize = 3;
 const EXCERPT_CHARS: usize = 2000;
 const TITLE_CHARS: usize = 120;
@@ -37,6 +48,10 @@ const UA_SAFARI: &str = concat!(
 
 const WECHAT_BLOCK_REASON: &str = "公众号拦住了自动读取，请在微信里打开这篇";
 const EMPTY_PAGE_REASON: &str = "页面里没有可读的内容";
+const BAD_ENCODING_REASON: &str = "网站返回了这里读不了的压缩格式";
+const CORRUPT_BODY_REASON: &str = "页面压缩数据损坏";
+const UNREADABLE_REASON: &str = "页面内容读不出来";
+const CHALLENGE_REASON: &str = "网站要求先做人机验证，这里读不了";
 const X_MISSING_REASON: &str = "帖子不存在、已删除或需要登录才能看";
 const BLOCKED_IP_REASON: &str = "域名指向内网或云元数据地址，不读取";
 
@@ -473,7 +488,7 @@ fn user_agent_for(url: &str) -> &'static str {
     }
 }
 
-/// 拼 curl 参数。不带 `-L`、cookie、`Authorization` 或任何请求头。
+/// 拼 curl 参数。不带 `-L`、cookie 或 `Authorization`。只带这一个请求头。
 fn safe_curl_arguments(
     url: &str,
     header_dump: &str,
@@ -496,6 +511,8 @@ fn safe_curl_arguments(
         max_filesize.as_str(),
         "-A",
         user_agent,
+        "-H",
+        "Accept-Encoding: gzip, deflate",
         "-D",
         header_dump,
         "--resolve",
@@ -552,7 +569,7 @@ fn curl_once_pinned(url: &str, ip: IpAddr) -> Result<PageResponse, FetchProblem>
     Ok(PageResponse {
         status,
         content_type,
-        body: decode_body(&output.stdout),
+        body: decode_page(&output.stdout, &headers)?,
         final_url: url.to_owned(),
         location,
     })
@@ -577,8 +594,314 @@ fn curl_exit_problem(code: i32, stderr: &str) -> FetchProblem {
     }
 }
 
-fn decode_body(bytes: &[u8]) -> String {
-    String::from_utf8_lossy(bytes).into_owned()
+enum BodyCoding {
+    Plain,
+    Gzip,
+    Deflate,
+    Unsupported,
+}
+
+enum InflateFault {
+    TooBig,
+    Corrupt { produced: usize },
+}
+
+/// 先按响应头解压，再按字符集解码。解压失败或正文明显是乱码时返回失败，不把乱码当读成功。
+fn decode_page(bytes: &[u8], headers: &[(String, String)]) -> Result<String, FetchProblem> {
+    let plain = inflate_body(bytes, headers)?;
+    let text = decode_charset(&plain, headers);
+    if text_is_garbled(&text) {
+        return Err(FetchProblem::fail(UNREADABLE_REASON));
+    }
+    Ok(text)
+}
+
+fn inflate_body(bytes: &[u8], headers: &[(String, String)]) -> Result<Vec<u8>, FetchProblem> {
+    match body_coding(bytes, headers) {
+        BodyCoding::Plain => Ok(bytes.to_vec()),
+        BodyCoding::Gzip => limited_bytes(GzDecoder::new(bytes)),
+        BodyCoding::Deflate => inflate_deflate(bytes),
+        BodyCoding::Unsupported => Err(FetchProblem::fail(BAD_ENCODING_REASON)),
+    }
+}
+
+/// 没有 `Content-Encoding` 时，开头是 gzip 魔数的也按 gzip 解（有的服务器忘了写头）。
+/// 头在但值有多个（逗号隔开，或重复头）一律不支持，避免只解一半。
+fn body_coding(bytes: &[u8], headers: &[(String, String)]) -> BodyCoding {
+    let mut present = false;
+    let mut codings = Vec::new();
+    for (name, value) in headers {
+        if !name.eq_ignore_ascii_case("content-encoding") {
+            continue;
+        }
+        present = true;
+        for part in value.split(',') {
+            let part = part.trim();
+            if !part.is_empty() {
+                codings.push(part.to_ascii_lowercase());
+            }
+        }
+    }
+    if !present {
+        return if looks_like_gzip(bytes) {
+            BodyCoding::Gzip
+        } else {
+            BodyCoding::Plain
+        };
+    }
+    match codings.as_slice() {
+        [] => BodyCoding::Plain,
+        [one] if one == "identity" => BodyCoding::Plain,
+        [one] if one == "gzip" || one == "x-gzip" => BodyCoding::Gzip,
+        [one] if one == "deflate" => BodyCoding::Deflate,
+        _ => BodyCoding::Unsupported,
+    }
+}
+
+fn looks_like_gzip(bytes: &[u8]) -> bool {
+    bytes.len() >= 2 && bytes[0] == 0x1f && bytes[1] == 0x8b
+}
+
+fn inflate_deflate(bytes: &[u8]) -> Result<Vec<u8>, FetchProblem> {
+    match read_limited(ZlibDecoder::new(bytes)) {
+        Ok(data) => Ok(data),
+        Err(InflateFault::TooBig) => Err(too_big_problem()),
+        Err(InflateFault::Corrupt { produced }) if produced == 0 => {
+            limited_bytes(DeflateDecoder::new(bytes))
+        }
+        Err(InflateFault::Corrupt { .. }) => Err(FetchProblem::fail(CORRUPT_BODY_REASON)),
+    }
+}
+
+fn limited_bytes<R: Read>(reader: R) -> Result<Vec<u8>, FetchProblem> {
+    match read_limited(reader) {
+        Ok(data) => Ok(data),
+        Err(InflateFault::TooBig) => Err(too_big_problem()),
+        Err(InflateFault::Corrupt { .. }) => Err(FetchProblem::fail(CORRUPT_BODY_REASON)),
+    }
+}
+
+/// 最多读 `MAX_DECODED_BYTES + 1`。多出来的那一个字节只说明超限，解码器不会继续把炸弹解完。
+fn read_limited<R: Read>(reader: R) -> Result<Vec<u8>, InflateFault> {
+    let mut limited = reader.take((MAX_DECODED_BYTES as u64).saturating_add(1));
+    let mut output = Vec::new();
+    match limited.read_to_end(&mut output) {
+        Ok(_) if output.len() > MAX_DECODED_BYTES => Err(InflateFault::TooBig),
+        Ok(_) => Ok(output),
+        Err(_) => Err(InflateFault::Corrupt {
+            produced: output.len(),
+        }),
+    }
+}
+
+fn decode_charset(bytes: &[u8], headers: &[(String, String)]) -> String {
+    text_encoding(bytes, headers).decode(bytes).0.into_owned()
+}
+
+/// BOM 优先于响应头，响应头优先于 `<meta>`，都没有或不认识就用 UTF-8。非法字节换成 U+FFFD。
+fn text_encoding(bytes: &[u8], headers: &[(String, String)]) -> &'static Encoding {
+    if let Some((encoding, _)) = Encoding::for_bom(bytes) {
+        return encoding;
+    }
+    if let Some(label) = content_type_charset(headers) {
+        return Encoding::for_label(label.as_bytes()).unwrap_or(UTF_8);
+    }
+    if let Some(label) = meta_charset(bytes) {
+        return Encoding::for_label(label.as_bytes()).unwrap_or(UTF_8);
+    }
+    UTF_8
+}
+
+fn content_type_charset(headers: &[(String, String)]) -> Option<String> {
+    charset_label_in(header_last_ci(headers, "content-type")?)
+}
+
+fn header_last_ci<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
+    headers
+        .iter()
+        .rev()
+        .find(|(key, _)| key.eq_ignore_ascii_case(name))
+        .map(|(_, value)| value.as_str())
+}
+
+fn charset_label_in(value: &str) -> Option<String> {
+    let lower = value.to_ascii_lowercase();
+    let bytes = lower.as_bytes();
+    let mut index = 0;
+    while index + "charset".len() <= bytes.len() {
+        if bytes[index..].starts_with(b"charset") {
+            let boundary_ok = index == 0 || !bytes[index - 1].is_ascii_alphanumeric();
+            if boundary_ok {
+                let mut cursor = index + "charset".len();
+                while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
+                    cursor += 1;
+                }
+                if cursor < bytes.len() && bytes[cursor] == b'=' {
+                    return take_charset_label(&lower[cursor + 1..]);
+                }
+            }
+        }
+        index += 1;
+    }
+    None
+}
+
+fn take_charset_label(rest: &str) -> Option<String> {
+    let rest = rest.trim_start();
+    let label = if let Some(inner) = rest.strip_prefix('"') {
+        inner.split('"').next().unwrap_or("")
+    } else if let Some(inner) = rest.strip_prefix('\'') {
+        inner.split('\'').next().unwrap_or("")
+    } else {
+        rest.split(|ch: char| ch == ';' || ch.is_ascii_whitespace())
+            .next()
+            .unwrap_or("")
+    };
+    let label = label.trim();
+    if label.is_empty() {
+        None
+    } else {
+        Some(label.to_owned())
+    }
+}
+
+/// `<meta charset>` 写在字节里，而且页面可能还不是 UTF-8，所以只扫前 4096 字节、按 ASCII 忽略大小写。
+fn meta_charset(bytes: &[u8]) -> Option<String> {
+    let end = bytes.len().min(META_CHARSET_BYTES);
+    let lower: Vec<u8> = bytes[..end]
+        .iter()
+        .copied()
+        .map(|byte| byte.to_ascii_lowercase())
+        .collect();
+    let mut from = 0;
+    while from < lower.len() {
+        let Some(relative) = find_bytes(&lower[from..], b"<meta") else {
+            return None;
+        };
+        let start = from + relative;
+        let after_name = start + 5;
+        if after_name < lower.len() {
+            let next = lower[after_name];
+            if !next.is_ascii_whitespace() && next != b'/' && next != b'>' {
+                from = after_name;
+                continue;
+            }
+        }
+        let Some(gt) = lower[after_name..].iter().position(|byte| *byte == b'>') else {
+            return None;
+        };
+        if let Some(label) = charset_from_meta_bytes(&lower[after_name..after_name + gt]) {
+            return Some(label);
+        }
+        from = after_name + gt + 1;
+    }
+    None
+}
+
+fn charset_from_meta_bytes(tag_body: &[u8]) -> Option<String> {
+    let attrs = byte_attrs(tag_body);
+    if let Some((_, value)) = attrs.iter().find(|(name, _)| name == "charset") {
+        let label = value.trim();
+        if !label.is_empty() {
+            return Some(label.to_owned());
+        }
+    }
+    let content_type = attrs.iter().any(|(name, value)| {
+        name == "http-equiv" && value.trim().eq_ignore_ascii_case("content-type")
+    });
+    if !content_type {
+        return None;
+    }
+    let (_, content) = attrs.iter().find(|(name, _)| name == "content")?;
+    charset_label_in(content)
+}
+
+fn byte_attrs(source: &[u8]) -> Vec<(String, String)> {
+    let mut index = 0;
+    let mut attrs = Vec::new();
+    while index < source.len() {
+        while index < source.len() && source[index].is_ascii_whitespace() {
+            index += 1;
+        }
+        if index >= source.len() || source[index] == b'/' {
+            break;
+        }
+        let name_start = index;
+        while index < source.len() && (is_name_byte(source[index]) || source[index] == b'_') {
+            index += 1;
+        }
+        if index == name_start {
+            break;
+        }
+        let name = String::from_utf8_lossy(&source[name_start..index]).into_owned();
+        while index < source.len() && source[index].is_ascii_whitespace() {
+            index += 1;
+        }
+        if index >= source.len() || source[index] != b'=' {
+            attrs.push((name, String::new()));
+            continue;
+        }
+        index += 1;
+        while index < source.len() && source[index].is_ascii_whitespace() {
+            index += 1;
+        }
+        if index >= source.len() {
+            break;
+        }
+        let value = if source[index] == b'"' || source[index] == b'\'' {
+            let quote = source[index];
+            index += 1;
+            let value_start = index;
+            while index < source.len() && source[index] != quote {
+                index += 1;
+            }
+            let value = String::from_utf8_lossy(&source[value_start..index]).into_owned();
+            if index < source.len() {
+                index += 1;
+            }
+            value
+        } else {
+            let value_start = index;
+            while index < source.len()
+                && !source[index].is_ascii_whitespace()
+                && source[index] != b'>'
+                && source[index] != b'/'
+            {
+                index += 1;
+            }
+            String::from_utf8_lossy(&source[value_start..index]).into_owned()
+        };
+        attrs.push((name, value));
+    }
+    attrs
+}
+
+fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() || haystack.len() < needle.len() {
+        return None;
+    }
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
+}
+
+fn text_is_garbled(text: &str) -> bool {
+    let mut total = 0usize;
+    let mut bad = 0usize;
+    for ch in text.chars().take(GARBLED_SAMPLE_CHARS) {
+        total += 1;
+        if ch == '\u{FFFD}' || is_disallowed_control(ch) {
+            bad += 1;
+        }
+    }
+    if total == 0 {
+        return false;
+    }
+    bad.saturating_mul(100) > total.saturating_mul(GARBLED_BAD_PERCENT)
+}
+
+fn is_disallowed_control(ch: char) -> bool {
+    ch.is_control() && ch != '\n' && ch != '\r' && ch != '\t'
 }
 
 struct HeaderDump(PathBuf);
@@ -762,6 +1085,15 @@ fn extract_web(raw: &str, page_url: &str) -> WebPage {
             author,
             excerpt,
             failure: Some(WECHAT_BLOCK_REASON),
+        };
+    }
+    // 用可见正文 body，不用摘要：摘要会拼上 meta description，也会被截到 2000 字，600 字的门槛就失真。
+    if let Some(reason) = challenge_reason(&title, &body) {
+        return WebPage {
+            title,
+            author,
+            excerpt,
+            failure: Some(reason),
         };
     }
     if title.is_empty() && excerpt.is_empty() {
@@ -1036,6 +1368,41 @@ fn compose_excerpt(summary: &str, body: &str) -> String {
         (false, false) => format!("{summary}\n{body}"),
     };
     truncate_chars(&text, EXCERPT_CHARS)
+}
+
+/// 正文短，并且标题或正文里出现人机验证话术，就当成被拦住。长文里偶然出现这些词不算。
+fn challenge_reason(title: &str, text: &str) -> Option<&'static str> {
+    if text.chars().count() >= CHALLENGE_TEXT_LIMIT {
+        return None;
+    }
+    const PHRASES: [&str; 16] = [
+        "正在进行安全检测",
+        "安全检测",
+        "人机验证",
+        "请完成验证",
+        "滑动验证",
+        "访问验证",
+        "检测到异常流量",
+        "请开启 javascript",
+        "请启用 javascript",
+        "just a moment",
+        "checking your browser",
+        "verify you are human",
+        "attention required",
+        "enable javascript and cookies",
+        "are you a robot",
+        "captcha",
+    ];
+    let title = title.to_ascii_lowercase();
+    let text = text.to_ascii_lowercase();
+    if PHRASES
+        .iter()
+        .any(|phrase| title.contains(phrase) || text.contains(phrase))
+    {
+        Some(CHALLENGE_REASON)
+    } else {
+        None
+    }
 }
 
 fn wechat_blocked(title: &str, excerpt: &str, body: &str) -> bool {
@@ -1971,6 +2338,7 @@ mod tests {
     use serde_json::json;
     use std::cell::RefCell;
     use std::collections::{HashMap, VecDeque};
+    use std::io::Write;
     use std::net::IpAddr;
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -2508,7 +2876,7 @@ mod tests {
     fn non_utf8_body_decodes_without_panic() {
         let bytes =
             b"<!DOCTYPE html><title>\xff\xfeOK</title><body><article>A\x80B</article></body>";
-        let text = decode_body(bytes);
+        let text = decode_page(bytes, &[]).expect("少量非法字节不应整页判失败");
         let page = extract_web(&text, "https://example.com/bin");
         assert!(page.title.contains("OK"), "{}", page.title);
         assert!(page.excerpt.contains('A') || page.excerpt.contains('B') || page.failure.is_none());
@@ -2778,7 +3146,18 @@ mod tests {
             args.last().map(String::as_str),
             Some("https://example.com/a?q=1")
         );
-        for forbidden in ["-L", "-b", "--cookie", "-H", "-u", "--oauth2-bearer"] {
+        assert!(args
+            .windows(2)
+            .any(|pair| { pair[0] == "-H" && pair[1] == "Accept-Encoding: gzip, deflate" }));
+        assert_eq!(args.iter().filter(|arg| arg.as_str() == "-H").count(), 1);
+        for forbidden in [
+            "-L",
+            "-b",
+            "--cookie",
+            "-u",
+            "--oauth2-bearer",
+            "--compressed",
+        ] {
             assert!(!args.iter().any(|arg| arg == forbidden), "{forbidden}");
         }
         for arg in &args {
@@ -3643,5 +4022,317 @@ https://github.com/real/repo
             github_repos_in(html, "https://mp.weixin.qq.com/s/split"),
             vec!["owner/repo".to_owned()]
         );
+    }
+
+    fn header_pairs(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+        pairs
+            .iter()
+            .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
+            .collect()
+    }
+
+    fn gzip_bytes(data: &[u8]) -> Vec<u8> {
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(data).expect("gzip 夹具应能写入");
+        encoder.finish().expect("gzip 夹具应能结束")
+    }
+
+    fn zlib_bytes(data: &[u8]) -> Vec<u8> {
+        let mut encoder =
+            flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(data).expect("zlib 夹具应能写入");
+        encoder.finish().expect("zlib 夹具应能结束")
+    }
+
+    fn raw_deflate_bytes(data: &[u8]) -> Vec<u8> {
+        let mut encoder =
+            flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(data).expect("deflate 夹具应能写入");
+        encoder.finish().expect("deflate 夹具应能结束")
+    }
+
+    fn gbk_bytes(text: &str) -> Vec<u8> {
+        let (bytes, _, failed) = encoding_rs::GBK.encode(text);
+        assert!(!failed, "夹具应能用 GBK 编码");
+        bytes.into_owned()
+    }
+
+    /// encoding_rs 的 UTF-16 只有解码器，`encode` 会原样返回 UTF-8。夹具得自己按码元拼小端字节。
+    fn utf16le_with_bom(text: &str) -> Vec<u8> {
+        let mut bytes = vec![0xFF, 0xFE];
+        for unit in text.encode_utf16() {
+            bytes.extend_from_slice(&unit.to_le_bytes());
+        }
+        bytes
+    }
+
+    fn assert_decodes_chinese(bytes: &[u8], headers: &[(&str, &str)], needle: &str) {
+        let text = decode_page(bytes, &header_pairs(headers)).expect("应能解码");
+        assert!(text.contains(needle), "{text}");
+        assert!(!text.contains('\u{FFFD}'), "{text}");
+    }
+
+    fn assert_decode_fail(bytes: &[u8], headers: &[(&str, &str)], message: &str) {
+        let problem = decode_page(bytes, &header_pairs(headers)).expect_err("应失败");
+        assert_eq!(problem.kind, FetchProblemKind::Fail);
+        assert_eq!(problem.message, message);
+    }
+
+    #[test]
+    fn gzip_decodes_chinese_page() {
+        let html = "<title>视频标题</title><body>这是一段中文简介</body>";
+        assert_decodes_chinese(
+            &gzip_bytes(html.as_bytes()),
+            &[("content-encoding", "gzip")],
+            "视频标题",
+        );
+        let text = decode_page(
+            &gzip_bytes(html.as_bytes()),
+            &header_pairs(&[("content-encoding", "gzip")]),
+        )
+        .expect("gzip 中文页应能解开");
+        assert!(text.contains("这是一段中文简介"), "{text}");
+    }
+
+    #[test]
+    fn x_gzip_and_mixed_case_header_name_decode() {
+        let html = "<title>视频标题</title><body>简介</body>";
+        let bytes = gzip_bytes(html.as_bytes());
+        assert_decodes_chinese(&bytes, &[("Content-Encoding", "x-gzip")], "视频标题");
+        assert_decodes_chinese(&bytes, &[("CONTENT-ENCODING", "X-GZIP")], "视频标题");
+    }
+
+    #[test]
+    fn gzip_magic_without_content_encoding_header_decodes() {
+        let html = "<title>忘了写头</title><body>中文简介</body>";
+        let bytes = gzip_bytes(html.as_bytes());
+        assert!(bytes.starts_with(&[0x1f, 0x8b]), "夹具应以 gzip 魔数开头");
+        assert_decodes_chinese(&bytes, &[], "忘了写头");
+        assert_decodes_chinese(&bytes, &[], "中文简介");
+    }
+
+    #[test]
+    fn zlib_wrapped_deflate_decodes_chinese() {
+        let html = "<title>压缩标题</title><body>中文正文</body>";
+        assert_decodes_chinese(
+            &zlib_bytes(html.as_bytes()),
+            &[("content-encoding", "deflate")],
+            "压缩标题",
+        );
+    }
+
+    #[test]
+    fn raw_deflate_decodes_chinese() {
+        let html = "<title>裸压缩</title><body>中文正文</body>";
+        assert_decodes_chinese(
+            &raw_deflate_bytes(html.as_bytes()),
+            &[("Content-Encoding", "Deflate")],
+            "裸压缩",
+        );
+    }
+
+    #[test]
+    fn brotli_encoding_is_unsupported() {
+        assert_decode_fail(
+            "<title>不应解开</title>".as_bytes(),
+            &[("content-encoding", "br")],
+            BAD_ENCODING_REASON,
+        );
+    }
+
+    #[test]
+    fn zstd_encoding_is_unsupported() {
+        assert_decode_fail(
+            "<title>不应解开</title>".as_bytes(),
+            &[("content-encoding", "zstd")],
+            BAD_ENCODING_REASON,
+        );
+    }
+
+    #[test]
+    fn corrupt_gzip_is_rejected() {
+        let mut bytes = gzip_bytes("<title>好</title>".as_bytes());
+        bytes.truncate(8);
+        assert_decode_fail(&bytes, &[("content-encoding", "gzip")], CORRUPT_BODY_REASON);
+    }
+
+    #[test]
+    fn gzip_bomb_is_too_big_quickly() {
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        let chunk = [0u8; 64 * 1024];
+        let mut left = 20_000_000usize;
+        while left > 0 {
+            let size = left.min(chunk.len());
+            encoder.write_all(&chunk[..size]).expect("应能写入零");
+            left -= size;
+        }
+        let compressed = encoder.finish().expect("应能压完 20 MB 的零");
+        let started = std::time::Instant::now();
+        let problem = decode_page(&compressed, &header_pairs(&[("content-encoding", "gzip")]))
+            .expect_err("压缩炸弹应被拒绝");
+        let elapsed = started.elapsed();
+        assert_eq!(problem, too_big_problem());
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "压缩炸弹应在几秒内被拒绝，实际 {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn multiple_content_encodings_are_unsupported() {
+        let html = "<title>不应解开</title>";
+        assert_decode_fail(
+            &gzip_bytes(html.as_bytes()),
+            &[("content-encoding", "gzip, br")],
+            BAD_ENCODING_REASON,
+        );
+    }
+
+    #[test]
+    fn content_type_gbk_decodes_chinese() {
+        let html = "<title>中文标题</title><body>中文正文</body>";
+        let bytes = gbk_bytes(html);
+        for content_type in [
+            "text/html; charset=gbk",
+            "text/html; charset=\"GBK\"",
+            "text/html; charset='gbk'",
+        ] {
+            assert_decodes_chinese(&bytes, &[("Content-Type", content_type)], "中文标题");
+            assert_decodes_chinese(&bytes, &[("Content-Type", content_type)], "中文正文");
+        }
+    }
+
+    #[test]
+    fn meta_charset_gb2312_decodes_chinese() {
+        let html = "<html><head><meta charset=\"gb2312\"></head><title>中文标题</title><body>中文正文</body></html>";
+        let bytes = gbk_bytes(html);
+        assert_decodes_chinese(&bytes, &[], "中文标题");
+        assert_decodes_chinese(&bytes, &[], "中文正文");
+    }
+
+    #[test]
+    fn meta_http_equiv_gbk_decodes_chinese() {
+        let html = "<html><head><meta http-equiv=\"Content-Type\" content=\"text/html; charset=GBK\"></head><title>门户标题</title><body>门户正文</body></html>";
+        assert_decodes_chinese(&gbk_bytes(html), &[], "门户标题");
+        assert_decodes_chinese(&gbk_bytes(html), &[], "门户正文");
+    }
+
+    #[test]
+    fn utf8_bom_wins_over_a_wrong_charset() {
+        let mut bytes = b"\xEF\xBB\xBF".to_vec();
+        bytes.extend_from_slice("<title>中文标题</title><body>正文</body>".as_bytes());
+        assert_decodes_chinese(
+            &bytes,
+            &[("content-type", "text/html; charset=gbk")],
+            "中文标题",
+        );
+        let text = decode_page(
+            &bytes,
+            &header_pairs(&[("content-type", "text/html; charset=gbk")]),
+        )
+        .expect("UTF-8 BOM 应能解码");
+        assert!(!text.starts_with('\u{FEFF}'), "BOM 不应留在正文里");
+    }
+
+    #[test]
+    fn utf16le_bom_decodes_chinese() {
+        let bytes = utf16le_with_bom("<title>中文标题</title><body>正文</body>");
+        assert!(bytes.starts_with(&[0xFF, 0xFE]), "夹具应带 UTF-16LE BOM");
+        assert_decodes_chinese(&bytes, &[], "中文标题");
+    }
+
+    #[test]
+    fn unknown_charset_falls_back_to_utf8() {
+        let html = "<title>中文标题</title><body>正文</body>";
+        assert_decodes_chinese(
+            html.as_bytes(),
+            &[("content-type", "text/html; charset=foo")],
+            "中文标题",
+        );
+    }
+
+    #[test]
+    fn binary_noise_is_unreadable() {
+        let bytes: Vec<u8> = (0..3000).map(|index| 0x80 + (index % 128) as u8).collect();
+        assert!(!bytes.starts_with(&[0x1f, 0x8b]));
+        assert_decode_fail(&bytes, &[], UNREADABLE_REASON);
+    }
+
+    #[test]
+    fn normal_chinese_page_is_not_flagged_as_garbled() {
+        let html = "<title>正常中文标题</title><body>这是正常的一段中文，用来确认乱码保护不会误伤。</body>";
+        assert_decodes_chinese(html.as_bytes(), &[], "正常中文标题");
+        assert_decodes_chinese(html.as_bytes(), &[], "不会误伤");
+    }
+
+    #[test]
+    fn security_check_interstitial_fails() {
+        let html = "<html><head></head><body><div>火山引擎 正在进行安全检测，请耐心等待</div></body></html>";
+        let fetcher = SeqFetcher::new(vec![Ok(html_page(html))]);
+        match fetch_html(&fetcher, "https://www.36kr.com/p/1") {
+            Outcome::Failed { reason } => assert_eq!(reason, CHALLENGE_REASON),
+            other => panic!("人机验证页应失败：{other:?}"),
+        }
+    }
+
+    #[test]
+    fn cloudflare_just_a_moment_fails() {
+        let html = "<html><head><title>Just a moment...</title></head><body><p>Please wait</p></body></html>";
+        let fetcher = SeqFetcher::new(vec![Ok(html_page(html))]);
+        match fetch_html(&fetcher, "https://example.com/cdn-cgi") {
+            Outcome::Failed { reason } => assert_eq!(reason, CHALLENGE_REASON),
+            other => panic!("Cloudflare 拦截页应失败：{other:?}"),
+        }
+    }
+
+    #[test]
+    fn long_article_mentioning_captcha_succeeds() {
+        let paragraph = "这是一篇正常的技术文章。";
+        let mut body = paragraph.repeat(80);
+        body.push_str("文中顺便提到验证码和安全检测，但页面本身不是拦截页。");
+        assert!(body.chars().count() > 600, "{}", body.chars().count());
+        let html = format!("<title>正常文章</title><article>{body}</article>");
+        let fetcher = SeqFetcher::new(vec![Ok(html_page(&html))]);
+        match fetch_html(&fetcher, "https://blog.example/long") {
+            Outcome::Done { title, excerpt, .. } => {
+                assert_eq!(title, "正常文章");
+                assert!(excerpt.contains("验证码"), "{excerpt}");
+                assert!(excerpt.contains("安全检测"), "{excerpt}");
+            }
+            other => panic!("长文提到验证码仍应读成功：{other:?}"),
+        }
+    }
+
+    #[test]
+    fn short_page_with_normal_title_succeeds() {
+        let html = "<title>今天的笔记</title><body>只有一句短话</body>";
+        let fetcher = SeqFetcher::new(vec![Ok(html_page(html))]);
+        match fetch_html(&fetcher, "https://example.com/note") {
+            Outcome::Done { title, excerpt, .. } => {
+                assert_eq!(title, "今天的笔记");
+                assert_eq!(excerpt, "只有一句短话");
+            }
+            other => panic!("正常短页面应读成功：{other:?}"),
+        }
+    }
+
+    #[test]
+    fn accept_encoding_requests_gzip_and_deflate_only() {
+        let args = safe_curl_arguments(
+            "https://example.com/a",
+            "/tmp/fsl-inbox-headers.txt",
+            "example.com:443:1.1.1.1",
+            UA_SAFARI,
+        );
+        assert!(args
+            .windows(2)
+            .any(|pair| { pair[0] == "-H" && pair[1] == "Accept-Encoding: gzip, deflate" }));
+        assert!(!args.iter().any(|arg| arg == "-L"));
+        assert!(!args.iter().any(|arg| arg == "--compressed"));
+        for arg in &args {
+            let lower = arg.to_ascii_lowercase();
+            assert!(!lower.contains("cookie"), "{arg}");
+            assert!(!lower.contains("authorization"), "{arg}");
+        }
     }
 }
