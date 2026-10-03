@@ -11,6 +11,7 @@ use rusqlite::{params, params_from_iter, Connection, OptionalExtension, Transact
 use serde::Serialize;
 use serde_json::Value;
 use std::path::Path;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -44,9 +45,15 @@ impl LlmClient for SizedClient {
     }
 }
 
+/// 连续这么多个请求都被服务商直接拒绝（HTTP 4xx），整条队列就停下来。
+/// 一个错的参数 / 一个过期的账户会让积压的几百个任务一个个瞬间失败（都不计费），白白把它们全标成失败。
+const CONSECUTIVE_REJECTIONS_BEFORE_PAUSE: u32 = 5;
+
 pub struct RepoCardHandler {
     config: ConfigLoader,
     client_factory: Option<ClientFactory>,
+    /// 连续被服务商拒绝的次数（线程之间共用）。任何一次成功或别的失败都会清零。
+    rejections: AtomicU32,
 }
 
 impl RepoCardHandler {
@@ -54,6 +61,7 @@ impl RepoCardHandler {
         Self {
             config,
             client_factory: None,
+            rejections: AtomicU32::new(0),
         }
     }
 
@@ -63,6 +71,38 @@ impl RepoCardHandler {
         Self {
             config,
             client_factory: Some(client_factory),
+            rejections: AtomicU32::new(0),
+        }
+    }
+
+    /// 数「连续被拒绝」：被服务商拒绝（不计费的 4xx）的累加，够数了就把这一次升级成暂停整条队列；别的结果清零。
+    fn track_rejections(&self, failure: JobFailure) -> JobFailure {
+        let rejected = matches!(
+            &failure,
+            JobFailure::Fatal {
+                kind: ErrorKind::ContentTooLarge,
+                message,
+            } if http_status_in(message).is_some_and(|status| (400..500).contains(&status))
+                // 真正的「内容超过模型上下文」是这一条自己的问题（一个特别长的 README），不是配置错了
+                && !message.contains("超过模型上下文")
+        );
+        if !rejected {
+            self.rejections.store(0, Ordering::SeqCst);
+            return failure;
+        }
+        let count = self.rejections.fetch_add(1, Ordering::SeqCst) + 1;
+        if count < CONSECUTIVE_REJECTIONS_BEFORE_PAUSE {
+            return failure;
+        }
+        self.rejections.store(0, Ordering::SeqCst);
+        let JobFailure::Fatal { message, .. } = failure else {
+            return failure;
+        };
+        JobFailure::PauseQueue {
+            kind: ErrorKind::Other,
+            message: format!(
+                "连续 {count} 个请求都被 AI 服务拒绝，先停下整理：{message} 请检查模型、请求地址、参数和账户余额，改好后点「继续整理」。"
+            ),
         }
     }
 }
@@ -119,8 +159,9 @@ impl JobHandler for RepoCardHandler {
             if error.spent_tokens > 0 {
                 let _ = jobs::add_charge(db_path, &job.id, error.spent_tokens);
             }
-            map_card_error(error)
+            self.track_rejections(map_card_error(error))
         })?;
+        self.rejections.store(0, Ordering::SeqCst);
         if let Err(message) = apply_scenario_tags(&mut conn, &job.account_id, repo_id) {
             return Err(JobFailure::Retryable {
                 kind: ErrorKind::Other,
@@ -2121,5 +2162,61 @@ mod tests {
             ),
             3500
         );
+    }
+
+    #[test]
+    fn five_rejections_in_a_row_pause_the_queue_and_any_other_result_resets_the_count() {
+        let (handler, _) = scripted(Ok(ok_config()), vec![]);
+        let rejected = || JobFailure::Fatal {
+            kind: ErrorKind::ContentTooLarge,
+            message: "AI 接口请求失败（HTTP 422）：请求被拒绝".to_owned(),
+        };
+        // 连着被拒绝：前 4 个只是各自失败
+        for _ in 0..4 {
+            assert!(matches!(
+                handler.track_rejections(rejected()),
+                JobFailure::Fatal { .. }
+            ));
+        }
+        // 中间夹一个别的结果（比如超时）：清零，重新数
+        assert!(matches!(
+            handler.track_rejections(JobFailure::Retryable {
+                kind: ErrorKind::Timeout,
+                message: "超时".to_owned(),
+                retry_after_secs: None,
+            }),
+            JobFailure::Retryable { .. }
+        ));
+        for _ in 0..4 {
+            assert!(matches!(
+                handler.track_rejections(rejected()),
+                JobFailure::Fatal { .. }
+            ));
+        }
+        // 第 5 个：升级成暂停整条队列，信息里带着原因
+        match handler.track_rejections(rejected()) {
+            JobFailure::PauseQueue { kind, message } => {
+                assert_eq!(kind, ErrorKind::Other);
+                assert!(message.contains("连续 5 个"), "{message}");
+                assert!(message.contains("HTTP 422"), "{message}");
+                assert!(message.contains("继续整理"), "{message}");
+            }
+            other => panic!("应暂停整条队列，实际 {other:?}"),
+        }
+        // 暂停之后重新数
+        assert!(matches!(
+            handler.track_rejections(rejected()),
+            JobFailure::Fatal { .. }
+        ));
+        // 「内容超过模型上下文」是这一条自己的问题（一个特别长的 README），不算被拒绝：连着 10 个也不停队列
+        for _ in 0..10 {
+            assert!(matches!(
+                handler.track_rejections(JobFailure::Fatal {
+                    kind: ErrorKind::ContentTooLarge,
+                    message: "AI 接口请求失败（HTTP 400）：内容超过模型上下文或最大 token 限制，请缩短输入。".to_owned(),
+                }),
+                JobFailure::Fatal { .. }
+            ));
+        }
     }
 }

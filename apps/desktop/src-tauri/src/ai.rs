@@ -910,6 +910,11 @@ fn is_private_network_ai_host(host: &str) -> bool {
         || (parts[0] == 192 && parts[1] == 168)
 }
 
+/// 4xx 是服务商在处理之前就拒绝的（密钥 / 模型 / 额度 / 参数不对、限流）：不计费。5xx 和别的状态不确定，当作可能计费。
+fn status_may_be_billed(http_code: Option<u16>) -> bool {
+    !matches!(http_code, Some(400..=499))
+}
+
 fn request_openai(config: &AiRequestConfig, prompt: &str) -> Result<String, String> {
     // 旧功能不走队列，和队列共用每日额度：发请求前问一句，成功后记账（见 spend_guard.rs）。
     let _permit = crate::spend_guard::check_before_request(prompt)?;
@@ -917,6 +922,9 @@ fn request_openai(config: &AiRequestConfig, prompt: &str) -> Result<String, Stri
     let response = execute_json_post(&request.endpoint, &request.headers, &request.body)?;
 
     if !response.status_success {
+        if !status_may_be_billed(response.http_code) {
+            crate::spend_guard::release_unbilled();
+        }
         return Err(format_ai_http_error(
             "OpenAI",
             response.http_code,
@@ -1023,6 +1031,9 @@ fn request_anthropic(
     let response = execute_json_post(&request.endpoint, &request.headers, &request.body)?;
 
     if !response.status_success {
+        if !status_may_be_billed(response.http_code) {
+            crate::spend_guard::release_unbilled();
+        }
         return Err(format_ai_http_error(
             "Anthropic",
             response.http_code,
@@ -2046,7 +2057,13 @@ fn execute_json_post(
                 sleep_before_ai_retry(attempt);
                 continue;
             }
-            Err(error) => return Err(format_ai_request_error(error)),
+            Err(error) => {
+                // 没连上、被拒绝连接这类（不是超时）：请求没到服务商那里，没有计费
+                if !error.is_timeout() {
+                    crate::spend_guard::release_unbilled();
+                }
+                return Err(format_ai_request_error(error));
+            }
         };
         let status = response.status();
         let body = response
@@ -2842,7 +2859,6 @@ mod card_chat {
             || normalized.contains("max tokens")
             || normalized.contains("token limit")
             || normalized.contains("maximum token")
-            || normalized.contains("max_tokens")
             || body.contains("超出上下文")
             || body.contains("上下文长度")
             || body.contains("上下文限制")
@@ -4372,5 +4388,22 @@ mod tests {
         assert_eq!(parsed.choices.len(), 1);
         // 离谱的大数不能在相加时 panic
         assert!(usage_pair(Some(u64::MAX), Some(u64::MAX)).is_some());
+    }
+
+    #[test]
+    fn only_client_errors_are_known_to_be_unbilled() {
+        for code in [400, 401, 402, 403, 404, 408, 409, 422, 429, 451] {
+            assert!(
+                !status_may_be_billed(Some(code)),
+                "HTTP {code} 在处理之前就被拒绝，不计费"
+            );
+        }
+        for code in [500, 502, 503, 504, 524] {
+            assert!(
+                status_may_be_billed(Some(code)),
+                "HTTP {code} 不确定，当作可能计费"
+            );
+        }
+        assert!(status_may_be_billed(None), "不知道状态码，当作可能计费");
     }
 }

@@ -112,6 +112,14 @@ pub fn extract_links_from_text(text: &str) -> Vec<ExtractedLink> {
     extract_links_limited(text, MAX_LINKS_PER_TEXT)
 }
 
+fn contains_ignore_case(haystack: &str, needle: &str) -> bool {
+    let needle = needle.as_bytes();
+    haystack
+        .as_bytes()
+        .windows(needle.len())
+        .any(|window| window.eq_ignore_ascii_case(needle))
+}
+
 /// 读网页正文用：按出现顺序找 GitHub 仓库链接，`accept` 决定这一条算不算（调用方自己的校验和去重），
 /// 够 `max` 条就停。不先把整页的链接都建出来：一个 6 MB 的页面可以有四十多万条链接（实测 110 MB 内存），
 /// 而文章里提取仓库只要前 30 个；也不受聊天粘贴的「最多 300 条链接」限制，
@@ -126,6 +134,10 @@ pub(crate) fn find_github_repo_links(
     for raw in candidates(text) {
         if found.len() >= max {
             break;
+        }
+        // 绝大多数链接不是 GitHub 的：不含 github.com 的不必建链接（解析 URL、查表都要钱）
+        if !contains_ignore_case(&raw, "github.com") {
+            continue;
         }
         let Some(link) = build_link(&raw) else {
             continue;
@@ -784,5 +796,37 @@ mod tests {
         ] {
             assert!(url_is_safe(url).is_ok(), "{url} 不该被拦");
         }
+    }
+
+    #[test]
+    fn the_repo_finder_stops_early_and_ignores_links_without_github() {
+        let mut text = String::new();
+        for index in 0..5_000 {
+            text.push_str(&format!("https://example.com/p{index} "));
+        }
+        text.push_str("HTTPS://GITHUB.COM/Late/One github.com/late/two ");
+        for index in 0..40 {
+            text.push_str(&format!("https://github.com/owner/repo-{index} "));
+        }
+        let mut seen = 0;
+        let found = find_github_repo_links(&text, 5, |_| {
+            seen += 1;
+            true
+        });
+        assert_eq!(found.len(), 5, "够 5 个就停");
+        assert_eq!(seen, 5, "停了之后不再看后面的");
+        assert_eq!(
+            found[0].owner.as_deref(),
+            Some("Late"),
+            "大小写不同的 GitHub 主机名也认"
+        );
+        assert_eq!(found[1].name.as_deref(), Some("two"));
+        // 校验不过的不算数，也不占名额
+        let rejected_first =
+            find_github_repo_links(&text, 3, |link| link.owner.as_deref() != Some("Late"));
+        assert_eq!(rejected_first.len(), 3);
+        assert!(rejected_first
+            .iter()
+            .all(|link| link.owner.as_deref() != Some("Late")));
     }
 }

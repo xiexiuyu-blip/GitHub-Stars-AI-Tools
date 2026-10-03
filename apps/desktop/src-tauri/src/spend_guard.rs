@@ -19,8 +19,11 @@
 use crate::jobs;
 use rusqlite::{params, Connection, TransactionBehavior};
 use std::cell::{Cell, RefCell};
+use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
+use std::thread;
+use std::time::Duration;
 
 /// 旧功能没有给输出设 `max_tokens`，输出长度不可控；按一个宽松的值估：至少 3000，翻译这类输出和输入一样长的取输入的长度。
 /// 一篇 README 摘要实测输出约 1k，标签网络一批可达几千。
@@ -45,6 +48,8 @@ struct Reservation {
     id: String,
     /// 提示词那部分的估计用量：请求没有记账就结束时，只留这么多。
     input_estimate: u64,
+    /// 预留的总量（提示词 + 输出余量）。流式回复没有真实用量时，记账不能比它还少。
+    reserved_total: u64,
 }
 
 thread_local! {
@@ -83,9 +88,13 @@ fn probing() -> bool {
 
 /// 通过了额度检查的凭证，拿着它直到请求结束并记完账。同一个线程里可以嵌套
 /// （流式请求失败后会在里面再发一次普通请求）：只有最外层真的在账本里预留，也只有它在结束时收尾。
+///
+/// 它不能跨线程（`!Send`）：嵌套深度和预留行都记在线程本地，凭证在别的线程上放掉，
+/// 原来那个线程的深度就永远是 1，之后的请求会被当成「嵌套」而不检查额度。
 #[must_use = "凭证要一直拿到请求结束并记完账；写成 `check_before_request(..)?;` 会立刻放掉，预留当场被取消"]
 pub struct SpendPermit {
     outermost: bool,
+    _not_send: PhantomData<*const ()>,
 }
 
 impl Drop for SpendPermit {
@@ -113,7 +122,10 @@ fn begin(database: Option<&Path>, prompt: &str) -> Result<SpendPermit, String> {
         current == 0
     });
     // 提前返回时这个凭证被放掉：深度减回去，最外层没有预留行可收
-    let permit = SpendPermit { outermost };
+    let permit = SpendPermit {
+        outermost,
+        _not_send: PhantomData,
+    };
     if !outermost {
         return Ok(permit);
     }
@@ -137,9 +149,21 @@ fn begin(database: Option<&Path>, prompt: &str) -> Result<SpendPermit, String> {
             database: database.to_path_buf(),
             id,
             input_estimate: input,
+            reserved_total: estimated,
         });
     });
     Ok(permit)
+}
+
+/// 请求被服务商直接拒绝（4xx：密钥 / 模型 / 额度 / 参数不对）或根本没连上：没有计费，把预留整个还回去，不留任何用量。
+/// 不调用的话，预留行会在凭证放掉时留下提示词那部分的估计用量——一把错的密钥、一个配错的模型，
+/// 整批解析连失败 20 多次，就在账本里记下 9 万多 token、什么也没花，把队列和所有旧功能锁 24 小时。
+pub fn release_unbilled() {
+    if let Some(reservation) = RESERVATION.with(|slot| slot.borrow_mut().take()) {
+        if let Err(error) = release_reservation(&reservation, &jobs::now_db_time()) {
+            eprintln!("旧版 AI 的预留没有退回：{error}");
+        }
+    }
 }
 
 /// `usage` 是服务商回的真实用量（输入，输出）；没有、或不可信就按文字估。
@@ -171,27 +195,56 @@ fn record(
     let Some(database) = database else {
         return;
     };
-    let (input, output) = match usage {
-        Some((input, output)) if input.saturating_add(output) <= MAX_PLAUSIBLE_CALL_TOKENS => {
-            (input, output)
-        }
-        _ => (estimate_tokens(prompt), estimate_tokens(content)),
-    };
+    let real_usage = usage.filter(|(input, output)| {
+        input.saturating_add(*output) <= MAX_PLAUSIBLE_CALL_TOKENS
+            && input.saturating_add(*output) > 0
+    });
+    let estimate = (estimate_tokens(prompt), estimate_tokens(content));
     let now = jobs::now_db_time();
     let reservation = RESERVATION.with(|slot| slot.borrow_mut().take());
     let result = match reservation {
         Some(reservation) if reservation.database == database => {
-            match settle_reservation(&reservation, &now, provider, model, input, output) {
+            // 流式回复里没有用量；推理模型的思考 token 又不在文字里，按文字估会比真实少得多：
+            // 这种情况记账不能比预留还少（预留本来就是「提示词 + 输出余量」的保守估计）。
+            let (input, output) = match real_usage {
+                Some(pair) => pair,
+                None => {
+                    let total = estimate
+                        .0
+                        .saturating_add(estimate.1)
+                        .max(reservation.reserved_total);
+                    (estimate.0, total.saturating_sub(estimate.0))
+                }
+            };
+            let mut outcome = Err(String::new());
+            for attempt in 0..3 {
+                outcome = settle_reservation(&reservation, &now, provider, model, input, output);
+                if outcome.is_ok() {
+                    break;
+                }
+                if attempt < 2 {
+                    thread::sleep(Duration::from_millis(300));
+                }
+            }
+            match outcome {
+                Ok(true) => Ok(()),
                 // 预留行已经不在 running（被恢复动作取消了）：退回去另记一条
                 Ok(false) => record_at(database, &now, provider, model, input, output),
-                other => other.map(|_| ()),
+                Err(error) => {
+                    // 记不上：把预留放回去，凭证放掉时会收尾成「已取消 + 提示词那部分」，不会留下一条永远 running 的行
+                    RESERVATION.with(|slot| *slot.borrow_mut() = Some(reservation));
+                    Err(error)
+                }
             }
         }
-        _ => record_at(database, &now, provider, model, input, output),
+        _ => {
+            let (input, output) = real_usage.unwrap_or(estimate);
+            record_at(database, &now, provider, model, input, output)
+        }
     };
     if let Err(error) = result {
         // 记不上账不能悄悄吞掉：至少留一条日志（开发版在终端里能看到）。预留行还在，仍占着额度。
-        eprintln!("旧版 AI 用量没有记上（{input} + {output} token）：{error}");
+        eprintln!("旧版 AI 用量没有记上：{error}");
     }
 }
 
@@ -243,12 +296,15 @@ fn refusal_for(control: &jobs::QueueControl, used: u64, estimated: u64) -> Resul
 /// 队列认领（`jobs::claim_next`）也是在 `BEGIN IMMEDIATE` 里算用量，后一个一定看得见前一个的预留。
 fn reserve_at(database_path: &Path, now: &str, estimated: u64) -> Result<String, String> {
     let control = jobs::read_control(&jobs::queue_control_path(database_path));
-    let mut connection = jobs::open_db(database_path)?;
+    let refuse = |error: String| format!("{REFUSAL_PREFIX}额度检查失败：{error}");
+    let mut connection = jobs::open_db(database_path).map_err(refuse)?;
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
-        .map_err(|error| format!("{REFUSAL_PREFIX}额度检查失败：{error}"))?;
-    let cutoff = jobs::shift_db_time(now, -jobs::DAY_SECS)?;
-    let used = jobs::tokens_used_since(&transaction, &cutoff)?.max(0) as u64;
+        .map_err(|error| refuse(error.to_string()))?;
+    let cutoff = jobs::shift_db_time(now, -jobs::DAY_SECS).map_err(refuse)?;
+    let used = jobs::tokens_used_since(&transaction, &cutoff)
+        .map_err(refuse)?
+        .max(0) as u64;
     refusal_for(&control, used, estimated)?;
     let id: String = transaction
         .query_row("SELECT lower(hex(randomblob(8)))", [], |row| row.get(0))
@@ -299,6 +355,20 @@ fn settle_reservation(
         )
         .map_err(|error| format!("用量记账失败：{error}"))?;
     Ok(changed > 0)
+}
+
+/// 没有计费：预留整个还回去（记成已取消、用量清零）。
+fn release_reservation(reservation: &Reservation, now: &str) -> Result<(), String> {
+    let connection = jobs::open_db(&reservation.database)?;
+    connection
+        .execute(
+            "UPDATE ai_jobs
+             SET status = 'cancelled', input_tokens = 0, output_tokens = 0, finished_at = ?1, updated_at = ?1
+             WHERE id = ?2 AND status = 'running'",
+            params![now, reservation.id],
+        )
+        .map_err(|error| format!("预留退回失败：{error}"))?;
+    Ok(())
 }
 
 /// 没记账就结束：记成已取消，只留提示词那部分的估计用量。
@@ -440,6 +510,7 @@ mod tests {
     const BUDGET_100K: &str = r#"{"dailyBudgetTokens":100000,"paused":false}"#;
     const LEGACY_ROW: &str =
         "SELECT status, input_tokens, output_tokens FROM ai_jobs WHERE target_id LIKE 'legacy-%'";
+    const LEGACY_ROW_LATEST: &str = "SELECT status, input_tokens, output_tokens FROM ai_jobs WHERE target_id LIKE 'legacy-%' ORDER BY created_at DESC, rowid DESC LIMIT 1";
 
     #[test]
     fn nothing_is_blocked_without_a_guard_installed() {
@@ -478,35 +549,52 @@ mod tests {
         // 1000 个汉字 = 1000 输入 + max(3000, 1000) 输出余量 = 4000
         assert_eq!(dir.used(), 4000);
         let status = jobs::queue_status(dir.path()).unwrap();
-        assert_eq!((status.running, status.tokens_24h), (1, 4000));
+        // 旧功能的预留行占额度（队列认领看得见），但不算队列任务：界面不该因此说「正在后台整理」
+        assert_eq!(
+            (status.running, status.queued, status.tokens_24h),
+            (0, 0, 4000)
+        );
         drop(permit);
     }
 
     #[test]
     fn two_requests_cannot_both_fit_when_only_one_does() {
-        // 修复前「问额度」和「记账」是两步，两个请求同时问到「还有 10 万」、各花 6 万就是 12 万
-        let dir = Dir::new();
-        dir.control(BUDGET_100K);
-        let now = jobs::now_db_time();
-        let barrier = Arc::new(Barrier::new(2));
-        let path = dir.path().to_path_buf();
-        let handles: Vec<_> = (0..2)
-            .map(|_| {
-                let barrier = Arc::clone(&barrier);
-                let path = path.clone();
-                let now = now.clone();
-                thread::spawn(move || {
-                    barrier.wait();
-                    reserve_at(&path, &now, 60_000).is_ok()
+        // 修复前「问额度」和「记账」是两步，两个请求同时问到「还有 10 万」、各花 6 万就是 12 万。
+        // 要真正证明是 BEGIN IMMEDIATE 在串行化：输的一方必须是被正式拒绝（看到了对方的预留），
+        // 而不是撞上 database is locked（用延迟事务也会「恰好一个成功」，但输的一方报的是锁错误）。循环多次，避免碰巧。
+        for round in 0..8 {
+            let dir = Dir::new();
+            dir.control(BUDGET_100K);
+            let now = jobs::now_db_time();
+            let barrier = Arc::new(Barrier::new(2));
+            let path = dir.path().to_path_buf();
+            let handles: Vec<_> = (0..2)
+                .map(|_| {
+                    let barrier = Arc::clone(&barrier);
+                    let path = path.clone();
+                    let now = now.clone();
+                    thread::spawn(move || {
+                        barrier.wait();
+                        reserve_at(&path, &now, 60_000)
+                    })
                 })
-            })
-            .collect();
-        let outcomes: Vec<bool> = handles
-            .into_iter()
-            .map(|handle| handle.join().unwrap())
-            .collect();
-        assert_eq!(outcomes.iter().filter(|ok| **ok).count(), 1, "{outcomes:?}");
-        assert_eq!(dir.used(), 60_000);
+                .collect();
+            let outcomes: Vec<Result<String, String>> = handles
+                .into_iter()
+                .map(|handle| handle.join().unwrap())
+                .collect();
+            let wins = outcomes.iter().filter(|outcome| outcome.is_ok()).count();
+            assert_eq!(wins, 1, "第 {round} 轮：{outcomes:?}");
+            let loser = outcomes
+                .iter()
+                .find_map(|outcome| outcome.as_ref().err())
+                .unwrap();
+            assert!(
+                loser.contains("所以没有发请求"),
+                "第 {round} 轮：输的一方应该是被正式拒绝，不是锁错误：{loser}"
+            );
+            assert_eq!(dir.used(), 60_000);
+        }
     }
 
     #[test]
@@ -604,7 +692,8 @@ mod tests {
         let dir = Dir::new();
         dir.control(BUDGET_100K);
         let _permit = begin(Some(dir.path()), &"说".repeat(100)).expect("应通过");
-        // 服务商回了一个离谱的用量（几十亿）：不能让它把当天额度整个占满
+        // 服务商回了一个离谱的用量（几十亿）：不能让它把当天额度整个占满，改按文字估；
+        // 文字只有 150，但有预留在（100 + 3000 = 3100），记账不低于预留
         record(
             Some(dir.path()),
             "openai",
@@ -613,7 +702,7 @@ mod tests {
             &"答".repeat(50),
             Some((4_000_000_000, 9)),
         );
-        assert_eq!(dir.used(), 150);
+        assert_eq!(dir.used(), 3100);
     }
 
     #[test]
@@ -685,5 +774,106 @@ mod tests {
         assert_eq!(readable_tokens(10_000), "1.0 万 token");
         assert_eq!(readable_tokens(138_651), "13.9 万 token");
         assert_eq!(readable_tokens(100_000), "10.0 万 token");
+    }
+
+    #[test]
+    fn a_rejected_request_gives_the_whole_reservation_back() {
+        // 一把错的密钥、一个配错的模型：整批解析连失败 20 多次，不能在账本里留下 9 万多 token、什么也没花
+        let dir = Dir::new();
+        dir.control(BUDGET_100K);
+        for _ in 0..30 {
+            let permit = begin(Some(dir.path()), &"说".repeat(2000)).expect("每次都应通过");
+            release_unbilled();
+            drop(permit);
+        }
+        assert_eq!(dir.used(), 0, "被拒绝的请求没有计费，一分都不该留");
+        let (status, input, output) = dir.row(LEGACY_ROW_LATEST);
+        assert_eq!((status.as_str(), input, output), ("cancelled", 0, 0));
+        // 没退回的对照（超时 / 5xx，不确定是否计费）：留提示词那部分
+        let permit = begin(Some(dir.path()), &"说".repeat(2000)).expect("应通过");
+        drop(permit);
+        assert_eq!(dir.used(), 2000);
+    }
+
+    #[test]
+    fn a_stream_without_usage_never_settles_below_the_reservation() {
+        // 流式回复没有用量，推理模型的思考 token 又不在文字里：只按文字估会比真实少得多，
+        // 甚至把预留压低（6k 预留结算成 1.5k）。这种情况记账不能比预留少。
+        let dir = Dir::new();
+        dir.control(BUDGET_100K);
+        let permit = begin(Some(dir.path()), &"说".repeat(1000)).expect("应通过");
+        assert_eq!(dir.used(), 4000);
+        record(
+            Some(dir.path()),
+            "openai",
+            "m",
+            &"说".repeat(1000),
+            "短",
+            None,
+        );
+        assert_eq!(dir.used(), 4000, "没有用量：不低于预留 4000");
+        drop(permit);
+        // 文字估得比预留还多（输出很长）：按文字估
+        let permit = begin(Some(dir.path()), "短").expect("应通过");
+        record(
+            Some(dir.path()),
+            "openai",
+            "m",
+            "短",
+            &"答".repeat(9000),
+            None,
+        );
+        drop(permit);
+        assert_eq!(dir.used(), 4000 + 1 + 9000);
+    }
+
+    #[test]
+    fn a_failed_settle_puts_the_reservation_back_so_nothing_stays_running() {
+        let dir = Dir::new();
+        dir.control(BUDGET_100K);
+        let permit = begin(Some(dir.path()), &"说".repeat(1000)).expect("应通过");
+        // 把预留指向一个打不开的路径，让结算失败（重试 3 次后放弃）
+        let bogus = dir
+            .path()
+            .with_file_name("not-a-dir")
+            .join("x")
+            .join("y.sqlite3");
+        RESERVATION.with(|slot| {
+            if let Some(reservation) = slot.borrow_mut().as_mut() {
+                reservation.database = bogus.clone();
+            }
+        });
+        record(Some(&bogus), "openai", "m", "p", "c", Some((10, 5)));
+        let restored = RESERVATION.with(|slot| slot.borrow().is_some());
+        assert!(restored, "结算失败要把预留放回去，凭证放掉时才有人收尾");
+        // 收尾：指回真的库，让凭证放掉时能把它记成已取消
+        RESERVATION.with(|slot| {
+            if let Some(reservation) = slot.borrow_mut().as_mut() {
+                reservation.database = dir.path().to_path_buf();
+            }
+        });
+        drop(permit);
+        let (status, _, _) = dir.row(LEGACY_ROW);
+        assert_eq!(status, "cancelled", "不能留下一条永远 running 的行");
+    }
+
+    #[test]
+    fn a_permit_cannot_cross_threads() {
+        // 编译期性质：SpendPermit 含 PhantomData<*const ()>，不是 Send。
+        // 用「自动引用」的小技巧在运行期读出来：只有 T: Send 时 Probe::<T>::IS_SEND 才取到 true，否则退到 trait 里的 false。
+        trait NotSend {
+            const IS_SEND: bool = false;
+        }
+        impl<T: ?Sized> NotSend for T {}
+        struct Probe<T: ?Sized>(PhantomData<T>);
+        #[allow(dead_code)]
+        impl<T: ?Sized + Send> Probe<T> {
+            const IS_SEND: bool = true;
+        }
+        assert!(
+            !<Probe<SpendPermit>>::IS_SEND,
+            "凭证不能是 Send：在别的线程放掉会让原线程的嵌套深度卡在 1，之后的请求不再检查额度"
+        );
+        assert!(<Probe<String>>::IS_SEND, "探针本身要能认出 Send 的类型");
     }
 }

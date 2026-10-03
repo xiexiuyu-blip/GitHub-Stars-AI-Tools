@@ -629,22 +629,27 @@ pub fn start_worker(db_path: &Path, handlers: Vec<Arc<dyn JobHandler>>) -> Worke
 /// `updated_at` 不改：那次请求发生在认领的时候，预留按那个时间进 24 小时窗口。改成现在，
 /// 几天前就停在 running 的旧行会把预留「重新记到今天」。
 fn recover_running_jobs(conn: &Connection, now: &str) -> Result<usize, String> {
-    // 旧版 AI 功能（`spend_guard`）发请求前在账本里留的预留行也是 running：程序崩了、被关掉时它们留下来。
-    // 它们不是队列任务，不能放回队列（没有处理器认领，会一直占着「排队中」）；记成已取消，预留的用量照旧计入窗口。
-    conn.execute(
+    let not_before = shift_db_time(now, INTERRUPTED_RETRY_DELAY_SECS)?;
+    // 两条 UPDATE 在一个事务里，中间不会有别的连接插进一条 running 的预留行
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(|error| format!("中断任务恢复失败：{error}"))?;
+    tx.execute(
         "UPDATE ai_jobs SET status = 'cancelled', finished_at = updated_at
          WHERE status = 'running' AND target_id LIKE 'legacy-%'",
         [],
     )
     .map_err(|error| format!("中断任务恢复失败：{error}"))?;
-    let not_before = shift_db_time(now, INTERRUPTED_RETRY_DELAY_SECS)?;
-    let changed = conn
+    // 旧功能的预留行绝不放回队列（没有处理器认领，会变成永远「排队中」的幽灵行）
+    let changed = tx
         .execute(
             "UPDATE ai_jobs
              SET status = 'queued', error_kind = ?1, started_at = NULL, not_before = ?2
-             WHERE status = 'running'",
+             WHERE status = 'running' AND target_id NOT LIKE 'legacy-%'",
             params![ErrorKind::Interrupted.as_str(), not_before],
         )
+        .map_err(|error| format!("中断任务恢复失败：{error}"))?;
+    tx.commit()
         .map_err(|error| format!("中断任务恢复失败：{error}"))?;
     Ok(changed)
 }
@@ -889,9 +894,11 @@ pub(crate) fn tokens_used_since(conn: &Connection, cutoff: &str) -> Result<i64, 
     .map_err(|error| format!("用量读取失败：{error}"))
 }
 
+/// 队列里某个状态的任务数。旧功能（`spend_guard`）的账本行不算：它们不是队列任务，
+/// 数进去，一次 AI 搜索在途时界面就会说「正在后台整理」「进行中 1」。用量（`tokens_used_since`）照旧含它们。
 fn count_status(conn: &Connection, status: &str) -> Result<i64, String> {
     conn.query_row(
-        "SELECT COUNT(*) FROM ai_jobs WHERE status = ?1",
+        "SELECT COUNT(*) FROM ai_jobs WHERE status = ?1 AND target_id NOT LIKE 'legacy-%'",
         [status],
         |row| row.get(0),
     )
@@ -2992,5 +2999,51 @@ mod tests {
         drop(conn);
         // 预留的用量照旧计入窗口
         assert_eq!(queue_status(db.path()).unwrap().tokens_24h, 4000);
+    }
+
+    #[test]
+    fn legacy_ledger_rows_use_up_budget_but_are_not_queue_work() {
+        let db = TestDb::new("legacy-not-queue");
+        let conn = db.conn();
+        let now = now_db_time();
+        conn.execute(
+            "INSERT INTO ai_jobs(id, account_id, job_type, target_type, target_id, status, attempts, input_tokens, created_at, updated_at)
+             VALUES ('legacy-run', 'acct', 'problem_answer', 'query', 'legacy-abc', 'running', 1, 4000, ?1, ?1)",
+            [&now],
+        )
+        .unwrap();
+        drop(conn);
+        set_daily_budget(&queue_control_path(db.path()), 100_000).unwrap();
+        let status = queue_status(db.path()).unwrap();
+        // 一次 AI 搜索在途：占额度，但界面不能因此说「正在后台整理」「进行中 1」
+        assert_eq!((status.running, status.queued, status.failed), (0, 0, 0));
+        assert_eq!(status.tokens_24h, 4000);
+        assert_eq!(status.state, "idle");
+    }
+
+    #[test]
+    fn a_late_recovery_never_turns_a_legacy_reservation_into_a_queued_ghost() {
+        let db = TestDb::new("recover-ghost");
+        let conn = db.conn();
+        let now = now_db_time();
+        conn.execute(
+            "INSERT INTO ai_jobs(id, account_id, job_type, target_type, target_id, status, attempts, input_tokens, created_at, updated_at)
+             VALUES ('legacy-run', 'acct', 'problem_answer', 'query', 'legacy-abc', 'running', 1, 4000, ?1, ?1)",
+            [&now],
+        )
+        .unwrap();
+        recover_running_jobs(&conn, &now).unwrap();
+        let queued: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM ai_jobs WHERE status = 'queued'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            queued, 0,
+            "旧功能的预留行没有处理器认领，变成排队中就是永远的幽灵行"
+        );
+        assert_eq!(snap(&conn, "legacy-run").status, "cancelled");
     }
 }

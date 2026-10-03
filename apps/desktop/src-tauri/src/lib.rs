@@ -5078,6 +5078,7 @@ fn batch_generate_repository_ai_documents_worker(
     let mut missing_readme_count = 0_usize;
     let mut failures = Vec::new();
     let mut stopped_by_budget: Option<String> = None;
+    let mut consecutive_failures = 0_usize;
 
     emit_task_progress(
         &app_handle,
@@ -5208,7 +5209,10 @@ fn batch_generate_repository_ai_documents_worker(
         })();
 
         match result {
-            Ok(BatchItemOutcome::Generated) => generated_count += 1,
+            Ok(BatchItemOutcome::Generated) => {
+                generated_count += 1;
+                consecutive_failures = 0;
+            }
             Ok(BatchItemOutcome::Skipped) => skipped_count += 1,
             Ok(BatchItemOutcome::MissingReadme) => missing_readme_count += 1,
             // 额度用完（或被暂停）：后面的每一个都会被同样拒绝，不要把整批都记成失败，到这里停下。
@@ -5216,11 +5220,21 @@ fn batch_generate_repository_ai_documents_worker(
                 stopped_by_budget = Some(error);
                 break;
             }
-            Err(error) => failures.push(BatchAiDocumentFailure {
-                repository_id: repository.id,
-                full_name: repository.full_name,
-                error,
-            }),
+            Err(error) => {
+                failures.push(BatchAiDocumentFailure {
+                    repository_id: repository.id,
+                    full_name: repository.full_name,
+                    error: error.clone(),
+                });
+                // 连续失败说明是配置的问题（密钥 / 模型 / 网络），不是某个仓库的问题：不要把几百个仓库一个个试完
+                consecutive_failures += 1;
+                if consecutive_failures >= BATCH_STOP_AFTER_FAILURES {
+                    stopped_by_budget = Some(format!(
+                        "连续 {BATCH_STOP_AFTER_FAILURES} 个仓库都失败了，先停下（最后一个错误：{error}）。请检查 AI 引擎设置和网络后再试。"
+                    ));
+                    break;
+                }
+            }
         }
         scanned_count += 1;
         emit_task_progress(
@@ -5274,6 +5288,9 @@ fn batch_generate_repository_ai_documents_worker(
         failures,
     })
 }
+
+/// 整批解析连续失败这么多个就停下。
+const BATCH_STOP_AFTER_FAILURES: usize = 5;
 
 enum BatchItemOutcome {
     Generated,
