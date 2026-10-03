@@ -304,7 +304,15 @@ function AppContent() {
       case 'capture':
         return <CapturePage />;
       case 'library':
-        return <V2LibraryPage initialKeyword={libraryKeyword} />;
+        return (
+          <V2LibraryPage
+            initialKeyword={libraryKeyword}
+            onOpenSolve={(query) => {
+              setSolveQuestion(query);
+              setCurrentPage('solve');
+            }}
+          />
+        );
       case 'map':
         return <MapPage />;
       case 'solve':
