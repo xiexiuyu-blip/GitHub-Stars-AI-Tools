@@ -9,6 +9,10 @@ cd "$ROOT"
 export COREPACK_HOME="$ROOT/.corepack"
 export COREPACK_ENABLE_NETWORK=0
 export CARGO_NET_OFFLINE=true
+# 不让 pnpm 在运行脚本前自作主张地重装依赖（无人值守时没有终端可确认，沙盒里也写不了全局仓库）
+export CI=true
+export npm_config_verify_deps_before_run=false
+export pnpm_config_verify_deps_before_run=false
 MANIFEST="$ROOT/apps/desktop/src-tauri/Cargo.toml"
 
 cmd="${1:-}"
