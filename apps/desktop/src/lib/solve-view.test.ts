@@ -6,6 +6,7 @@ import {
   formatOptions,
   gapNote,
   initialPicks,
+  makeMain,
   matchBadge,
   noIntentNote,
   orderedPicks,
@@ -340,5 +341,20 @@ describe('packPlaceholder 和 formatOptions', () => {
   it('格式选项的值和文案', () => {
     expect(formatOptions.map((item) => item.value)).toEqual(['markdown', 'agents', 'json']);
     expect(formatOptions.map((item) => item.label)).toEqual(['Markdown', 'AGENTS.md', 'JSON']);
+  });
+});
+
+describe('makeMain', () => {
+  it('把勾选里的某一项挪到最前，其余顺序不变', () => {
+    expect(makeMain(['a', 'b', 'c'], 'c')).toEqual(['c', 'a', 'b']);
+    expect(makeMain(['a', 'b', 'c'], 'b')).toEqual(['b', 'a', 'c']);
+  });
+
+  it('已经是第一个、或者没勾选，原样返回（新数组）', () => {
+    const picked = ['a', 'b'];
+    expect(makeMain(picked, 'a')).toEqual(['a', 'b']);
+    expect(makeMain(picked, 'a')).not.toBe(picked);
+    expect(makeMain(picked, 'x')).toEqual(['a', 'b']);
+    expect(makeMain([], 'a')).toEqual([]);
   });
 });

@@ -7,6 +7,7 @@ import {
   codexFallbackText,
   greetingFor,
   itemsForReadingFilter,
+  pickReason,
   pickWhyLine,
   readingGroupLabel,
 } from '@/lib/item-format';
@@ -19,18 +20,19 @@ import {
   getTodayView,
   listLibraryView,
   listScenarios,
-  regenerateLibraryCard,
   setLibraryReading,
 } from '@/lib/api';
 import { automationHint } from '@/lib/automation-view';
+import type { LibraryPreset } from '@/lib/library-filters';
 import { useAiAutomation } from '@/hooks/use-ai-automation';
+import { useRegenerate } from '@/hooks/use-regenerate';
 import { useListKeys } from '@/hooks/use-list-keys';
 import { Button, Card, EmptyState, Kbd, PageHeader, StatCard, useToast } from '@/components/kit';
-import { AutomationBanner, ItemDetail, ItemRow, PickCard } from '@/components/library';
+import { AutomationBanner, ItemDetail, ItemRow, PickCard, scenarioChipsOf } from '@/components/library';
 import { cn } from '@/lib/utils';
 
 type TodayPageProps = {
-  onOpenLibrary: () => void;
+  onOpenLibrary: (preset?: LibraryPreset) => void;
   onOpenCapture: () => void;
   onOpenSolve: () => void;
   /** 去工具箱（开启 / 调整 AI 自动整理） */
@@ -55,6 +57,8 @@ const FILTER_QUERY: Record<Exclude<TodayFilter, 'week'>, LibraryFilters> = {
 export function TodayPage(props: TodayPageProps) {
   const toast = useToast();
   const { status: automation } = useAiAutomation();
+  const regenerateCard = useRegenerate(props.onOpenToolbox);
+  const listScrollRef = useRef<HTMLDivElement | null>(null);
   const [name, setName] = useState('Fox');
   const [phase, setPhase] = useState<'loading' | 'ready' | 'error'>('loading');
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -322,14 +326,6 @@ export function TodayPage(props: TodayPageProps) {
     }
   }
 
-  async function regenerateCard(id: string) {
-    try {
-      await regenerateLibraryCard(id);
-      toast.show({ title: '已排队，整理好会更新' });
-    } catch (reason) {
-      toast.show({ title: describeInvokeError(reason) });
-    }
-  }
 
   useListKeys({
     ids: ordered.map((item) => item.id),
@@ -345,6 +341,7 @@ export function TodayPage(props: TodayPageProps) {
 
   function choose(next: TodayFilter) {
     setFilter(next);
+    if (listScrollRef.current) listScrollRef.current.scrollTop = 0;
     if (narrow) setDetailOpen(false);
   }
 
@@ -369,6 +366,22 @@ export function TodayPage(props: TodayPageProps) {
   const hideDetail = narrow && !detailOpen;
   const empty = emptyCopy(filter);
   const hint = automationHint(automation, today?.counts?.cardsPending ?? 0);
+  // 统计卡上写的是全部，列表最多列一屏：差多少就老实说，并给一个去资料库看全部的入口
+  const listedTotal = filter === 'pending'
+    ? today?.counts?.cardsPending ?? 0
+    : filter === 'want'
+      ? readingCounts?.want ?? 0
+      : filter === 'in_use'
+        ? readingCounts?.inUse ?? 0
+        : 0;
+  const viewAllPreset: LibraryPreset | null = filter === 'pending'
+    ? { cardState: 'pending' }
+    : filter === 'want'
+      ? { reading: 'want' }
+      : filter === 'in_use'
+        ? { reading: 'in_use' }
+        : null;
+  const hiddenCount = viewAllPreset ? Math.max(0, listedTotal - ordered.length) : 0;
 
   return (
     <section className="flex h-full min-h-0 flex-col gap-3 overflow-hidden px-5 pt-4 pb-5 max-[899px]:px-4 max-[899px]:pt-3 max-[899px]:pb-4">
@@ -382,7 +395,7 @@ export function TodayPage(props: TodayPageProps) {
       <AutomationBanner hint={hint} onAction={props.onOpenToolbox} />
       <div className="grid min-h-0 flex-1 grid-cols-1 gap-3 min-[900px]:grid-cols-[minmax(340px,460px)_minmax(0,1fr)]">
         <Card className={cn('flex min-h-0 flex-col overflow-hidden', hideList && 'hidden')}>
-          <div className="min-h-0 flex-1 overflow-auto py-1">
+          <div ref={listScrollRef} className="min-h-0 flex-1 overflow-auto py-1">
             {renderListBody()}
           </div>
           <div className="flex shrink-0 flex-wrap gap-2.5 border-t border-muted px-4 py-2.5 text-xs text-on-surface-variant">
@@ -451,6 +464,7 @@ export function TodayPage(props: TodayPageProps) {
                 item={item}
                 selected={item.id === selectedId}
                 why={pickWhyLine(item)}
+                reason={pickReason(scenarioChipsOf(item, scenarios).map((scenario) => scenario.nameZh))}
                 scenarios={scenarios}
                 onSelect={() => pickRow(item.id)}
                 onWant={() => void changeReading(item.id, 'want')}
@@ -475,6 +489,16 @@ export function TodayPage(props: TodayPageProps) {
             ))}
           </>
         ) : null}
+        {hiddenCount > 0 && viewAllPreset ? (
+          <button
+            type="button"
+            className="mx-3 my-2.5 flex w-[calc(100%-24px)] items-center justify-between rounded-lg border border-dashed border-border px-3.5 py-2.5 text-left text-sm text-on-surface-variant hover:bg-surface-container-low"
+            onClick={() => props.onOpenLibrary(viewAllPreset)}
+          >
+            <span>这里只列了前 {ordered.length} 个，还有 {hiddenCount} 个</span>
+            <span className="shrink-0 text-accent-foreground">去资料库看全部 →</span>
+          </button>
+        ) : null}
       </>
     );
   }
@@ -495,10 +519,10 @@ function emptyCopy(filter: TodayFilter): { title: string; description: string } 
 
 function GroupHeader(props: { title: string; count: number; hint?: string }) {
   return (
-    <div className="flex flex-wrap items-center gap-1.5 px-4 pt-3 pb-1 text-xs text-on-surface-variant">
-      <span>{props.title}</span>
-      <span className="font-medium">{props.count}</span>
-      {props.hint ? <span>· {props.hint}</span> : null}
+    <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5 px-4 pt-3.5 pb-1.5">
+      <span className="text-[15px] font-semibold text-foreground">{props.title}</span>
+      <span className="text-xs font-medium text-on-surface-variant">{props.count}</span>
+      {props.hint ? <span className="text-xs text-subtle">{props.hint}</span> : null}
     </div>
   );
 }

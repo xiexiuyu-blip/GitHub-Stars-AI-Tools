@@ -34,9 +34,12 @@ export class AppErrorBoundary extends Component<AppErrorBoundaryProps, AppErrorB
           <p className="mt-2 text-sm text-on-surface-variant">
             只是界面崩了，你的资料库没有受影响。点「重新加载」通常就能恢复；如果反复出现，请复制下面的信息发给开发者。
           </p>
-          <pre className="mt-4 max-h-64 overflow-auto whitespace-pre-wrap break-words rounded-md bg-surface-container p-3 text-xs">
-            {detail}
-          </pre>
+          <details className="mt-4">
+            <summary className="cursor-pointer text-xs text-on-surface-variant">看报错细节（给开发者的）</summary>
+            <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-words rounded-md bg-surface-container p-3 text-xs">
+              {detail}
+            </pre>
+          </details>
           <div className="mt-4 flex gap-2">
             <button
               type="button"

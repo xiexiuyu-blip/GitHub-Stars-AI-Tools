@@ -15,6 +15,7 @@ import {
   canCommit,
   type CaptureSource,
   describeCommit,
+  inboxHeading,
   type InboxFilter,
   isTooLong,
   noteError,
@@ -243,6 +244,7 @@ export function CapturePage() {
     if (busyRef.current) return;
     const action = archiveAction(item.status);
     const editingThis = editingId === item.id;
+    const itemName = inboxHeading(item.title, item.normalizedUrl);
     busyRef.current = item.id;
     setBusyId(item.id);
     try {
@@ -253,13 +255,15 @@ export function CapturePage() {
       if (action.target === 'archived' && back) {
         toast.show({
           title: '已归档',
+          sub: itemName,
           actions: [{ label: '撤销', onClick: () => { void undoStatus(item.id, back); } }],
         });
       } else if (action.target === 'archived') {
-        toast.show({ title: '已归档' });
+        toast.show({ title: '已归档', sub: itemName });
       } else {
         toast.show({
           title: '已恢复',
+          sub: itemName,
           actions: [{ label: '撤销', onClick: () => { void undoStatus(item.id, 'archived'); } }],
         });
       }

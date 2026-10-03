@@ -34,10 +34,8 @@ export const SUB_TABS: Record<'library' | 'solve' | 'settings', SubTab[]> = {
     { key: 'library', label: '资料库' },
     { key: 'map', label: '地图' },
   ],
-  solve: [
-    { key: 'solve', label: '找方案' },
-    { key: 'packs', label: '参考包' },
-  ],
+  // 参考包已经在「找方案」页右边了；旧的单独「参考包」页不再放进标签条（只有一项就不显示标签条）
+  solve: [{ key: 'solve', label: '找方案' }],
   settings: [
     { key: 'settings', label: '设置' },
     { key: 'toolbox', label: '工具箱' },
@@ -69,7 +67,7 @@ export function navKeyFor(page: AppPage): NavKey | null {
 export function subTabsFor(page: AppPage): SubTab[] | null {
   const group = navKeyFor(page);
   if (group === 'library' || group === 'solve' || group === 'settings') {
-    return SUB_TABS[group];
+    return SUB_TABS[group].length > 1 ? SUB_TABS[group] : null;
   }
   return null;
 }

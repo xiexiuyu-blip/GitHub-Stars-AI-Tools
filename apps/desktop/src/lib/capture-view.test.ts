@@ -18,6 +18,7 @@ import {
   isTooLong,
   githubFullName,
   kindIcon,
+  plainBlockedReason,
   noteError,
   previewDecision,
   previewSummary,
@@ -114,7 +115,7 @@ describe('describeCommit', () => {
       alreadyStarred: 2,
       alreadyInInbox: 0,
       blocked: 1,
-    }))).toBe('新收 4 条，2 条已在你的 Stars 里，1 条是本机或内网地址，已拦下。');
+    }))).toBe('新收 4 条，2 条你已经收藏过了，1 条是本机或内网地址，没有收。');
     expect(describeCommit(commit({ linksFound: 2, created: 0, alreadyInInbox: 2 }))).toBe('新收 0 条，2 条已在收集箱。');
   });
 
@@ -125,7 +126,7 @@ describe('describeCommit', () => {
       alreadyStarred: 2,
       alreadyInInbox: 1,
       blocked: 3,
-    }))).toBe('新收 4 条，2 条已在你的 Stars 里，1 条已在收集箱，3 条是本机或内网地址，已拦下。');
+    }))).toBe('新收 4 条，2 条你已经收藏过了，1 条已在收集箱，3 条是本机或内网地址，没有收。');
   });
 });
 
@@ -163,10 +164,10 @@ describe('previewSummary 与 canCommit', () => {
   it('按四类数字汇总，0 也写出来；一个都没有时返回 null', () => {
     expect(previewSummary(preview({ new: 0, starred: 0, inbox: 0, blocked: 0 }))).toBeNull();
     expect(previewSummary(preview({ new: 4, starred: 2, inbox: 0, blocked: 1 }))).toBe(
-      '识别到 7 个链接：新 4 · 已在 Stars 2 · 已在收集箱 0 · 将被拦下 1',
+      '识别到 7 个链接：新的 4 · 已收藏 2 · 已在收集箱 0 · 不会收 1',
     );
     expect(previewSummary(preview({ new: 1, starred: 0, inbox: 0, blocked: 0 }))).toBe(
-      '识别到 1 个链接：新 1 · 已在 Stars 0 · 已在收集箱 0 · 将被拦下 0',
+      '识别到 1 个链接：新的 1 · 已收藏 0 · 已在收集箱 0 · 不会收 0',
     );
   });
 
@@ -204,16 +205,16 @@ describe('rowLabel 与 rowStatusTag', () => {
 
   it('四种状态对应颜色和文案，拦下时带上原因', () => {
     expect(rowStatusTag(row({ status: 'new' }))).toEqual({ tone: 'blue', text: '新' });
-    expect(rowStatusTag(row({ status: 'starred' }))).toEqual({ tone: 'gray', text: '已在你的 Stars' });
+    expect(rowStatusTag(row({ status: 'starred' }))).toEqual({ tone: 'gray', text: '你已经收藏了' });
     expect(rowStatusTag(row({ status: 'inbox' }))).toEqual({ tone: 'gray', text: '已在收集箱' });
     expect(rowStatusTag(row({ status: 'blocked', blockedReason: ' 内网地址 ' }))).toEqual({
       tone: 'red',
-      text: '将被拦下',
+      text: '不会收',
       reason: '内网地址',
     });
     expect(rowStatusTag(row({ status: 'blocked', blockedReason: '   ' }))).toEqual({
       tone: 'red',
-      text: '将被拦下',
+      text: '不会收',
     });
   });
 });
@@ -385,3 +386,13 @@ describe('githubFullName', () => {
   });
 });
 
+describe('plainBlockedReason', () => {
+  it('本机、内网、云元数据地址换成人话', () => {
+    expect(plainBlockedReason('本机、内网或云元数据地址，不收')).toContain('不是公开网页');
+    expect(plainBlockedReason(' 内网地址 ')).toContain('不是公开网页');
+  });
+
+  it('别的原因原样给', () => {
+    expect(plainBlockedReason(' 只收 http / https 链接 ')).toBe('只收 http / https 链接');
+  });
+});

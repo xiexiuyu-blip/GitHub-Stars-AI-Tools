@@ -9,6 +9,7 @@ import {
   formatTokens,
   itemPendingNote,
   parseDailyBudget,
+  regenerateNote,
   TOKENS_PER_REPO,
   type AutomationStatus,
 } from './automation-view';
@@ -201,5 +202,27 @@ describe('itemPendingNote', () => {
     expect(itemPendingNote(status({ queued: 1 })).actionLabel).toBeNull();
     expect(itemPendingNote(status()).actionLabel).toBeNull();
     expect(itemPendingNote(status({ enabled: false })).actionLabel).toBe('开启自动整理');
+  });
+});
+
+describe('regenerateNote', () => {
+  it('读不到状态：只说已加入队列，不许诺', () => {
+    expect(regenerateNote(null)).toEqual({ title: '已加入整理队列', actionLabel: null });
+  });
+
+  it('没开额度：明说要开启才会重做、不开不花钱，并给「去开启」', () => {
+    const note = regenerateNote(status({ enabled: false, dailyBudgetTokens: 0, budgetRemaining: 0 }));
+    expect(note.sub).toContain('开启后才会重新整理');
+    expect(note.sub).toContain('不花钱');
+    expect(note.actionLabel).toBe('去开启');
+  });
+
+  it('没配置服务 / 暂停 / 额度用完 / 在跑，各说各的', () => {
+    expect(regenerateNote(status({ providerConfigured: false })).actionLabel).toBe('去看看');
+    expect(regenerateNote(status({ paused: true })).sub).toContain('暂停');
+    expect(regenerateNote(status({ budgetRemaining: 0 })).sub).toContain('明天');
+    const running = regenerateNote(status({ queued: 2 }));
+    expect(running.sub).toContain('后台重新整理');
+    expect(running.actionLabel).toBeNull();
   });
 });

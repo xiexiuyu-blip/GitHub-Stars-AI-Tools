@@ -25,12 +25,12 @@ function state(patch: Partial<LibraryUiState> = {}): LibraryUiState {
 }
 
 describe('资料库筛选状态', () => {
-  it('默认只看已整理，按收藏时间，其余为空', () => {
+  it('默认看全部（没整理的也是收藏），按收藏时间，其余为空', () => {
     expect(createLibraryUiState()).toEqual({
       scenario: null,
       reading: null,
       form: null,
-      cardState: 'done',
+      cardState: 'all',
       keyword: '',
       sort: 'starred',
     });
@@ -41,7 +41,7 @@ describe('资料库筛选状态', () => {
     expect(blank.keyword).toBeUndefined();
     expect(blank.offset).toBe(0);
     expect(blank.limit).toBe(80);
-    expect(blank.cardState).toBe('done');
+    expect(blank.cardState).toBe('all');
     expect(blank.sort).toBe('starred');
     expect(blank.scenario).toBeUndefined();
     expect(blank.reading).toBeUndefined();
@@ -101,7 +101,7 @@ describe('资料库筛选状态', () => {
     expect(toggleForm(picked, 'cli').form).toBe('cli');
   });
 
-  it('清除筛选后整理状态回到已整理，排序保留', () => {
+  it('清除筛选后整理状态回到全部，排序保留', () => {
     const cleared = clearFilters(state({
       scenario: 'ec',
       reading: 'want',
@@ -114,7 +114,7 @@ describe('资料库筛选状态', () => {
       scenario: null,
       reading: null,
       form: null,
-      cardState: 'done',
+      cardState: 'all',
       keyword: '',
       sort: 'updated',
     });
@@ -129,7 +129,8 @@ describe('资料库筛选状态', () => {
     expect(hasActiveFilters(state({ reading: 'dropped' }))).toBe(true);
     expect(hasActiveFilters(state({ form: 'cli' }))).toBe(true);
     expect(hasActiveFilters(state({ cardState: 'pending' }))).toBe(true);
-    expect(hasActiveFilters(state({ cardState: 'all' }))).toBe(true);
+    expect(hasActiveFilters(state({ cardState: 'done' }))).toBe(true);
+    expect(hasActiveFilters(state({ cardState: 'all' }))).toBe(false);
   });
 
   it('初始关键词和场景会带上，空白当成没有', () => {
@@ -139,7 +140,7 @@ describe('资料库筛选状态', () => {
     expect(withInitial('  小红书  ', ' ec ')).toMatchObject({
       keyword: '小红书',
       scenario: 'ec',
-      cardState: 'done',
+      cardState: 'all',
       sort: 'starred',
     });
   });
@@ -196,21 +197,21 @@ describe('筛选栏的联动计数', () => {
     expect(formOptions(null)).toEqual([]);
   });
 
-  it('整理状态三个选项，全部是已整理加待整理', () => {
+  it('整理状态三个选项，全部排最前，数量是已整理加待整理', () => {
     expect(cardStateOptions({ done: 3, pending: 2 })).toEqual([
+      { value: 'all', label: '全部 5' },
       { value: 'done', label: '已整理 3' },
       { value: 'pending', label: '待整理 2' },
-      { value: 'all', label: '全部 5' },
     ]);
     expect(cardStateOptions(null)).toEqual([
+      { value: 'all', label: '全部 0' },
       { value: 'done', label: '已整理 0' },
       { value: 'pending', label: '待整理 0' },
-      { value: 'all', label: '全部 0' },
     ]);
     expect(cardStateOptions({ done: Number.NaN, pending: Number.POSITIVE_INFINITY }).map((item) => item.label)).toEqual([
+      '全部 0',
       '已整理 0',
       '待整理 0',
-      '全部 0',
     ]);
   });
 });
@@ -233,10 +234,11 @@ describe('加载更多和空白回退', () => {
     expect(nextPageOffset(50, 100, 80)).toBeNull();
   });
 
-  it('已整理为 0 且还有待整理、用户没动过、当前仍是默认值时，改看全部', () => {
+  it('当前停在「已整理」、已整理为 0 且还有待整理、用户没动过时，改看全部（默认已经是全部，这条只在从「已整理」进来时用得到）', () => {
     const counts = { cardState: { done: 0, pending: 4 } };
-    expect(shouldFallbackToAll(counts, state(), false)).toBe(true);
-    expect(shouldFallbackToAll({ cardState: { done: 0, pending: 1 } }, state(), false)).toBe(true);
+    expect(shouldFallbackToAll(counts, state({ cardState: 'done' }), false)).toBe(true);
+    expect(shouldFallbackToAll({ cardState: { done: 0, pending: 1 } }, state({ cardState: 'done' }), false)).toBe(true);
+    expect(shouldFallbackToAll(counts, state(), false)).toBe(false);
   });
 
   it('用户动过、已经不是默认、没有待整理、或已整理大于 0 时，不自动切换', () => {

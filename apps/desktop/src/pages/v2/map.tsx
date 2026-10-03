@@ -7,7 +7,9 @@ export function MapPage() {
   const [blocks, setBlocks] = useState<Block[]>([]);
   const [error, setError] = useState<string | null>(null);
   useEffect(() => {
-    invoke<Block[]>('get_graph_overview').then(setBlocks).catch((reason: unknown) => setError(String(reason)));
+    invoke<Block[] | null>('get_graph_overview')
+      .then((result) => setBlocks(Array.isArray(result) ? result : []))
+      .catch((reason: unknown) => setError(String(reason)));
   }, []);
   const total = blocks.reduce((sum, block) => sum + block.count, 0);
   return (

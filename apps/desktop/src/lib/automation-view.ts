@@ -146,6 +146,22 @@ export function itemPendingNote(status: AutomationStatus | null): { text: string
   return { text: `整理好之后，这里会出现中文说明、能做什么、怎么试。${original}`, actionLabel: null };
 }
 
+export type RegenerateNote = { title: string; sub?: string; actionLabel: string | null };
+
+/**
+ * 点「不对，重新整理」之后的提示。这只是把它排进队列，真正重做要等自动整理在跑、并且还有额度：
+ * 没开额度时不能说「整理好会更新」（那是花钱的动作，也是一句不会兑现的承诺）。
+ */
+export function regenerateNote(status: AutomationStatus | null): RegenerateNote {
+  const queued = '已加入整理队列';
+  if (!status) return { title: queued, actionLabel: null };
+  if (!status.providerConfigured) return { title: queued, sub: '还没配置 AI 服务，配置好才会重新整理', actionLabel: '去看看' };
+  if (status.paused) return { title: queued, sub: '自动整理现在是暂停的，继续后才会重新整理', actionLabel: '去处理' };
+  if (!status.enabled) return { title: queued, sub: '自动整理还没开启，开启后才会重新整理（不开启就不花钱）', actionLabel: '去开启' };
+  if (status.budgetRemaining <= 0) return { title: queued, sub: '今天的额度用完了，明天会接着整理', actionLabel: null };
+  return { title: queued, sub: '会在后台重新整理，好了会自动更新', actionLabel: null };
+}
+
 export function formatMinute(iso: string): string {
   const date = new Date(iso);
   if (Number.isNaN(date.getTime())) return iso;

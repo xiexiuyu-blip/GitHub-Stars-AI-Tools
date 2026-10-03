@@ -54,9 +54,9 @@ export function describeCommit(commit: CaptureCommit): string {
   if (commit.linksFound === 0) return '没有找到链接。';
   if (commit.duplicateBatch) return '这段已经收过，没有重复写入。';
   const parts = [`新收 ${commit.created} 条`];
-  if (commit.alreadyStarred) parts.push(`${commit.alreadyStarred} 条已在你的 Stars 里`);
+  if (commit.alreadyStarred) parts.push(`${commit.alreadyStarred} 条你已经收藏过了`);
   if (commit.alreadyInInbox) parts.push(`${commit.alreadyInInbox} 条已在收集箱`);
-  if (commit.blocked) parts.push(`${commit.blocked} 条是本机或内网地址，已拦下`);
+  if (commit.blocked) parts.push(`${commit.blocked} 条是本机或内网地址，没有收`);
   return `${parts.join('，')}。`;
 }
 
@@ -75,7 +75,7 @@ export function previewSummary(preview: CapturePreview): string | null {
   const blocked = preview.counts.blocked;
   const total = fresh + starred + inbox + blocked;
   if (total <= 0) return null;
-  return `识别到 ${total} 个链接：新 ${fresh} · 已在 Stars ${starred} · 已在收集箱 ${inbox} · 将被拦下 ${blocked}`;
+  return `识别到 ${total} 个链接：新的 ${fresh} · 已收藏 ${starred} · 已在收集箱 ${inbox} · 不会收 ${blocked}`;
 }
 
 export function canCommit(preview: CapturePreview): boolean {
@@ -96,10 +96,10 @@ export function rowLabel(row: Pick<CapturePreviewRow, 'kind' | 'owner' | 'name' 
 
 export function rowStatusTag(row: Pick<CapturePreviewRow, 'status' | 'blockedReason'>): RowStatusTag {
   if (row.status === 'new') return { tone: 'blue', text: '新' };
-  if (row.status === 'starred') return { tone: 'gray', text: '已在你的 Stars' };
+  if (row.status === 'starred') return { tone: 'gray', text: '你已经收藏了' };
   if (row.status === 'inbox') return { tone: 'gray', text: '已在收集箱' };
   const reason = row.blockedReason?.trim();
-  return reason ? { tone: 'red', text: '将被拦下', reason } : { tone: 'red', text: '将被拦下' };
+  return reason ? { tone: 'red', text: '不会收', reason } : { tone: 'red', text: '不会收' };
 }
 
 /** 收集箱里的 GitHub 仓库条目 → `owner/repo`（用来显示头像）。不是仓库、或链接里认不出来就返回 null。 */
@@ -236,4 +236,11 @@ export function removeInboxItem(
     totalCount: Math.max(0, page.totalCount - 1),
     counts: shiftInboxCounts(page.counts, from, to),
   };
+}
+
+/** 后台给的拦截原因里有「云元数据地址」这类词：换成人话。 */
+export function plainBlockedReason(reason: string): string {
+  const text = reason.trim();
+  if (/内网|本机|云元数据|localhost|127\.0\.0\.1|metadata/i.test(text)) return '这是你电脑本机或公司内网的地址，不是公开网页，不收';
+  return text;
 }

@@ -4,13 +4,16 @@ import {
   assembleWeekGroups,
   buildTodayLead,
   cleanHowToTry,
+  cleanDescription,
   clipText,
   codexFallbackText,
   firstSentences,
   formatStars,
   greetingFor,
   itemsForReadingFilter,
+  maturityLabel,
   monthDay,
+  pickReason,
   pickWhyLine,
   readingGroupLabel,
   relativeDays,
@@ -246,5 +249,53 @@ describe('仓库名、截断与今日列表', () => {
     ];
     expect(itemsForReadingFilter(items, 'want').map((item) => item.id)).toEqual(['a', 'c']);
     expect(itemsForReadingFilter(items, 'in_use')).toEqual([]);
+  });
+});
+
+describe('maturityLabel', () => {
+  it('认识的英文换成中文，不分大小写', () => {
+    expect(maturityLabel('usable')).toBe('可用');
+    expect(maturityLabel(' Stable ')).toBe('稳定');
+    expect(maturityLabel('EXPERIMENTAL')).toBe('实验中');
+  });
+
+  it('短词原样；整句话不显示（不截半句误导）', () => {
+    expect(maturityLabel('较成熟')).toBe('较成熟');
+    expect(maturityLabel('较高，具备详细文档、QC 自检流程、多种结构模板')).toBeNull();
+    expect(maturityLabel('开源项目，提供安装脚本和文档，需自行部署。')).toBeNull();
+  });
+
+  it('空值返回 null', () => {
+    expect(maturityLabel(null)).toBeNull();
+    expect(maturityLabel('   ')).toBeNull();
+  });
+});
+
+describe('cleanDescription', () => {
+  it('去掉表情、:shortcode:、链接，空白折成一格', () => {
+    expect(cleanDescription('🚀 抖音数据采集   工具 :hedgehog: https://example.com/a?b=1 好用')).toBe('抖音数据采集 工具 好用');
+    expect(cleanDescription(':arrow_double_down: Dumb downloader')).toBe('Dumb downloader');
+  });
+
+  it('开头残留的分隔符也去掉；空值给空串', () => {
+    expect(cleanDescription('| 一个工具')).toBe('一个工具');
+    expect(cleanDescription(null)).toBe('');
+    expect(cleanDescription('   ')).toBe('');
+  });
+
+  it('正常文字原样', () => {
+    expect(cleanDescription('Python tool for converting files to Markdown.')).toBe('Python tool for converting files to Markdown.');
+  });
+});
+
+describe('pickReason', () => {
+  it('取所属的第一个方向写成推荐理由', () => {
+    expect(pickReason(['小红书', '抖音·短视频'])).toBe('你常做「小红书」，这个还没看过');
+    expect(pickReason(['  ', '电商'])).toBe('你常做「电商」，这个还没看过');
+  });
+
+  it('没有所属方向就不编', () => {
+    expect(pickReason([])).toBeNull();
+    expect(pickReason([' ', ''])).toBeNull();
   });
 });

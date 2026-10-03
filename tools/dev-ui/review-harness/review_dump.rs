@@ -228,6 +228,24 @@ fn call(work: &Path, cmd: &str, args: &serde_json::Value) -> Result<serde_json::
         }
         "open_external_url" => Ok(Value::Null),
         "solve_v2" => ser(to_value(solve::solve_query(work, &arg_str(args, "query")?)?)),
+        // 发现 / 社区：这两个会真的联网（GitHub 搜索、Hacker News），不登录；结果写进副本库里的缓存表
+        "list_discover" => ser(to_value(crate::discover::list_discover_view(
+            work,
+            args.get("scenarioId").and_then(|v| v.as_str()),
+        )?)),
+        "refresh_discover" => ser(to_value(crate::discover::refresh_discover_with(
+            &crate::web_fetch::CurlFetcher,
+            work,
+            &arg_str(args, "scenarioId")?,
+            time::OffsetDateTime::now_utc().unix_timestamp(),
+        )?)),
+        "get_repo_community" => ser(to_value(crate::community::get_repo_community_with(
+            &crate::web_fetch::CurlFetcher,
+            work,
+            &arg_str(args, "id")?,
+            args.get("refresh").and_then(|v| v.as_bool()).unwrap_or(false),
+            time::OffsetDateTime::now_utc().unix_timestamp(),
+        )?)),
         "preview_capture" => ser(to_value(inbox_view::preview_capture(
             work,
             &arg_str(args, "text")?,

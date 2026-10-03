@@ -52,14 +52,24 @@ export function createLibraryUiState(): LibraryUiState {
     scenario: null,
     reading: null,
     form: null,
-    cardState: 'done',
+    // 默认看全部：还没整理的项目也是你的收藏，搜关键词、按场景找都不该漏掉它们
+    cardState: 'all',
     keyword: '',
     sort: 'starred',
   };
 }
 
-export function withInitial(initialKeyword?: string | null, initialScenario?: string | null): LibraryUiState {
+/** 从别的页面带着条件进资料库（比如今日里的「去资料库看全部待整理」）。 */
+export type LibraryPreset = { cardState?: 'done' | 'pending'; reading?: ReadingGroup | null };
+
+export function withInitial(
+  initialKeyword?: string | null,
+  initialScenario?: string | null,
+  preset?: LibraryPreset | null,
+): LibraryUiState {
   const state = createLibraryUiState();
+  if (preset?.cardState) state.cardState = preset.cardState;
+  if (preset?.reading) state.reading = preset.reading;
   state.keyword = initialKeyword?.trim() ?? '';
   const scenario = initialScenario?.trim() ?? '';
   state.scenario = scenario ? scenario : null;
@@ -104,7 +114,7 @@ export function clearFilters(state: LibraryUiState): LibraryUiState {
     scenario: null,
     reading: null,
     form: null,
-    cardState: 'done',
+    cardState: 'all',
     keyword: '',
     sort: state.sort,
   };
@@ -116,7 +126,7 @@ export function hasActiveFilters(state: LibraryUiState): boolean {
     || Boolean(state.reading)
     || Boolean(state.form)
     || state.keyword.trim() !== ''
-    || state.cardState !== 'done';
+    || state.cardState !== 'all';
 }
 
 /**
@@ -159,9 +169,9 @@ export function cardStateOptions(
   const done = asCount(cardState?.done);
   const pending = asCount(cardState?.pending);
   return [
+    { value: 'all', label: `全部 ${done + pending}` },
     { value: 'done', label: `已整理 ${done}` },
     { value: 'pending', label: `待整理 ${pending}` },
-    { value: 'all', label: `全部 ${done + pending}` },
   ];
 }
 

@@ -8,6 +8,7 @@ import {
   rowLabel,
   rowStatusTag,
   TOO_LONG_MESSAGE,
+  plainBlockedReason,
 } from '@/lib/capture-view';
 import { cn } from '@/lib/utils';
 
@@ -97,7 +98,7 @@ function PreviewRow(props: { row: CapturePreviewRow }) {
       </span>
       <div className="min-w-0">
         <b className="block truncate text-sm font-medium text-foreground" title={label}>{label}</b>
-        {tag.reason ? <div className="truncate text-xs text-error" title={tag.reason}>{tag.reason}</div> : null}
+        {tag.reason ? <div className="truncate text-xs text-error" title={tag.reason}>{plainBlockedReason(tag.reason)}</div> : null}
       </div>
       <Tag tone={tag.tone}>{tag.text}</Tag>
     </div>
