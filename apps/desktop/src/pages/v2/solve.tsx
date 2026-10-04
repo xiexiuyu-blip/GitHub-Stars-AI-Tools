@@ -6,6 +6,7 @@ import {
   BACK_TO_PICK_LABEL,
   buildPackRequest,
   crossNote,
+  DIRECT_FROM_PICKS_LABEL,
   DIRECT_LABEL,
   formatOptions,
   gapNote,
@@ -350,6 +351,9 @@ export function SolvePage(props: {
             </div>
           )}
           <div className="flex shrink-0 items-center gap-2 border-t border-muted px-4 py-3">
+            {!direct && selectedHits.length > 0 ? (
+              <Button variant="text" size="sm" onClick={() => setDirect(true)}>{DIRECT_FROM_PICKS_LABEL}</Button>
+            ) : null}
             <span className="flex-1" />
             {copyButton}
           </div>

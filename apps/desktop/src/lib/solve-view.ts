@@ -220,6 +220,8 @@ export function pickLocalCapabilities(
 
 /** 参考包面板里，一个工具都没勾时的入口。 */
 export const DIRECT_LABEL = '没有合适的？直接交给 Codex';
+/** 已经勾了工具、又觉得都不合适时的入口；勾选的工具留着，「改回挑工具」能回去。 */
+export const DIRECT_FROM_PICKS_LABEL = '都不合适？直接交给 Codex';
 /** 从直接交接单回到勾选工具。 */
 export const BACK_TO_PICK_LABEL = '改回挑工具';
 

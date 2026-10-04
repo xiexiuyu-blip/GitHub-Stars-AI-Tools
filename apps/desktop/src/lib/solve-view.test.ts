@@ -4,6 +4,7 @@ import {
   BACK_TO_PICK_LABEL,
   buildPackRequest,
   crossNote,
+  DIRECT_FROM_PICKS_LABEL,
   DIRECT_LABEL,
   formatOptions,
   gapNote,
@@ -299,6 +300,11 @@ describe('buildPackRequest', () => {
 
   it('直接交给 Codex 的按钮文案', () => {
     expect(DIRECT_LABEL).toBe('没有合适的？直接交给 Codex');
+  });
+
+  it('勾了工具之后的直接交接入口文案，和没勾时的不同', () => {
+    expect(DIRECT_FROM_PICKS_LABEL).toBe('都不合适？直接交给 Codex');
+    expect(DIRECT_FROM_PICKS_LABEL).not.toBe(DIRECT_LABEL);
   });
 
   it('改回挑工具的按钮文案', () => {

@@ -490,6 +490,8 @@ struct RepoRecord {
     has_card: bool,
     /// GitHub 描述原文。没有理解卡时，命中的「一句话」取它的第一句。
     github_description: String,
+    /// 理解卡写了它支持哪些系统，而里面没有 macOS（也不是跨平台 / 网页）。这台是 Mac：列出来，但不默认勾选。
+    mac_unsupported: bool,
 }
 
 struct CardBits {
@@ -498,6 +500,7 @@ struct CardBits {
     form: Option<String>,
     use_when: Vec<String>,
     what_it_is: String,
+    platforms: Vec<String>,
 }
 
 struct ScoreParts {
@@ -595,9 +598,11 @@ pub fn solve_query(db_path: &Path, query: &str) -> Result<SolveResult, String> {
     let mut hits = Vec::new();
     // 和 hits 一一对应：这条命中是不是只靠 README 里提到（见 `ScoreParts::readme_only`）。
     let mut readme_only = Vec::new();
+    let mut mac_unsupported = Vec::new();
     for (index, parts) in scored.into_iter().take(HIT_LIMIT) {
         let repo = &repos[index];
         readme_only.push(parts.readme_only);
+        mac_unsupported.push(repo.mac_unsupported);
         // 没有意图词时不知道用户要什么，不能说「全部对上」。
         let full_match = !main.is_empty() && parts.missing.is_empty();
         let why = why_text(repo, &main, &parts.matched, &extra, readme.get(&repo.id));
@@ -628,13 +633,13 @@ pub fn solve_query(db_path: &Path, query: &str) -> Result<SolveResult, String> {
         })
         .cloned()
         .collect::<Vec<_>>();
-    // 默认勾选：全都对上、且至少有一个意图词在内容里对上的前 3 条。
+    // 默认勾选：全都对上、至少有一个意图词在内容里对上、卡片没写「不支持 macOS」的前 3 条。
     // 只靠 README 里提到几次的命中（「做表情包」「写周报」这类收藏里没有专门工具的问题）不默认勾选，免得
     // 一打开参考包托盘里就是三个不太相关的工具；它们仍在列表里，要用自己勾。
     let preselected = hits
         .iter()
-        .zip(&readme_only)
-        .filter(|(hit, weak)| hit.full_match && !**weak)
+        .zip(readme_only.iter().zip(&mac_unsupported))
+        .filter(|(hit, (weak, no_mac))| hit.full_match && !**weak && !**no_mac)
         .take(3)
         .map(|(hit, _)| hit.id.clone())
         .collect::<Vec<_>>();
@@ -870,19 +875,20 @@ fn load_repos(
             scenario_ids,
             has_card,
             github_description: description.clone(),
+            mac_unsupported: lacks_macos(&card.platforms),
             blocks: TextBlocks {
                 name: full_name.to_lowercase(),
-                one_liner: shown.to_lowercase(),
-                capabilities: join_lower(&card.capabilities),
-                problems: join_lower(&problems),
-                keywords: join_lower(&keywords),
+                one_liner: mask_negated(&shown.to_lowercase()),
+                capabilities: mask_negated(&join_lower(&card.capabilities)),
+                problems: mask_negated(&join_lower(&problems)),
+                keywords: mask_negated(&join_lower(&keywords)),
                 scenarios: join_lower(&scenario_bits),
-                summary: format!(
+                summary: mask_negated(&format!(
                     "{} {}",
                     summary.to_lowercase(),
                     card.what_it_is.to_lowercase()
-                ),
-                description: description.to_lowercase(),
+                )),
+                description: mask_negated(&description.to_lowercase()),
                 topics: join_lower(&topics),
             },
             full_name,
@@ -996,7 +1002,7 @@ fn load_readme_stats(
         if text.trim().is_empty() {
             continue;
         }
-        let lower = text.to_lowercase();
+        let lower = mask_negated(&text.to_lowercase());
         let mut hits = HashMap::new();
         for intent in intents {
             let count = count_mentions(&lower, intent);
@@ -1851,6 +1857,57 @@ fn contains_all(haystack: &str, terms: &[String]) -> bool {
         .all(|term| !term.is_empty() && haystack.contains(term))
 }
 
+/// 这些词前面紧挨着「无 / 免 / 不含 / 不带 / 没有 / 零」，说的是「没有这个东西」（无水印下载、免广告），
+/// 不是「能处理这个东西」：把关键字遮掉，免得「去除水印」类任务命中「无水印下载」的下载器。
+const NEGATED_WORDS: [&str; 2] = ["水印", "广告"];
+const NEGATION_PREFIXES: [&str; 6] = ["无", "免", "不含", "不带", "没有", "零"];
+/// 英文里同样的说法（`watermark` 是「水印」的同义词）：no watermark / watermark-free……
+const NEGATED_ENGLISH: [&str; 8] = [
+    "no watermark",
+    "no-watermark",
+    "without watermark",
+    "watermark-free",
+    "watermark free",
+    "watermarks-free",
+    "non-watermarked",
+    "no watermarks",
+];
+
+fn mask_negated(text: &str) -> String {
+    let mut out = text.to_owned();
+    for word in NEGATED_WORDS {
+        let mask = "▒".repeat(word.chars().count());
+        for prefix in NEGATION_PREFIXES {
+            let negated = format!("{prefix}{word}");
+            if out.contains(&negated) {
+                out = out.replace(&negated, &format!("{prefix}{mask}"));
+            }
+        }
+    }
+    for phrase in NEGATED_ENGLISH {
+        if out.contains(phrase) {
+            out = out.replace(phrase, &phrase.replace("watermark", "▒▒▒▒▒▒▒▒▒"));
+        }
+    }
+    out
+}
+
+/// 理解卡写了支持哪些系统，而里面没有 macOS / 跨平台 / 网页。没写（空）不算不支持。
+fn lacks_macos(platforms: &[String]) -> bool {
+    let lowered: Vec<String> = platforms
+        .iter()
+        .map(|platform| platform.trim().to_lowercase())
+        .filter(|platform| !platform.is_empty())
+        .collect();
+    !lowered.is_empty()
+        && !lowered.iter().any(|platform| {
+            matches!(
+                platform.as_str(),
+                "macos" | "mac" | "darwin" | "cross" | "web"
+            )
+        })
+}
+
 fn join_lower(parts: &[String]) -> String {
     parts
         .iter()
@@ -1894,6 +1951,7 @@ fn parse_card(value: &Value) -> CardBits {
             form: None,
             use_when: Vec::new(),
             what_it_is: String::new(),
+            platforms: Vec::new(),
         };
     };
     let capabilities = obj
@@ -1924,12 +1982,14 @@ fn parse_card(value: &Value) -> CardBits {
         .map(str::trim)
         .filter(|text| !text.is_empty())
         .map(str::to_owned);
+    let platforms = string_list(obj, "platforms");
     CardBits {
         problems,
         capabilities,
         form,
         use_when,
         what_it_is,
+        platforms,
     }
 }
 
@@ -4573,6 +4633,7 @@ mod tests {
             },
             has_card: false,
             github_description: text.to_owned(),
+            mac_unsupported: false,
         }
     }
 
@@ -5265,6 +5326,148 @@ mod tests {
         let result = run(&db, "转录");
         assert!(has_term(&result.intents, "转录"), "{:?}", result.intents);
         assert_eq!(result.hits.len(), 1, "{:?}", result.hits);
+    }
+
+    #[test]
+    fn negated_mentions_do_not_count_as_the_thing() {
+        // 「无水印下载」是下载器的卖点，不是「能去水印」
+        assert_eq!(mask_negated("支持无水印下载"), "支持无▒▒下载");
+        assert_eq!(
+            mask_negated("免费无广告、不带水印、没有广告"),
+            "免费无▒▒、不带▒▒、没有▒▒"
+        );
+        // 「去水印」「水印检测」「广告创意」是正面说法，不动
+        assert_eq!(
+            mask_negated("批量去水印，做广告创意"),
+            "批量去水印，做广告创意"
+        );
+        assert_eq!(mask_negated("无需登录"), "无需登录");
+        assert_eq!(
+            mask_negated("video downloader, no watermark; watermark-free exports"),
+            "video downloader, no ▒▒▒▒▒▒▒▒▒; ▒▒▒▒▒▒▒▒▒-free exports"
+        );
+        assert_eq!(
+            mask_negated("remove watermark in batch"),
+            "remove watermark in batch"
+        );
+        let card = rich_card(
+            "app",
+            &["下载无水印视频"],
+            &["想存一份干净的视频"],
+            &["需要无水印素材时"],
+            "一个下载器",
+        );
+        let db = prepare("negated", |conn| {
+            insert_repo(
+                conn,
+                &NewRepo {
+                    id: "dl",
+                    full_name: "lab/downloader",
+                    description: "video downloader, no watermark",
+                    stars: 5,
+                    status: "active",
+                    one_liner: Some("无水印视频下载器"),
+                    summary: "下载无水印视频",
+                    keywords_json: "[\"无水印\"]",
+                    card_json: Some(&card),
+                },
+            );
+            insert_repo(
+                conn,
+                &NewRepo {
+                    id: "rm",
+                    full_name: "lab/remover",
+                    description: "remove watermark from images",
+                    stars: 1,
+                    status: "active",
+                    one_liner: Some("批量去水印工具"),
+                    summary: "批量去水印",
+                    keywords_json: "[\"去水印\"]",
+                    card_json: None,
+                },
+            );
+        });
+        let result = run(&db, "水印");
+        let names: Vec<&str> = result
+            .hits
+            .iter()
+            .map(|hit| hit.full_name.as_str())
+            .collect();
+        assert_eq!(names, vec!["lab/remover"], "{names:?}");
+    }
+
+    #[test]
+    fn projects_without_macos_are_listed_but_not_preselected() {
+        let windows_card = serde_json::json!({
+            "form": "app",
+            "platforms": ["windows"],
+            "capabilities": [{"name_zh": "生成封面"}],
+            "problems_solved": ["需要封面"],
+        })
+        .to_string();
+        let mac_card = serde_json::json!({
+            "form": "app",
+            "platforms": ["macos", "windows"],
+            "capabilities": [{"name_zh": "生成封面"}],
+            "problems_solved": ["需要封面"],
+        })
+        .to_string();
+        let unknown_card = serde_json::json!({
+            "form": "app",
+            "capabilities": [{"name_zh": "生成封面"}],
+            "problems_solved": ["需要封面"],
+        })
+        .to_string();
+        let db = prepare("macos-preselect", |conn| {
+            for (id, name, card, stars) in [
+                ("win", "lab/win-only", &windows_card, 900),
+                ("mac", "lab/mac-ok", &mac_card, 10),
+                ("unk", "lab/unknown", &unknown_card, 5),
+            ] {
+                insert_repo(
+                    conn,
+                    &NewRepo {
+                        id,
+                        full_name: name,
+                        description: "封面工具",
+                        stars,
+                        status: "active",
+                        one_liner: Some("生成封面的工具"),
+                        summary: "封面",
+                        keywords_json: "[]",
+                        card_json: Some(card),
+                    },
+                );
+            }
+        });
+        let result = run(&db, "封面");
+        assert_eq!(result.hits.len(), 3, "{:?}", result.hits);
+        assert!(result
+            .hits
+            .iter()
+            .any(|hit| hit.id == "win" && hit.full_match));
+        assert_eq!(result.full_match_count, 3);
+        assert!(
+            !result.preselected.iter().any(|id| id == "win"),
+            "{:?}",
+            result.preselected
+        );
+        assert!(result.preselected.iter().any(|id| id == "mac"));
+        assert!(result.preselected.iter().any(|id| id == "unk"));
+    }
+
+    #[test]
+    fn lacks_macos_only_when_a_list_is_given_and_none_fits() {
+        let list =
+            |items: &[&str]| -> Vec<String> { items.iter().map(|s| (*s).to_owned()).collect() };
+        assert!(lacks_macos(&list(&["windows"])));
+        assert!(lacks_macos(&list(&["windows", "Linux"])));
+        assert!(lacks_macos(&list(&["android", "ios"])));
+        assert!(!lacks_macos(&list(&[])));
+        assert!(!lacks_macos(&list(&["", "  "])));
+        assert!(!lacks_macos(&list(&["cross"])));
+        assert!(!lacks_macos(&list(&["web"])));
+        assert!(!lacks_macos(&list(&["Linux", " MacOS "])));
     }
 
     #[test]

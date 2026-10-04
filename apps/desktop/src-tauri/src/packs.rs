@@ -2335,7 +2335,7 @@ mod tests {
         assert!(content.contains("- 能做：套用封面模板；导出 PNG 图片"));
         assert!(content.contains("- 装法：npm i -g cover-kit && cover-kit init"));
         assert!(content
-            .contains("- 装到：Node 工具：在这次任务的目录里用 npm / npx 本地装，不要 -g 全局装"));
+            .contains("- 装到：装法写的是全局安装（npm -g）：按「Node 用项目本地」的约定，改成在这次任务的目录里本地装、用 npx 运行（命令名不变）；改不了再问我"));
         assert!(content.contains("- 不适合：不适合视频剪辑"));
         assert!(content.contains("- 注意：需要网络下载模板"));
         assert!(content.contains("- 为什么选它：封面排版可以直接借鉴"));
@@ -2383,7 +2383,7 @@ mod tests {
         assert!(content.contains(ABOUT_ME));
         assert!(content.contains("用现成工具出成品，不开发新软件。"));
         assert!(content.contains("## 可用的工具（按顺序）"));
-        assert!(content.contains("1. acme/cover-kit（命令行工具，许可证 GPL-3.0）：用模板生成封面图的命令行工具。链接：https://github.com/acme/cover-kit。装到：Node 工具：在这次任务的目录里用 npm / npx 本地装，不要 -g 全局装"));
+        assert!(content.contains("1. acme/cover-kit（命令行工具，许可证 GPL-3.0）：用模板生成封面图的命令行工具。链接：https://github.com/acme/cover-kit。装到：装法写的是全局安装（npm -g）：按「Node 用项目本地」的约定，改成在这次任务的目录里本地装、用 npx 运行（命令名不变）；改不了再问我"));
         assert!(content.contains("2. blank/no-card（工具，许可证 未知（先核实））：（GitHub 原文）只有仓库简介的小工具。链接：https://github.com/blank/no-card。装到：README 推荐的方式，装进一个独立的新目录"));
         assert!(content.contains("## 工作规则"));
         // 第 1 条「用现成工具做成品」已经写在开头；2–7 条重新从 1 编号，「先查本机已装」也在里面
@@ -3402,7 +3402,7 @@ mod tests {
         assert!(full.contains("- 能做：套用封面模板；导出 PNG 图片"));
         assert!(full.contains("- 装法：npm i -g cover-kit && cover-kit init"));
         assert!(full
-            .contains("- 装到：Node 工具：在这次任务的目录里用 npm / npx 本地装，不要 -g 全局装"));
+            .contains("- 装到：装法写的是全局安装（npm -g）：按「Node 用项目本地」的约定，改成在这次任务的目录里本地装、用 npx 运行（命令名不变）；改不了再问我"));
         assert!(full.contains("- 不适合：不适合视频剪辑"));
         assert!(full.contains("- 注意：需要网络下载模板"));
         assert!(full.ends_with(CODEX_CLOSING));
@@ -4122,7 +4122,7 @@ mod tests {
         for problem in ["把群聊记录整理成日报", "写爆款标题"] {
             let content = direct_output(problem, PackFormat::Markdown).content;
             assert!(
-                content.contains("macOS 自带的 textutil 和 pandoc 可以转文档格式"),
+                content.contains("macOS 自带的 textutil 可以转文档格式；常见的还有 pandoc、soffice（LibreOffice）"),
                 "{problem}\n{content}"
             );
             assert!(!content.contains("sips"), "{problem}");
