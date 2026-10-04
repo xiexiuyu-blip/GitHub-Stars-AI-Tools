@@ -44,6 +44,8 @@ export type PackRequest = {
   architectureNotes?: string;
   items: PackItemInput[];
   localCapabilities: LocalCapabilityInput[];
+  /** 不传就是用收藏里的工具。direct 是没有合适工具、直接交给 Codex。 */
+  mode?: 'useTools' | 'direct';
 };
 
 export type PackOutput = {

@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import type { ScenarioSummary, SolveHit, SolveResult } from '@/lib/contracts';
 import {
+  BACK_TO_PICK_LABEL,
   buildPackRequest,
   crossNote,
+  DIRECT_LABEL,
   formatOptions,
   gapNote,
   initialPicks,
@@ -265,6 +267,41 @@ describe('buildPackRequest', () => {
     expect(first.items).toEqual([]);
     expect(first.localCapabilities).toEqual([]);
     expect(first.localCapabilities).not.toBe(second.localCapabilities);
+  });
+
+  it('直接模式不带项目，mode 是 direct，标题换成直接交给 Codex', () => {
+    const hits = [hit({ id: '1', why: '主因' }), hit({ id: '2', why: '备因' })];
+    const request = buildPackRequest('批量改图尺寸和压缩', hits, [], true);
+    expect(request.items).toEqual([]);
+    expect(request.mode).toBe('direct');
+    expect(request.title).toBe('直接交给 Codex：批量改图尺寸和压缩');
+    expect(request.problem).toBe('批量改图尺寸和压缩');
+    expect(request.localCapabilities).toEqual([]);
+    expect(hits.map((item) => item.id)).toEqual(['1', '2']);
+  });
+
+  it('非直接模式不写 mode', () => {
+    const request = buildPackRequest('做小红书封面', [hit({ id: '1' })]);
+    expect(request.mode).toBeUndefined();
+    expect(Object.prototype.hasOwnProperty.call(request, 'mode')).toBe(false);
+    expect(request.title).toBe('参考包：做小红书封面');
+  });
+
+  it('直接模式带上本机能力，而且不和调用方共用数组', () => {
+    const local = [{ name: 'sips', oneLiner: '改图片尺寸', path: '/usr/bin/sips' }];
+    const request = buildPackRequest('批量改图尺寸和压缩', [hit({ id: '1' })], local, true);
+    expect(request.mode).toBe('direct');
+    expect(request.items).toEqual([]);
+    expect(request.localCapabilities).toEqual(local);
+    expect(request.localCapabilities).not.toBe(local);
+  });
+
+  it('直接交给 Codex 的按钮文案', () => {
+    expect(DIRECT_LABEL).toBe('没有合适的？直接交给 Codex');
+  });
+
+  it('改回挑工具的按钮文案', () => {
+    expect(BACK_TO_PICK_LABEL).toBe('改回挑工具');
   });
 });
 
