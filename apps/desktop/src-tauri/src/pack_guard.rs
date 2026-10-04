@@ -141,7 +141,7 @@ const DATA_OUT_TOKENS: [&str; 15] = [
     "敏感信息",
 ];
 /// 这些词紧挨在前面，说明后面那个词是被否定的（「无需 API Key」不算要 API Key）。
-const NEGATIONS: [&str; 7] = ["无需", "不需要", "不用", "无须", "不必", "免", "without"];
+const NEGATIONS: [&str; 7] = ["无需", "不需要", "不用", "无须", "不必", "避免", "without"];
 /// 看前面几个字符找否定词。
 const NEGATION_WINDOW: usize = 8;
 
@@ -684,6 +684,12 @@ mod tests {
         assert!(detect_cautions("无需 API Key，直接运行", "").ask.is_empty());
         assert!(detect_cautions("", "不需要付费").ask.is_empty());
         assert!(detect_cautions("without API key", "").ask.is_empty());
+        assert!(detect_cautions("避免使用 sudo", "").ask.is_empty());
+        // 「免费的 API Key」还是要一个 Key，照样提醒
+        assert_eq!(
+            detect_cautions("需要一个免费的 API Key", "").ask,
+            vec![Caution::Money]
+        );
         // 否定词在别处，不影响后面真正要 Key 的
         assert_eq!(
             detect_cautions("无需登录；配置 API Key", "").ask,
