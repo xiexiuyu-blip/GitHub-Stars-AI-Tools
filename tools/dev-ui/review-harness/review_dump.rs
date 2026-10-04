@@ -938,6 +938,20 @@ fn review_tasks_dump() {
         let markdown = packs::build_pack(&connection, &request, packs::PackFormat::Markdown, &generated_on)
             .expect("参考包 Markdown");
         fs::write(out.join(format!("{name}_pack.md")), &markdown.content).expect("写参考包");
+        // 没有默认勾选的任务：界面上有「没有合适的？直接交给 Codex」，一并生成那份直接交接单
+        if result.preselected.is_empty() {
+            let direct = packs::PackRequest {
+                title: format!("直接交给 Codex：{task}"),
+                problem: (*task).to_owned(),
+                architecture_notes: None,
+                items: vec![],
+                local_capabilities: vec![],
+                mode: packs::PackMode::Direct,
+            };
+            let direct_pack = packs::build_pack(&connection, &direct, packs::PackFormat::Markdown, &generated_on)
+                .expect("直接交接单");
+            fs::write(out.join(format!("{name}_direct.md")), &direct_pack.content).expect("写直接交接单");
+        }
         let single = packs::render_item_for_codex_with(&connection, &picks[0].id, Some(task)).expect("单项复制");
         fs::write(out.join(format!("{name}_single.txt")), &single).expect("写单项");
         index.insert(
