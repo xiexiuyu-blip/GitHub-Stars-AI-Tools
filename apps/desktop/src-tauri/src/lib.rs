@@ -19,6 +19,7 @@ mod library;
 mod library_view;
 mod local_api;
 mod local_scan;
+mod pack_guard;
 mod packs;
 mod ranking_query;
 mod rankings_live;
