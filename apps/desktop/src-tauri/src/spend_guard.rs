@@ -1453,11 +1453,12 @@ mod tests {
             &long_ago,
             "p",
             "m",
-            290_000,
+            295_000,
             0,
             SOLVE_RERANK_TAG,
         )
         .unwrap();
+        // 25 小时前的 29.5 万不算：要是还算着，这次 1 万就超过 30 万了
         assert!(reserve_with(dir.path(), &now, 10_000, Policy::SolveRerank).is_ok());
     }
 
