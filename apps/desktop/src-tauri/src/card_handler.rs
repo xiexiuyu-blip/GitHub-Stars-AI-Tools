@@ -20,13 +20,21 @@ const BACKFILL_PRIORITY: i64 = 6;
 const NEW_STAR_PRIORITY: i64 = 3;
 const REGENERATE_PRIORITY: i64 = 2;
 /// 空串和坏 JSON 上直接 `json_extract` 会让整句失败。`CASE` 只在合法 JSON 上取值。
+/// 「说明过期」：有卡，但结构还是第 2 版之前的，或者是旧版提示词写的（提示词升版后，旧说明的文风、场景标签口径都变了）。
+fn outdated_sql() -> String {
+    format!(
+        "IFNULL(trim(repo_ai_documents.card_json), '') <> '' AND (IFNULL(repo_ai_documents.card_schema_version, 0) < 2 OR IFNULL(repo_ai_documents.prompt_version, '') <> '{}')",
+        card_pipeline::PROMPT_VERSION
+    )
+}
+
 pub(crate) const NOT_CONFIRMED_SQL: &str = "CASE WHEN json_valid(repo_ai_documents.card_json) THEN IFNULL(json_extract(repo_ai_documents.card_json, '$.review_status'), '') ELSE '' END <> 'confirmed'";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CardEnqueueScope {
     /// 有效仓库里还没有理解卡。
     Missing,
-    /// 有卡，但还是第 2 版之前的结构，而且没有被确认。
+    /// 有卡，但还是第 2 版之前的结构，或者是旧版提示词（`card_pipeline::PROMPT_VERSION` 之前的）写的，而且没有被确认。
     Outdated,
 }
 
@@ -412,13 +420,14 @@ pub struct AutomationStatus {
 /// 有效仓库里「全量整理」要处理的：没有理解卡的，加上还是第 2 版之前结构的（没被确认的都算）。
 /// 和 `insert_scoped` 的两个范围一致。
 fn count_needs_organizing(conn: &Connection) -> Result<i64, String> {
+    let outdated = outdated_sql();
     let sql = format!(
         "SELECT COUNT(*) FROM repositories
          LEFT JOIN repo_ai_documents ON repo_ai_documents.repo_id = repositories.id
          WHERE repositories.sync_status = 'active'
            AND (
              (repo_ai_documents.repo_id IS NULL OR IFNULL(trim(repo_ai_documents.card_json), '') = '')
-             OR (IFNULL(trim(repo_ai_documents.card_json), '') <> '' AND IFNULL(repo_ai_documents.card_schema_version, 0) < 2)
+             OR ({outdated})
            )
            AND {NOT_CONFIRMED_SQL}"
     );
@@ -682,10 +691,9 @@ fn insert_scoped(
     let extra = match scope {
         CardEnqueueScope::Missing => {
             "(repo_ai_documents.repo_id IS NULL OR IFNULL(trim(repo_ai_documents.card_json), '') = '')"
+                .to_owned()
         }
-        CardEnqueueScope::Outdated => {
-            "IFNULL(trim(repo_ai_documents.card_json), '') <> '' AND IFNULL(repo_ai_documents.card_schema_version, 0) < 2"
-        }
+        CardEnqueueScope::Outdated => outdated_sql(),
     };
     let sql = format!(
         "INSERT OR IGNORE INTO ai_jobs(id, account_id, job_type, target_type, target_id, priority, status)
@@ -950,7 +958,8 @@ mod tests {
             "zh_friendly": true,
             "confidence": 0.82,
             "keywords": ["小红书", "封面", "xiaohongshu", "cover", "配图", "出图"],
-            "scenario_tags": ["xhs"]
+            "scenario_tags": ["xhs"],
+            "scenario_evidence": {"xhs": "做小红书封面的命令行工具"}
         }))
         .expect("样例卡片应能序列化")
     }
@@ -1004,8 +1013,15 @@ mod tests {
         conn.execute(
             "INSERT INTO repo_ai_documents(
                 repo_id, summary_zh, model, prompt_version, source_hash, generated_at, card_json, card_schema_version
-             ) VALUES (?1, '旧摘要', 'kept-model', 'card-v1', ?2, '2026-01-01T00:00:00Z', ?3, ?4)",
-            params![repo_id, hash, card_json, schema],
+             ) VALUES (?1, '旧摘要', 'kept-model', ?5, ?2, '2026-01-01T00:00:00Z', ?3, ?4)",
+            // 第 2 版结构的卡当作「现行」：提示词版本跟当前一致；更老的结构才是 card-v1
+            params![
+                repo_id,
+                hash,
+                card_json,
+                schema,
+                if schema >= 2 { PROMPT_VERSION } else { "card-v1" }
+            ],
         )
         .expect("理解卡应能写入");
     }
@@ -2240,6 +2256,38 @@ mod tests {
         assert!(jobs::read_control(&jobs::queue_control_path(db.path()))
             .full_scan
             .is_none());
+    }
+
+    #[test]
+    fn cards_written_by_an_older_prompt_are_outdated_and_current_or_confirmed_ones_are_not() {
+        let db = TempDb::new("older-prompt");
+        let conn = db.open();
+        for id in ["old-prompt", "current", "confirmed-old", "no-card"] {
+            insert_repo(&conn, id, "active");
+        }
+        conn.execute(
+            "INSERT INTO repo_ai_documents(repo_id, summary_zh, model, prompt_version, source_hash, generated_at, card_json, card_schema_version)
+             VALUES ('old-prompt', 's', 'm', 'card-v2', 'h', '2026-01-01T00:00:00Z', '{\"review_status\":\"suggested\"}', 2),
+                    ('current', 's', 'm', ?1, 'h', '2026-01-01T00:00:00Z', '{\"review_status\":\"suggested\"}', 2),
+                    ('confirmed-old', 's', 'm', 'card-v2', 'h', '2026-01-01T00:00:00Z', '{\"review_status\":\"confirmed\"}', 2)",
+            params![PROMPT_VERSION],
+        )
+        .expect("理解卡应能写入");
+        drop(conn);
+        // 「说明过期」= 旧结构，或旧版提示词写的（没被确认）；没有卡的不算过期（那是「缺失」）
+        let mut conn = db.open();
+        assert_eq!(
+            enqueue_cards(&mut conn, CardEnqueueScope::Outdated, 6).expect("应能入队"),
+            1
+        );
+        drop(conn);
+        let rows = job_rows(&db.open());
+        assert_eq!(rows.len(), 1);
+        assert_eq!(priority_of(&rows, "old-prompt"), Some((6, "queued")));
+        // 一次性全部整理要数的「还要整理多少」= 没有卡的 + 过期的
+        let status = automation_status(db.path(), &fs_settings()).expect("状态应能读出");
+        assert_eq!(status.needs_organizing, 2, "old-prompt 和 no-card");
+        assert_eq!(PROMPT_VERSION, "card-v3");
     }
 
     #[test]

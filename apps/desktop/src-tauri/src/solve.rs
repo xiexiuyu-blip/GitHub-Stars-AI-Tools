@@ -160,6 +160,8 @@ const STOP_WORDS: &[&str] = &[
 
 const WHY_LIMIT: usize = 80;
 const HIT_LIMIT: usize = 8;
+/// 排在 `HIT_LIMIT` 之后、留给 AI 精选的后备候选个数（界面默认不显示，AI 点了名才拿出来）。
+const MORE_HIT_LIMIT: usize = 8;
 /// README 只看前面这么多字符：再往后多半是更新日志、赞助名单，提到的词不代表这个项目是做什么的。
 const README_SCAN_CHARS: i64 = 60_000;
 /// 只出现 1 次多半是顺带一提（「也支持小红书」），不算证据。
@@ -448,6 +450,8 @@ pub struct SolveResult {
     pub intents: Vec<String>,
     pub extras: Vec<String>,
     pub hits: Vec<SolveHit>,
+    /// 本地排名 9–16 的后备候选：界面默认不显示，只在 AI 精选从里面点了名时才拿出来。
+    pub more_hits: Vec<SolveHit>,
     pub preselected: Vec<String>,
     pub full_match_count: i64,
     pub gap_intents: Vec<String>,
@@ -599,14 +603,22 @@ pub fn solve_query(db_path: &Path, query: &str) -> Result<SolveResult, String> {
     // 和 hits 一一对应：这条命中是不是只靠 README 里提到（见 `ScoreParts::readme_only`）。
     let mut readme_only = Vec::new();
     let mut mac_unsupported = Vec::new();
-    for (index, parts) in scored.into_iter().take(HIT_LIMIT) {
+    let mut more_hits = Vec::new();
+    for (rank, (index, parts)) in scored
+        .into_iter()
+        .take(HIT_LIMIT + MORE_HIT_LIMIT)
+        .enumerate()
+    {
         let repo = &repos[index];
-        readme_only.push(parts.readme_only);
-        mac_unsupported.push(repo.mac_unsupported);
+        let in_main_list = rank < HIT_LIMIT;
+        if in_main_list {
+            readme_only.push(parts.readme_only);
+            mac_unsupported.push(repo.mac_unsupported);
+        }
         // 没有意图词时不知道用户要什么，不能说「全部对上」。
         let full_match = !main.is_empty() && parts.missing.is_empty();
         let why = why_text(repo, &main, &parts.matched, &extra, readme.get(&repo.id));
-        hits.push(SolveHit {
+        let hit = SolveHit {
             id: repo.id.clone(),
             full_name: repo.full_name.clone(),
             html_url: repo.html_url.clone(),
@@ -620,7 +632,12 @@ pub fn solve_query(db_path: &Path, query: &str) -> Result<SolveResult, String> {
             score: parts.score,
             full_match,
             has_card: repo.has_card,
-        });
+        };
+        if in_main_list {
+            hits.push(hit);
+        } else {
+            more_hits.push(hit);
+        }
     }
 
     // 缺口只看返回的最多 8 条。排到第 9 名以后的仓库，即使对上了某个意图，也不算补上。
@@ -678,6 +695,7 @@ pub fn solve_query(db_path: &Path, query: &str) -> Result<SolveResult, String> {
         intents: main,
         extras: extra,
         hits,
+        more_hits,
         preselected,
         full_match_count,
         gap_intents,
@@ -693,6 +711,7 @@ fn empty_result(query: &str) -> SolveResult {
         intents: Vec::new(),
         extras: Vec::new(),
         hits: Vec::new(),
+        more_hits: Vec::new(),
         preselected: Vec::new(),
         full_match_count: 0,
         gap_intents: Vec::new(),
@@ -3420,6 +3439,7 @@ mod tests {
             intents: vec!["封面".to_owned()],
             extras: vec!["zz".to_owned()],
             hits: vec![hit.clone()],
+            more_hits: vec![hit.clone()],
             preselected: vec!["r1".to_owned()],
             full_match_count: 0,
             gap_intents: vec!["小红书".to_owned()],
@@ -3472,6 +3492,7 @@ mod tests {
                 "intents",
                 "extras",
                 "hits",
+                "moreHits",
                 "preselected",
                 "fullMatchCount",
                 "gapIntents",
@@ -3484,6 +3505,7 @@ mod tests {
         assert!(result_value.get("intents").unwrap().as_array().unwrap()[0].is_string());
         assert!(result_value.get("extras").unwrap().as_array().unwrap()[0].is_string());
         assert!(result_value.get("hits").unwrap().is_array());
+        assert!(result_value.get("moreHits").unwrap().is_array());
         assert!(result_value.get("preselected").unwrap().as_array().unwrap()[0].is_string());
         assert!(result_value.get("fullMatchCount").unwrap().is_number());
         assert!(result_value.get("gapIntents").unwrap().as_array().unwrap()[0].is_string());
@@ -5348,6 +5370,72 @@ mod tests {
         let result = run(&db, "转录");
         assert!(has_term(&result.intents, "转录"), "{:?}", result.intents);
         assert_eq!(result.hits.len(), 1, "{:?}", result.hits);
+    }
+
+    #[test]
+    fn the_next_eight_matches_wait_in_more_hits_for_the_ai_pass() {
+        let db = prepare("more-hits", |conn| {
+            for index in 0..20 {
+                let id = format!("r{index:02}");
+                let name = format!("lab/cover-tool-{index:02}");
+                insert_repo(
+                    conn,
+                    &NewRepo {
+                        id: &id,
+                        full_name: &name,
+                        description: "封面工具",
+                        // 星数从高到低：同分时按星数排，名次就是编号
+                        stars: 1000 - index as i64,
+                        status: "active",
+                        one_liner: Some("生成封面的工具"),
+                        summary: "封面",
+                        keywords_json: "[]",
+                        card_json: None,
+                    },
+                );
+            }
+        });
+        let result = run(&db, "封面");
+        assert_eq!(result.hits.len(), HIT_LIMIT);
+        assert_eq!(result.more_hits.len(), MORE_HIT_LIMIT);
+        let first: Vec<&str> = result.hits.iter().map(|hit| hit.id.as_str()).collect();
+        let more: Vec<&str> = result.more_hits.iter().map(|hit| hit.id.as_str()).collect();
+        assert_eq!(
+            first,
+            ["r00", "r01", "r02", "r03", "r04", "r05", "r06", "r07"]
+        );
+        assert_eq!(
+            more,
+            ["r08", "r09", "r10", "r11", "r12", "r13", "r14", "r15"]
+        );
+        // 后备候选不影响主列表的统计：默认勾选、「全对上」个数、缺口都只看前 8
+        assert!(result
+            .preselected
+            .iter()
+            .all(|id| first.contains(&id.as_str())));
+        assert!(result.full_match_count <= HIT_LIMIT as i64);
+        // 候选不到 9 个时 more_hits 是空的
+        let small = run(
+            &prepare("more-hits-small", |conn| {
+                insert_repo(
+                    conn,
+                    &NewRepo {
+                        id: "only",
+                        full_name: "lab/only",
+                        description: "封面工具",
+                        stars: 1,
+                        status: "active",
+                        one_liner: Some("生成封面的工具"),
+                        summary: "封面",
+                        keywords_json: "[]",
+                        card_json: None,
+                    },
+                );
+            }),
+            "封面",
+        );
+        assert_eq!(small.hits.len(), 1);
+        assert!(small.more_hits.is_empty());
     }
 
     #[test]

@@ -20,6 +20,10 @@
 //! 额度、暂停都用队列的控制文件（工具箱里「AI 自动整理」的设置），所以只有一处开关。
 //! 没装闸（单元测试）时什么都不拦；正式运行时没装上就一律拒绝，宁可旧功能暂时不能用，也不在没有额度保护时花钱。
 //! 连接测试和自检是一次很小的调用，用 `probe` 包起来：不看额度、不被暂停拦住，但仍然记账。
+//!
+//! 「找方案」的 AI 精选（用户一搜就自动调一次模型，约 4k token）用 `solve_rerank` 包起来：它在同一个账本里记账
+//! （`prompt_version = 'solve-rerank'`），但**有自己的每日额度**（`SOLVE_RERANK_DAILY_TOKENS`），不被后台整理（尤其是全量整理）
+//! 用掉的额度挡住；前提是 Fox 开过 AI 额度（每天额度大于 0，或全量整理在进行）、队列没有暂停。
 
 use crate::jobs;
 use rusqlite::{params, Connection, TransactionBehavior};
@@ -45,6 +49,13 @@ const MAX_PLAUSIBLE_CALL_TOKENS: u64 = 300_000;
 /// 拒绝时的前缀。调用方用 `is_refusal` 认它。
 pub const REFUSAL_PREFIX: &str = "AI 额度：";
 
+/// 旧功能在账本里的标记（`ai_jobs.prompt_version`）。
+const LEGACY_TAG: &str = "legacy";
+/// 「找方案」AI 精选在账本里的标记。队列从不认领 `problem_answer`，所以它和旧功能一样只是账本行。
+pub const SOLVE_RERANK_TAG: &str = "solve-rerank";
+/// 「找方案」AI 精选每 24 小时最多用这么多 token（一次约 4k，够搜 70 次左右）。
+pub const SOLVE_RERANK_DAILY_TOKENS: u64 = 300_000;
+
 static DATABASE: OnceLock<PathBuf> = OnceLock::new();
 
 /// 这个线程当前这次请求在账本里的预留行。
@@ -55,10 +66,13 @@ struct Reservation {
     input_estimate: u64,
     /// 预留的总量（提示词 + 输出余量）。流式回复没有真实用量时，记账不能比它还少。
     reserved_total: u64,
+    /// 账本里的标记（旧功能 / 找方案 AI 精选）。预留行被取消后要「另记一条」时沿用它。
+    tag: &'static str,
 }
 
 thread_local! {
     static PROBE_DEPTH: Cell<u32> = const { Cell::new(0) };
+    static RERANK_DEPTH: Cell<u32> = const { Cell::new(0) };
     static PERMIT_DEPTH: Cell<u32> = const { Cell::new(0) };
     static RESERVATION: RefCell<Option<Reservation>> = const { RefCell::new(None) };
     /// 最近这次尝试可能已经到了服务商那里（流式请求收到了状态行、读到一半断了），还没记进 `EXTRA_TOKENS`。
@@ -108,6 +122,42 @@ pub fn probe<R>(run: impl FnOnce() -> R) -> R {
 
 fn probing() -> bool {
     PROBE_DEPTH.with(|depth| depth.get() > 0)
+}
+
+struct RerankScope;
+
+impl Drop for RerankScope {
+    fn drop(&mut self) {
+        RERANK_DEPTH.with(|depth| depth.set(depth.get().saturating_sub(1)));
+    }
+}
+
+/// 「找方案」的 AI 精选：包在里面的请求按它自己的每日额度（`SOLVE_RERANK_DAILY_TOKENS`）算，不看后台整理用掉了多少；
+/// 账本行标成 `solve-rerank`。暂停、每天额度是 0（Fox 还没开过 AI 额度，全量整理也没开）照样拦。
+pub fn solve_rerank<R>(run: impl FnOnce() -> R) -> R {
+    RERANK_DEPTH.with(|depth| depth.set(depth.get() + 1));
+    let _scope = RerankScope;
+    run()
+}
+
+fn reranking() -> bool {
+    RERANK_DEPTH.with(|depth| depth.get() > 0)
+}
+
+/// 预留 / 记账用哪套规矩。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Policy {
+    Legacy,
+    SolveRerank,
+}
+
+impl Policy {
+    fn tag(self) -> &'static str {
+        match self {
+            Policy::Legacy => LEGACY_TAG,
+            Policy::SolveRerank => SOLVE_RERANK_TAG,
+        }
+    }
 }
 
 /// 通过了额度检查的凭证，拿着它直到请求结束并记完账。同一个线程里可以嵌套
@@ -173,13 +223,19 @@ fn begin(database: Option<&Path>, prompt: &str) -> Result<SpendPermit, String> {
     }
     let input = estimate_tokens(prompt);
     let estimated = input.saturating_add(MIN_OUTPUT_ALLOWANCE_TOKENS.max(input));
-    let id = reserve_at(database, &jobs::now_db_time(), estimated)?;
+    let policy = if reranking() {
+        Policy::SolveRerank
+    } else {
+        Policy::Legacy
+    };
+    let id = reserve_with(database, &jobs::now_db_time(), estimated, policy)?;
     RESERVATION.with(|slot| {
         *slot.borrow_mut() = Some(Reservation {
             database: database.to_path_buf(),
             id,
             input_estimate: input,
             reserved_total: estimated,
+            tag: policy.tag(),
         });
     });
     Ok(permit)
@@ -300,7 +356,15 @@ fn record(
             match outcome {
                 Ok(true) => Ok(()),
                 // 预留行已经不在 running（被恢复动作取消了）：退回去另记一条
-                Ok(false) => record_at(database, &now, provider, model, input, output),
+                Ok(false) => record_at_tagged(
+                    database,
+                    &now,
+                    provider,
+                    model,
+                    input,
+                    output,
+                    reservation.tag,
+                ),
                 Err(error) => {
                     // 记不上：把预留放回去，凭证放掉时会收尾成「已取消 + 提示词那部分」，不会留下一条永远 running 的行
                     RESERVATION.with(|slot| *slot.borrow_mut() = Some(reservation));
@@ -379,9 +443,68 @@ fn refusal_for(
     Ok(())
 }
 
+/// 「找方案」AI 精选的规矩（纯函数）：暂停、每天额度是 0（又没有全量整理在进行）、自己这份额度放不下。
+/// 不看后台整理已经用了多少：后台用满了，AI 精选照样能用自己的那份。
+fn refusal_for_rerank(
+    control: &jobs::QueueControl,
+    rerank_used: u64,
+    estimated: u64,
+    scan_open: bool,
+) -> Result<(), String> {
+    if control.paused {
+        return Err(format!(
+            "{REFUSAL_PREFIX}AI 整理现在是暂停状态，「找方案」的 AI 精选也先停着，这次按本地排序。"
+        ));
+    }
+    if control.daily_budget_tokens == 0 && !scan_open {
+        return Err(format!(
+            "{REFUSAL_PREFIX}每天的 AI 额度是 0，「找方案」的 AI 精选还不能用，这次按本地排序。"
+        ));
+    }
+    if rerank_used.saturating_add(estimated) > SOLVE_RERANK_DAILY_TOKENS {
+        return Err(format!(
+            "{REFUSAL_PREFIX}「找方案」的 AI 精选最近 24 小时已经用了约 {}，这一次预计还要约 {}，会超过它每天 {} 的额度，所以没有发请求；这次按本地排序，过一阵额度恢复后再试。",
+            readable_tokens(rerank_used),
+            readable_tokens(estimated),
+            readable_tokens(SOLVE_RERANK_DAILY_TOKENS),
+        ));
+    }
+    Ok(())
+}
+
+/// 最近 24 小时里「找方案」AI 精选用掉的（含在途预留）。口径和 `jobs::tokens_used_since` 一样，只是限定标记。
+fn rerank_tokens_used_since(connection: &Connection, cutoff: &str) -> Result<i64, String> {
+    connection
+        .query_row(
+            "SELECT COALESCE(SUM(input_tokens + output_tokens), 0)
+             FROM ai_jobs
+             WHERE prompt_version = ?2
+               AND ((status IN ('succeeded', 'skipped', 'failed', 'cancelled')
+                     AND finished_at IS NOT NULL
+                     AND finished_at >= ?1)
+                 OR (status IN ('queued', 'running')
+                     AND input_tokens + output_tokens > 0
+                     AND updated_at >= ?1))",
+            params![cutoff, SOLVE_RERANK_TAG],
+            |row| row.get(0),
+        )
+        .map_err(|error| format!("用量读取失败：{error}"))
+}
+
+/// 旧功能的预留（见 `reserve_with`）。
+fn reserve_at(database_path: &Path, now: &str, estimated: u64) -> Result<String, String> {
+    reserve_with(database_path, now, estimated, Policy::Legacy)
+}
+
 /// 在一个 `BEGIN IMMEDIATE` 里查额度并写一条 `running` 的预留行，返回这一行的 id。
 /// 队列认领（`jobs::claim_next`）也是在 `BEGIN IMMEDIATE` 里算用量，后一个一定看得见前一个的预留。
-fn reserve_at(database_path: &Path, now: &str, estimated: u64) -> Result<String, String> {
+/// 找方案 AI 精选的预留行同样占「最近 24 小时已用」（队列和旧功能都看得见），只是它自己的额度另算。
+fn reserve_with(
+    database_path: &Path,
+    now: &str,
+    estimated: u64,
+    policy: Policy,
+) -> Result<String, String> {
     let control = jobs::read_control(&jobs::queue_control_path(database_path));
     let refuse = |error: String| format!("{REFUSAL_PREFIX}额度检查失败：{error}");
     let mut connection = jobs::open_db(database_path).map_err(refuse)?;
@@ -394,7 +517,13 @@ fn reserve_at(database_path: &Path, now: &str, estimated: u64) -> Result<String,
         .max(0) as u64;
     // 全量整理进行中（Fox 亲手确认过、没超时、用量没超过刹车线）：这一轮不看每天额度。预留照常写，用量照常记账
     let unlimited = jobs::full_scan_open(&transaction, &control, now);
-    refusal_for(&control, used, estimated, unlimited)?;
+    match policy {
+        Policy::Legacy => refusal_for(&control, used, estimated, unlimited)?,
+        Policy::SolveRerank => {
+            let rerank_used = rerank_tokens_used_since(&transaction, &cutoff)?.max(0) as u64;
+            refusal_for_rerank(&control, rerank_used, estimated, unlimited)?
+        }
+    }
     let id: String = transaction
         .query_row("SELECT lower(hex(randomblob(8)))", [], |row| row.get(0))
         .map_err(|error| format!("{REFUSAL_PREFIX}额度预留失败：{error}"))?;
@@ -404,11 +533,11 @@ fn reserve_at(database_path: &Path, now: &str, estimated: u64) -> Result<String,
             "INSERT INTO ai_jobs(id, account_id, job_type, target_type, target_id, priority, status, attempts, max_attempts,
                                  prompt_version, input_tokens, output_tokens, created_at, started_at, updated_at)
              SELECT ?1, github_accounts.id, 'problem_answer', 'query', 'legacy-' || ?1, 9, 'running', 1, 1,
-                    'legacy', ?2, 0, ?3, ?3, ?3
+                    ?4, ?2, 0, ?3, ?3, ?3
              FROM github_accounts
              ORDER BY github_accounts.updated_at DESC
              LIMIT 1",
-            params![id, reserved, now],
+            params![id, reserved, now, policy.tag()],
         )
         .map_err(|error| format!("{REFUSAL_PREFIX}额度预留失败：{error}"))?;
     if inserted == 0 {
@@ -477,6 +606,26 @@ fn record_at(
     input_tokens: u64,
     output_tokens: u64,
 ) -> Result<(), String> {
+    record_at_tagged(
+        database_path,
+        now,
+        provider,
+        model,
+        input_tokens,
+        output_tokens,
+        LEGACY_TAG,
+    )
+}
+
+fn record_at_tagged(
+    database_path: &Path,
+    now: &str,
+    provider: &str,
+    model: &str,
+    input_tokens: u64,
+    output_tokens: u64,
+    tag: &str,
+) -> Result<(), String> {
     let connection = jobs::open_db(database_path)?;
     insert_ledger_row(
         &connection,
@@ -485,6 +634,7 @@ fn record_at(
         model,
         input_tokens,
         output_tokens,
+        tag,
     )
 }
 
@@ -495,6 +645,7 @@ fn insert_ledger_row(
     model: &str,
     input_tokens: u64,
     output_tokens: u64,
+    tag: &str,
 ) -> Result<(), String> {
     let input = i64::try_from(input_tokens.min(MAX_RECORDED_TOKENS)).unwrap_or(0);
     let output = i64::try_from(output_tokens.min(MAX_RECORDED_TOKENS)).unwrap_or(0);
@@ -503,11 +654,11 @@ fn insert_ledger_row(
             "INSERT INTO ai_jobs(id, account_id, job_type, target_type, target_id, priority, status, attempts, max_attempts,
                                  provider, model, prompt_version, input_tokens, output_tokens, created_at, started_at, finished_at, updated_at)
              SELECT lower(hex(randomblob(8))), github_accounts.id, 'problem_answer', 'query', 'legacy-' || lower(hex(randomblob(8))),
-                    9, 'succeeded', 1, 1, ?1, ?2, 'legacy', ?3, ?4, ?5, ?5, ?5, ?5
+                    9, 'succeeded', 1, 1, ?1, ?2, ?6, ?3, ?4, ?5, ?5, ?5, ?5
              FROM github_accounts
              ORDER BY github_accounts.updated_at DESC
              LIMIT 1",
-            params![provider, model, input, output, now],
+            params![provider, model, input, output, now, tag],
         )
         .map_err(|error| format!("用量记账失败：{error}"))?;
     if inserted == 0 {
@@ -519,7 +670,7 @@ fn insert_ledger_row(
 /// 一万以上写成「x.x 万」，不到一万写成整数。
 fn readable_tokens(tokens: u64) -> String {
     if tokens >= 10_000 {
-        let tenths = (tokens + 500) / 1_000;
+        let tenths = tokens.saturating_add(500) / 1_000;
         format!("{}.{} 万 token", tenths / 10, tenths % 10)
     } else {
         format!("{tokens} token")
@@ -563,6 +714,21 @@ pub(crate) mod testing {
             &self.0
         }
 
+        /// 往账本里记一笔「后台整理」的用量（队列任务，不是旧功能的行）：测「队列额度被用光」时用。
+        pub(crate) fn fill_background_usage_row(&self, tokens: i64) {
+            let now = jobs::now_db_time();
+            Connection::open(&self.0)
+                .unwrap()
+                .execute(
+                    "INSERT INTO ai_jobs(id, account_id, job_type, target_type, target_id, priority, status, attempts, max_attempts,
+                                         input_tokens, output_tokens, created_at, started_at, finished_at, updated_at)
+                     VALUES (lower(hex(randomblob(8))), 'acct', 'repo_card', 'repository', lower(hex(randomblob(8))), 3, 'succeeded', 1, 1,
+                             ?1, 0, ?2, ?2, ?2, ?2)",
+                    params![tokens, now],
+                )
+                .unwrap();
+        }
+
         pub(crate) fn control(&self, text: &str) {
             fs::write(jobs::queue_control_path(&self.0), text).unwrap();
         }
@@ -593,6 +759,10 @@ pub(crate) mod testing {
             TEST_DATABASE.with(|slot| *slot.borrow_mut() = Some(self.0.clone()));
             DatabaseScope
         }
+    }
+
+    pub(crate) fn fill_background_usage(dir: &Dir, tokens: i64) {
+        dir.fill_background_usage_row(tokens);
     }
 
     pub(crate) struct DatabaseScope;
@@ -1186,5 +1356,226 @@ mod tests {
             "凭证不能是 Send：在别的线程放掉会让原线程的嵌套深度卡在 1，之后的请求不再检查额度"
         );
         assert!(<Probe<String>>::IS_SEND, "探针本身要能认出 Send 的类型");
+    }
+
+    // ───────────── 「找方案」AI 精选：自己的额度，同一本账 ─────────────
+
+    const RERANK_ROW: &str = "SELECT status, input_tokens, output_tokens FROM ai_jobs WHERE prompt_version = 'solve-rerank' ORDER BY created_at DESC, rowid DESC LIMIT 1";
+
+    fn rerank_begin(dir: &Dir, prompt: &str) -> Result<SpendPermit, String> {
+        solve_rerank(|| begin(Some(dir.path()), prompt))
+    }
+
+    #[test]
+    fn rerank_reservations_are_ledger_rows_tagged_for_it() {
+        let dir = Dir::new();
+        dir.control(BUDGET_100K);
+        let permit = rerank_begin(&dir, &"说".repeat(1000)).expect("应通过");
+        // 和旧功能一样：账本行、队列看得见、不算队列任务；只是标记不同
+        assert_eq!(dir.row(RERANK_ROW), ("running".to_owned(), 4000, 0));
+        assert_eq!(dir.used(), 4000);
+        let legacy: i64 = Connection::open(dir.path())
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM ai_jobs WHERE prompt_version = 'legacy'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(legacy, 0, "AI 精选的行不能标成旧功能");
+        let status = jobs::queue_status(dir.path()).unwrap();
+        assert_eq!((status.running, status.queued), (0, 0));
+        drop(permit);
+    }
+
+    #[test]
+    fn rerank_has_its_own_allowance_and_ignores_what_the_queue_has_used() {
+        let dir = Dir::new();
+        let now = jobs::now_db_time();
+        // 队列额度 10 万，后台整理已经用了 50 万：旧功能被拒，AI 精选照样能用自己的那份
+        dir.control(BUDGET_100K);
+        record_at(dir.path(), &now, "p", "m", 400_000, 100_000).unwrap();
+        let error = begin(Some(dir.path()), "提示词")
+            .err()
+            .expect("旧功能应被拒");
+        assert!(is_refusal(&error), "{error}");
+        let permit = rerank_begin(&dir, "提示词").expect("AI 精选有自己的额度");
+        drop(permit);
+    }
+
+    #[test]
+    fn rerank_usage_is_counted_only_against_itself_but_everyone_sees_it() {
+        let dir = Dir::new();
+        let now = jobs::now_db_time();
+        dir.control(BUDGET_100K);
+        // 旧功能用了 29 万：不占 AI 精选的额度
+        record_at(dir.path(), &now, "p", "m", 250_000, 40_000).unwrap();
+        let first = reserve_with(dir.path(), &now, 5_000, Policy::SolveRerank);
+        assert!(first.is_ok(), "{first:?}");
+        // AI 精选自己的用量记进同一本账：队列和旧功能的「最近 24 小时已用」都含它
+        assert_eq!(dir.used(), 295_000);
+    }
+
+    #[test]
+    fn rerank_stops_at_its_own_daily_allowance_and_says_so() {
+        let dir = Dir::new();
+        let now = jobs::now_db_time();
+        dir.control(BUDGET_100K);
+        record_at_tagged(
+            dir.path(),
+            &now,
+            "p",
+            "m",
+            200_000,
+            95_000,
+            SOLVE_RERANK_TAG,
+        )
+        .unwrap();
+        // 29.5 万已经用了：再预留 5001 会超过 30 万
+        let error = reserve_with(dir.path(), &now, 5_001, Policy::SolveRerank)
+            .expect_err("超过自己的额度应拒绝");
+        assert!(is_refusal(&error), "{error}");
+        assert!(error.contains("AI 精选"), "{error}");
+        assert!(error.contains("所以没有发请求"), "{error}");
+        assert!(error.contains("本地排序"), "{error}");
+        // 刚好放得下（正好 30 万）的不拦
+        assert!(reserve_with(dir.path(), &now, 5_000, Policy::SolveRerank).is_ok());
+    }
+
+    #[test]
+    fn rerank_usage_older_than_a_day_is_forgotten() {
+        let dir = Dir::new();
+        let now = jobs::now_db_time();
+        dir.control(BUDGET_100K);
+        let long_ago = jobs::shift_db_time(&now, -25 * 3600).unwrap();
+        record_at_tagged(
+            dir.path(),
+            &long_ago,
+            "p",
+            "m",
+            295_000,
+            0,
+            SOLVE_RERANK_TAG,
+        )
+        .unwrap();
+        // 25 小时前的 29.5 万不算：要是还算着，这次 1 万就超过 30 万了
+        assert!(reserve_with(dir.path(), &now, 10_000, Policy::SolveRerank).is_ok());
+    }
+
+    #[test]
+    fn rerank_follows_the_pause_and_the_zero_budget_gates() {
+        let dir = Dir::new();
+        let now = jobs::now_db_time();
+        // 每天额度是 0：Fox 还没开过 AI 额度，AI 精选也不能花钱
+        let error = rerank_begin(&dir, "提示词").err().expect("额度 0 应拒绝");
+        assert!(is_refusal(&error), "{error}");
+        assert!(error.contains("额度是 0"), "{error}");
+        assert_eq!(dir.used(), 0, "被拒绝不能留下预留");
+        // 暂停
+        dir.control(r#"{"dailyBudgetTokens":100000,"paused":true}"#);
+        let error = rerank_begin(&dir, "提示词").err().expect("暂停应拒绝");
+        assert!(error.contains("暂停"), "{error}");
+        // 全量整理进行中（Fox 亲手开的）：每天额度是 0 也放行
+        dir.control(&control_with_full_scan(0, false, &now, 300));
+        assert!(rerank_begin(&dir, "提示词").is_ok());
+        // 全量整理 + 暂停：照样拦
+        dir.control(&control_with_full_scan(0, true, &now, 300));
+        assert!(rerank_begin(&dir, "提示词").is_err());
+    }
+
+    #[test]
+    fn recording_settles_the_rerank_row_with_real_usage() {
+        let dir = Dir::new();
+        dir.control(BUDGET_100K);
+        let _scope = dir.use_in_this_thread();
+        let permit = solve_rerank(|| check_before_request(&"说".repeat(500))).expect("应通过");
+        assert_eq!(dir.row(RERANK_ROW).0, "running");
+        record_after_request("openai", "m", "p", "c", Some((2_800, 650)));
+        assert_eq!(dir.row(RERANK_ROW), ("succeeded".to_owned(), 2_800, 650));
+        drop(permit);
+        // 记完账之后凭证放掉，不会再改这一行
+        assert_eq!(dir.row(RERANK_ROW), ("succeeded".to_owned(), 2_800, 650));
+    }
+
+    #[test]
+    fn a_rerank_that_ends_without_recording_keeps_only_the_prompt_part() {
+        let dir = Dir::new();
+        dir.control(BUDGET_100K);
+        let _scope = dir.use_in_this_thread();
+        let prompt = "说".repeat(800);
+        let permit = solve_rerank(|| check_before_request(&prompt)).expect("应通过");
+        drop(permit);
+        assert_eq!(dir.row(RERANK_ROW), ("cancelled".to_owned(), 800, 0));
+    }
+
+    #[test]
+    fn a_cancelled_rerank_reservation_is_replaced_by_a_row_with_the_same_tag() {
+        let dir = Dir::new();
+        dir.control(BUDGET_100K);
+        let _scope = dir.use_in_this_thread();
+        let permit = solve_rerank(|| check_before_request("提示词")).expect("应通过");
+        // 恢复动作把预留行取消了
+        Connection::open(dir.path())
+            .unwrap()
+            .execute(
+                "UPDATE ai_jobs SET status = 'cancelled' WHERE prompt_version = 'solve-rerank'",
+                [],
+            )
+            .unwrap();
+        record_after_request("openai", "m", "p", "c", Some((1_000, 200)));
+        let rows: i64 = Connection::open(dir.path())
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM ai_jobs WHERE prompt_version = 'solve-rerank' AND status = 'succeeded' AND input_tokens = 1000",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(rows, 1, "另记的那一行也要标成 AI 精选");
+        drop(permit);
+    }
+
+    #[test]
+    fn the_rerank_scope_ends_with_its_closure_even_when_it_panics() {
+        assert!(!reranking());
+        let nested = solve_rerank(|| solve_rerank(reranking));
+        assert!(nested);
+        assert!(!reranking(), "嵌套结束后要回到没在精选");
+        let result = std::panic::catch_unwind(|| solve_rerank(|| panic!("出事了")));
+        assert!(result.is_err());
+        assert!(!reranking(), "panic 也不能让后面的旧功能请求被当成 AI 精选");
+    }
+
+    #[test]
+    fn plain_requests_are_never_tagged_as_rerank() {
+        let dir = Dir::new();
+        dir.control(BUDGET_100K);
+        let permit = begin(Some(dir.path()), "提示词").expect("应通过");
+        let rerank_rows: i64 = Connection::open(dir.path())
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM ai_jobs WHERE prompt_version = 'solve-rerank'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(rerank_rows, 0);
+        drop(permit);
+    }
+
+    #[test]
+    fn refusal_for_rerank_is_a_plain_table() {
+        let control = |budget: u64, paused: bool| jobs::QueueControl {
+            paused,
+            daily_budget_tokens: budget,
+            ..jobs::QueueControl::default()
+        };
+        assert!(refusal_for_rerank(&control(1, false), 0, 5_000, false).is_ok());
+        assert!(refusal_for_rerank(&control(0, false), 0, 5_000, true).is_ok());
+        assert!(refusal_for_rerank(&control(0, false), 0, 5_000, false).is_err());
+        assert!(refusal_for_rerank(&control(1, true), 0, 5_000, true).is_err());
+        assert!(refusal_for_rerank(&control(1, false), 295_000, 5_000, false).is_ok());
+        assert!(refusal_for_rerank(&control(1, false), 295_001, 5_000, false).is_err());
+        assert!(refusal_for_rerank(&control(1, false), u64::MAX, 1, false).is_err());
     }
 }
