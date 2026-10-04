@@ -1148,6 +1148,18 @@ fn push_lexicon_word(words: &mut Vec<String>, seen: &mut HashSet<String>, raw: &
     words.push(word);
 }
 
+/// 全角字母、数字、半角符号折成半角（「ＰＰＴ」→「ppt」），全角空格折成空格。
+/// 中文输入法里不小心打出全角字母很常见，不折的话「做ＰＰＴ」认不出 ppt。汉字和中文标点（。、）不动。
+fn fold_fullwidth(text: &str) -> String {
+    text.chars()
+        .map(|ch| match ch {
+            '\u{3000}' => ' ',
+            '\u{FF01}'..='\u{FF5E}' => char::from_u32(ch as u32 - 0xFEE0).unwrap_or(ch),
+            other => other,
+        })
+        .collect()
+}
+
 enum QueryPiece {
     Latin(String),
     Han(Vec<char>),
@@ -1161,7 +1173,7 @@ struct GramStat {
 }
 
 fn concepts(query: &str, lexicon: &[String], repos: &[RepoRecord]) -> (Vec<String>, Vec<String>) {
-    let mut rest = query.to_lowercase();
+    let mut rest = fold_fullwidth(&query.to_lowercase());
     let mut main = Vec::new();
     for word in lexicon {
         if word.is_empty() {
@@ -2071,6 +2083,22 @@ mod tests {
         let (main, extra) = concepts("做 PPT 和文档", &base_lexicon(), &[]);
         assert_eq!(main, vec!["ppt".to_owned(), "文档".to_owned()]);
         assert!(extra.is_empty());
+    }
+
+    #[test]
+    fn concepts_fold_fullwidth_letters_and_spaces() {
+        let (main, extra) = concepts("做ＰＰＴ　和文档", &base_lexicon(), &[]);
+        assert_eq!(main, vec!["ppt".to_owned(), "文档".to_owned()]);
+        assert!(extra.is_empty(), "{extra:?}");
+        let (_main, extra) = concepts("ＡＢ１２", &base_lexicon(), &[]);
+        assert_eq!(extra, vec!["ab12".to_owned()]);
+        // 中文标点不动：「，」折成「,」后仍是分隔符，「。」不在折叠范围内
+        let (main, _extra) = concepts("封面，海报。字幕", &base_lexicon(), &[]);
+        assert_eq!(
+            main.iter().map(String::as_str).collect::<HashSet<_>>(),
+            HashSet::from(["封面", "海报", "字幕"])
+        );
+        assert_eq!(fold_fullwidth("ａＺ０～　、。"), "aZ0~ 、。");
     }
 
     #[test]

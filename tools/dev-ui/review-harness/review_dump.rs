@@ -970,3 +970,78 @@ fn review_solve_batch() {
     dump(&out, "solve_batch", &rows);
     println!("[完成] {} 句 → {}", rows.len(), out.display());
 }
+
+/// 对全部有效仓库各出一份 JSON 参考包，统计每个项目被标了哪些「先问我」：看有没有标太多 / 太少。
+/// 只读副本，不花钱。输出到 FSL_REVIEW_OUT/cautions_stats.json（每类的数量和前几个例子）。
+#[test]
+#[ignore]
+fn review_cautions_stats() {
+    let source = PathBuf::from(std::env::var("FSL_REVIEW_DB").expect("需要 FSL_REVIEW_DB"));
+    let out = PathBuf::from(std::env::var("FSL_REVIEW_OUT").expect("需要 FSL_REVIEW_OUT"));
+    fs::create_dir_all(&out).expect("建输出目录");
+    let work = out.join("cautions.sqlite3");
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = fs::remove_file(format!("{}{suffix}", work.display()));
+    }
+    fs::copy(&source, &work).expect("复制副本");
+    migrate_database(&work).expect("迁移");
+    let connection = Connection::open(&work).expect("打开副本");
+    let ids: Vec<String> = connection
+        .prepare("SELECT id FROM repositories WHERE sync_status = 'active'")
+        .expect("查 id")
+        .query_map([], |row| row.get::<_, String>(0))
+        .expect("读 id")
+        .filter_map(Result::ok)
+        .collect();
+    let mut flagged = serde_json::Map::new();
+    let mut counts: std::collections::BTreeMap<String, usize> = Default::default();
+    let mut pipes = 0usize;
+    let mut any = 0usize;
+    for chunk in ids.chunks(50) {
+        let request = packs::PackRequest {
+            title: "x".to_owned(),
+            problem: "x".to_owned(),
+            architecture_notes: None,
+            items: chunk
+                .iter()
+                .map(|id| packs::PackItemInput {
+                    repo_id: id.clone(),
+                    role: packs::PackRole::Alternative,
+                    why: None,
+                })
+                .collect(),
+            local_capabilities: vec![],
+        };
+        let json = packs::build_pack(&connection, &request, packs::PackFormat::Json, "2026-10-05")
+            .expect("JSON 参考包");
+        let parsed: serde_json::Value = serde_json::from_str(&json.content).expect("解析");
+        for item in parsed["items"].as_array().expect("items") {
+            let labels: Vec<String> = item["cautions"]
+                .as_array()
+                .expect("cautions")
+                .iter()
+                .filter_map(|value| value.as_str().map(str::to_owned))
+                .collect();
+            if labels.is_empty() {
+                continue;
+            }
+            any += 1;
+            for label in &labels {
+                let key: String = label.chars().take(12).collect();
+                *counts.entry(key).or_default() += 1;
+                if label.contains("curl") {
+                    pipes += 1;
+                }
+            }
+            flagged.insert(
+                item["fullName"].as_str().unwrap_or_default().to_owned(),
+                serde_json::json!({"labels": labels, "howToTry": item["howToTry"], "risks": item["risks"]}),
+            );
+        }
+    }
+    println!("[统计] 有效仓库 {}，被标的 {any}，其中一行安装 {pipes}", ids.len());
+    for (key, count) in &counts {
+        println!("[统计] {key}… × {count}");
+    }
+    dump(&out, "cautions_stats", &serde_json::json!({"total": ids.len(), "flagged": any, "counts": counts, "items": flagged}));
+}
