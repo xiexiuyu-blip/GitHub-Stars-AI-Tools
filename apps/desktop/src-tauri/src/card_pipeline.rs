@@ -11,7 +11,11 @@ pub const PROMPT_VERSION: &str = "card-v2";
 pub const UNTRUSTED_BEGIN: &str = "===== 以下是不可信资料，开始 =====";
 pub const UNTRUSTED_END: &str = "===== 不可信资料结束 =====";
 
-const CARD_MAX_OUTPUT_TOKENS: u32 = 2048;
+/// 一张卡的输出额度（思考 + 正文）。思考型模型会先长篇「思考」：2026-10-04 真实记录里，额度 2048 时 84 次调用只成功 27 次，
+/// 其余 57 次都是「结束原因 length，只给了思考内容、没有正文」，每次白花约 5k token。
+/// 放宽到 8192（大多数服务商允许的上限）；还是被截断就放大到 `CARD_MAX_OUTPUT_TOKENS_RETRY` 重试一次（见 `complete_with_room`）。
+const CARD_MAX_OUTPUT_TOKENS: u32 = 8192;
+const CARD_MAX_OUTPUT_TOKENS_RETRY: u32 = 16_384;
 const HEAD_CHARS: usize = 2_500;
 const SECTION_CHARS: usize = 3_500;
 const TOTAL_CHARS: usize = 6_500;
@@ -444,6 +448,125 @@ pub fn validate_card(
     }
 }
 
+/// 模型这一次因为输出额度用完（结束原因 length）被截断：`ai.rs` 在「只有思考没有正文」时写的就是这样一句。
+fn output_was_cut_off(error: &LlmError) -> bool {
+    matches!(error.kind, LlmErrorKind::Other) && error.message.contains("结束原因 length")
+}
+
+/// 被截断的那一次调用已经计费，但我们读不到真实用量：输出取错误信息里写的（「这次输出了 N token」），读不到就按额度算；
+/// 输入按提示词长度估（和 `TokenSum` 缺用量时一样除以 3）。
+fn cut_off_spend(request: &LlmRequest, error: &LlmError) -> u64 {
+    let output = error
+        .message
+        .split_once("这次输出了 ")
+        .and_then(|(_, rest)| {
+            let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+            digits.parse::<u64>().ok()
+        })
+        .unwrap_or(u64::from(request.max_output_tokens));
+    let input = (request.system.chars().count() + request.user.chars().count()) as u64 / 3;
+    input.saturating_add(output)
+}
+
+struct CutOffRetry {
+    reply: LlmReply,
+    /// 被截断的那次调用花掉的（估计），要算进这张卡的用量。
+    earlier_spent: u64,
+}
+
+/// 服务商拒绝了这次的输出额度（它的上限比我们要的小，`ai.rs` 认出后写了固定说法）。被拒绝的请求没有计费。
+fn output_limit_rejected(error: &LlmError) -> bool {
+    matches!(
+        error.kind,
+        LlmErrorKind::Other | LlmErrorKind::ContentTooLarge
+    ) && error.message.contains(crate::ai::OUTPUT_LIMIT_REJECTED)
+}
+
+/// 服务商拒绝 `CARD_MAX_OUTPUT_TOKENS` 时依次降到这几档再试（比第一次要的小的才试）。
+const CARD_OUTPUT_FALLBACKS: [u32; 2] = [4_096, 2_048];
+
+/// 调用模型，输出额度自己找合适的档位：
+/// - 被服务商拒绝（它的输出上限比我们要的小）：没有计费，降一档再试，直到 2048；
+/// - 「输出额度用完、只有思考没有正文」（被截断）：放大到 `CARD_MAX_OUTPUT_TOKENS_RETRY` 重试一次——这不是模型坏了，
+///   是它想得太长，不重试这个仓库就一直没有说明，还白花了一次调用。放大后被服务商拒绝（或别的非暂时性错误）就还是报原来的截断错误；
+///   放大后又被截断，报这一次的；遇到网络 / 限流 / 超时 / 认证问题，照那个种类报（队列会按种类处理）；
+/// - 两种情况都带上被截断那次的花费（读不到真实用量，按错误信息里写的输出数 + 提示词长度估）。
+fn complete_with_room(
+    client: &impl LlmClient,
+    request: &LlmRequest,
+) -> Result<CutOffRetry, (LlmError, u64)> {
+    let with_cap = |cap: u32| LlmRequest {
+        max_output_tokens: cap,
+        ..request.clone()
+    };
+    let first_cap = request.max_output_tokens;
+    let first_error = match client.complete_json(request) {
+        Ok(reply) => {
+            return Ok(CutOffRetry {
+                reply,
+                earlier_spent: 0,
+            })
+        }
+        Err(error) => error,
+    };
+    if output_limit_rejected(&first_error) {
+        let mut last = first_error;
+        for cap in CARD_OUTPUT_FALLBACKS
+            .into_iter()
+            .filter(|cap| *cap < first_cap)
+        {
+            match client.complete_json(&with_cap(cap)) {
+                Ok(reply) => {
+                    return Ok(CutOffRetry {
+                        reply,
+                        earlier_spent: 0,
+                    })
+                }
+                Err(error) if output_limit_rejected(&error) => last = error,
+                Err(error) => {
+                    // 这一档收下了请求；之后出的错（包括又被截断）照实报，不再往上放大（这个服务商的上限就在这附近）
+                    let spent = if output_was_cut_off(&error) {
+                        cut_off_spend(&with_cap(cap), &error)
+                    } else {
+                        0
+                    };
+                    return Err((error, spent));
+                }
+            }
+        }
+        return Err((last, 0));
+    }
+    if output_was_cut_off(&first_error) && first_cap < CARD_MAX_OUTPUT_TOKENS_RETRY {
+        let spent = cut_off_spend(request, &first_error);
+        let bigger = with_cap(CARD_MAX_OUTPUT_TOKENS_RETRY);
+        return match client.complete_json(&bigger) {
+            Ok(reply) => Ok(CutOffRetry {
+                reply,
+                earlier_spent: spent,
+            }),
+            Err(second) => {
+                let cut_off_again = output_was_cut_off(&second);
+                let second_spent = if cut_off_again {
+                    cut_off_spend(&bigger, &second)
+                } else {
+                    0
+                };
+                let transient = !matches!(
+                    second.kind,
+                    LlmErrorKind::Other | LlmErrorKind::ContentTooLarge
+                );
+                let reported = if transient || cut_off_again {
+                    second
+                } else {
+                    first_error
+                };
+                Err((reported, spent.saturating_add(second_spent)))
+            }
+        };
+    }
+    Err((first_error, 0))
+}
+
 pub fn run_repo_card(
     conn: &mut Connection,
     client: &impl LlmClient,
@@ -465,10 +588,15 @@ pub fn run_repo_card(
     }
 
     let request = build_prompt(&input);
-    let first = client.complete_json(&request).map_err(from_llm)?;
+    let completed = complete_with_room(client, &request).map_err(|(error, spent)| {
+        let mut failure = from_llm(error);
+        failure.spent_tokens = spent;
+        failure
+    })?;
+    let first = completed.reply;
     let mut warnings = Vec::new();
     let mut tokens = TokenSum {
-        input: 0,
+        input: completed.earlier_spent,
         output: 0,
     };
     tokens.add(&request, &first, &mut warnings);
@@ -478,12 +606,14 @@ pub fn run_repo_card(
         Err(failure) => {
             let repair = repair_request(&request, &first.content, &failure.messages());
             let spent = tokens.input.saturating_add(tokens.output);
-            let second = client.complete_json(&repair).map_err(|error| {
-                // 第一次调用已经成功（已计费），修复调用才失败：把第一次的用量带出去
+            let second = complete_with_room(client, &repair).map_err(|(error, extra)| {
+                // 第一次调用已经成功（已计费），修复调用才失败：把第一次的用量（和修复调用被截断那次的）带出去
                 let mut failure = from_llm(error);
-                failure.spent_tokens = spent;
+                failure.spent_tokens = spent.saturating_add(extra);
                 failure
             })?;
+            tokens.input = tokens.input.saturating_add(second.earlier_spent);
+            let second = second.reply;
             tokens.add(&repair, &second, &mut warnings);
             if let Some(name) = second
                 .model
@@ -2726,7 +2856,7 @@ https://img.shields.io/github/stars/fox/demo
         assert!(!request.user.contains("scenario_tags"), "{}", request.user);
         assert!(!request.system.contains(SECRET));
         assert!(!request.user.contains(SECRET));
-        assert_eq!(request.max_output_tokens, 2_048);
+        assert_eq!(request.max_output_tokens, 8_192);
     }
 
     #[test]
@@ -3065,6 +3195,402 @@ https://img.shields.io/github/stars/fox/demo
         assert_eq!(client.calls().len(), 2);
         assert_eq!(cell_i64(&conn, "SELECT COUNT(*) FROM repo_ai_documents"), 0);
         assert_eq!(cell_i64(&conn, "SELECT COUNT(*) FROM entity_categories"), 0);
+    }
+
+    // —— 输出额度用完被截断（思考型模型只给了思考、没有正文）——
+
+    const CUT_OFF: &str = "OpenAI 响应中没有可用内容（结束原因 length，模型只给了思考内容，没有正文，这次输出了 8192 token）";
+
+    fn cut_off() -> Result<LlmReply, LlmError> {
+        Err(LlmError {
+            kind: LlmErrorKind::Other,
+            message: CUT_OFF.to_owned(),
+        })
+    }
+
+    #[test]
+    fn a_reply_cut_off_by_the_output_limit_is_retried_once_with_more_room_and_both_calls_are_paid_for(
+    ) {
+        let db = TempDb::new();
+        let mut conn = db.open();
+        seed_repo(&conn, Some(&usable_readme()));
+        let client = ScriptedClient::new(vec![
+            cut_off(),
+            ok_reply(&valid_json(), "fake-model", 3_000, 900),
+        ]);
+        let report = run_repo_card(
+            &mut conn,
+            &client,
+            "r1",
+            &options(false, "2026-10-03T00:00:00Z"),
+        )
+        .expect("放大额度重试后应成功");
+        assert_eq!(report.outcome, CardRunOutcome::Generated);
+        let calls = client.calls();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].max_output_tokens, 8_192);
+        assert_eq!(calls[1].max_output_tokens, 16_384);
+        assert_eq!(
+            calls[1].user, calls[0].user,
+            "重试的提示词不变，只放大输出额度"
+        );
+        // 用量 = 重试那次的真实用量 + 被截断那次（输出 8192 + 按提示词估的输入），不能只记重试那次
+        assert_eq!(report.output_tokens, 900);
+        assert!(
+            report.input_tokens >= 3_000 + 8_192,
+            "被截断那次也花了钱：{}",
+            report.input_tokens
+        );
+    }
+
+    #[test]
+    fn a_second_cut_off_fails_with_the_cut_off_message_and_carries_the_first_spend() {
+        let db = TempDb::new();
+        let mut conn = db.open();
+        seed_repo(&conn, Some(&usable_readme()));
+        let client = ScriptedClient::new(vec![cut_off(), cut_off()]);
+        let error = run_repo_card(
+            &mut conn,
+            &client,
+            "r1",
+            &options(false, "2026-10-03T00:00:00Z"),
+        )
+        .expect_err("两次都被截断应失败");
+        assert_eq!(error.kind, CardRunErrorKind::Other);
+        assert!(
+            error.message.contains("结束原因 length"),
+            "{}",
+            error.message
+        );
+        assert_eq!(client.calls().len(), 2, "只重试一次");
+        assert!(error.spent_tokens >= 8_192, "{}", error.spent_tokens);
+        assert_eq!(cell_i64(&conn, "SELECT COUNT(*) FROM repo_ai_documents"), 0);
+    }
+
+    #[test]
+    fn a_retry_the_provider_rejects_keeps_the_cut_off_error() {
+        // 放大后的额度超过它的上限（HTTP 400）：照旧报「被截断」，别把 400 当成这张卡的错
+        let db = TempDb::new();
+        let mut conn = db.open();
+        seed_repo(&conn, Some(&usable_readme()));
+        let client = ScriptedClient::new(vec![
+            cut_off(),
+            Err(LlmError {
+                kind: LlmErrorKind::Other,
+                message: "AI 接口请求失败（HTTP 400）：max_tokens is too large".to_owned(),
+            }),
+        ]);
+        let error = run_repo_card(
+            &mut conn,
+            &client,
+            "r1",
+            &options(false, "2026-10-03T00:00:00Z"),
+        )
+        .expect_err("应失败");
+        assert!(
+            error.message.contains("结束原因 length"),
+            "{}",
+            error.message
+        );
+        assert!(error.spent_tokens >= 8_192);
+    }
+
+    #[test]
+    fn a_retry_that_hits_a_transient_problem_reports_that_kind_with_the_first_spend() {
+        let db = TempDb::new();
+        let mut conn = db.open();
+        seed_repo(&conn, Some(&usable_readme()));
+        let client = ScriptedClient::new(vec![
+            cut_off(),
+            Err(LlmError {
+                kind: LlmErrorKind::Network,
+                message: "连接断了".to_owned(),
+            }),
+        ]);
+        let error = run_repo_card(
+            &mut conn,
+            &client,
+            "r1",
+            &options(false, "2026-10-03T00:00:00Z"),
+        )
+        .expect_err("应失败");
+        assert_eq!(error.kind, CardRunErrorKind::Network);
+        assert!(error.spent_tokens >= 8_192);
+    }
+
+    fn limit_rejected() -> Result<LlmReply, LlmError> {
+        Err(LlmError {
+            kind: LlmErrorKind::Other,
+            message: format!(
+                "AI 接口请求失败（HTTP 400）：{}。",
+                crate::ai::OUTPUT_LIMIT_REJECTED
+            ),
+        })
+    }
+
+    fn caps(client: &ScriptedClient) -> Vec<u32> {
+        client
+            .calls()
+            .iter()
+            .map(|call| call.max_output_tokens)
+            .collect()
+    }
+
+    #[test]
+    fn a_provider_with_a_lower_output_limit_gets_a_lower_request_and_nothing_is_paid_for_the_rejections(
+    ) {
+        let db = TempDb::new();
+        let mut conn = db.open();
+        seed_repo(&conn, Some(&usable_readme()));
+        let client = ScriptedClient::new(vec![
+            limit_rejected(),
+            limit_rejected(),
+            ok_reply(&valid_json(), "fake-model", 3_000, 900),
+        ]);
+        let report = run_repo_card(
+            &mut conn,
+            &client,
+            "r1",
+            &options(false, "2026-10-03T00:00:00Z"),
+        )
+        .expect("降到 2048 后应成功");
+        assert_eq!(caps(&client), vec![8_192, 4_096, 2_048]);
+        assert_eq!(
+            (report.input_tokens, report.output_tokens),
+            (3_000, 900),
+            "被拒绝的请求没有计费"
+        );
+    }
+
+    #[test]
+    fn a_provider_that_rejects_every_output_limit_fails_with_that_message_and_no_spend() {
+        let db = TempDb::new();
+        let mut conn = db.open();
+        seed_repo(&conn, Some(&usable_readme()));
+        let client =
+            ScriptedClient::new(vec![limit_rejected(), limit_rejected(), limit_rejected()]);
+        let error = run_repo_card(
+            &mut conn,
+            &client,
+            "r1",
+            &options(false, "2026-10-03T00:00:00Z"),
+        )
+        .expect_err("全都被拒绝应失败");
+        assert_eq!(caps(&client), vec![8_192, 4_096, 2_048]);
+        assert!(
+            error.message.contains(crate::ai::OUTPUT_LIMIT_REJECTED),
+            "{}",
+            error.message
+        );
+        assert_eq!(error.spent_tokens, 0);
+    }
+
+    #[test]
+    fn a_cut_off_at_a_lower_limit_is_reported_and_never_grown_back_past_the_providers_limit() {
+        let db = TempDb::new();
+        let mut conn = db.open();
+        seed_repo(&conn, Some(&usable_readme()));
+        let client = ScriptedClient::new(vec![limit_rejected(), cut_off()]);
+        let error = run_repo_card(
+            &mut conn,
+            &client,
+            "r1",
+            &options(false, "2026-10-03T00:00:00Z"),
+        )
+        .expect_err("应失败");
+        assert_eq!(
+            caps(&client),
+            vec![8_192, 4_096],
+            "服务商的上限就在这附近：不再往上放大"
+        );
+        assert!(
+            error.message.contains("结束原因 length"),
+            "{}",
+            error.message
+        );
+        assert!(
+            error.spent_tokens >= 8_192,
+            "被截断那次花了钱：{}",
+            error.spent_tokens
+        );
+    }
+
+    #[test]
+    fn a_growth_the_provider_rejects_reports_the_original_cut_off_with_its_spend() {
+        let db = TempDb::new();
+        let mut conn = db.open();
+        seed_repo(&conn, Some(&usable_readme()));
+        let client = ScriptedClient::new(vec![cut_off(), limit_rejected()]);
+        let error = run_repo_card(
+            &mut conn,
+            &client,
+            "r1",
+            &options(false, "2026-10-03T00:00:00Z"),
+        )
+        .expect_err("应失败");
+        assert_eq!(caps(&client), vec![8_192, 16_384]);
+        assert!(
+            error.message.contains("结束原因 length"),
+            "{}",
+            error.message
+        );
+        assert!(!error.message.contains(crate::ai::OUTPUT_LIMIT_REJECTED));
+        assert!(error.spent_tokens >= 8_192);
+    }
+
+    #[test]
+    fn two_cut_offs_charge_both_calls() {
+        let db = TempDb::new();
+        let mut conn = db.open();
+        seed_repo(&conn, Some(&usable_readme()));
+        let second = Err(LlmError {
+            kind: LlmErrorKind::Other,
+            message: "OpenAI 响应中没有可用内容（结束原因 length，模型只给了思考内容，没有正文，这次输出了 16384 token）".to_owned(),
+        });
+        let client = ScriptedClient::new(vec![cut_off(), second]);
+        let error = run_repo_card(
+            &mut conn,
+            &client,
+            "r1",
+            &options(false, "2026-10-03T00:00:00Z"),
+        )
+        .expect_err("应失败");
+        assert!(error.message.contains("16384"), "{}", error.message);
+        assert!(
+            error.spent_tokens >= 8_192 + 16_384,
+            "{}",
+            error.spent_tokens
+        );
+    }
+
+    #[test]
+    fn a_repair_call_that_is_cut_off_is_retried_with_more_room_and_paid_for() {
+        let db = TempDb::new();
+        let mut conn = db.open();
+        seed_repo(&conn, Some(&usable_readme()));
+        let client = ScriptedClient::new(vec![
+            ok_reply("不是 JSON", "m", 100, 50),
+            cut_off(),
+            ok_reply(&valid_json(), "fake-model", 200, 60),
+        ]);
+        let report = run_repo_card(
+            &mut conn,
+            &client,
+            "r1",
+            &options(false, "2026-10-03T00:00:00Z"),
+        )
+        .expect("修复调用放大额度后应成功");
+        assert_eq!(caps(&client), vec![8_192, 8_192, 16_384]);
+        assert_eq!(report.output_tokens, 110);
+        assert!(
+            report.input_tokens >= 300 + 8_192,
+            "修复调用被截断那次也花了钱：{}",
+            report.input_tokens
+        );
+    }
+
+    #[test]
+    fn the_repair_call_also_finds_its_own_output_room() {
+        // 第一次回的不是 JSON；修复调用被服务商拒绝输出额度，降一档后成功
+        let db = TempDb::new();
+        let mut conn = db.open();
+        seed_repo(&conn, Some(&usable_readme()));
+        let client = ScriptedClient::new(vec![
+            ok_reply("不是 JSON", "m", 100, 50),
+            limit_rejected(),
+            ok_reply(&valid_json(), "fake-model", 200, 60),
+        ]);
+        let report = run_repo_card(
+            &mut conn,
+            &client,
+            "r1",
+            &options(false, "2026-10-03T00:00:00Z"),
+        )
+        .expect("修复调用降档后应成功");
+        assert_eq!(caps(&client), vec![8_192, 8_192, 4_096]);
+        assert_eq!((report.input_tokens, report.output_tokens), (300, 110));
+    }
+
+    #[test]
+    fn an_empty_reply_that_was_not_cut_off_is_not_retried() {
+        let db = TempDb::new();
+        let mut conn = db.open();
+        seed_repo(&conn, Some(&usable_readme()));
+        let client = ScriptedClient::new(vec![Err(LlmError {
+            kind: LlmErrorKind::Other,
+            message: "OpenAI 响应中没有可用内容（结束原因 stop）".to_owned(),
+        })]);
+        let error = run_repo_card(
+            &mut conn,
+            &client,
+            "r1",
+            &options(false, "2026-10-03T00:00:00Z"),
+        )
+        .expect_err("应失败");
+        assert_eq!(client.calls().len(), 1);
+        assert_eq!(error.spent_tokens, 0);
+    }
+
+    #[test]
+    fn a_repair_failure_after_a_cut_off_retry_carries_every_spend() {
+        let db = TempDb::new();
+        let mut conn = db.open();
+        seed_repo(&conn, Some(&usable_readme()));
+        let client = ScriptedClient::new(vec![
+            cut_off(),
+            ok_reply("不是 JSON", "m", 100, 50),
+            Err(LlmError {
+                kind: LlmErrorKind::Network,
+                message: "断了".to_owned(),
+            }),
+        ]);
+        let error = run_repo_card(
+            &mut conn,
+            &client,
+            "r1",
+            &options(false, "2026-10-03T00:00:00Z"),
+        )
+        .expect_err("应失败");
+        assert_eq!(error.kind, CardRunErrorKind::Network);
+        // 被截断那次（≥ 8192）+ 第二次调用（100 + 50）
+        assert!(error.spent_tokens >= 8_192 + 150, "{}", error.spent_tokens);
+    }
+
+    #[test]
+    fn a_cut_off_at_the_largest_room_is_not_retried_again_and_the_spend_is_read_from_the_message() {
+        let client = ScriptedClient::new(vec![cut_off()]);
+        let request = LlmRequest {
+            system: "系统".to_owned(),
+            user: "用户".to_owned(),
+            max_output_tokens: 16_384,
+        };
+        let (error, spent) = match complete_with_room(&client, &request) {
+            Err(failure) => failure,
+            Ok(_) => panic!("应失败"),
+        };
+        assert!(error.message.contains("结束原因 length"));
+        assert_eq!(spent, 0, "没有重试，就没有「更早那次」的花费");
+        assert_eq!(client.calls().len(), 1);
+        // 花费：输出读错误信息里写的数，读不到就按额度算；输入按提示词长度估
+        let long_request = LlmRequest {
+            system: "字".repeat(300),
+            user: "字".repeat(300),
+            max_output_tokens: 8_192,
+        };
+        assert_eq!(
+            cut_off_spend(&long_request, &cut_off().unwrap_err()),
+            200 + 8_192
+        );
+        let unknown = LlmError {
+            kind: LlmErrorKind::Other,
+            message: "结束原因 length".to_owned(),
+        };
+        assert_eq!(cut_off_spend(&long_request, &unknown), 200 + 8_192);
+        let small = LlmError {
+            kind: LlmErrorKind::Other,
+            message: "结束原因 length，这次输出了 1234 token".to_owned(),
+        };
+        assert_eq!(cut_off_spend(&long_request, &small), 200 + 1_234);
     }
 
     #[test]

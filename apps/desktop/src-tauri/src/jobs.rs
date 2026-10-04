@@ -24,8 +24,9 @@ const MAX_DAILY_BUDGET: u64 = 2_000_000;
 
 /// 「全量整理」最长运行多久（从开始算）。Fox 点了确认才开，到点自动结束，免得忘了关就一直不限额。
 pub(crate) const FULL_SCAN_SECS: i64 = 48 * 60 * 60;
-/// 一张理解卡用多少 token（2026-10-04 试跑实测约 5k，含思考）。只用来给全量整理算「远超预计」的刹车线。
-const FULL_SCAN_TOKENS_PER_CARD: i64 = 5_200;
+/// 一张理解卡用多少 token（2026-10-04 真实记录：成功的卡平均约 6.3k，含思考；输出额度放宽后偶尔还要被截断重试，按 7.5k 算）。
+/// 只用来给全量整理算「远超预计」的刹车线。
+const FULL_SCAN_TOKENS_PER_CARD: i64 = 7_500;
 /// 全量整理的用量超过「预计 × 4」（至少 300 万）就自动结束：说明哪里不对劲了（死循环、反复重试、提示词暴涨），
 /// 比让它一直不限额地花下去强。正常整理远到不了这条线。
 const FULL_SCAN_CEILING_FACTOR: i64 = 4;
@@ -73,7 +74,9 @@ pub const REPAIRED_FAILURE_TOKEN_ESTIMATE: i64 = 10_000;
 /// 认领一个花钱的任务时，先在这条任务自己的行上记下这么多（写进 `input_tokens`），结束时换成真实用量。
 /// 这样额度用量里一直看得见在跑的任务，取消、崩溃、被打断都不会让这笔账消失，
 /// 几个线程同时认领也不会一起冲破额度（认领在一个 `BEGIN IMMEDIATE` 里，后一个一定看得见前一个的预留）。
-/// 取一次「两次调用都用满」的上限：一张卡一次调用约 5k，校验没过会再补一次，合计可到 12k。
+/// 取一次调用的上限：提示词约 3–4.5k + 输出额度 8192（`card_pipeline::CARD_MAX_OUTPUT_TOKENS`）≈ 12k；一张卡平均约 6k。
+/// 被截断重试 / 校验没过再补一次调用时会超过它（最多约再多一次调用），这是已知的小误差，不是额度被冲破：
+/// 超出的部分照实记账，下一次认领会看见。
 pub const CLAIM_RESERVE_TOKENS: i64 = 12_000;
 
 /// 这一次失败该记多少。网络不通（没连上）、限流、认证失败、内容太大（本地就拦了）、被打断没有真的花 token，
@@ -3453,7 +3456,7 @@ mod tests {
         // 开始时只有 1 个要整理：刹车线是至少 300 万。用量超过它说明哪里不对劲，自动结束，而不是一直不限额地花
         assert_eq!(full_scan_ceiling(1), 3_000_000);
         assert_eq!(full_scan_ceiling(0), 3_000_000);
-        assert_eq!(full_scan_ceiling(388), 388 * 5_200 * 4);
+        assert_eq!(full_scan_ceiling(388), 388 * 7_500 * 4);
         let db = TestDb::new("full-scan-ceiling");
         let path = queue_control_path(db.path());
         begin_full_scan(&path, NOW, 1).unwrap();

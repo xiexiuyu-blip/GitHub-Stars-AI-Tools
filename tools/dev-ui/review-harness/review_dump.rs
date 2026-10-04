@@ -442,7 +442,7 @@ fn canned_card() -> String {
     .to_string()
 }
 
-fn start_fake_llm(served: Arc<AtomicUsize>) -> u16 {
+fn start_fake_llm(served: Arc<AtomicUsize>, delay_ms: u64) -> u16 {
     let listener = TcpListener::bind(("127.0.0.1", 0)).expect("监听假模型端口");
     let port = listener.local_addr().expect("端口").port();
     std::thread::spawn(move || {
@@ -475,6 +475,9 @@ fn start_fake_llm(served: Arc<AtomicUsize>) -> u16 {
                     buf.extend_from_slice(&chunk[..n]);
                 }
                 served.fetch_add(1, AtomicOrdering::SeqCst);
+                if delay_ms > 0 {
+                    std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+                }
                 let body = serde_json::json!({
                     "id": "fake",
                     "model": "fake-model",
@@ -509,7 +512,7 @@ fn review_pipeline_rehearsal() {
     scenarios::ensure_initial_classification(&work).expect("首次归类");
 
     let served = Arc::new(AtomicUsize::new(0));
-    let port = start_fake_llm(served.clone());
+    let port = start_fake_llm(served.clone(), 0);
     println!("[演练] 假模型：http://127.0.0.1:{port}/v1");
 
     // 1) 排队：没有授权预算时不应有任何调用
@@ -581,6 +584,133 @@ fn review_pipeline_rehearsal() {
         )
         .ok();
     println!("[演练] 失败样例：{sample:?}");
+    worker.stop();
+    println!(
+        "[演练] 控制文件：{}",
+        fs::read_to_string(crate::jobs::queue_control_path(&work)).unwrap_or_default()
+    );
+}
+
+/// 全量整理演练：假模型 + 真队列 / 真处理器 / 真工作线程，在开发库副本上跑。不花钱、不读钥匙串。
+/// 日常额度到线就停 → 开始全量整理（必须确认）一路做 → 中途停止后回到每天额度 → 再开始，整理完自动结束。
+#[test]
+#[ignore]
+fn review_full_scan_rehearsal() {
+    let source = PathBuf::from(std::env::var("FSL_REVIEW_DB").expect("需要 FSL_REVIEW_DB"));
+    let out = PathBuf::from(std::env::var("FSL_REVIEW_OUT").expect("需要 FSL_REVIEW_OUT"));
+    fs::create_dir_all(&out).expect("建输出目录");
+    let work = out.join("fullscan.sqlite3");
+    for suffix in ["", "-wal", "-shm", ".queue.json"] {
+        let _ = fs::remove_file(format!("{}{suffix}", work.display()));
+    }
+    let _ = fs::remove_file(crate::jobs::queue_control_path(&work));
+    fs::copy(&source, &work).expect("复制副本");
+    migrate_database(&work).expect("迁移");
+    scenarios::ensure_initial_classification(&work).expect("首次归类");
+
+    let served = Arc::new(AtomicUsize::new(0));
+    let port = start_fake_llm(served.clone(), 120);
+    let settings = serde_json::json!({"ai": {"provider": "openai-compatible", "model": "fake-model"}});
+    let config_fn: Arc<dyn Fn() -> Result<crate::ai::AiRequestConfig, String> + Send + Sync> =
+        Arc::new(move || {
+            Ok(crate::ai::AiRequestConfig {
+                provider: "openai-compatible".to_owned(),
+                api_key: String::new(),
+                base_url: Some(format!("http://127.0.0.1:{port}/v1")),
+                model: "fake-model".to_owned(),
+            })
+        });
+    let handler = crate::card_handler::RepoCardHandler::new(config_fn);
+    let worker = crate::jobs::start_worker(&work, vec![Arc::new(handler)]);
+    let control = crate::jobs::queue_control_path(&work);
+    let calls = || served.load(AtomicOrdering::SeqCst);
+
+    // 0) 没有授权时：全量整理要确认、也不会悄悄开
+    let refused = crate::card_handler::start_full_scan(&work, &settings, false);
+    println!("[演练] 没确认就开始：{refused:?}");
+    assert!(refused.is_err());
+
+    // 1) 日常额度 3 万：到线就停（每次假调用记 3600）
+    let queued = crate::card_handler::enqueue_cards_for_scope(&work, "missing").expect("排队 missing")
+        + crate::card_handler::enqueue_cards_for_scope(&work, "outdated").expect("排队 outdated");
+    crate::jobs::set_daily_budget(&control, 30_000).expect("设预算");
+    let begun = Instant::now();
+    loop {
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        let status = crate::jobs::queue_status(&work).expect("队列状态");
+        if status.state == "budget_reached" || begun.elapsed().as_secs() > 120 {
+            break;
+        }
+    }
+    std::thread::sleep(std::time::Duration::from_secs(2));
+    let at_cap = calls();
+    std::thread::sleep(std::time::Duration::from_secs(3));
+    println!("[演练] 排队 {queued} 个；日常额度到线时调用 {at_cap} 次，再等 3 秒 {} 次", calls());
+    assert_eq!(calls(), at_cap, "到线之后不该再调用模型");
+    let capped = crate::card_handler::automation_status(&work, &settings).expect("状态");
+    println!(
+        "[演练] 到线时：enabled={} unlimited={} 已用={} 剩余额度={} 待整理={}",
+        capped.enabled, capped.unlimited, capped.tokens_24h, capped.budget_remaining, capped.needs_organizing
+    );
+    assert!(!capped.unlimited);
+
+    // 2) 开始全量整理（确认）：不看每天额度一路做；中途停止
+    let started = crate::card_handler::start_full_scan(&work, &settings, true).expect("开始全量整理");
+    println!(
+        "[演练] 开始：unlimited={} enabled={} total={:?}",
+        started.unlimited,
+        started.enabled,
+        started.full_scan.as_ref().map(|scan| scan.total)
+    );
+    assert!(started.unlimited && started.enabled);
+    std::thread::sleep(std::time::Duration::from_secs(5));
+    let mid = crate::card_handler::automation_status(&work, &settings).expect("状态");
+    let mid_scan = mid.full_scan.clone().expect("进行中应有进度");
+    println!(
+        "[演练] 5 秒后：已用 {} 剩余 {} / {}，调用 {}",
+        mid_scan.tokens_used,
+        mid_scan.remaining,
+        mid_scan.total,
+        calls()
+    );
+    assert!(calls() > at_cap, "全量整理应当继续调用");
+    assert!(mid.tokens_24h > 30_000, "用量应当超过每天额度");
+    let stopped = crate::card_handler::stop_full_scan(&work, &settings).expect("停止");
+    assert!(!stopped.unlimited && stopped.full_scan.is_none());
+    println!("[演练] 停止：{:?}", stopped.last_full_scan);
+    std::thread::sleep(std::time::Duration::from_secs(2)); // 在跑的做完
+    let after_stop = calls();
+    std::thread::sleep(std::time::Duration::from_secs(4));
+    println!("[演练] 停止后调用 {after_stop} → 再等 4 秒 {}", calls());
+    assert_eq!(calls(), after_stop, "停止之后回到每天额度，用量早已超线，不该再调用模型");
+
+    // 3) 再开始，一路做完，整理完自动结束
+    crate::card_handler::start_full_scan(&work, &settings, true).expect("再次开始");
+    let begun = Instant::now();
+    loop {
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        let status = crate::card_handler::automation_status(&work, &settings).expect("状态");
+        let progress = status.full_scan.as_ref().map(|scan| (scan.remaining, scan.total, scan.tokens_used));
+        println!("[演练] {} 秒：unlimited={} 进度={progress:?} 调用={}", begun.elapsed().as_secs(), status.unlimited, calls());
+        if !status.unlimited || begun.elapsed().as_secs() > 600 {
+            break;
+        }
+    }
+    let done = crate::card_handler::automation_status(&work, &settings).expect("状态");
+    let last = done.last_full_scan.clone().expect("整理完应留下记录");
+    println!("[演练] 完成记录：{last:?}；24 小时已用 {}；待整理 {}", done.tokens_24h, done.needs_organizing);
+    assert_eq!(last.reason, "completed");
+    assert_eq!(last.remaining, 0);
+    assert!(!done.unlimited && done.full_scan.is_none());
+    assert_eq!(done.queued + done.running, 0);
+
+    // 4) 账：调用次数 = 成功的任务数（没有白花的调用）；回到每天额度
+    let connection = Connection::open(&work).expect("打开副本");
+    let one = |sql: &str| -> i64 { connection.query_row(sql, [], |r| r.get(0)).expect(sql) };
+    let succeeded = one("SELECT COUNT(*) FROM ai_jobs WHERE status='succeeded' AND input_tokens > 0");
+    let failed = one("SELECT COUNT(*) FROM ai_jobs WHERE status='failed'");
+    println!("[演练] 成功 {succeeded}，失败 {failed}，模型调用 {}", calls());
+    assert_eq!(calls() as i64, succeeded + failed, "每次调用都应有对应的任务记账");
     worker.stop();
     println!(
         "[演练] 控制文件：{}",

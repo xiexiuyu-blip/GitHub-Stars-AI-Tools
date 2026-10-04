@@ -20,6 +20,11 @@ const ANTHROPIC_SEARCH_PLAN_MAX_TOKENS: u16 = 800;
 const ANTHROPIC_SEARCH_ANSWER_MAX_TOKENS: u16 = 1200;
 const ANTHROPIC_EXPLANATION_MAX_TOKENS: u16 = 1000;
 const ANTHROPIC_TRANSLATION_MAX_TOKENS: u16 = 6000;
+/// 服务商因为「max_tokens 比这个模型允许的输出上限还大」拒绝了请求（HTTP 400 / 422）时，错误信息里的固定说法。
+/// 理解卡流水线靠它认出「该把输出额度降一档重试」（`card_pipeline::complete_with_room`）；
+/// 错误文案不回显响应体（可能带密钥），所以只能在看得到响应体的这里认。
+pub(crate) const OUTPUT_LIMIT_REJECTED: &str = "输出长度（max_tokens）超过了这个模型允许的上限";
+
 const AI_SYSTEM_PROMPT: &str =
     "你是开源项目知识库助手。严格遵守用户消息中的输出格式要求；需要结构化 JSON 时只输出 JSON，需要自然语言时直接回答。";
 
@@ -2694,6 +2699,15 @@ mod card_chat {
                 ),
             };
         }
+        if (status == 400 || status == 422) && rejects_output_limit(body) {
+            return ChatError {
+                kind: ChatErrorKind::Other,
+                message: format!(
+                    "AI 接口请求失败（HTTP {status}）：{}。",
+                    super::OUTPUT_LIMIT_REJECTED
+                ),
+            };
+        }
         if status == 400 && looks_like_context_overflow(body) {
             return ChatError {
                 kind: ChatErrorKind::ContentTooLarge,
@@ -2950,6 +2964,14 @@ mod card_chat {
         } else {
             text.parse::<u64>().ok()
         }
+    }
+
+    /// 响应体说的是「max_tokens 比允许的输出上限大」，而不是「输入太长」（同时提到上下文的算输入太长，不在这里认）。
+    fn rejects_output_limit(body: &str) -> bool {
+        let normalized = body.to_ascii_lowercase();
+        (normalized.contains("max_tokens") || normalized.contains("max_completion_tokens"))
+            && !normalized.contains("context")
+            && !body.contains("上下文")
     }
 
     fn looks_like_context_overflow(body: &str) -> bool {
@@ -4565,6 +4587,23 @@ mod tests {
             None,
         );
         assert_eq!(openai.kind, ChatErrorKind::Other, "{}", openai.message);
+        // 两种都写固定说法：理解卡流水线靠它认出「该把输出额度降一档重试」
+        for rejected in [&anthropic, &openai] {
+            assert!(
+                rejected.message.contains(OUTPUT_LIMIT_REJECTED),
+                "{}",
+                rejected.message
+            );
+        }
+        // 别的 400（没提 max_tokens）不会被当成输出上限被拒；422 同样认
+        let plain = classify_http_failure(400, r#"{"error":{"message":"bad request"}}"#, None);
+        assert!(!plain.message.contains(OUTPUT_LIMIT_REJECTED));
+        let unprocessable = classify_http_failure(
+            422,
+            r#"{"detail":"max_completion_tokens must be <= 8192"}"#,
+            None,
+        );
+        assert!(unprocessable.message.contains(OUTPUT_LIMIT_REJECTED));
         // 真的是内容太长的几种写法照旧认得（包括同时提到 max_tokens 和上下文窗口的）
         for genuine in [
             "This model's maximum context length is 8192 tokens. However, your messages resulted in 9000 tokens.",
