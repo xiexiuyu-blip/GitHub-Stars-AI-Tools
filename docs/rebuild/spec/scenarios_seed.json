@@ -1,7 +1,7 @@
 {
-  "version": 1,
+  "version": 2,
   "grounded_on": "原型 extract.py 的 13 个业务场景与关键词（2026-10-03，492 个仓库试分，见 docs/rebuild/原型/README.md）",
-  "note": "场景是「Fox 用它来做什么」，和 taxonomy_seed.json 的技术分类（它是什么）正交。规则只做第一遍候选（origin=rule，confidence 0.5，status=suggested）；AI 理解卡的 scenario_tags 给出 origin=ai；用户确认或手动加的是 origin=user。关键词一律小写匹配，在仓库名、描述、topics、中文摘要、理解卡的能力与问题文字里做子串匹配。",
+  "note": "场景是「Fox 用它来做什么」，和 taxonomy_seed.json 的技术分类（它是什么）正交。规则只做第一遍候选（origin=rule，status=suggested）；AI 理解卡的 scenario_tags 给出 origin=ai；用户确认或手动加的是 origin=user。v2（2026-10-05，审读 50 个仓库 105 个标签：对 32%、错 30%，规则标签只有约 18% 对）：关键词一律小写，只在「仓库名、描述、topics、README 开头 1500 字」里匹配，不再读 AI 写的中文说明 / 关键词 / 分类名；一个词命中在名称、描述、topics 里，或 README 里有两个不同的词命中，才算候选；evidence 非空的场景（平台类、自动化、SEO）必须在材料里字面出现 evidence 里的词，规则和 AI 的建议都一样，没有就不给；description_zh 写的是「给 / 不给」的口径，会原样放进理解卡提示词。 evidence_meta：只有出现在名称 / 描述 / topics 里才算证据的词（README 里到处都是「自动化」，不算）；规则归类对要求证据的场景，README 里的命中不单独成立，必须名称 / 描述 / topics 里也有（README 开头常有「微信群」「抖音号」这类社群入口）。",
   "thin_threshold": 14,
   "thin_focus": [
     "ec",
@@ -18,7 +18,14 @@
         "xiaohongshu",
         "rednote",
         "xhs"
-      ]
+      ],
+      "evidence": [
+        "小红书",
+        "xiaohongshu",
+        "rednote",
+        "xhs"
+      ],
+      "description_zh": "做小红书内容、运营、发布、封面。不给：只是能导出图片的通用工具。"
     },
     {
       "slug": "wx",
@@ -29,7 +36,14 @@
         "微信",
         "wechat",
         "weixin"
-      ]
+      ],
+      "evidence": [
+        "公众号",
+        "微信",
+        "wechat",
+        "weixin"
+      ],
+      "description_zh": "做公众号文章、排版、发布；微信生态运营；整理微信群聊记录。不给：微信读书、企业微信机器人、只是名字带 wechat 的通用库。"
     },
     {
       "slug": "dy",
@@ -37,12 +51,15 @@
       "sort_order": 3,
       "keywords": [
         "抖音",
-        "短视频",
         "douyin",
-        "tiktok",
-        "shorts",
-        "reels"
-      ]
+        "tiktok"
+      ],
+      "evidence": [
+        "抖音",
+        "douyin",
+        "tiktok"
+      ],
+      "description_zh": "做或发布抖音类短视频，材料里要写到抖音 / TikTok；没写平台名的短视频工具归「视频·字幕·语音」。不给：通用视频剪辑器、下载器。"
     },
     {
       "slug": "img",
@@ -52,8 +69,6 @@
         "海报",
         "封面",
         "poster",
-        "logo",
-        "figma",
         "illustration",
         "图片生成",
         "image generation",
@@ -66,26 +81,35 @@
         "ui design",
         "图文卡片",
         "信息图",
-        "infographic"
-      ]
+        "infographic",
+        "配图",
+        "插画"
+      ],
+      "description_zh": "出图、海报、封面、信息图、排版。不给：前端组件库、白板 SDK、UI 规范。"
     },
     {
       "slug": "vid",
       "name_zh": "视频·字幕·语音",
       "sort_order": 5,
       "keywords": [
-        "视频",
+        "视频剪辑",
+        "视频生成",
+        "视频制作",
+        "短视频",
         "字幕",
-        "语音",
-        "video",
+        "配音",
+        "语音合成",
+        "转写",
+        "video editing",
+        "video generation",
         "subtitle",
         "whisper",
         "tts",
         "asr",
         "transcri",
-        "剪辑",
-        "配音"
-      ]
+        "剪辑"
+      ],
+      "description_zh": "做视频、剪辑、字幕、配音、转写。不给：视频下载器、播放器、视频网站脚本、仅名字带 video 的项目。"
     },
     {
       "slug": "ppt",
@@ -98,12 +122,11 @@
         "presentation",
         "pptx",
         "docx",
-        "excel",
-        "pdf",
         "办公文档",
         "文档处理",
         "文档转换"
-      ]
+      ],
+      "description_zh": "做 PPT、文档、PDF、表格，或互相转换。不给：「顺带能导出 PDF」。"
     },
     {
       "slug": "wr",
@@ -119,7 +142,8 @@
         "自媒体",
         "小说",
         "novel"
-      ]
+      ],
+      "description_zh": "写、改、润色文章和文案。不给：摘要工具、笔记软件、代码文档。"
     },
     {
       "slug": "res",
@@ -130,12 +154,12 @@
         "爬虫",
         "scrap",
         "crawl",
-        "research",
         "采集",
         "抓取",
         "web search",
         "deep research"
-      ]
+      ],
+      "description_zh": "搜索、采集、监控资料或对手信息。不给：给 AI 编程助手用的代码搜索。"
     },
     {
       "slug": "data",
@@ -144,11 +168,10 @@
       "keywords": [
         "数据分析",
         "analytics",
-        "dashboard",
         "数据可视",
-        "sql",
         "报表"
-      ]
+      ],
+      "description_zh": "分析业务、内容、销售数据，做报表。不给：监控 AI 用量、代码分析、日志。"
     },
     {
       "slug": "kb",
@@ -157,26 +180,56 @@
       "keywords": [
         "知识库",
         "obsidian",
-        "notion",
         "rag",
-        "笔记",
+        "第二大脑",
+        "笔记软件",
         "knowledge base",
         "second brain",
         "wiki"
-      ]
+      ],
+      "description_zh": "个人或团队的资料沉淀、笔记、基于资料问答。不给：AI 编程助手的「项目记忆」、代码知识图谱。"
     },
     {
       "slug": "auto",
       "name_zh": "自动化·工作流",
       "sort_order": 11,
       "keywords": [
-        "自动化",
-        "automation",
-        "workflow",
         "n8n",
         "zapier",
-        "工作流",
-        "rpa"
+        "rpa",
+        "定时任务",
+        "cron",
+        "webhook",
+        "低代码",
+        "low-code",
+        "批量发布",
+        "自动发布",
+        "工作流自动化",
+        "workflow automation",
+        "自动化流程"
+      ],
+      "evidence": [
+        "n8n",
+        "zapier",
+        "rpa",
+        "定时任务",
+        "cron",
+        "webhook",
+        "低代码",
+        "low-code",
+        "批量发布",
+        "自动发布",
+        "工作流自动化",
+        "workflow automation",
+        "自动化流程"
+      ],
+      "description_zh": "只在两种情况给：①它本身就是让非程序员把一串步骤自动跑起来的工具（n8n、Zapier、RPA、定时任务、批量处理、机器人）；②README 的主要卖点是把某个运营流程（发布、采集、对账、回复）自动化。一律不给：AI 编程助手的配置切换、记忆、监控、插件、技能规范，模型网关与代理，多智能体框架，开发框架、组件库、部署运维工具。",
+      "evidence_meta": [
+        "自动化",
+        "automation",
+        "automate",
+        "automating",
+        "自动回复"
       ]
     },
     {
@@ -193,7 +246,8 @@
         "京东",
         "带货",
         "商品"
-      ]
+      ],
+      "description_zh": "电商运营：商品、详情页、直播带货、跨境、店铺。"
     },
     {
       "slug": "seo",
@@ -201,15 +255,21 @@
       "sort_order": 13,
       "keywords": [
         "seo",
-        "增长",
-        "growth hack",
-        "营销",
-        "marketing",
-        "广告",
         "投放",
         "获客",
-        "私域"
-      ]
+        "私域",
+        "growth hack",
+        "增长黑客"
+      ],
+      "evidence": [
+        "seo",
+        "投放",
+        "获客",
+        "私域",
+        "growth hack",
+        "增长黑客"
+      ],
+      "description_zh": "SEO、投放、获客、转化、私域增长、营销数据。不给：「无广告」「去广告」「广告拦截」，「增长」只是形容词。"
     }
   ]
 }

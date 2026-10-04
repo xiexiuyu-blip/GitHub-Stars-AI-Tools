@@ -42,6 +42,15 @@ struct SeedScenario {
     name_zh: String,
     sort_order: i64,
     keywords: Vec<String>,
+    /// 非空时：材料里必须字面出现其中一个词，这个场景才成立（平台类、自动化、SEO 这类容易乱贴的）。
+    #[serde(default)]
+    evidence: Vec<String>,
+    /// 同上，但只有出现在名称 / 描述 / topics 里才算（README 里到处都是「自动化」，不能算证据）。
+    #[serde(default)]
+    evidence_meta: Vec<String>,
+    /// 「给 / 不给」的口径，会原样放进理解卡提示词。
+    #[serde(default)]
+    description_zh: String,
 }
 
 #[derive(Debug)]
@@ -49,20 +58,65 @@ struct ScenarioRow {
     id: String,
     slug: String,
     keywords: Vec<String>,
+    /// 来自种子（用户自己加的场景没有）：非空时材料里必须字面出现其中一个词。
+    evidence: Evidence,
 }
 
+/// 一个场景的证据要求。两个列表都空 = 不要求证据。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct Evidence {
+    /// 名称、描述、topics 或 README 里出现都算。
+    anywhere: Vec<String>,
+    /// 只有出现在名称、描述、topics 里才算。
+    meta_only: Vec<String>,
+}
+
+impl Evidence {
+    fn required(&self) -> bool {
+        !self.anywhere.is_empty() || !self.meta_only.is_empty()
+    }
+
+    /// `meta`：名称、描述、topics；`readme`：README 文字。都已转小写。
+    /// 名称 / 描述 / topics 里出现一个证据词就算；README 里要出现至少 `README_EVIDENCE_MIN_MENTIONS` 次
+    /// （「加入微信群」「cron 表达式」这种顺带一提，不能让一个开发工具变成「自动化工具」）。
+    fn satisfied(&self, meta: &str, readme: &str) -> bool {
+        if !self.required() {
+            return true;
+        }
+        if self
+            .anywhere
+            .iter()
+            .chain(self.meta_only.iter())
+            .any(|word| matches_keyword(meta, word))
+        {
+            return true;
+        }
+        let mentions: usize = self
+            .anywhere
+            .iter()
+            .map(|word| count_keyword(readme, word))
+            .sum();
+        mentions >= README_EVIDENCE_MIN_MENTIONS
+    }
+}
+
+/// 规则归类只读「仓库自己写的」文字：名称、描述、topics，加 README 开头一小段。
+/// 不读 AI 写的中文说明 / 关键词 / 能力 / 分类名：它们会把「无广告」「视频号」「Notion 替代品」这类说法带成场景。
 #[derive(Debug)]
 struct RepoText {
     id: String,
     full_name: String,
     description: String,
     topics_json: String,
-    summary_zh: String,
-    one_liner_zh: String,
-    keywords_json: String,
-    suggested_tags_json: String,
-    card_json: String,
+    readme_head: String,
 }
+
+/// README 开头取多少字参与规则归类。
+const README_RULE_CHARS: usize = 1_500;
+/// 判断「场景有没有证据」时读 README 的多少字（比归类宽松：证据可以出现在功能列表里，但只读前面这些）。
+const README_EVIDENCE_CHARS: usize = 8_000;
+/// README 里的证据词至少出现这么多次才算（只在名称 / 描述 / topics 里出现一次就够）：一次顺带提到不算。
+const README_EVIDENCE_MIN_MENTIONS: usize = 2;
 
 fn open_db(path: &Path) -> Result<Connection, String> {
     crate::v2_ops::open_db(path)
@@ -88,9 +142,21 @@ fn same_keywords(stored: &str, seed: &[String]) -> bool {
     serde_json::from_str::<Vec<String>>(stored).ok().as_deref() == Some(seed)
 }
 
-/// 幂等写入场景种子。只返回新插入的行数；已有的 seed 行若名称、关键词或排序变了就更新。
+/// 种子写入的结果：新插入几行、更新了几行（名称、关键词、排序或口径说明变了）。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SeedReport {
+    pub inserted: usize,
+    pub updated: usize,
+}
+
+/// 幂等写入场景种子。只返回新插入的行数；已有的 seed 行若名称、关键词、排序或口径说明变了就更新。
 /// `origin='user'` 和 `archived=1` 的行保持原样。
 pub fn seed_scenarios(path: &Path) -> Result<usize, String> {
+    seed_scenarios_report(path).map(|report| report.inserted)
+}
+
+/// 同 `seed_scenarios`，另外告诉调用方有没有更新过已有的行（更新了关键词就该重新做一遍规则归类）。
+pub fn seed_scenarios_report(path: &Path) -> Result<SeedReport, String> {
     let seed = load_seed()?;
     let mut connection = open_db(path)?;
     let account = account_id(&connection)?;
@@ -98,48 +164,100 @@ pub fn seed_scenarios(path: &Path) -> Result<usize, String> {
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|error| format!("场景种子事务开启失败：{error}"))?;
     let mut inserted = 0;
+    let mut updated = 0;
     for scenario in &seed.scenarios {
         let id = format!("scn-{}", scenario.slug);
         let keywords = serde_json::to_string(&scenario.keywords)
             .map_err(|error| format!("场景关键词序列化失败：{error}"))?;
-        let existing: Option<(String, String, i64, i64, String)> = tx
+        let existing: Option<(String, String, i64, i64, String, String)> = tx
             .query_row(
-                "SELECT origin, name_zh, sort_order, archived, keywords_json FROM scenarios WHERE account_id = ?1 AND slug = ?2",
+                "SELECT origin, name_zh, sort_order, archived, keywords_json, description_zh FROM scenarios WHERE account_id = ?1 AND slug = ?2",
                 params![account, scenario.slug],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)),
             )
             .optional()
             .map_err(|error| format!("场景读取失败：{error}"))?;
         match existing {
             None => {
                 tx.execute(
-                    "INSERT INTO scenarios(id, account_id, slug, name_zh, keywords_json, sort_order, origin, archived) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'seed', 0)",
-                    params![id, account, scenario.slug, scenario.name_zh, keywords, scenario.sort_order],
+                    "INSERT INTO scenarios(id, account_id, slug, name_zh, keywords_json, sort_order, origin, archived, description_zh) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'seed', 0, ?7)",
+                    params![id, account, scenario.slug, scenario.name_zh, keywords, scenario.sort_order, scenario.description_zh],
                 )
                 .map_err(|error| format!("场景种子写入失败：{error}"))?;
                 inserted += 1;
             }
-            Some((origin, name, sort_order, archived, stored_keywords)) => {
+            Some((origin, name, sort_order, archived, stored_keywords, stored_description)) => {
                 if origin != "seed" || archived != 0 {
                     continue;
                 }
                 if name == scenario.name_zh
                     && sort_order == scenario.sort_order
                     && same_keywords(&stored_keywords, &scenario.keywords)
+                    && stored_description == scenario.description_zh
                 {
                     continue;
                 }
                 tx.execute(
-                    "UPDATE scenarios SET name_zh = ?1, keywords_json = ?2, sort_order = ?3, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE account_id = ?4 AND slug = ?5 AND origin = 'seed' AND archived = 0",
-                    params![scenario.name_zh, keywords, scenario.sort_order, account, scenario.slug],
+                    "UPDATE scenarios SET name_zh = ?1, keywords_json = ?2, sort_order = ?3, description_zh = ?4, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE account_id = ?5 AND slug = ?6 AND origin = 'seed' AND archived = 0",
+                    params![scenario.name_zh, keywords, scenario.sort_order, scenario.description_zh, account, scenario.slug],
                 )
                 .map_err(|error| format!("场景种子更新失败：{error}"))?;
+                updated += 1;
             }
         }
     }
     tx.commit()
         .map_err(|error| format!("场景种子提交失败：{error}"))?;
-    Ok(inserted)
+    Ok(SeedReport { inserted, updated })
+}
+
+/// 种子里每个场景的证据要求（没写就是不要求）。用户自己加的场景不在种子里，也不要求。
+fn seed_evidence(slug: &str) -> Evidence {
+    static EVIDENCE: std::sync::OnceLock<std::collections::HashMap<String, Evidence>> =
+        std::sync::OnceLock::new();
+    let clean = |words: &[String]| {
+        words
+            .iter()
+            .map(|word| word.trim().to_lowercase())
+            .filter(|word| !word.is_empty())
+            .collect::<Vec<_>>()
+    };
+    EVIDENCE
+        .get_or_init(|| {
+            load_seed()
+                .map(|seed| {
+                    seed.scenarios
+                        .into_iter()
+                        .map(|scenario| {
+                            let evidence = Evidence {
+                                anywhere: clean(&scenario.evidence),
+                                meta_only: clean(&scenario.evidence_meta),
+                            };
+                            (scenario.slug, evidence)
+                        })
+                        .collect()
+                })
+                .unwrap_or_default()
+        })
+        .get(slug)
+        .cloned()
+        .unwrap_or_default()
+}
+
+/// 种子里写的「给 / 不给」口径（给理解卡提示词用）；没有就是 `None`。
+pub fn seed_description(slug: &str) -> Option<String> {
+    let seed = load_seed().ok()?;
+    seed.scenarios
+        .into_iter()
+        .find(|scenario| scenario.slug == slug)
+        .map(|scenario| scenario.description_zh)
+        .filter(|text| !text.trim().is_empty())
+}
+
+/// 这个场景在给定材料里有没有证据：种子没要求证据的场景一律算有。
+/// `meta_lower`：名称、描述、topics；`readme_lower`：README 文字（都已转小写）。
+pub fn has_evidence(slug: &str, meta_lower: &str, readme_lower: &str) -> bool {
+    seed_evidence(slug).satisfied(meta_lower, readme_lower)
 }
 
 /// 关键词和文本都按小写比较。
@@ -174,6 +292,33 @@ pub fn matches_keyword(haystack_lower: &str, keyword_lower: &str) -> bool {
         index += 1;
     }
     false
+}
+
+/// 关键词在文本里出现几次（不重叠）。边界规则和 `matches_keyword` 一样：短的纯 ASCII 词只从词首匹配。
+fn count_keyword(haystack_lower: &str, keyword_lower: &str) -> usize {
+    let haystack = haystack_lower.to_lowercase();
+    let keyword = keyword_lower.trim().to_lowercase();
+    if keyword.is_empty() {
+        return 0;
+    }
+    let short_token =
+        keyword.len() <= 4 && keyword.bytes().all(|byte| byte.is_ascii_alphanumeric());
+    let hay = haystack.as_bytes();
+    let needle = keyword.as_bytes();
+    let mut count = 0;
+    let mut index = 0;
+    while index + needle.len() <= hay.len() {
+        if &hay[index..index + needle.len()] == needle {
+            let before_ok = !short_token || index == 0 || !hay[index - 1].is_ascii_alphanumeric();
+            if before_ok {
+                count += 1;
+                index += needle.len();
+                continue;
+            }
+        }
+        index += 1;
+    }
+    count
 }
 
 fn confidence_for(hits: usize) -> f64 {
@@ -242,71 +387,41 @@ fn push_json_strings(parts: &mut Vec<String>, raw: &str) {
     collect_strings(&value, parts);
 }
 
-fn push_string_list(parts: &mut Vec<String>, value: &Value) {
-    match value {
-        Value::String(text) => push_text(parts, text),
-        Value::Array(items) => {
-            for item in items {
-                if let Value::String(text) = item {
-                    push_text(parts, text);
-                }
-            }
-        }
-        _ => {}
-    }
-}
-
-/// 理解卡字段类型不对、空串或坏 JSON 都跳过，不让整批归类失败。
-fn push_card_text(parts: &mut Vec<String>, raw: &str) {
-    if raw.trim().is_empty() {
-        return;
-    }
-    let Ok(value) = serde_json::from_str::<Value>(raw) else {
-        return;
-    };
-    let Some(object) = value.as_object() else {
-        return;
-    };
-    if let Some(capabilities) = object.get("capabilities") {
-        match capabilities {
-            Value::Array(items) => {
-                for item in items {
-                    match item {
-                        Value::Object(map) => {
-                            if let Some(Value::String(name)) = map.get("name_zh") {
-                                push_text(parts, name);
-                            }
-                        }
-                        Value::String(text) => push_text(parts, text),
-                        _ => {}
-                    }
-                }
-            }
-            Value::String(text) => push_text(parts, text),
-            _ => {}
-        }
-    }
-    for key in ["problems_solved", "use_when"] {
-        if let Some(value) = object.get(key) {
-            push_string_list(parts, value);
-        }
-    }
-    if let Some(Value::String(text)) = object.get("inspiration_for_fox") {
-        push_text(parts, text);
-    }
-}
-
-fn build_haystack(repo: &RepoText) -> String {
+/// 仓库自己写的文字：名称、描述、topics（转小写）。命中这里的一个词就够。
+fn meta_haystack(repo: &RepoText) -> String {
     let mut parts = Vec::new();
     push_text(&mut parts, &repo.full_name);
     push_text(&mut parts, &repo.description);
     push_json_strings(&mut parts, &repo.topics_json);
-    push_text(&mut parts, &repo.summary_zh);
-    push_text(&mut parts, &repo.one_liner_zh);
-    push_json_strings(&mut parts, &repo.keywords_json);
-    push_json_strings(&mut parts, &repo.suggested_tags_json);
-    push_card_text(&mut parts, &repo.card_json);
     parts.join(" ").to_lowercase()
+}
+
+/// README 开头一小段（转小写）。只在它里面命中，要有两个不同的词才算候选。
+fn readme_haystack(repo: &RepoText) -> String {
+    repo.readme_head.to_lowercase()
+}
+
+/// 一个场景在这个仓库上的规则命中词；`None` 表示不成为候选。
+/// 规则：命中名称 / 描述 / topics 里的一个词，或 README 开头里有两个不同的词；
+/// 再加上种子要求的「证据词」必须字面出现（平台类、自动化、SEO）。
+fn rule_hits(scenario: &ScenarioRow, meta: &str, readme: &str) -> Option<Vec<String>> {
+    let in_meta = keyword_hits(meta, &scenario.keywords);
+    let mut all = in_meta.clone();
+    for hit in keyword_hits(readme, &scenario.keywords) {
+        if !all.contains(&hit) {
+            all.push(hit);
+        }
+    }
+    if in_meta.is_empty() && all.len() < 2 {
+        return None;
+    }
+    if scenario.evidence.required() {
+        // 平台类、自动化、SEO：README 开头常有「微信群」「抖音号」「加入社群」这类入口，README 里的命中不单独成立
+        if in_meta.is_empty() || !scenario.evidence.satisfied(meta, readme) {
+            return None;
+        }
+    }
+    Some(all)
 }
 
 fn load_scenarios(connection: &Connection, account: &str) -> Result<Vec<ScenarioRow>, String> {
@@ -329,18 +444,22 @@ fn load_scenarios(connection: &Connection, account: &str) -> Result<Vec<Scenario
         let (id, slug, keywords_json) = row.map_err(|error| format!("场景行读取失败：{error}"))?;
         let keywords = parse_keywords(&keywords_json)
             .map_err(|error| format!("场景「{slug}」的关键词无法读取：{error}"))?;
-        scenarios.push(ScenarioRow { id, slug, keywords });
+        let evidence = seed_evidence(&slug);
+        scenarios.push(ScenarioRow {
+            id,
+            slug,
+            keywords,
+            evidence,
+        });
     }
     Ok(scenarios)
 }
 
 const REPO_SELECT: &str = "
 SELECT r.id, r.full_name, IFNULL(r.description, ''), IFNULL(r.topics_json, '[]'),
-       IFNULL(d.summary_zh, ''), IFNULL(d.one_liner_zh, ''),
-       IFNULL(d.keywords_json, '[]'), IFNULL(d.suggested_tags_json, '[]'),
-       IFNULL(d.card_json, '')
+       IFNULL(substr(rd.raw_markdown, 1, 1500), '')
 FROM repositories r
-LEFT JOIN repo_ai_documents d ON d.repo_id = r.id
+LEFT JOIN repo_readmes rd ON rd.repo_id = r.id
 ";
 
 fn placeholders(count: usize) -> String {
@@ -357,11 +476,7 @@ fn map_repo(row: &rusqlite::Row<'_>) -> rusqlite::Result<RepoText> {
         full_name: row.get(1)?,
         description: row.get(2)?,
         topics_json: row.get(3)?,
-        summary_zh: row.get(4)?,
-        one_liner_zh: row.get(5)?,
-        keywords_json: row.get(6)?,
-        suggested_tags_json: row.get(7)?,
-        card_json: row.get(8)?,
+        readme_head: row.get(4)?,
     })
 }
 
@@ -491,13 +606,13 @@ pub fn classify_repositories(
     let mut assigned = 0;
     let mut removed = 0;
     for repo in &repos {
-        let haystack = build_haystack(repo);
+        let meta = meta_haystack(repo);
+        let readme = readme_haystack(repo);
         let mut matched = Vec::new();
         for (index, scenario) in scenarios.iter().enumerate() {
-            let hits = keyword_hits(&haystack, &scenario.keywords);
-            if hits.is_empty() {
+            let Some(hits) = rule_hits(scenario, &meta, &readme) else {
                 continue;
-            }
+            };
             counts[index] += 1;
             matched.push(scenario.id.clone());
             assigned += write_rule(
@@ -531,7 +646,7 @@ pub fn classify_repositories(
 /// 已经归类过的库不重做（新收藏同步后单独归类），所以不会每次启动都写库。返回 `None` 表示这次没有重做。
 /// 规则归类不联网、不读钥匙串、不花钱。
 pub fn ensure_initial_classification(path: &Path) -> Result<Option<ClassifyStats>, String> {
-    seed_scenarios(path)?;
+    let seeded = seed_scenarios_report(path)?;
     let existing: i64 = {
         let connection = open_db(path)?;
         connection
@@ -542,10 +657,15 @@ pub fn ensure_initial_classification(path: &Path) -> Result<Option<ClassifyStats
             )
             .map_err(|error| format!("规则归类计数失败：{error}"))?
     };
-    if existing > 0 {
-        return Ok(None);
-    }
-    classify_repositories(path, None).map(Some)
+    // 关键词、证据词或口径更新过（种子换了版本）：旧的规则建议按新规矩重做一遍（`delete_stale` 会清掉不再成立的）
+    let stats = if existing > 0 && seeded.updated == 0 {
+        None
+    } else {
+        Some(classify_repositories(path, None)?)
+    };
+    // AI 给过的、没有证据的平台 / 自动化 / SEO 标签：去掉（不花钱，每次启动都核一遍，没有要去的就什么也不写）
+    audit_scenario_tags(path)?;
+    Ok(stats)
 }
 
 /// 同步之后给新出现的仓库补种子并做规则归类。没有新仓库时什么都不做。
@@ -560,6 +680,123 @@ pub fn classify_new_repositories(
     classify_repositories(path, Some(repo_ids))
 }
 
+/// 判断「场景有没有证据」用的材料（都转小写）：(名称 + 描述 + topics, README 前 `README_EVIDENCE_CHARS` 字)。
+fn evidence_material(connection: &Connection, repo_id: &str) -> Result<(String, String), String> {
+    let row: Option<(String, String, String, String)> = connection
+        .query_row(
+            "SELECT r.full_name, IFNULL(r.description, ''), IFNULL(r.topics_json, '[]'), IFNULL(substr(rd.raw_markdown, 1, ?2), '')
+             FROM repositories r LEFT JOIN repo_readmes rd ON rd.repo_id = r.id WHERE r.id = ?1",
+            params![repo_id, README_EVIDENCE_CHARS as i64],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .optional()
+        .map_err(|error| format!("证据材料读取失败：{error}"))?;
+    let Some((name, description, topics, readme)) = row else {
+        return Ok((String::new(), String::new()));
+    };
+    let mut parts = Vec::new();
+    push_text(&mut parts, &name);
+    push_text(&mut parts, &description);
+    push_json_strings(&mut parts, &topics);
+    Ok((parts.join(" ").to_lowercase(), readme.to_lowercase()))
+}
+
+/// 把 AI 给的场景 slug 过一遍证据：种子要求证据的场景（平台类、自动化、SEO），材料里没有字面出现证据词就丢掉。
+/// 没要求证据的场景、用户自己加的场景原样保留。
+pub fn supported_slugs(
+    connection: &Connection,
+    repo_id: &str,
+    slugs: &[String],
+) -> Result<Vec<String>, String> {
+    if slugs.iter().all(|slug| !seed_evidence(slug).required()) {
+        return Ok(slugs.to_vec());
+    }
+    let (meta, readme) = evidence_material(connection, repo_id)?;
+    Ok(slugs
+        .iter()
+        .filter(|slug| has_evidence(slug, &meta, &readme))
+        .cloned()
+        .collect())
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AuditStats {
+    /// 核对了几条（只看要求证据的场景上、没被确认的 AI / 规则建议）。
+    pub checked: usize,
+    pub removed: usize,
+    pub per_scenario: Vec<(String, usize)>,
+}
+
+/// 不花钱的复核：已经写在库里的、要求证据的场景（平台类、自动化、SEO）建议，材料里找不到证据词的就删掉。
+/// 只动 `origin` 是 `ai` / `rule`、`status` 是 `suggested` 的；用户确认、拒绝或手动加的不碰。
+/// 重复跑没有副作用（删完就没有可删的了）。
+pub fn audit_scenario_tags(path: &Path) -> Result<AuditStats, String> {
+    let seed = load_seed()?;
+    let risky: Vec<String> = seed
+        .scenarios
+        .iter()
+        .filter(|scenario| !scenario.evidence.is_empty() || !scenario.evidence_meta.is_empty())
+        .map(|scenario| scenario.slug.clone())
+        .collect();
+    if risky.is_empty() {
+        return Ok(AuditStats::default());
+    }
+    let mut connection = open_db(path)?;
+    let tx = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|error| format!("场景复核事务开启失败：{error}"))?;
+    let sql = format!(
+        "SELECT es.entity_id, es.scenario_id, s.slug FROM entity_scenarios es
+         JOIN scenarios s ON s.id = es.scenario_id
+         WHERE es.entity_type = 'repository' AND es.origin IN ('ai', 'rule') AND es.status = 'suggested'
+           AND s.slug IN ({}) ORDER BY es.entity_id, s.slug",
+        placeholders(risky.len())
+    );
+    let rows: Vec<(String, String, String)> = {
+        let mut statement = tx
+            .prepare(&sql)
+            .map_err(|error| format!("场景复核读取失败：{error}"))?;
+        let mapped = statement
+            .query_map(params_from_iter(risky.iter()), |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })
+            .map_err(|error| format!("场景复核查询失败：{error}"))?;
+        mapped
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| format!("场景复核解析失败：{error}"))?
+    };
+    let mut stats = AuditStats {
+        checked: rows.len(),
+        ..AuditStats::default()
+    };
+    let mut per: std::collections::BTreeMap<String, usize> = Default::default();
+    let mut current: Option<(String, (String, String))> = None;
+    for (repo_id, scenario_id, slug) in rows {
+        let material = match &current {
+            Some((id, text)) if *id == repo_id => text.clone(),
+            _ => {
+                let text = evidence_material(&tx, &repo_id)?;
+                current = Some((repo_id.clone(), text.clone()));
+                text
+            }
+        };
+        if has_evidence(&slug, &material.0, &material.1) {
+            continue;
+        }
+        tx.execute(
+            "DELETE FROM entity_scenarios WHERE entity_type = 'repository' AND entity_id = ?1 AND scenario_id = ?2 AND origin IN ('ai', 'rule') AND status = 'suggested'",
+            params![repo_id, scenario_id],
+        )
+        .map_err(|error| format!("场景复核删除失败：{error}"))?;
+        stats.removed += 1;
+        *per.entry(slug).or_default() += 1;
+    }
+    tx.commit()
+        .map_err(|error| format!("场景复核提交失败：{error}"))?;
+    stats.per_scenario = per.into_iter().collect();
+    Ok(stats)
+}
+
 /// 替换这个仓库上 `origin='ai'` 且 `status='suggested'` 的建议。
 /// 已确认、已拒绝，以及 `origin='user'` 的场景跳过；不认识或已归档的 slug 丢掉。
 pub fn apply_ai_scenarios(
@@ -572,6 +809,9 @@ pub fn apply_ai_scenarios(
     if !confidence.is_finite() || !(0.0..=1.0).contains(&confidence) {
         return Err("置信度必须在 0 到 1 之间".to_owned());
     }
+    // 平台类、自动化、SEO 要有字面证据；AI 凭联想给的这类标签在这里就丢掉
+    let slugs = supported_slugs(connection, repo_id, slugs)?;
+    let slugs = slugs.as_slice();
     let savepoint = connection
         .savepoint()
         .map_err(|error| format!("场景写入事务开启失败：{error}"))?;
@@ -849,6 +1089,16 @@ mod tests {
             .expect("应能写入理解卡");
     }
 
+    fn insert_readme(path: &Path, repo_id: &str, markdown: &str) {
+        let connection = open_db(path).expect("应能打开测试库");
+        connection
+            .execute(
+                "INSERT INTO repo_readmes(repo_id, raw_markdown, content_hash, source_path, fetched_at) VALUES (?1, ?2, 'hash', 'README.md', '2026-09-01T00:00:00Z')",
+                params![repo_id, markdown],
+            )
+            .expect("应能写入 README");
+    }
+
     fn insert_link(
         path: &Path,
         repo_id: &str,
@@ -1071,70 +1321,18 @@ mod tests {
     }
 
     #[test]
-    fn classify_reads_each_text_source_and_bad_card_json() {
+    fn rules_read_only_what_the_repository_itself_says() {
         let db = ready("sources");
-        insert_repo(&db.0, "cap", "fox/caponly", "plain", "[]", "active");
-        insert_doc(
+        // 名称、描述、topics：一个词就够
+        insert_repo(
             &db.0,
-            "cap",
-            "",
-            "",
+            "name",
+            "fox/xiaohongshu-kit",
+            "plain",
             "[]",
-            "[]",
-            r#"{"capabilities":[{"name_zh":"整理小红书选题"}]}"#,
+            "active",
         );
-        insert_repo(&db.0, "empty-card", "fox/emptycard", "微信", "[]", "active");
-        insert_doc(&db.0, "empty-card", "", "", "[]", "[]", "");
-        insert_repo(&db.0, "bad-card", "fox/badcard", "抖音", "[]", "active");
-        insert_doc(&db.0, "bad-card", "", "", "[]", "[]", "{not json");
-        insert_repo(&db.0, "problem", "fox/problem", "plain", "[]", "active");
-        insert_doc(
-            &db.0,
-            "problem",
-            "",
-            "",
-            "[]",
-            "[]",
-            r#"{"problems_solved":["想做电商详情"]}"#,
-        );
-        insert_repo(&db.0, "when", "fox/when", "plain", "[]", "active");
-        insert_doc(
-            &db.0,
-            "when",
-            "",
-            "",
-            "[]",
-            "[]",
-            r#"{"use_when":["做数据分析的时候"]}"#,
-        );
-        insert_repo(&db.0, "idea", "fox/idea", "plain", "[]", "active");
-        insert_doc(
-            &db.0,
-            "idea",
-            "",
-            "",
-            "[]",
-            "[]",
-            r#"{"inspiration_for_fox":"可以借鉴知识库结构"}"#,
-        );
-        insert_repo(&db.0, "kw", "fox/kw", "plain", "[]", "active");
-        insert_doc(&db.0, "kw", "", "", r#"["爬虫"]"#, "[]", "");
-        insert_repo(&db.0, "tag", "fox/tag", "plain", "[]", "active");
-        insert_doc(&db.0, "tag", "", "", "[]", r#"["字幕"]"#, "");
-        insert_repo(&db.0, "liner", "fox/liner", "plain", "[]", "active");
-        insert_doc(&db.0, "liner", "", "这是写作助手", "[]", "[]", "");
-        insert_repo(&db.0, "summary", "fox/summary", "plain", "[]", "active");
-        insert_doc(&db.0, "summary", "自动化脚本", "", "[]", "[]", "");
-        insert_repo(&db.0, "typed", "fox/typed", "京东", "[]", "active");
-        insert_doc(
-            &db.0,
-            "typed",
-            "",
-            "",
-            "[]",
-            "[]",
-            r#"{"capabilities":"bad","problems_solved":1,"use_when":{"a":true},"inspiration_for_fox":["不是字符串"]}"#,
-        );
+        insert_repo(&db.0, "desc", "fox/desc", "微信", "[]", "active");
         insert_repo(
             &db.0,
             "topic",
@@ -1143,26 +1341,102 @@ mod tests {
             r#"["tiktok"]"#,
             "active",
         );
+        // README 开头：两个不同的词才算
+        insert_repo(&db.0, "readme2", "fox/readme2", "plain", "[]", "active");
+        insert_readme(&db.0, "readme2", "# 工具\n用来做海报，也能做封面。");
+        insert_repo(&db.0, "readme1", "fox/readme1", "plain", "[]", "active");
+        insert_readme(&db.0, "readme1", "# 工具\n顺带能做海报。");
+        // README 很长时，只看开头 1500 字：后面再多的词也不算
+        insert_repo(&db.0, "late", "fox/late", "plain", "[]", "active");
+        let late = format!("{}海报和封面", "说明。".repeat(600));
+        insert_readme(&db.0, "late", &late);
+        // AI 写的文字一概不读：摘要、一句话、关键词、建议标签、能力、问题、使用时机、灵感
+        insert_repo(&db.0, "ai", "fox/ai", "plain", "[]", "active");
+        insert_doc(
+            &db.0,
+            "ai",
+            "做小红书选题的自动化脚本",
+            "这是写作助手",
+            r#"["爬虫","抖音"]"#,
+            r#"["字幕","知识库"]"#,
+            r#"{"capabilities":[{"name_zh":"整理小红书选题"}],"problems_solved":["想做电商详情"],"use_when":["做数据分析的时候"],"inspiration_for_fox":"可以借鉴知识库结构"}"#,
+        );
+        // 坏 JSON、空串、类型不对的理解卡也不会让整批归类失败
+        insert_repo(&db.0, "bad-card", "fox/badcard", "抖音", "[]", "active");
+        insert_doc(&db.0, "bad-card", "", "", "[]", "[]", "{not json");
 
         let stats = classify_repositories(&db.0, None).expect("坏 JSON 也不能让归类失败");
-        assert_eq!(stats.repositories, 12);
-        assert!(link_of(&db.0, "cap", "scn-xhs").is_some(), "能力名应命中");
-        assert!(link_of(&db.0, "cap", "scn-img").is_none());
-        assert!(link_of(&db.0, "empty-card", "scn-wx").is_some());
-        assert!(link_of(&db.0, "bad-card", "scn-dy").is_some());
-        assert!(link_of(&db.0, "problem", "scn-ec").is_some());
-        assert!(link_of(&db.0, "when", "scn-data").is_some());
-        assert!(link_of(&db.0, "idea", "scn-kb").is_some());
-        assert!(link_of(&db.0, "kw", "scn-res").is_some());
-        assert!(link_of(&db.0, "tag", "scn-vid").is_some());
-        assert!(link_of(&db.0, "liner", "scn-wr").is_some());
-        assert!(link_of(&db.0, "summary", "scn-auto").is_some());
-        assert!(link_of(&db.0, "typed", "scn-ec").is_some());
-        assert!(link_of(&db.0, "topic", "scn-dy").is_some());
-        assert_eq!(
-            count_sql(&db.0, "SELECT COUNT(*) FROM entity_scenarios"),
-            12
+        assert_eq!(stats.repositories, 8);
+        assert!(link_of(&db.0, "name", "scn-xhs").is_some(), "名称里的词");
+        assert!(link_of(&db.0, "desc", "scn-wx").is_some(), "描述里的词");
+        assert!(link_of(&db.0, "topic", "scn-dy").is_some(), "topics 里的词");
+        assert!(
+            link_of(&db.0, "readme2", "scn-img").is_some(),
+            "README 里两个不同的词"
         );
+        assert!(
+            link_of(&db.0, "readme1", "scn-img").is_none(),
+            "README 里只有一个词不够"
+        );
+        assert!(
+            link_of(&db.0, "late", "scn-img").is_none(),
+            "1500 字之后的不算"
+        );
+        assert!(link_of(&db.0, "bad-card", "scn-dy").is_some());
+        let ai_links = count_sql(
+            &db.0,
+            "SELECT COUNT(*) FROM entity_scenarios WHERE entity_id = 'ai'",
+        );
+        assert_eq!(ai_links, 0, "AI 写的文字不参与规则归类");
+        assert_eq!(count_sql(&db.0, "SELECT COUNT(*) FROM entity_scenarios"), 5);
+    }
+
+    #[test]
+    fn the_things_that_used_to_misfire_no_longer_do() {
+        // 审读 50 个仓库时找到的真实错标：「无广告」→ SEO·增长、「视频号」「流媒体视频」→ 视频、「Notion 替代品」→ 知识库、
+        // 「微信读书」之外的 Wechat 通用库不在这里测；这里只测词表收紧：广告、增长、营销、视频、笔记、notion、sql、dashboard、workflow
+        let db = ready("misfire");
+        let cases = [
+            (
+                "ad",
+                "fox/downloader",
+                "界面精美，永久免费且无广告",
+                "scn-seo",
+            ),
+            ("grow", "fox/grow", "增长很快的营销小工具", "scn-seo"),
+            (
+                "video",
+                "fox/streamer",
+                "多协议下载器，支持流媒体视频",
+                "scn-vid",
+            ),
+            ("channel", "fox/live", "支持视频号和快手小店", "scn-vid"),
+            ("notion", "fox/huly", "Notion 替代品，团队协作", "scn-kb"),
+            ("notes", "fox/xhs-mcp", "发布小红书笔记", "scn-kb"),
+            ("sql", "fox/dash", "一个 sql dashboard", "scn-data"),
+            (
+                "flow",
+                "fox/flow",
+                "一个 workflow automation 的小库，自动化",
+                "scn-auto",
+            ),
+            ("logo", "fox/logo", "项目 logo 设计规范", "scn-img"),
+        ];
+        for (id, full_name, description, _) in cases {
+            insert_repo(&db.0, id, full_name, description, "[]", "active");
+        }
+        classify_repositories(&db.0, None).expect("归类应成功");
+        for (id, _, description, scenario) in cases {
+            let link = link_of(&db.0, id, scenario);
+            // 唯一例外：「workflow automation」是自动化词表里明写的短语，该命中
+            if id == "flow" {
+                assert!(link.is_some(), "{description} 应命中 {scenario}");
+            } else {
+                assert!(link.is_none(), "{description} 不该命中 {scenario}");
+            }
+        }
+        // 小红书这个平台名本身还在：「发布小红书笔记」归小红书，不归知识库
+        assert!(link_of(&db.0, "notes", "scn-xhs").is_some());
     }
 
     #[test]
@@ -1230,6 +1504,264 @@ mod tests {
     }
 
     #[test]
+    fn ai_tags_without_literal_evidence_are_dropped_but_plain_ones_stay() {
+        let db = ready("ai-evidence");
+        insert_repo(
+            &db.0,
+            "r",
+            "fox/repo",
+            "做长视频剪辑和字幕的工具",
+            "[]",
+            "active",
+        );
+        let mut connection = open_db(&db.0).expect("应能打开测试库");
+        let slugs = ["xhs", "wx", "dy", "auto", "seo", "vid", "img"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        let written =
+            apply_ai_scenarios(&mut connection, "acct", "r", &slugs, 0.8).expect("应写入");
+        assert_eq!(written, 2, "只有没要求证据的 vid、img 留下");
+        drop(connection);
+        for gone in ["xhs", "wx", "dy", "auto", "seo"] {
+            assert!(
+                link_of(&db.0, "r", &format!("scn-{gone}")).is_none(),
+                "{gone}"
+            );
+        }
+        assert!(link_of(&db.0, "r", "scn-vid").is_some());
+        assert!(link_of(&db.0, "r", "scn-img").is_some());
+        // README 里有证据也算：材料是名称 + 描述 + topics + README
+        insert_readme(
+            &db.0,
+            "r",
+            "支持把成品发布到小红书，小红书笔记也能定时发。也能接 n8n，n8n 流程模板。",
+        );
+        let mut connection = open_db(&db.0).expect("应能打开测试库");
+        let written =
+            apply_ai_scenarios(&mut connection, "acct", "r", &slugs, 0.8).expect("应写入");
+        assert_eq!(written, 4, "xhs、auto 有了证据");
+        drop(connection);
+        assert!(link_of(&db.0, "r", "scn-xhs").is_some());
+        assert!(link_of(&db.0, "r", "scn-auto").is_some());
+        assert!(link_of(&db.0, "r", "scn-wx").is_none());
+    }
+
+    #[test]
+    fn the_audit_removes_only_unsupported_unconfirmed_ai_and_rule_tags() {
+        let db = ready("audit");
+        insert_repo(&db.0, "bare", "fox/bare", "一个通用的库", "[]", "active");
+        insert_repo(&db.0, "kept", "fox/kept", "做小红书封面", "[]", "active");
+        // 没证据的：ai / rule 建议 → 删
+        insert_link(&db.0, "bare", "scn-xhs", "ai", "suggested", 0.9);
+        insert_link(&db.0, "bare", "scn-auto", "rule", "suggested", 0.5);
+        insert_link(&db.0, "bare", "scn-seo", "ai", "suggested", 0.7);
+        // 没证据但被 Fox 确认 / 拒绝过，或者是他自己加的 → 不碰
+        insert_link(&db.0, "bare", "scn-wx", "ai", "confirmed", 0.7);
+        insert_link(&db.0, "bare", "scn-dy", "user", "suggested", 0.9);
+        insert_link(&db.0, "bare", "scn-img", "ai", "suggested", 0.6);
+        // 有证据的 → 留
+        insert_link(&db.0, "kept", "scn-xhs", "ai", "suggested", 0.9);
+        let stats = audit_scenario_tags(&db.0).expect("复核应成功");
+        assert_eq!(
+            stats.checked, 4,
+            "只核要求证据的场景上、没被确认的 ai / rule 建议"
+        );
+        assert_eq!(stats.removed, 3);
+        assert_eq!(
+            stats.per_scenario,
+            vec![
+                ("auto".to_owned(), 1),
+                ("seo".to_owned(), 1),
+                ("xhs".to_owned(), 1)
+            ]
+        );
+        assert!(link_of(&db.0, "bare", "scn-xhs").is_none());
+        assert!(link_of(&db.0, "bare", "scn-auto").is_none());
+        assert!(link_of(&db.0, "bare", "scn-seo").is_none());
+        assert!(link_of(&db.0, "bare", "scn-wx").is_some(), "确认过的不碰");
+        assert!(link_of(&db.0, "bare", "scn-dy").is_some(), "用户加的不碰");
+        assert!(
+            link_of(&db.0, "bare", "scn-img").is_some(),
+            "不要求证据的场景不核"
+        );
+        assert!(link_of(&db.0, "kept", "scn-xhs").is_some());
+        // 再跑一遍什么也不删
+        let again = audit_scenario_tags(&db.0).expect("复核应成功");
+        assert_eq!(again.removed, 0);
+    }
+
+    #[test]
+    fn a_changed_seed_redoes_the_rule_pass_and_unchanged_does_not() {
+        let db = ready("reseed");
+        insert_repo(&db.0, "r", "fox/repo", "小红书", "[]", "active");
+        // 第一次：没有任何规则归类，做一遍
+        assert!(ensure_initial_classification(&db.0)
+            .expect("启动")
+            .is_some());
+        // 种子没变：不重做
+        assert!(ensure_initial_classification(&db.0)
+            .expect("启动")
+            .is_none());
+        // 种子里的口径说明被改过（比如旧库是 v1 种子）：重做
+        {
+            let connection = open_db(&db.0).expect("应能打开测试库");
+            connection
+                .execute(
+                    "UPDATE scenarios SET description_zh = '' WHERE slug = 'auto'",
+                    [],
+                )
+                .expect("应能改");
+        }
+        let stats = ensure_initial_classification(&db.0)
+            .expect("启动")
+            .expect("要重做");
+        assert_eq!(stats.repositories, 1);
+        let description: String = open_db(&db.0)
+            .expect("应能打开测试库")
+            .query_row(
+                "SELECT description_zh FROM scenarios WHERE slug = 'auto'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("应读到");
+        assert!(description.contains("只在两种情况给"), "{description}");
+    }
+
+    #[test]
+    fn seed_evidence_and_descriptions_are_there_for_the_risky_scenarios() {
+        for slug in ["xhs", "wx", "dy", "auto", "seo"] {
+            assert!(seed_evidence(slug).required(), "{slug} 要有证据词");
+        }
+        for slug in ["img", "vid", "ppt", "wr", "res", "data", "kb", "ec"] {
+            assert!(!seed_evidence(slug).required(), "{slug} 不要求证据");
+        }
+        for slug in [
+            "xhs", "wx", "dy", "img", "vid", "ppt", "wr", "res", "data", "kb", "auto", "ec", "seo",
+        ] {
+            assert!(seed_description(slug).is_some(), "{slug} 要有口径说明");
+        }
+        assert!(seed_description("nope").is_none());
+        assert!(has_evidence("auto", "用 n8n 做的小工具", ""));
+        assert!(
+            has_evidence("auto", "", "支持 n8n 和 zapier"),
+            "强证据词 README 里出现两次也算"
+        );
+        assert!(
+            !has_evidence("auto", "ai 编程助手", "可以配合 cron 表达式使用"),
+            "README 里顺带提到一次不算"
+        );
+        assert!(
+            has_evidence("auto", "", "n8n 流程 n8n 模板"),
+            "同一个词出现两次也算"
+        );
+        assert!(!has_evidence("auto", "ai 编程助手的配置切换工具", ""));
+        // 「自动化」这种泛词：名称 / 描述里有才算，只在 README 里出现不算
+        assert!(has_evidence("auto", "直播带货自动化辅助工具", ""));
+        assert!(has_evidence(
+            "auto",
+            "make websites accessible. automate tasks online",
+            ""
+        ));
+        assert!(!has_evidence(
+            "auto",
+            "ai 编程助手",
+            "支持自动化测试和 automation"
+        ));
+        assert!(
+            has_evidence("img", "什么都没有", ""),
+            "不要求证据的场景一律算有"
+        );
+        assert!(
+            has_evidence("user-made", "什么都没有", ""),
+            "用户自己加的场景也算有"
+        );
+    }
+
+    #[test]
+    fn readme_community_links_do_not_make_platform_tags() {
+        let db = ready("community");
+        // README 开头常有「微信群」「WeChat 交流群」「抖音号」这类入口：两个不同的词也不能单独造出平台标签
+        insert_repo(
+            &db.0,
+            "doc",
+            "fox/docqa",
+            "document QA system",
+            "[]",
+            "active",
+        );
+        insert_readme(
+            &db.0,
+            "doc",
+            "# DocQA\n加入微信群交流 | WeChat group | 关注我们的抖音号",
+        );
+        // 名称 / 描述里写了平台：照常成立
+        insert_repo(
+            &db.0,
+            "real",
+            "fox/real",
+            "微信群聊日报整理",
+            "[]",
+            "active",
+        );
+        // 非平台类的场景（海报）：README 里两个不同的词照旧算
+        insert_readme(&db.0, "real", "做海报，也能做封面");
+        classify_repositories(&db.0, None).expect("归类应成功");
+        assert!(link_of(&db.0, "doc", "scn-wx").is_none());
+        assert!(link_of(&db.0, "doc", "scn-dy").is_none());
+        assert!(link_of(&db.0, "real", "scn-wx").is_some());
+        assert!(link_of(&db.0, "real", "scn-img").is_some());
+    }
+
+    #[test]
+    fn counting_keywords_follows_the_same_boundaries_as_matching() {
+        assert_eq!(count_keyword("n8n n8n", "n8n"), 2);
+        assert_eq!(
+            count_keyword("rpa rpaa xrpa", "rpa"),
+            2,
+            "短词只从词首：xrpa 不算，rpaa 算"
+        );
+        assert_eq!(count_keyword("小红书和小红书", "小红书"), 2);
+        assert_eq!(count_keyword("aaa", "aa"), 1, "不重叠");
+        assert_eq!(count_keyword("abc", ""), 0);
+        assert_eq!(count_keyword("", "abc"), 0);
+    }
+
+    #[test]
+    fn a_tool_that_calls_itself_automation_keeps_the_automation_tag() {
+        let db = ready("auto-meta");
+        // 自己的描述里写了「自动化」：AI 给的自动化标签有证据
+        insert_repo(
+            &db.0,
+            "live",
+            "fox/live-tool",
+            "多平台直播带货自动化辅助工具",
+            "[]",
+            "active",
+        );
+        // 只有 README 里提到「自动化测试」的开发工具：没有
+        insert_repo(
+            &db.0,
+            "dev",
+            "fox/dev-tool",
+            "AI 编程助手的配置切换",
+            "[]",
+            "active",
+        );
+        insert_readme(&db.0, "dev", "支持自动化测试，automation friendly");
+        let mut connection = open_db(&db.0).expect("应能打开测试库");
+        let slugs = vec!["auto".to_owned()];
+        assert_eq!(
+            apply_ai_scenarios(&mut connection, "acct", "live", &slugs, 0.8).expect("应写入"),
+            1
+        );
+        assert_eq!(
+            apply_ai_scenarios(&mut connection, "acct", "dev", &slugs, 0.8).expect("应写入"),
+            0
+        );
+    }
+
+    #[test]
     fn classify_again_changes_nothing_when_text_is_unchanged() {
         let db = ready("idempotent");
         insert_repo(&db.0, "r", "fox/repo", "小红书", "[]", "active");
@@ -1245,7 +1777,15 @@ mod tests {
     #[test]
     fn apply_ai_scenarios_replaces_suggestions_and_skips_protected() {
         let db = ready("ai");
-        insert_repo(&db.0, "r", "fox/repo", "plain", "[]", "active");
+        // 小红书、抖音、SEO 要有字面证据：描述里写上
+        insert_repo(
+            &db.0,
+            "r",
+            "fox/repo",
+            "小红书 抖音 SEO 工具",
+            "[]",
+            "active",
+        );
         insert_link(&db.0, "r", "scn-xhs", "ai", "suggested", 0.4);
         insert_link(&db.0, "r", "scn-wx", "ai", "suggested", 0.4);
         insert_link(&db.0, "r", "scn-dy", "rule", "suggested", 0.5);
@@ -1582,14 +2122,11 @@ mod tests {
         for (id, full_name, description, topics) in repos {
             insert_repo(&db.0, id, full_name, description, topics, "active");
         }
-        insert_doc(
+        // 只有 README 里命中时，要有两个不同的词才算候选（一个不够）
+        insert_readme(
             &db.0,
             "r5",
-            "",
-            "",
-            "[]",
-            "[]",
-            r#"{"capabilities":[{"name_zh":"用 RAG 检索笔记"}]}"#,
+            "# parser\n一个解析器，也可以接到知识库里做 RAG 检索。",
         );
 
         let expected = [
@@ -1607,18 +2144,14 @@ mod tests {
                 "ppt",
                 vec!["ppt", "幻灯", "pptx", "办公文档"],
             ),
-            ("fox/plain-repo", "kb", vec!["rag", "笔记"]),
-            (
-                "fox/seo-lab",
-                "seo",
-                vec!["seo", "增长", "营销", "投放", "获客"],
-            ),
+            ("fox/plain-repo", "kb", vec!["知识库", "rag"]),
+            ("fox/seo-lab", "seo", vec!["seo", "投放", "获客"]),
             (
                 "fox/sql-dashboard",
                 "data",
-                vec!["数据分析", "analytics", "dashboard", "sql", "报表"],
+                vec!["数据分析", "analytics", "报表"],
             ),
-            ("fox/n8n-shop", "auto", vec!["自动化", "n8n"]),
+            ("fox/n8n-shop", "auto", vec!["n8n"]),
             ("fox/n8n-shop", "ec", vec!["电商", "商品"]),
         ]
         .into_iter()
@@ -1637,12 +2170,12 @@ mod tests {
             let repos = load_repos(&connection, "acct", None).expect("应能读仓库");
             let mut actual = Vec::new();
             for repo in &repos {
-                let haystack = build_haystack(repo);
+                let meta = meta_haystack(repo);
+                let readme = readme_haystack(repo);
                 for scenario in &scenarios {
-                    let hits = keyword_hits(&haystack, &scenario.keywords);
-                    if hits.is_empty() {
+                    let Some(hits) = rule_hits(scenario, &meta, &readme) else {
                         continue;
-                    }
+                    };
                     actual.push((repo.full_name.clone(), scenario.slug.clone(), hits));
                 }
             }
