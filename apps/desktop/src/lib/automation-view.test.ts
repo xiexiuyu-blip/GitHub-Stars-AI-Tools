@@ -4,14 +4,23 @@ import {
   automationHint,
   automationState,
   BUDGET_PRESETS,
+  estimateFullScanTokens,
   formatMinute,
   formatSize,
   formatTokens,
+  FULL_SCAN_TOKENS_PER_REPO,
+  fullScanPanel,
+  fullScanPending,
+  fullScanProgress,
   itemPendingNote,
+  lastFullScanText,
   parseDailyBudget,
   regenerateNote,
+  roundedEstimate,
   TOKENS_PER_REPO,
   type AutomationStatus,
+  type FullScan,
+  type LastFullScan,
 } from './automation-view';
 
 function status(overrides: Partial<AutomationStatus> = {}): AutomationStatus {
@@ -231,5 +240,305 @@ describe('regenerateNote', () => {
     const running = regenerateNote(status({ queued: 2 }));
     expect(running.sub).toContain('后台重新整理');
     expect(running.actionLabel).toBeNull();
+  });
+});
+
+function fullScan(overrides: Partial<FullScan> = {}): FullScan {
+  return {
+    startedAt: '2026-10-04T04:00:00Z',
+    until: '2026-10-06T04:00:00Z',
+    tokensUsed: 620_000,
+    total: 388,
+    remaining: 268,
+    ...overrides,
+  };
+}
+
+function lastScan(overrides: Partial<LastFullScan> = {}): LastFullScan {
+  return {
+    startedAt: '2026-10-04T04:00:00Z',
+    finishedAt: '2026-10-04T12:30:00',
+    tokensUsed: 620_000,
+    reason: 'stopped',
+    total: 388,
+    remaining: 268,
+    ...overrides,
+  };
+}
+
+describe('estimateFullScanTokens', () => {
+  it('按每个 5200 token 估算，向最接近的整数取整', () => {
+    expect(FULL_SCAN_TOKENS_PER_REPO).toBe(5200);
+    expect(estimateFullScanTokens(388)).toBe(2_017_600);
+    expect(estimateFullScanTokens(1)).toBe(5200);
+    expect(estimateFullScanTokens(1.2)).toBe(6240);
+  });
+
+  it('不是有限数或 ≤ 0 时返回 0', () => {
+    expect(estimateFullScanTokens(0)).toBe(0);
+    expect(estimateFullScanTokens(-3)).toBe(0);
+    expect(estimateFullScanTokens(Number.NaN)).toBe(0);
+    expect(estimateFullScanTokens(Number.POSITIVE_INFINITY)).toBe(0);
+  });
+});
+
+describe('roundedEstimate', () => {
+  it('100 万以上按 10 万取整，否则按 1 万取整，0 就是 0', () => {
+    expect(roundedEstimate(2_017_600)).toBe('200 万');
+    expect(roundedEstimate(2_065_000)).toBe('210 万');
+    expect(roundedEstimate(35_000)).toBe('4 万');
+    expect(roundedEstimate(0)).toBe('0');
+  });
+
+  it('不足 1 万的正数至少写成 1 万，非法值当 0', () => {
+    expect(roundedEstimate(5200)).toBe('1 万');
+    expect(roundedEstimate(1)).toBe('1 万');
+    expect(roundedEstimate(Number.NaN)).toBe('0');
+    expect(roundedEstimate(-20)).toBe('0');
+  });
+});
+
+describe('fullScanPending', () => {
+  it('有 needsOrganizing 就用它，0 也不退回排队数', () => {
+    expect(fullScanPending(status({ needsOrganizing: 388, queued: 1, running: 1 }))).toBe(388);
+    expect(fullScanPending(status({ needsOrganizing: 0, queued: 9, running: 2 }))).toBe(0);
+  });
+
+  it('缺失或 null 时用排队 + 进行中；不是有限数或小于 0 当 0', () => {
+    expect(fullScanPending(status({ queued: 4, running: 1 }))).toBe(5);
+    expect(fullScanPending(status({ needsOrganizing: null, queued: 2, running: 3 }))).toBe(5);
+    expect(fullScanPending(status({ needsOrganizing: -1, queued: 8 }))).toBe(0);
+    expect(fullScanPending(status({ queued: Number.NaN, running: 1 }))).toBe(0);
+  });
+});
+
+describe('fullScanProgress', () => {
+  it('正常进度：已整理夹在 0 和总数之间，百分比向下取整', () => {
+    expect(fullScanProgress(fullScan())).toEqual({ done: 120, total: 388, percent: 30 });
+    expect(fullScanProgress(fullScan({ total: 3, remaining: 2 }))).toEqual({ done: 1, total: 3, percent: 33 });
+  });
+
+  it('remaining 大于 total 时已整理是 0，百分比是 0', () => {
+    expect(fullScanProgress(fullScan({ total: 10, remaining: 25 }))).toEqual({ done: 0, total: 10, percent: 0 });
+  });
+
+  it('total 为 0 时百分比是 0（即使 remaining 也是 0）', () => {
+    expect(fullScanProgress(fullScan({ total: 0, remaining: 0 }))).toEqual({ done: 0, total: 0, percent: 0 });
+    expect(fullScanProgress(fullScan({ total: 0, remaining: 4 }))).toEqual({ done: 0, total: 0, percent: 0 });
+  });
+
+  it('remaining 为 0 且 total 大于 0 时百分比一定是 100', () => {
+    expect(fullScanProgress(fullScan({ total: 388, remaining: 0 }))).toEqual({ done: 388, total: 388, percent: 100 });
+  });
+});
+
+describe('fullScanPanel', () => {
+  it('还没读到状态是 loading', () => {
+    expect(fullScanPanel(null)).toEqual({ kind: 'loading' });
+  });
+
+  it('没配置 AI 服务是 unavailable，原因让人去设置里保存密钥', () => {
+    expect(fullScanPanel(status({ providerConfigured: false }))).toEqual({
+      kind: 'unavailable',
+      reason: '先到「设置 → 引擎」里选好服务商和模型、保存密钥，才能整理。',
+    });
+  });
+
+  it('没有要整理的是 nothing，有上次结果就带上一行', () => {
+    const last = lastScan({ reason: 'completed', remaining: 0, total: 388, tokensUsed: 2_018_000 });
+    const panel = fullScanPanel(status({ needsOrganizing: 0, queued: 3, lastFullScan: last }));
+    expect(panel.kind).toBe('nothing');
+    if (panel.kind !== 'nothing') return;
+    expect(panel.last).toBe('上次全量整理：2026-10-04 12:30 完成，整理了 388 个，用了约 201.8 万 token。');
+  });
+
+  it('有要整理的是 ready：388 个约 200 万 token', () => {
+    const panel = fullScanPanel(status({ needsOrganizing: 388, lastFullScan: lastScan() }));
+    expect(panel).toMatchObject({
+      kind: 'ready',
+      pending: 388,
+      estimate: '200 万',
+      last: '上次全量整理：2026-10-04 12:30 被停止，已整理 120 / 388 个，用了约 62 万 token。',
+    });
+  });
+
+  it('正在全量整理是 running，带上进度、用量和暂停原因', () => {
+    const panel = fullScanPanel(status({
+      unlimited: true,
+      paused: true,
+      pauseReason: { kind: 'errors', message: '连续失败', at: '2026-10-04T05:00:00Z' },
+      fullScan: fullScan(),
+    }));
+    expect(panel).toEqual({
+      kind: 'running',
+      done: 120,
+      total: 388,
+      percent: 30,
+      tokensUsed: 620_000,
+      startedAt: '2026-10-04T04:00:00Z',
+      until: '2026-10-06T04:00:00Z',
+      paused: true,
+      pausedReason: '连续失败',
+    });
+  });
+
+  it('有 fullScan 时，就算还没配好服务也是 running（进行中优先于没配服务）', () => {
+    const panel = fullScanPanel(status({
+      providerConfigured: false,
+      unlimited: true,
+      fullScan: fullScan({ total: 10, remaining: 10, tokensUsed: 0 }),
+    }));
+    expect(panel.kind).toBe('running');
+  });
+
+  it('unlimited 明确是 false 时，留着 fullScan 也不算在跑', () => {
+    const panel = fullScanPanel(status({
+      unlimited: false,
+      needsOrganizing: 12,
+      fullScan: fullScan(),
+    }));
+    expect(panel.kind).toBe('ready');
+  });
+
+  it('unlimited 缺失但 fullScan 还在：没有被明确关掉，面板仍是 running', () => {
+    const panel = fullScanPanel(status({
+      providerConfigured: false,
+      fullScan: fullScan({ total: 4, remaining: 4 }),
+    }));
+    expect(panel.kind).toBe('running');
+  });
+
+  it('unlimited 明确关掉、又没配服务：按顺序落到 unavailable', () => {
+    const panel = fullScanPanel(status({
+      unlimited: false,
+      providerConfigured: false,
+      fullScan: fullScan(),
+    }));
+    expect(panel.kind).toBe('unavailable');
+  });
+});
+
+describe('lastFullScanText', () => {
+  it('完成、停止、到时间、用量超了，四句各不相同', () => {
+    expect(lastFullScanText(lastScan({ reason: 'completed', remaining: 0, total: 388, tokensUsed: 2_018_000 }))).toBe(
+      '上次全量整理：2026-10-04 12:30 完成，整理了 388 个，用了约 201.8 万 token。',
+    );
+    expect(lastFullScanText(lastScan({ reason: 'stopped' }))).toBe(
+      '上次全量整理：2026-10-04 12:30 被停止，已整理 120 / 388 个，用了约 62 万 token。',
+    );
+    expect(lastFullScanText(lastScan({ reason: 'expired' }))).toBe(
+      '上次全量整理：2026-10-04 12:30 到时间自动结束，已整理 120 / 388 个，用了约 62 万 token。',
+    );
+    expect(lastFullScanText(lastScan({ reason: 'ceiling' }))).toBe(
+      '上次全量整理：2026-10-04 12:30 因为用量远超预计，已自动停下（已整理 120 / 388 个，用了约 62 万 token）。要继续可以再开一次。',
+    );
+  });
+
+  it('没有记录，或 reason 认不出，返回 null', () => {
+    expect(lastFullScanText(null)).toBeNull();
+    expect(lastFullScanText(undefined)).toBeNull();
+    const unknown = lastScan();
+    (unknown as { reason: string }).reason = 'other';
+    expect(lastFullScanText(unknown)).toBeNull();
+  });
+});
+
+describe('全量整理期间不说额度用完', () => {
+  const during = () => status({
+    unlimited: true,
+    budgetRemaining: 0,
+    queued: 10,
+    tokens24h: 80_000,
+    fullScan: fullScan({ tokensUsed: 620_000 }),
+  });
+
+  it('顶部状态是「全量整理中」，不提额度用完', () => {
+    const state = automationState(during());
+    expect(state).toEqual({
+      label: '全量整理中（不限额）',
+      hue: 148,
+      detail: '在后台连续整理，不受每天额度限制；整理完会自动回到日常的增量整理。',
+    });
+    expect(state.detail).not.toContain('用完');
+  });
+
+  it('今日 / 资料库提示说还在全量整理，按钮是「查看进度」，个数用传入的 pending', () => {
+    const hint = automationHint(during(), 5);
+    expect(hint).toEqual({
+      hue: 148,
+      icon: 'autorenew',
+      title: '正在全量整理（不限额），还剩 5 个',
+      detail: '不受每天额度限制，已用约 62 万 token。整理完会自动回到日常整理。',
+      actionLabel: '查看进度',
+    });
+    expect(hint?.title).not.toContain('额度用完');
+    expect(hint?.detail).not.toContain('用完');
+  });
+
+  it('没有 fullScan.tokensUsed 时，提示改用最近 24 小时的用量', () => {
+    const hint = automationHint(status({ unlimited: true, budgetRemaining: 0, queued: 2, tokens24h: 40_000, fullScan: null }), 7);
+    expect(hint?.detail).toBe('不受每天额度限制，已用约 4 万 token。整理完会自动回到日常整理。');
+  });
+
+  it('详情不说额度用完，改说正在全量整理', () => {
+    const note = itemPendingNote(during());
+    expect(note).toEqual({
+      text: '正在全量整理，整理好会自动出现在这里。先看 GitHub 上的原文：',
+      actionLabel: null,
+    });
+    expect(note.text).not.toContain('额度');
+  });
+
+  it('队列是 0、额度也是 0 时，只要 unlimited，详情和顶上提示都不说额度用完', () => {
+    const pausedBudget = status({ unlimited: true, budgetRemaining: 0, queued: 0, running: 0 });
+    const note = itemPendingNote(pausedBudget);
+    expect(note.text).toContain('正在全量整理');
+    expect(note.text).not.toContain('额度用完');
+    const hint = automationHint(pausedBudget, 3);
+    expect(hint?.title ?? '').not.toContain('额度用完');
+    expect(hint?.detail ?? '').not.toContain('用完');
+    expect(automationState(pausedBudget).label).toBe('全量整理中（不限额）');
+    expect(regenerateNote(pausedBudget).sub ?? '').not.toContain('额度');
+  });
+
+  it('重新整理的提示说会在全量整理里重做，不说额度用完', () => {
+    const note = regenerateNote(during());
+    expect(note).toEqual({
+      title: '已加入整理队列',
+      sub: '正在全量整理，会在后台重新整理，好了会自动更新',
+      actionLabel: null,
+    });
+    expect(note.sub).not.toContain('额度');
+  });
+
+  it('暂停优先于 unlimited：徽章仍是「已暂停」', () => {
+    const state = automationState(status({ paused: true, unlimited: true, budgetRemaining: 0, queued: 4 }));
+    expect(state.label).toBe('已暂停');
+    expect(state.hue).toBe(4);
+    expect(automationHint(status({ paused: true, unlimited: true, budgetRemaining: 0, queued: 4 }), 5)?.title).toBe('自动整理被暂停了');
+    expect(itemPendingNote(status({ paused: true, unlimited: true, budgetRemaining: 0 })).text).toContain('暂停');
+    expect(regenerateNote(status({ paused: true, unlimited: true, budgetRemaining: 0 })).sub).toContain('暂停');
+  });
+});
+
+describe('额度用完时指出可以开全量整理', () => {
+  it('不是全量整理时，提示改去工具箱，并说明可以不限额整理完', () => {
+    const hint = automationHint(status({ budgetRemaining: 0, queued: 3 }), 5);
+    expect(hint?.title).toBe('今天的整理额度用完了');
+    expect(hint?.actionLabel).toBe('去工具箱');
+    expect(hint?.detail).toBe('还有 5 个没整理，明天会自动接着做；想现在就整理完，可以在工具箱里开启「全量整理」（不限额）。');
+  });
+
+  it('详情和重新整理的「额度用完」都补上一句可以开全量整理', () => {
+    expect(itemPendingNote(status({ budgetRemaining: 0 })).text).toContain('也可以在工具箱里开启全量整理');
+    expect(regenerateNote(status({ budgetRemaining: 0 })).sub).toContain('也可以在工具箱里开启全量整理');
+  });
+
+  it('unlimited 字段缺失时，仍走原来的「额度用完」，不说正在全量整理', () => {
+    expect(automationState(status({ budgetRemaining: 0, queued: 10 })).label).toBe('今天的额度用完了');
+    expect(automationHint(status({ budgetRemaining: 0, queued: 3 }), 5)?.title).toBe('今天的整理额度用完了');
+    expect(itemPendingNote(status({ budgetRemaining: 0 })).text).toContain('明天');
+    expect(itemPendingNote(status({ queued: 1 })).text).toContain('整理队列');
+    expect(regenerateNote(status({ budgetRemaining: 0 })).sub).toContain('明天');
   });
 });
