@@ -190,6 +190,8 @@ pub struct CardInput {
     pub stars: i64,
     pub pushed_on: Option<String>,
     pub readme: Option<ReadmeExcerpt>,
+    /// 缓存 README 的 content_hash。只在摘录可用时有值，不参与 `source_hash`。
+    pub readme_hash: Option<String>,
     pub categories: Vec<(String, String)>,
     pub scenarios: Vec<(String, String)>,
 }
@@ -311,20 +313,24 @@ pub fn load_card_input(conn: &Connection, repo_id: &str) -> Result<CardInput, Ca
     let (account_id, full_name, description, topics_json, language, stars, pushed_at) = repo;
     let raw_readme = conn
         .query_row(
-            "SELECT raw_markdown FROM repo_readmes WHERE repo_id = ?1",
+            "SELECT raw_markdown, content_hash FROM repo_readmes WHERE repo_id = ?1",
             params![repo_id],
-            |row| row.get::<_, String>(0),
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
         )
         .optional()
         .map_err(db_err)?;
-    let readme = raw_readme.and_then(|text| {
-        let excerpt = build_readme_excerpt(&text);
-        if excerpt.is_absent() {
-            None
-        } else {
-            Some(excerpt)
+    // 摘录太短时流水线把 README 当成没有。哈希也留空，这样以后真有内容时还会被看成「以前没有 README」。
+    let (readme, readme_hash) = match raw_readme {
+        Some((text, hash)) => {
+            let excerpt = build_readme_excerpt(&text);
+            if excerpt.is_absent() {
+                (None, None)
+            } else {
+                (Some(excerpt), Some(hash))
+            }
         }
-    });
+        None => (None, None),
+    };
     Ok(CardInput {
         categories: load_categories(conn, &account_id)?,
         scenarios: load_scenarios(conn, &account_id)?,
@@ -336,6 +342,7 @@ pub fn load_card_input(conn: &Connection, repo_id: &str) -> Result<CardInput, Ca
         stars,
         pushed_on: date_only(pushed_at),
         readme,
+        readme_hash,
     })
 }
 
@@ -967,12 +974,17 @@ fn persist_card(
         .map_err(|_| card_error(CardRunErrorKind::Database, "建议标签无法序列化", None))?;
     let summary = required_card_str(card, "what_it_is")?;
     let one_liner = required_card_str(card, "one_liner_zh")?;
+    let (readme_hash, readme_basis) = match &input.readme {
+        Some(excerpt) => (input.readme_hash.clone(), Some(excerpt.text.clone())),
+        None => (None, None),
+    };
     tx.execute(
         "INSERT INTO repo_ai_documents (
             repo_id, summary_zh, keywords_json, suggested_tags_json,
             model, prompt_version, source_hash, input_tokens, output_tokens,
-            generated_at, one_liner_zh, card_json, card_schema_version
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, 2)
+            generated_at, one_liner_zh, card_json, card_schema_version,
+            readme_hash, readme_basis
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, 2, ?13, ?14)
          ON CONFLICT(repo_id) DO UPDATE SET
             summary_zh = excluded.summary_zh,
             keywords_json = excluded.keywords_json,
@@ -985,7 +997,9 @@ fn persist_card(
             generated_at = excluded.generated_at,
             one_liner_zh = excluded.one_liner_zh,
             card_json = excluded.card_json,
-            card_schema_version = excluded.card_schema_version",
+            card_schema_version = excluded.card_schema_version,
+            readme_hash = excluded.readme_hash,
+            readme_basis = excluded.readme_basis",
         params![
             repo_id,
             summary,
@@ -999,6 +1013,8 @@ fn persist_card(
             now,
             one_liner,
             card_json,
+            readme_hash,
+            readme_basis,
         ],
     )
     .map_err(db_err)?;
@@ -3135,6 +3151,7 @@ https://img.shields.io/github/stars/fox/demo
                 original_chars: 40,
                 kept_chars: 40,
             }),
+            readme_hash: Some("readme-hash".to_owned()),
             categories: vec![
                 ("content-creation".to_owned(), "内容创作".to_owned()),
                 ("media-gen".to_owned(), "图像生成".to_owned()),
@@ -4729,5 +4746,150 @@ INSERT INTO scenarios(slug, name_zh, account_id, archived) VALUES
         assert_eq!(error.message, "请求太频繁");
         assert_eq!(client.calls().len(), 1);
         assert_eq!(cell_i64(&conn, "SELECT COUNT(*) FROM repo_ai_documents"), 0);
+    }
+
+    fn cell_optional(conn: &Connection, sql: &str) -> Option<String> {
+        conn.query_row(sql, [], |row| row.get(0))
+            .expect("查询应返回")
+    }
+
+    #[test]
+    fn generated_card_stores_readme_hash_and_basis() {
+        let db = TempDb::new();
+        let mut conn = db.open();
+        let raw = usable_readme();
+        seed_repo(&conn, Some(&raw));
+        let client = ScriptedClient::new(vec![ok_reply(&valid_json(), "fake-model", 3, 4)]);
+        let report = run_repo_card(
+            &mut conn,
+            &client,
+            "r1",
+            &options(false, "2026-10-03T00:00:00Z"),
+        )
+        .expect("有 README 时应生成");
+        assert_eq!(report.outcome, CardRunOutcome::Generated);
+        assert_eq!(
+            cell_string(
+                &conn,
+                "SELECT readme_hash FROM repo_ai_documents WHERE repo_id = 'r1'"
+            ),
+            "hash"
+        );
+        assert_eq!(
+            cell_string(
+                &conn,
+                "SELECT readme_basis FROM repo_ai_documents WHERE repo_id = 'r1'"
+            ),
+            build_readme_excerpt(&raw).text
+        );
+    }
+
+    #[test]
+    fn generated_card_without_readme_stores_null_basis() {
+        let db = TempDb::new();
+        let mut conn = db.open();
+        seed_repo(&conn, None);
+        let client = ScriptedClient::new(vec![ok_reply(&valid_json(), "fake-model", 6, 7)]);
+        let report = run_repo_card(
+            &mut conn,
+            &client,
+            "r1",
+            &options(false, "2026-10-03T00:00:00Z"),
+        )
+        .expect("没有 README 仍应生成");
+        assert_eq!(report.outcome, CardRunOutcome::Generated);
+        assert_eq!(
+            cell_optional(
+                &conn,
+                "SELECT readme_hash FROM repo_ai_documents WHERE repo_id = 'r1'"
+            ),
+            None
+        );
+        assert_eq!(
+            cell_optional(
+                &conn,
+                "SELECT readme_basis FROM repo_ai_documents WHERE repo_id = 'r1'"
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn confirmed_card_keeps_existing_readme_basis() {
+        let db = TempDb::new();
+        let mut conn = db.open();
+        seed_repo(&conn, Some(&usable_readme()));
+        insert_existing_doc(
+            &conn,
+            "不要改我",
+            "保留的译文",
+            r#"{"review_status":"confirmed"}"#,
+        );
+        conn.execute(
+            "UPDATE repo_ai_documents SET readme_hash = 'old', readme_basis = '旧依据' WHERE repo_id = 'r1'",
+            [],
+        )
+        .expect("旧依据应能写入");
+        let client = ScriptedClient::new(vec![ok_reply(&valid_json(), "should-not-run", 9, 9)]);
+        let report = run_repo_card(
+            &mut conn,
+            &client,
+            "r1",
+            &options(true, "2026-10-04T00:00:00Z"),
+        )
+        .expect("已确认的卡应跳过");
+        assert_eq!(report.outcome, CardRunOutcome::Skipped("已确认".to_owned()));
+        assert!(client.calls().is_empty());
+        assert_eq!(
+            cell_string(
+                &conn,
+                "SELECT readme_hash FROM repo_ai_documents WHERE repo_id = 'r1'"
+            ),
+            "old"
+        );
+        assert_eq!(
+            cell_string(
+                &conn,
+                "SELECT readme_basis FROM repo_ai_documents WHERE repo_id = 'r1'"
+            ),
+            "旧依据"
+        );
+        assert_eq!(
+            cell_string(
+                &conn,
+                "SELECT summary_zh FROM repo_ai_documents WHERE repo_id = 'r1'"
+            ),
+            "不要改我"
+        );
+    }
+
+    #[test]
+    fn readme_hash_is_not_part_of_source_hash() {
+        let mut left = sample_input(false);
+        let mut right = sample_input(false);
+        left.readme_hash = Some("aaa".to_owned());
+        right.readme_hash = Some("bbb".to_owned());
+        assert_eq!(source_hash_of(&left), source_hash_of(&right));
+        right.readme = None;
+        right.readme_hash = left.readme_hash.clone();
+        assert_ne!(source_hash_of(&left), source_hash_of(&right));
+    }
+
+    #[test]
+    fn load_card_input_reads_readme_hash_only_when_excerpt_is_usable() {
+        let db = TempDb::new();
+        let conn = db.open();
+        seed_repo(&conn, Some(&usable_readme()));
+        let input = load_card_input(&conn, "r1").expect("应能读出输入");
+        assert_eq!(input.readme_hash.as_deref(), Some("hash"));
+        assert!(input.readme.is_some());
+        conn.execute(
+            "UPDATE repo_readmes SET raw_markdown = '太短' WHERE repo_id = 'r1'",
+            [],
+        )
+        .expect("应能改短 README");
+        let short = load_card_input(&conn, "r1").expect("短 README 也应能读");
+        assert!(short.readme.is_none());
+        assert!(short.readme_hash.is_none());
     }
 }

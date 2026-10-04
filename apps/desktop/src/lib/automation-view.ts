@@ -53,8 +53,19 @@ export type AutomationStatus = {
   fullScan?: FullScan | null;
   /** 缺失当作 null。 */
   lastFullScan?: LastFullScan | null;
+  /** 上次 README 更新检查。缺失当作 null，界面不显示那一行。 */
+  lastReadmeCheck?: LastReadmeCheck | null;
   /** 还没整理好的收藏数。缺失或 null 时用 queued + running 代替。 */
   needsOrganizing?: number | null;
+};
+
+/** 一次 README 更新检查。后台还没带上这个字段时，整个值是 null。 */
+export type LastReadmeCheck = {
+  checkedAt: string;
+  checked: number;
+  refreshed: number;
+  material: number;
+  queued: number;
 };
 
 /** 整理一个仓库大约用多少 token（2026-10-04 真实记录：输入约 4300 + 输出约 1500，成功的卡平均约 5.7–6.3 千，取 6000）。只用来估「约整理多少个」。 */
@@ -176,6 +187,42 @@ export function lastFullScanText(last: LastFullScan | null | undefined): string 
     return `上次全量整理：${when} 因为失败太多，已自动停下（已整理 ${ok} / ${total} 个${failedNote}，用了约 ${used} token）。先到「设置 → 引擎」检查模型，再重试。`;
   }
   return null;
+}
+
+function finiteCount(value: number): number {
+  if (!Number.isFinite(value) || value < 0) return 0;
+  return Math.floor(value);
+}
+
+function pad2(value: number): string {
+  return String(value).padStart(2, '0');
+}
+
+function sameLocalDay(left: Date, right: Date): boolean {
+  return left.getFullYear() === right.getFullYear() && left.getMonth() === right.getMonth() && left.getDate() === right.getDate();
+}
+
+/** 不到 1 小时、当天、昨天、更早。时间读不懂就当没有这次检查。 */
+function readmeWhen(iso: string, now: Date): string | null {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return null;
+  const age = now.getTime() - date.getTime();
+  if (age < 60 * 60 * 1000) return '刚刚';
+  if (sameLocalDay(date, now)) return `今天 ${pad2(date.getHours())}:${pad2(date.getMinutes())}`;
+  const yesterday = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1);
+  if (sameLocalDay(date, yesterday)) return `昨天 ${pad2(date.getHours())}:${pad2(date.getMinutes())}`;
+  return `${date.getMonth() + 1}月${date.getDate()}日`;
+}
+
+/** 工具箱里「README 更新检查」那一行。没检查过、或时间读不懂，就什么都不写。 */
+export function readmeCheckText(last: LastReadmeCheck | null | undefined, now = new Date()): string | null {
+  if (!last) return null;
+  const when = readmeWhen(last.checkedAt, now);
+  if (!when) return null;
+  const checked = finiteCount(last.checked);
+  const material = finiteCount(last.material);
+  const tail = material > 0 ? `有明显改动 ${material} 个，已排队重新整理` : '没有明显改动';
+  return `README 更新检查：${when} · 看了 ${checked} 个 · ${tail}`;
 }
 
 export type FullScanPanel =
