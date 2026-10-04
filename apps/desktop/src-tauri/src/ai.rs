@@ -18,6 +18,7 @@ const ANTHROPIC_TAG_NETWORK_MAX_TOKENS: u16 = 2400;
 const ANTHROPIC_RECOMMENDATION_MAX_TOKENS: u16 = 1000;
 const ANTHROPIC_SEARCH_PLAN_MAX_TOKENS: u16 = 800;
 const ANTHROPIC_SEARCH_ANSWER_MAX_TOKENS: u16 = 1200;
+const ANTHROPIC_SOLVE_RERANK_MAX_TOKENS: u16 = 1200;
 const ANTHROPIC_EXPLANATION_MAX_TOKENS: u16 = 1000;
 const ANTHROPIC_TRANSLATION_MAX_TOKENS: u16 = 6000;
 /// 服务商因为「max_tokens 比这个模型允许的输出上限还大」拒绝了请求（HTTP 400 / 422）时，错误信息里的固定说法。
@@ -585,6 +586,17 @@ pub fn answer_search_results(
         _ => return Err("当前仅支持 OpenAI、OpenAI 兼容接口或 Anthropic AI 服务".to_owned()),
     };
     parse_search_answer(&content, evidence)
+}
+
+/// 「找方案」的 AI 精选：把一段提示词发给模型，原样返回回复文字（要 JSON 的话由调用方解析）。
+/// 额度走 `spend_guard::solve_rerank` 里它自己的那一份，不被后台整理用掉的额度挡住。
+pub fn complete_solve_rerank(config: &AiRequestConfig, prompt: &str) -> Result<String, String> {
+    let provider = validate_request_config(config)?;
+    crate::spend_guard::solve_rerank(|| match provider.as_str() {
+        "openai" => request_openai(config, prompt),
+        "anthropic" => request_anthropic(config, prompt, ANTHROPIC_SOLVE_RERANK_MAX_TOKENS),
+        _ => Err("当前仅支持 OpenAI、OpenAI 兼容接口或 Anthropic AI 服务".to_owned()),
+    })
 }
 
 pub fn list_models(config: &AiRequestConfig) -> Result<Vec<AiModelOption>, String> {
@@ -4977,6 +4989,40 @@ mod tests {
             ("succeeded".to_owned(), 700 + 1000, 50),
             "成功那次的真实用量，加上 503 那次的提示词估计"
         );
+    }
+
+    #[test]
+    fn solve_rerank_requests_use_their_own_allowance_and_are_tagged_in_the_ledger() {
+        let dir = crate::spend_guard::testing::Dir::new();
+        // 队列额度只有 10 万，而且已经被后台整理用光：普通请求会被拒，AI 精选照样能发，并按真实用量记账
+        dir.control(SPEND_BUDGET);
+        let _scope = dir.use_in_this_thread();
+        crate::spend_guard::testing::fill_background_usage(&dir, 500_000);
+        let (url, server) = spawn_http_sequence_server(vec![("200 OK", SPEND_REPLY)]);
+        let config = loopback_config(url);
+        let refused =
+            request_openai(&config, &prompt_of_1000_tokens()).expect_err("普通请求应被拒");
+        assert!(crate::spend_guard::is_refusal(&refused), "{refused}");
+        assert_eq!(
+            complete_solve_rerank(&config, &prompt_of_1000_tokens()).expect("AI 精选应能发"),
+            "好的"
+        );
+        server.join().expect("假服务应正常结束");
+        assert_eq!(
+            dir.row("SELECT status, input_tokens, output_tokens FROM ai_jobs WHERE prompt_version = 'solve-rerank' ORDER BY created_at DESC, rowid DESC LIMIT 1"),
+            ("succeeded".to_owned(), 700, 50)
+        );
+    }
+
+    #[test]
+    fn solve_rerank_with_an_unsupported_provider_fails_before_asking_for_money() {
+        let dir = crate::spend_guard::testing::Dir::new();
+        dir.control(SPEND_BUDGET);
+        let _scope = dir.use_in_this_thread();
+        let mut config = loopback_config("http://127.0.0.1:9/x".to_owned());
+        config.provider = "not-a-provider".to_owned();
+        assert!(complete_solve_rerank(&config, "提示词").is_err());
+        assert_eq!(dir.used(), 0, "没发请求就不能留预留");
     }
 
     #[test]
