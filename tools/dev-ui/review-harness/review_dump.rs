@@ -927,3 +927,46 @@ fn review_tasks_dump() {
     dump(&out, "index", &index);
     println!("[完成] 输出目录：{}", out.display());
 }
+
+/// 批量问「找方案」：FSL_REVIEW_QUERIES 是一个文本文件，每行一句话。每句输出
+/// 意图词 / 额外词 / 前 8 名（名称、形态、命中、缺口、分数、是否全对上），写到 FSL_REVIEW_OUT/solve_batch.json。
+/// 用来在改词表 / 分词 / 打分前后对比。只读副本，不花钱。
+#[test]
+#[ignore]
+fn review_solve_batch() {
+    let source = PathBuf::from(std::env::var("FSL_REVIEW_DB").expect("需要 FSL_REVIEW_DB"));
+    let out = PathBuf::from(std::env::var("FSL_REVIEW_OUT").expect("需要 FSL_REVIEW_OUT"));
+    let queries = fs::read_to_string(std::env::var("FSL_REVIEW_QUERIES").expect("需要 FSL_REVIEW_QUERIES"))
+        .expect("读问题文件");
+    fs::create_dir_all(&out).expect("建输出目录");
+    let work = out.join("solve_batch.sqlite3");
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = fs::remove_file(format!("{}{suffix}", work.display()));
+    }
+    fs::copy(&source, &work).expect("复制副本");
+    migrate_database(&work).expect("迁移");
+    let mut rows = Vec::new();
+    for query in queries.lines().map(str::trim).filter(|line| !line.is_empty()) {
+        let result = solve::solve_query(&work, query).expect("找方案");
+        rows.push(serde_json::json!({
+            "query": query,
+            "intents": result.intents,
+            "extras": result.extras,
+            "fullMatchCount": result.full_match_count,
+            "preselected": result.preselected.iter().map(|id| {
+                result.hits.iter().find(|hit| &hit.id == id).map(|hit| hit.full_name.clone()).unwrap_or_default()
+            }).collect::<Vec<_>>(),
+            "gapIntents": result.gap_intents,
+            "hits": result.hits.iter().map(|hit| serde_json::json!({
+                "name": hit.full_name,
+                "form": hit.form,
+                "matched": hit.matched,
+                "missing": hit.missing,
+                "score": (hit.score * 10.0).round() / 10.0,
+                "full": hit.full_match,
+            })).collect::<Vec<_>>(),
+        }));
+    }
+    dump(&out, "solve_batch", &rows);
+    println!("[完成] {} 句 → {}", rows.len(), out.display());
+}
