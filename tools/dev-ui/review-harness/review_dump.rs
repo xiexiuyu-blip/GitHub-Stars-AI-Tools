@@ -442,7 +442,19 @@ fn canned_card() -> String {
     .to_string()
 }
 
+/// 假模型的脾气：正常 / 输出额度小于门槛就被截断（只有思考没有正文，和 LongCat 的真实表现一样）/ 输出额度超过上限就 HTTP 400 拒绝。
+#[derive(Clone, Copy)]
+enum FakeMode {
+    Plain,
+    CutOffBelow(u64),
+    RejectAbove(u64),
+}
+
 fn start_fake_llm(served: Arc<AtomicUsize>, delay_ms: u64) -> u16 {
+    start_fake_llm_with(served, delay_ms, FakeMode::Plain)
+}
+
+fn start_fake_llm_with(served: Arc<AtomicUsize>, delay_ms: u64, mode: FakeMode) -> u16 {
     let listener = TcpListener::bind(("127.0.0.1", 0)).expect("监听假模型端口");
     let port = listener.local_addr().expect("端口").port();
     std::thread::spawn(move || {
@@ -478,15 +490,38 @@ fn start_fake_llm(served: Arc<AtomicUsize>, delay_ms: u64) -> u16 {
                 if delay_ms > 0 {
                     std::thread::sleep(std::time::Duration::from_millis(delay_ms));
                 }
-                let body = serde_json::json!({
-                    "id": "fake",
-                    "model": "fake-model",
-                    "choices": [{"message": {"role": "assistant", "content": canned_card()}}],
-                    "usage": {"prompt_tokens": 3000, "completion_tokens": 600}
-                })
-                .to_string();
+                let request_body = String::from_utf8_lossy(&buf[header_end..]).to_string();
+                let max_tokens = serde_json::from_str::<serde_json::Value>(&request_body)
+                    .ok()
+                    .and_then(|value| value.get("max_tokens").and_then(|v| v.as_u64()))
+                    .unwrap_or(0);
+                let (status, body) = match mode {
+                    FakeMode::RejectAbove(limit) if max_tokens > limit => (
+                        "400 Bad Request",
+                        serde_json::json!({"error": {"message": format!("max_tokens is too large: {max_tokens}. This model supports at most {limit} completion tokens.")}}).to_string(),
+                    ),
+                    FakeMode::CutOffBelow(threshold) if max_tokens < threshold => (
+                        "200 OK",
+                        serde_json::json!({
+                            "id": "fake", "model": "fake-model",
+                            "choices": [{"finish_reason": "length", "message": {"role": "assistant", "content": "", "reasoning_content": "想了很多很多……"}}],
+                            "usage": {"prompt_tokens": 3000, "completion_tokens": max_tokens}
+                        })
+                        .to_string(),
+                    ),
+                    _ => (
+                        "200 OK",
+                        serde_json::json!({
+                            "id": "fake",
+                            "model": "fake-model",
+                            "choices": [{"finish_reason": "stop", "message": {"role": "assistant", "content": canned_card()}}],
+                            "usage": {"prompt_tokens": 3000, "completion_tokens": 600}
+                        })
+                        .to_string(),
+                    ),
+                };
                 let text = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                     body.as_bytes().len()
                 );
                 let _ = stream.write_all(text.as_bytes());
@@ -716,4 +751,90 @@ fn review_full_scan_rehearsal() {
         "[演练] 控制文件：{}",
         fs::read_to_string(crate::jobs::queue_control_path(&work)).unwrap_or_default()
     );
+}
+
+/// 输出额度演练：真队列 / 真处理器 / 真流水线 / 真 HTTP，假服务商。看三种服务商脾气下，调用次数和记账对不对：
+/// 1) 正常：每张卡 1 次调用，记 3600；2) 额度小于 16384 就被截断（真实记录里的 LongCat）：每张卡 2 次调用，
+/// 记账 = 重试那次的 3600 + 被截断那次（输出 8192 + 提示词估计）；3) 输出上限 4096（8192 被 400 拒绝）：每张卡 2 次调用，
+/// 被拒绝的那次不计费，记账 3600。不花钱、不读钥匙串。
+#[test]
+#[ignore]
+fn review_output_room_rehearsal() {
+    let source = PathBuf::from(std::env::var("FSL_REVIEW_DB").expect("需要 FSL_REVIEW_DB"));
+    let out = PathBuf::from(std::env::var("FSL_REVIEW_OUT").expect("需要 FSL_REVIEW_OUT"));
+    fs::create_dir_all(&out).expect("建输出目录");
+    for (label, mode) in [
+        ("正常", FakeMode::Plain),
+        ("被截断（16384 才够）", FakeMode::CutOffBelow(16_000)),
+        ("上限 4096", FakeMode::RejectAbove(4_096)),
+    ] {
+        let work = out.join("room.sqlite3");
+        for suffix in ["", "-wal", "-shm", ".queue.json"] {
+            let _ = fs::remove_file(format!("{}{suffix}", work.display()));
+        }
+        let _ = fs::remove_file(crate::jobs::queue_control_path(&work));
+        fs::copy(&source, &work).expect("复制副本");
+        migrate_database(&work).expect("迁移");
+        scenarios::ensure_initial_classification(&work).expect("首次归类");
+        crate::card_handler::enqueue_cards_for_scope(&work, "missing").expect("排队");
+        // 只留 10 个排队的，演练快一点
+        {
+            let connection = Connection::open(&work).expect("打开副本");
+            connection
+                .execute(
+                    "DELETE FROM ai_jobs WHERE status = 'queued' AND id NOT IN (SELECT id FROM ai_jobs WHERE status = 'queued' LIMIT 10)",
+                    [],
+                )
+                .expect("只留 10 个");
+            connection.execute("DELETE FROM ai_jobs WHERE status <> 'queued'", []).expect("清掉别的");
+        }
+        let served = Arc::new(AtomicUsize::new(0));
+        let port = start_fake_llm_with(served.clone(), 0, mode);
+        let config_fn: Arc<dyn Fn() -> Result<crate::ai::AiRequestConfig, String> + Send + Sync> =
+            Arc::new(move || {
+                Ok(crate::ai::AiRequestConfig {
+                    provider: "openai-compatible".to_owned(),
+                    api_key: String::new(),
+                    base_url: Some(format!("http://127.0.0.1:{port}/v1")),
+                    model: "fake-model".to_owned(),
+                })
+            });
+        let handler = crate::card_handler::RepoCardHandler::new(config_fn);
+        let worker = crate::jobs::start_worker(&work, vec![Arc::new(handler)]);
+        crate::jobs::set_daily_budget(&crate::jobs::queue_control_path(&work), 2_000_000).expect("设预算");
+        let begun = Instant::now();
+        loop {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            let status = crate::jobs::queue_status(&work).expect("队列状态");
+            if status.queued + status.running == 0 || begun.elapsed().as_secs() > 120 {
+                break;
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        worker.stop();
+        let connection = Connection::open(&work).expect("打开副本");
+        let one = |sql: &str| -> i64 { connection.query_row(sql, [], |r| r.get(0)).expect(sql) };
+        let succeeded = one("SELECT COUNT(*) FROM ai_jobs WHERE status='succeeded'");
+        let failed = one("SELECT COUNT(*) FROM ai_jobs WHERE status='failed'");
+        let tokens = one("SELECT COALESCE(SUM(input_tokens + output_tokens), 0) FROM ai_jobs WHERE status='succeeded'");
+        let calls = served.load(AtomicOrdering::SeqCst) as i64;
+        let per_job = if succeeded > 0 { tokens / succeeded } else { 0 };
+        println!("[演练·{label}] 成功 {succeeded} 失败 {failed}；模型被调用 {calls} 次；成功任务平均记账 {per_job} token（总 {tokens}）");
+        assert_eq!(succeeded, 10, "{label}：10 个都应成功");
+        assert_eq!(failed, 0);
+        match mode {
+            FakeMode::Plain => {
+                assert_eq!(calls, 10);
+                assert_eq!(per_job, 3_600);
+            }
+            FakeMode::CutOffBelow(_) => {
+                assert_eq!(calls, 20, "每张卡：被截断一次 + 放大重试一次");
+                assert!(per_job >= 3_600 + 8_192, "被截断那次也要记账：{per_job}");
+            }
+            FakeMode::RejectAbove(_) => {
+                assert_eq!(calls, 20, "每张卡：8192 被拒绝一次 + 4096 成功一次");
+                assert_eq!(per_job, 3_600, "被拒绝的请求不计费");
+            }
+        }
+    }
 }
