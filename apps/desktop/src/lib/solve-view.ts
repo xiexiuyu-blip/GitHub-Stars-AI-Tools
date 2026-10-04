@@ -137,7 +137,37 @@ const LOCAL_SYNONYMS: Record<string, readonly string[]> = {
   采集: ['crawl', 'scrape', 'fetch', '抓取'],
   爬虫: ['crawl', 'scrape', '抓取'],
   电商: ['ecommerce', 'commerce'],
+  压缩: ['compress', 'optimize', 'minify'],
+  尺寸: ['resize', 'crop', 'scale'],
+  缩放: ['resize', 'scale'],
+  裁剪: ['crop'],
+  改图: ['image', 'retouch', 'edit'],
+  修图: ['retouch', 'image'],
+  抠图: ['rembg', 'matting', 'background', 'remove-bg'],
+  水印: ['watermark'],
+  日报: ['daily', 'digest'],
+  周报: ['weekly', 'report'],
+  月报: ['monthly', 'report'],
+  转写: ['transcribe', 'whisper', 'asr', 'stt'],
+  转录: ['transcribe', 'whisper', 'asr', 'stt'],
+  文字稿: ['transcript', 'transcribe'],
+  录音: ['audio', 'recording'],
+  会议: ['meeting'],
+  播客: ['podcast'],
+  表情包: ['sticker', 'meme', 'emoji'],
+  头像: ['avatar'],
+  提示词: ['prompt'],
+  抓取: ['crawl', 'scrape', 'fetch'],
+  流程图: ['flowchart', 'mermaid', 'diagram'],
+  思维导图: ['mindmap', 'mind-map'],
+  二维码: ['qrcode', 'qr-code'],
+  数据看板: ['dashboard'],
+  看板: ['kanban'],
+  用户画像: ['persona'],
 };
+
+/** 一句话里零星提到一个任务词（1 分）不算相关：「飞书电子表格……调整尺寸」不是改图工具。名字里有（3 分）或两处以上才算。 */
+const MIN_LOCAL_SCORE = 2;
 
 function localTerms(intent: string): string[] {
   const base = intent.trim().toLowerCase();
@@ -149,7 +179,7 @@ function localTerms(intent: string): string[] {
  * 从本机已装的 Skill / MCP 里挑出该写进参考包的：
  * 1. 名字和选中的项目对得上的（说明这个工具本机已经装了，Codex 不用再装），排最前；
  * 2. 和任务相关的，最多 limit 个（「本机已有的相关能力」）：任务词（含近义说法）出现在名字里算 3 分、
- *    只出现在一句话里算 1 分，每个任务词只算一次，按总分从高到低挑，同分按名字排。
+ *    只出现在一句话里算 1 分，每个任务词只算一次，总分不到 2 的不要（零星提到一次不算相关），按总分从高到低挑，同分按名字排。
  * 全部本机能力有几十上百个，整个塞进去只会淹没重点。
  */
 export function pickLocalCapabilities(
@@ -182,7 +212,7 @@ export function pickLocalCapabilities(
       if (terms.some((term) => name.includes(term))) score += 3;
       else if (terms.some((term) => line.includes(term))) score += 1;
     }
-    if (score > 0) scored.push({ item, score });
+    if (score >= MIN_LOCAL_SCORE) scored.push({ item, score });
   }
   scored.sort((left, right) => right.score - left.score || left.item.name.localeCompare(right.item.name));
   return [...installed, ...scored.slice(0, Math.max(0, limit)).map((entry) => entry.item)];
@@ -231,6 +261,17 @@ export function todayLocalDate(now: Date): string {
   const month = String(now.getMonth() + 1).padStart(2, '0');
   const day = String(now.getDate()).padStart(2, '0');
   return `${year}-${month}-${day}`;
+}
+
+/**
+ * 参考包面板里一个工具都没勾时，说一句为什么没替你勾：搜到了但没有特别对口的（默认勾选是空的），
+ * 或者一个都没搜到。还没搜、或者是自己取消了默认勾选的，不用解释，返回 null。
+ */
+export function packEmptyNote(result: Pick<SolveResult, 'hits' | 'preselected'> | null): string | null {
+  if (!result) return null;
+  if (result.hits.length === 0) return '收藏里没找到相关的工具。';
+  if (result.preselected.length === 0) return '没有特别对口的，所以没替你默认勾选。看一眼左边的列表自己勾，或者直接交给 Codex。';
+  return null;
 }
 
 export function packPlaceholder(format: PackFormat): string {

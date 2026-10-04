@@ -397,7 +397,8 @@ fn render_project(
     let cautions = pack_guard::detect_cautions(
         how_to_try_full.as_deref().unwrap_or_default(),
         &risks_raw(card.as_ref()),
-    );
+    )
+    .with_platforms(&platforms_raw(card.as_ref()));
     let install_target = pack_guard::install_target(
         form.as_deref(),
         repository_short_name(&full_name),
@@ -550,13 +551,13 @@ fn selection_row(index: usize, project: &RenderedProject, local: &[LocalCapabili
     )
 }
 
-/// 要先问 Fox 的事、一行安装的提醒，各占一行。没有就不写。
+/// 要先问 Fox 的事、不用先问的提醒（一行安装、别的系统的命令、未签名……），各占一行。没有就不写。
 fn push_caution_lines(lines: &mut Vec<String>, project: &RenderedProject) {
     if let Some(text) = project.cautions.ask_text() {
         lines.push(format!("- ⚠ 先问我再动手：{text}"));
     }
-    if project.cautions.one_line_install {
-        lines.push(format!("- ⚠ {}", pack_guard::ONE_LINE_INSTALL_NOTE));
+    for note in project.cautions.notes() {
+        lines.push(format!("- ⚠ {note}"));
     }
 }
 
@@ -637,8 +638,8 @@ fn render_agents(
         if let Some(text) = project.cautions.ask_text() {
             line.push_str(&format!("。⚠ 先问我再动手：{text}"));
         }
-        if project.cautions.one_line_install {
-            line.push_str(&format!("。⚠ {}", pack_guard::ONE_LINE_INSTALL_NOTE));
+        for note in project.cautions.notes() {
+            line.push_str(&format!("。⚠ {note}"));
         }
         lines.push(line);
     }
@@ -793,17 +794,21 @@ fn render_json(
         1,
         &format!("\"verify\": {},", json_string_list(&verify, 1)?),
     );
-    out.push_str("  \"items\": [\n");
-    for (index, project) in projects.iter().enumerate() {
-        write_json_item(
-            &mut out,
-            index,
-            project,
-            &request.local_capabilities,
-            index + 1 == projects.len(),
-        )?;
+    if projects.is_empty() {
+        out.push_str("  \"items\": [],\n");
+    } else {
+        out.push_str("  \"items\": [\n");
+        for (index, project) in projects.iter().enumerate() {
+            write_json_item(
+                &mut out,
+                index,
+                project,
+                &request.local_capabilities,
+                index + 1 == projects.len(),
+            )?;
+        }
+        out.push_str("  ],\n");
     }
-    out.push_str("  ],\n");
     out.push_str("  \"local\": ");
     out.push_str(&json_local(&request.local_capabilities)?);
     out.push_str("\n}");
@@ -1094,6 +1099,23 @@ fn how_to_try_raw(card: Option<&Value>) -> Option<String> {
 /// 显示用的装法：最多 300 字，在「。」「；」处截断。
 fn resolve_how_to_try(card: Option<&Value>) -> Option<String> {
     how_to_try_raw(card).map(|text| clamp_how_to_try(&text))
+}
+
+/// 理解卡里写的支持哪些系统（`platforms`：macos / windows / linux / web / cross……）。没写就是空。
+fn platforms_raw(card: Option<&Value>) -> Vec<String> {
+    let Some(value) = card.and_then(|card| card.get("platforms")) else {
+        return Vec::new();
+    };
+    match value {
+        Value::String(text) => vec![flatten(text)],
+        Value::Array(items) => items
+            .iter()
+            .filter_map(Value::as_str)
+            .map(flatten)
+            .filter(|text| !text.is_empty())
+            .collect(),
+        _ => Vec::new(),
+    }
 }
 
 /// 理解卡里全部注意事项的原文，用「；」连起来（显示用的 `risks` 每条最多 80 字、最多 3 条）。
@@ -2312,7 +2334,8 @@ mod tests {
         assert!(content.contains("- 是什么：用模板生成封面图的命令行工具"));
         assert!(content.contains("- 能做：套用封面模板；导出 PNG 图片"));
         assert!(content.contains("- 装法：npm i -g cover-kit && cover-kit init"));
-        assert!(content.contains("- 装到：优先用 brew、pipx 或 uv tool，装在独立环境里"));
+        assert!(content
+            .contains("- 装到：Node 工具：在这次任务的目录里用 npm / npx 本地装，不要 -g 全局装"));
         assert!(content.contains("- 不适合：不适合视频剪辑"));
         assert!(content.contains("- 注意：需要网络下载模板"));
         assert!(content.contains("- 为什么选它：封面排版可以直接借鉴"));
@@ -2360,7 +2383,7 @@ mod tests {
         assert!(content.contains(ABOUT_ME));
         assert!(content.contains("用现成工具出成品，不开发新软件。"));
         assert!(content.contains("## 可用的工具（按顺序）"));
-        assert!(content.contains("1. acme/cover-kit（命令行工具，许可证 GPL-3.0）：用模板生成封面图的命令行工具。链接：https://github.com/acme/cover-kit。装到：优先用 brew、pipx 或 uv tool，装在独立环境里"));
+        assert!(content.contains("1. acme/cover-kit（命令行工具，许可证 GPL-3.0）：用模板生成封面图的命令行工具。链接：https://github.com/acme/cover-kit。装到：Node 工具：在这次任务的目录里用 npm / npx 本地装，不要 -g 全局装"));
         assert!(content.contains("2. blank/no-card（工具，许可证 未知（先核实））：（GitHub 原文）只有仓库简介的小工具。链接：https://github.com/blank/no-card。装到：README 推荐的方式，装进一个独立的新目录"));
         assert!(content.contains("## 工作规则"));
         // 第 1 条「用现成工具做成品」已经写在开头；2–7 条重新从 1 编号，「先查本机已装」也在里面
@@ -2695,8 +2718,106 @@ mod tests {
         assert!(!content.contains(".dmg"), "{content}");
         let card = json!({"one_liner_zh": "一句话", "form": "app"});
         let content = pack_with_card(&card, "做点什么", PackFormat::Markdown);
-        assert!(content.contains("从 Releases 下载 .dmg"), "{content}");
+        assert!(!content.contains(".dmg"), "{content}");
+        assert!(content.contains("别猜安装包"), "{content}");
         assert!(content.contains("你点不了它的界面"), "{content}");
+        let card = json!({
+            "one_liner_zh": "一句话",
+            "form": "app",
+            "how_to_try": "从 Releases 下载 .dmg 安装"
+        });
+        let content = pack_with_card(&card, "做点什么", PackFormat::Markdown);
+        assert!(
+            content.contains("从 Releases 下载 .dmg，拖进「应用程序」"),
+            "{content}"
+        );
+    }
+
+    #[test]
+    fn instructions_for_another_system_and_unsigned_apps_become_notes() {
+        let card = json!({
+            "one_liner_zh": "视频下载工具",
+            "form": "app",
+            "how_to_try": "winget install aandrew-me.ytDownloader",
+            "risks": ["macOS 版本未签名，需手动绕过 Gatekeeper"],
+            "platforms": ["macos", "windows", "linux"]
+        });
+        let markdown = pack_with_card(&card, "做点什么", PackFormat::Markdown);
+        assert!(
+            markdown.contains("- ⚠ 装法写的是 Windows 命令"),
+            "{markdown}"
+        );
+        assert!(markdown.contains("- ⚠ 未签名的 Mac 应用"), "{markdown}");
+        assert!(
+            !markdown.contains("先问我再动手"),
+            "只有提醒、没有要问的：{markdown}"
+        );
+        assert!(!markdown.contains("这几个工具装之前要先问我"), "{markdown}");
+        assert!(!markdown.contains(".dmg"), "{markdown}");
+        let json = pack_with_card(&card, "做点什么", PackFormat::Json);
+        let parsed: Value = serde_json::from_str(&json).expect("JSON 应能解析");
+        assert_eq!(
+            parsed["items"][0]["cautions"]
+                .as_array()
+                .expect("数组")
+                .len(),
+            2
+        );
+        assert_eq!(parsed["askFirst"].as_array().expect("数组").len(), 5);
+        let agents = pack_with_card(&card, "做点什么", PackFormat::Agents);
+        assert!(agents.contains("。⚠ 装法写的是 Windows 命令"), "{agents}");
+    }
+
+    #[test]
+    fn a_project_that_does_not_support_macos_is_flagged_to_ask_first() {
+        let card = json!({
+            "one_liner_zh": "只有 Windows 版的工具",
+            "form": "app",
+            "how_to_try": "下载 Setup.exe 安装",
+            "platforms": ["windows"]
+        });
+        let content = pack_with_card(&card, "做点什么", PackFormat::Markdown);
+        assert!(
+            content.contains("- ⚠ 先问我再动手：卡片写它不支持 macOS"),
+            "{content}"
+        );
+        assert!(content.contains("owner/name（不支持 macOS）"), "{content}");
+        // 同一张卡写了 macOS 就不标
+        let card = json!({
+            "one_liner_zh": "跨平台工具",
+            "form": "app",
+            "how_to_try": "下载 Setup.exe 或 .dmg 安装",
+            "platforms": ["windows", "macos"]
+        });
+        let content = pack_with_card(&card, "做点什么", PackFormat::Markdown);
+        assert!(!content.contains("不支持 macOS"), "{content}");
+    }
+
+    #[test]
+    fn direct_json_questions_follow_the_task_and_empty_items_stay_compact() {
+        let json = direct_output("给短视频加字幕", PackFormat::Json).content;
+        let parsed: Value = serde_json::from_str(&json).expect("JSON 应能解析");
+        let ask = parsed["askFirst"].as_array().expect("数组");
+        assert!(
+            ask[0].as_str().unwrap_or_default().contains("视频"),
+            "{ask:?}"
+        );
+        assert!(
+            ask.iter()
+                .any(|item| item.as_str().unwrap_or_default().contains("srt")),
+            "{ask:?}"
+        );
+        assert!(json.contains("\"items\": [],"), "{json}");
+        let batch = direct_output("批量改图尺寸和压缩", PackFormat::Json).content;
+        let parsed: Value = serde_json::from_str(&batch).expect("JSON 应能解析");
+        assert!(parsed["askFirst"][1]
+            .as_str()
+            .unwrap_or_default()
+            .contains("宽高比"));
+        assert!(parsed["verify"][0]
+            .as_str()
+            .unwrap_or_default()
+            .contains("数量"));
     }
 
     #[test]
@@ -3113,7 +3234,9 @@ mod tests {
         assert_eq!(table_rows(&content).len(), 1);
         assert!(content.contains("| 1 | owner/name | 桌面应用 · 未确认是否已装 | 默认首选 |"));
         assert!(content.contains("## 1. owner/name（主参考）"));
-        assert!(content.contains("从 Releases 下载 .dmg，拖进「应用程序」；只有 .pkg 的话先告诉我（安装包可能要管理员权限）"));
+        // 卡片没写装法：不编一个 .dmg，让 Codex 先读 README
+        assert!(content.contains("装法没写清楚就先读它的 README，别猜安装包"));
+        assert!(!content.contains(".dmg"), "{content}");
     }
 
     #[test]
@@ -3278,7 +3401,8 @@ mod tests {
         assert!(full.contains("- 是什么：用模板生成封面图的命令行工具"));
         assert!(full.contains("- 能做：套用封面模板；导出 PNG 图片"));
         assert!(full.contains("- 装法：npm i -g cover-kit && cover-kit init"));
-        assert!(full.contains("- 装到：优先用 brew、pipx 或 uv tool，装在独立环境里"));
+        assert!(full
+            .contains("- 装到：Node 工具：在这次任务的目录里用 npm / npx 本地装，不要 -g 全局装"));
         assert!(full.contains("- 不适合：不适合视频剪辑"));
         assert!(full.contains("- 注意：需要网络下载模板"));
         assert!(full.ends_with(CODEX_CLOSING));

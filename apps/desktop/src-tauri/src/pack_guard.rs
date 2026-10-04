@@ -15,6 +15,10 @@ pub(crate) enum Caution {
     Account,
     /// 内容可能发到外部服务，或涉及隐私数据
     DataOut,
+    /// 会往真实账号发布、评论、回复、私信
+    Publish,
+    /// 理解卡写明它不支持 macOS
+    Platform,
 }
 
 impl Caution {
@@ -25,6 +29,8 @@ impl Caution {
             Caution::Money => "要 API Key 或付费",
             Caution::Account => "要登录账号 / 扫码 / Cookie",
             Caution::DataOut => "内容可能外发或涉及隐私数据",
+            Caution::Publish => "会往真实账号发内容",
+            Caution::Platform => "不支持 macOS",
         }
     }
 
@@ -36,17 +42,42 @@ impl Caution {
             Caution::DataOut => {
                 "内容可能发到外部服务，或涉及隐私数据（有本机 / 本地模型的模式就优先用，不要默认外发）"
             }
+            Caution::Publish => {
+                "会往我的真实账号发布 / 评论 / 回复 / 私信（先只演练，发出去之前每一条都要我确认）"
+            }
+            Caution::Platform => {
+                "卡片写它不支持 macOS（只有 Windows / Linux 版），这台是 Mac：先别装，问我换哪个"
+            }
         }
     }
 }
 
 pub(crate) const ONE_LINE_INSTALL_NOTE: &str =
     "装法里有「curl … | bash」这类一行安装：不要直接运行，先把脚本下载下来通读，没问题再装";
+const UNSIGNED_NOTE: &str = "未签名的 Mac 应用：第一次打开会被系统拦下，要在「系统设置 → 隐私与安全性」里点「仍要打开」；不要用 sudo 或 xattr 命令绕过，先告诉我";
+const LINUX_NOTE: &str =
+    "装法写的是 Linux 命令（apt / dnf / .deb / .rpm），这台是 Mac，别照抄：先看有没有 macOS 的装法，没有就告诉我";
+const WINDOWS_NOTE: &str =
+    "装法写的是 Windows 命令（winget / .exe / .msi），这台是 Mac，别照抄：先看有没有 macOS 的装法，没有就告诉我";
+const SUDO_DOCKER_NOTE: &str =
+    "装法里 Docker 命令前的 sudo 去掉：Mac 上的 Docker（Docker Desktop / OrbStack）不需要 sudo";
+
+/// 装法写的是别的系统的命令。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ForeignOs {
+    Linux,
+    Windows,
+}
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct Cautions {
+    /// 要先问 Fox 的事。
     pub(crate) ask: Vec<Caution>,
+    /// 下面几项是「照着做就行」的提醒，不用先问。
     pub(crate) one_line_install: bool,
+    pub(crate) unsigned: bool,
+    pub(crate) foreign: Option<ForeignOs>,
+    pub(crate) sudo_docker: bool,
 }
 
 impl Cautions {
@@ -78,22 +109,59 @@ impl Cautions {
         )
     }
 
-    /// JSON 里 `cautions` 数组的内容：要先问的，加上一行安装的提醒。
+    /// 不用先问、照着做就行的提醒，每条一句，按重要程度排。
+    pub(crate) fn notes(&self) -> Vec<&'static str> {
+        let mut notes = Vec::new();
+        if self.one_line_install {
+            notes.push(ONE_LINE_INSTALL_NOTE);
+        }
+        match self.foreign {
+            Some(ForeignOs::Linux) => notes.push(LINUX_NOTE),
+            Some(ForeignOs::Windows) => notes.push(WINDOWS_NOTE),
+            None => {}
+        }
+        if self.sudo_docker {
+            notes.push(SUDO_DOCKER_NOTE);
+        }
+        if self.unsigned {
+            notes.push(UNSIGNED_NOTE);
+        }
+        notes
+    }
+
+    /// JSON 里 `cautions` 数组的内容：要先问的，加上不用先问的提醒。
     pub(crate) fn labels(&self) -> Vec<String> {
         let mut labels: Vec<String> = self
             .ask
             .iter()
             .map(|caution| caution.label().to_owned())
             .collect();
-        if self.one_line_install {
-            labels.push(ONE_LINE_INSTALL_NOTE.to_owned());
-        }
+        labels.extend(self.notes().into_iter().map(str::to_owned));
         labels
+    }
+
+    /// 理解卡写了它支持哪些系统，而里面没有 macOS（也不是跨平台 / 网页）：这台是 Mac，要先问。
+    pub(crate) fn with_platforms(mut self, platforms: &[String]) -> Self {
+        let lowered: Vec<String> = platforms
+            .iter()
+            .map(|platform| platform.trim().to_lowercase())
+            .filter(|platform| !platform.is_empty())
+            .collect();
+        let usable = lowered.iter().any(|platform| {
+            matches!(
+                platform.as_str(),
+                "macos" | "mac" | "darwin" | "cross" | "web"
+            )
+        });
+        if !lowered.is_empty() && !usable {
+            self.ask.push(Caution::Platform);
+        }
+        self
     }
 }
 
-const ADMIN_TOKENS: [&str; 5] = ["sudo", "管理员", ".pkg", "root 权限", "root权限"];
-const MONEY_TOKENS: [&str; 13] = [
+const ADMIN_TOKENS: &[&str] = &["sudo", "管理员", ".pkg", "root 权限", "root权限"];
+const MONEY_TOKENS: &[&str] = &[
     "api key",
     "api_key",
     "apikey",
@@ -107,8 +175,10 @@ const MONEY_TOKENS: [&str; 13] = [
     "费用",
     "按量",
     "paid plan",
+    "调用成本",
+    "成本不可控",
 ];
-const ACCOUNT_TOKENS: [&str; 13] = [
+const ACCOUNT_TOKENS: &[&str] = &[
     "注册登录",
     "登录账号",
     "登录账户",
@@ -120,10 +190,13 @@ const ACCOUNT_TOKENS: [&str; 13] = [
     "oauth",
     "账号风险",
     "封号",
+    "封禁",
+    "风控",
+    "凭证",
     "数据库密钥",
     "提取密钥",
 ];
-const DATA_OUT_TOKENS: [&str; 15] = [
+const DATA_OUT_TOKENS: &[&str] = &[
     "发送至",
     "发送到",
     "发送给",
@@ -139,35 +212,155 @@ const DATA_OUT_TOKENS: [&str; 15] = [
     "隐私风险",
     "隐私泄露",
     "敏感信息",
+    "托管 ocr",
+    "云端 ocr",
+];
+const PUBLISH_TOKENS: &[&str] = &[
+    "误发",
+    "草稿箱",
+    "推送草稿",
+    "自动发布",
+    "自动评论",
+    "自动回复",
+    "群发",
+];
+const UNSIGNED_TOKENS: &[&str] = &[
+    "未签名",
+    "gatekeeper",
+    "手动放行",
+    "手动解除",
+    "无法验证开发者",
+    "身份不明",
+];
+/// 只有这些系统的命令、又没有任何跨平台写法时，才说「装法是别的系统的」。
+const LINUX_MARKERS: &[&str] = &[
+    "apt install",
+    "apt-get install",
+    "dnf install",
+    "yum install",
+    "pacman -s",
+    "snap install",
+    ".deb",
+    ".rpm",
+    "systemctl ",
+];
+const WINDOWS_MARKERS: &[&str] = &[
+    "winget ",
+    "choco install",
+    "scoop ",
+    ".exe",
+    ".msi",
+    "windows 安装包",
+    "windows 安装器",
+    "windows 安装程序",
+    "powershell",
+];
+/// 跨平台或 macOS 上能用的写法：出现任何一个，就不说「装法是别的系统的」。
+const SAFE_MARKERS: &[&str] = &[
+    "git clone",
+    "npm ",
+    "pnpm ",
+    "yarn ",
+    "npx ",
+    "bun ",
+    "pip ",
+    "pip3 ",
+    "pipx ",
+    "uv ",
+    "cargo ",
+    "go install",
+    "docker",
+    "brew ",
+    "curl ",
+    "wget ",
+    "dmg",
+    ".app",
+    "macos",
+    "mac os",
+    ".zip",
+    "zip 包",
+    ".tar.gz",
 ];
 /// 这些词紧挨在前面，说明后面那个词是被否定的（「无需 API Key」不算要 API Key）。
 const NEGATIONS: [&str; 7] = ["无需", "不需要", "不用", "无须", "不必", "避免", "without"];
 /// 看前面几个字符找否定词。
 const NEGATION_WINDOW: usize = 8;
+/// Linux 写法的 sudo：在 Mac 上不是「要管理员权限」。
+const LINUX_SUDO: [&str; 8] = [
+    "sudo apt-get",
+    "sudo apt",
+    "sudo dnf",
+    "sudo yum",
+    "sudo snap",
+    "sudo pacman",
+    "sudo systemctl",
+    "sudo service",
+];
 
-/// 从装法和注意事项里认出要先问 Fox 的几类事。`how_to_try` 和 `risks` 都是未截断的原文。
-/// 内容外发只看注意事项：装法里的「上传到」多半是在说把成品传到哪儿。
+/// 从装法和注意事项里认出要先问 Fox 的几类事，和几条「照着做就行」的提醒。
+/// `how_to_try` 和 `risks` 都是未截断的原文。内容外发只看注意事项：装法里的「上传到」多半是在说把成品传到哪儿。
 pub(crate) fn detect_cautions(how_to_try: &str, risks: &str) -> Cautions {
     let how = how_to_try.to_lowercase();
     let risk = risks.to_lowercase();
-    let both = format!("{how}；{risk}");
+    // `sudo docker …` 和 `sudo apt …` 是 Linux 的写法，Mac 上的 Docker 不需要 sudo、apt 根本没有：
+    // 不算「要管理员权限」，去掉 sudo 再认，另外各写一条提醒。
+    let (how_for_admin, sudo_docker, sudo_linux) = strip_foreign_sudo(&how);
+    let both = format!("{how_for_admin}；{risk}");
     let mut ask = Vec::new();
-    if mentions_any(&both, &ADMIN_TOKENS) {
+    if mentions_any(&both, ADMIN_TOKENS) {
         ask.push(Caution::Admin);
     }
-    if mentions_any(&both, &MONEY_TOKENS) {
+    if mentions_any(&both, MONEY_TOKENS) {
         ask.push(Caution::Money);
     }
-    if mentions_any(&both, &ACCOUNT_TOKENS) {
+    if mentions_any(&both, ACCOUNT_TOKENS) {
         ask.push(Caution::Account);
     }
-    if mentions_any(&risk, &DATA_OUT_TOKENS) {
+    if mentions_any(&risk, DATA_OUT_TOKENS) {
         ask.push(Caution::DataOut);
+    }
+    if mentions_any(&both, PUBLISH_TOKENS) {
+        ask.push(Caution::Publish);
     }
     Cautions {
         ask,
         one_line_install: pipes_to_shell(&how),
+        unsigned: UNSIGNED_TOKENS.iter().any(|token| both.contains(token)),
+        foreign: foreign_install(&how_for_admin, sudo_linux),
+        sudo_docker,
     }
+}
+
+/// 去掉 Docker / Linux 包管理器命令前的 sudo。返回 (处理后的文本, 有没有 sudo docker, 有没有 Linux 的 sudo 命令)。
+fn strip_foreign_sudo(how: &str) -> (String, bool, bool) {
+    let mut text = how.to_owned();
+    let docker = text.contains("sudo docker");
+    if docker {
+        text = text.replace("sudo docker", "docker");
+    }
+    let mut linux = false;
+    for pattern in LINUX_SUDO {
+        if text.contains(pattern) {
+            linux = true;
+            text = text.replace(pattern, &pattern["sudo ".len()..]);
+        }
+    }
+    (text, docker, linux)
+}
+
+/// 装法只有别的系统的写法（Linux 的 apt / dnf / .deb / .rpm，Windows 的 winget / .exe / .msi），
+/// 没有任何跨平台或 macOS 的写法。
+fn foreign_install(how: &str, sudo_linux: bool) -> Option<ForeignOs> {
+    if SAFE_MARKERS.iter().any(|marker| how.contains(marker)) {
+        return None;
+    }
+    if sudo_linux || LINUX_MARKERS.iter().any(|marker| how.contains(marker)) {
+        return Some(ForeignOs::Linux);
+    }
+    if WINDOWS_MARKERS.iter().any(|marker| how.contains(marker)) {
+        return Some(ForeignOs::Windows);
+    }
+    None
 }
 
 fn mentions_any(text: &str, tokens: &[&str]) -> bool {
@@ -292,19 +485,24 @@ fn contains_word(text: &str, word: &str) -> bool {
     false
 }
 
-const DOCKER_TARGET: &str = "用 Docker 跑：先确认本机装了 Docker 并已启动（没有就先问我）；端口和目录按我本机 AGENTS.md 的规则登记；不要用 sudo docker，要管理员权限就先问我";
+const DOCKER_TARGET: &str = "用 Docker 跑：先确认本机装了 Docker 并已启动（没有就先问我）；端口和目录按我本机 AGENTS.md 的规则登记；命令前的 sudo 去掉（Mac 上的 Docker 不需要）";
 const APP_NOTE: &str = "（桌面应用：你点不了它的界面。先看它有没有命令行 / MCP 入口，没有就告诉我，由我自己操作或换备选）";
-const RELEASE_WORDS: [&str; 9] = [
-    "release",
-    "下载",
-    "dmg",
-    "brew install --cask",
-    "homebrew",
-    ".app",
-    "安装包",
-    "官网",
-    "download",
-];
+const APP_NOTE_WEB: &str = "（装好后是个网页界面：你点不了它的界面。先看它有没有 API / 命令行入口，没有就告诉我，由我自己操作或换备选）";
+const APP_UNKNOWN: &str = "按装法里写的方式装；装法没写清楚就先读它的 README，别猜安装包";
+const NODE_TARGET: &str = "Node 工具：在这次任务的目录里用 npm / npx 本地装，不要 -g 全局装";
+const PYTHON_TARGET: &str =
+    "Python 工具：用 pipx 或 uv tool 装，或者放进项目自己的 venv，不要装进系统 Python";
+const RUST_TARGET: &str = "按装法里的 cargo / go 命令装在用户目录里，不要用 sudo";
+const CLI_DEFAULT: &str = "优先用 brew、pipx 或 uv tool，装在独立环境里";
+/// 装法里说的是「去下载一个现成安装包」：英文词要整词（`ytdownloader` 里的 download 不算）。
+fn mentions_release(how: &str) -> bool {
+    ["release", "releases", "download", "dmg", "homebrew"]
+        .iter()
+        .any(|word| contains_word(how, word))
+        || [".app", "brew install --cask", "下载", "安装包", "官网"]
+            .iter()
+            .any(|word| how.contains(word))
+}
 const SOURCE_COMMANDS: [&str; 10] = [
     "git clone",
     "npm ",
@@ -317,16 +515,11 @@ const SOURCE_COMMANDS: [&str; 10] = [
     "npx ",
     "bun ",
 ];
-const GLOBAL_INSTALLS: [&str; 5] = [
-    "npm i -g",
-    "npm install -g",
-    "npm install --global",
-    "pnpm add -g",
-    "yarn global",
-];
+const NODE_COMMANDS: [&str; 5] = ["npm ", "npx ", "pnpm ", "yarn ", "bun "];
+const PYTHON_COMMANDS: [&str; 4] = ["pip ", "pip3 ", "pipx ", "uv "];
 
 /// 装到哪里。先按形态给默认写法，再看装法里实际写了什么：写的是 Docker 就别让人去拖 .dmg，
-/// 写的是全局安装就提醒改成项目本地（和「Node 用项目本地」的约定一致）。
+/// 写的是 npm / pip 就按「Node 用项目本地、Python 用 venv」的约定写，装法里根本没写安装包就不编一个 .dmg。
 pub(crate) fn install_target(
     form: Option<&str>,
     repo_name: &str,
@@ -334,12 +527,13 @@ pub(crate) fn install_target(
 ) -> String {
     let how = how_to_try.map(str::to_lowercase).unwrap_or_default();
     let uses_docker = contains_word(&how, "docker");
+    let global_flag = how.contains(" -g") || how.contains("--global");
     match form.map(str::trim) {
         Some("skill") => {
             let mut text = format!(
                 "~/.agents/skills/{repo_name}（Codex 从这里读取 Skill；README 里写的是 ~/.claude/skills 的话，以这里为准）"
             );
-            if how.contains("npx skills add") {
+            if how.contains("npx skills add") && !global_flag {
                 text.push_str(
                     "；装法里的 `npx skills add` 默认只装进当前目录，要装给 Codex 全局用就加 `-g -y`，不确定先 `npx skills add --help` 看一眼",
                 );
@@ -347,30 +541,42 @@ pub(crate) fn install_target(
             text
         }
         Some("mcp") => {
-            "用 codex mcp add 登记，或者改 ~/.codex/config.toml（改之前先备份）".to_owned()
+            if uses_docker {
+                "先按装法用 Docker 把它跑起来，再用 codex mcp add 登记它的地址；改 ~/.codex/config.toml 之前先备份".to_owned()
+            } else {
+                "用 codex mcp add 登记，或者改 ~/.codex/config.toml（改之前先备份）".to_owned()
+            }
         }
         Some("app") => {
-            let base = if uses_docker {
+            if uses_docker {
+                format!("{DOCKER_TARGET}{APP_NOTE_WEB}")
+            } else {
+                let base = if how.contains("brew install") {
+                    "按装法里的 brew 命令装；brew 要输入密码或管理员权限时先停下来问我"
+                } else if mentions_release(&how) {
+                    "从 Releases 下载 .dmg，拖进「应用程序」；只有 .pkg 的话先告诉我（安装包可能要管理员权限）"
+                } else if SOURCE_COMMANDS.iter().any(|command| how.contains(command)) {
+                    "按装法里的命令，装在这次任务的目录里，不要装进系统；先查本机有没有它要的运行环境（Node / Python），缺了先告诉我"
+                } else {
+                    APP_UNKNOWN
+                };
+                format!("{base}{APP_NOTE}")
+            }
+        }
+        Some("cli") => {
+            if uses_docker {
                 DOCKER_TARGET.to_owned()
             } else if how.contains("brew install") {
                 "按装法里的 brew 命令装；brew 要输入密码或管理员权限时先停下来问我".to_owned()
-            } else if SOURCE_COMMANDS.iter().any(|command| how.contains(command))
-                && !RELEASE_WORDS.iter().any(|word| how.contains(word))
-            {
-                "按装法里的命令，装在这次任务的目录里，不要装进系统；先查本机有没有它要的运行环境（Node / Python），缺了先告诉我".to_owned()
+            } else if NODE_COMMANDS.iter().any(|command| how.contains(command)) {
+                NODE_TARGET.to_owned()
+            } else if PYTHON_COMMANDS.iter().any(|command| how.contains(command)) {
+                PYTHON_TARGET.to_owned()
+            } else if how.contains("cargo ") || how.contains("go install") {
+                RUST_TARGET.to_owned()
             } else {
-                "从 Releases 下载 .dmg，拖进「应用程序」；只有 .pkg 的话先告诉我（安装包可能要管理员权限）".to_owned()
-            };
-            format!("{base}{APP_NOTE}")
-        }
-        Some("cli") => {
-            let mut text = "优先用 brew、pipx 或 uv tool，装在独立环境里".to_owned();
-            if uses_docker {
-                text = DOCKER_TARGET.to_owned();
-            } else if GLOBAL_INSTALLS.iter().any(|command| how.contains(command)) {
-                text.push_str("；装法里写的是全局安装（-g）：改成项目本地（npm 本地装 / npx），不要装进系统全局");
+                CLI_DEFAULT.to_owned()
             }
-            text
         }
         Some("library") => "项目自己的虚拟环境（venv），不要装进系统 Python".to_owned(),
         Some("service") => {
@@ -399,6 +605,14 @@ pub(crate) enum TaskKind {
     Batch,
     Writing,
     Visual,
+    /// 抓取 / 采集 / 下载 / 监控
+    Scrape,
+    /// 文件格式转换（PDF、Word、Excel、图片格式……）
+    Convert,
+    /// 自动发布 / 回复 / 私信 / 涨粉：会动真实账号
+    Operate,
+    /// 分析、调研、竞品、看板、画像
+    Analysis,
     General,
 }
 
@@ -466,6 +680,47 @@ const VISUAL_WORDS: [&str; 15] = [
     "插画",
 ];
 
+const SCRAPE_WORDS: [&str; 6] = ["抓取", "采集", "爬取", "爬虫", "下载", "监控"];
+const CONVERT_WORDS: [&str; 14] = [
+    "格式转换",
+    "转格式",
+    "转换格式",
+    "pdf",
+    "word",
+    "excel",
+    "markdown",
+    "docx",
+    "xlsx",
+    "png",
+    "jpg",
+    "webp",
+    "mp3",
+    "mp4",
+];
+const OPERATE_WORDS: [&str; 9] = [
+    "发布",
+    "自动回复",
+    "自动评论",
+    "私信",
+    "群发",
+    "涨粉",
+    "养号",
+    "排期",
+    "定时发布",
+];
+const ANALYSIS_WORDS: [&str; 10] = [
+    "分析",
+    "调研",
+    "竞品",
+    "看板",
+    "画像",
+    "统计",
+    "可视化",
+    "趋势",
+    "数据",
+    "报表",
+];
+
 fn kind_words(kind: TaskKind) -> &'static [&'static str] {
     match kind {
         TaskKind::Video => &VIDEO_WORDS,
@@ -473,15 +728,36 @@ fn kind_words(kind: TaskKind) -> &'static [&'static str] {
         TaskKind::Batch => &BATCH_WORDS,
         TaskKind::Writing => &WRITING_WORDS,
         TaskKind::Visual => &VISUAL_WORDS,
+        TaskKind::Scrape => &SCRAPE_WORDS,
+        TaskKind::Convert => &CONVERT_WORDS,
+        TaskKind::Operate => &OPERATE_WORDS,
+        TaskKind::Analysis => &ANALYSIS_WORDS,
         TaskKind::General => &[],
     }
 }
 
-/// 这句话是哪类任务，最多两类：谁的关键词出现得越靠后谁排前面（中文里被做的东西在句子末尾：
-/// 「给短视频加字幕」是视频，「公众号文章配图」是配图），位置相同按固定顺序。一类都认不出返回空。
+/// 这句话是哪类任务，最多两类。先看「要做什么动作」：抓取 > 转格式 > 自动发布 > 分析，认出来的排最前
+/// （「抓取抖音热门视频」是抓取，不是视频）；再按「被做的东西」：关键词出现得越靠后的越靠前
+/// （中文里被做的东西在句子末尾：「给短视频加字幕」是视频，「公众号文章配图」是配图），位置相同按固定顺序。
+/// 一类都认不出返回空。
 pub(crate) fn task_kinds(problem: &str) -> Vec<TaskKind> {
     let lower = problem.to_lowercase();
-    let mut found: Vec<(usize, usize, TaskKind)> = Vec::new();
+    let mentions = |kind: TaskKind| {
+        kind_words(kind)
+            .iter()
+            .filter_map(|word| lower.rfind(word))
+            .max()
+    };
+    let mut kinds: Vec<TaskKind> = [
+        TaskKind::Scrape,
+        TaskKind::Convert,
+        TaskKind::Operate,
+        TaskKind::Analysis,
+    ]
+    .into_iter()
+    .filter(|kind| mentions(*kind).is_some())
+    .collect();
+    let mut objects: Vec<(usize, usize, TaskKind)> = Vec::new();
     for (order, kind) in [
         TaskKind::Video,
         TaskKind::Records,
@@ -492,16 +768,14 @@ pub(crate) fn task_kinds(problem: &str) -> Vec<TaskKind> {
     .into_iter()
     .enumerate()
     {
-        let last = kind_words(kind)
-            .iter()
-            .filter_map(|word| lower.rfind(word))
-            .max();
-        if let Some(position) = last {
-            found.push((position, order, kind));
+        if let Some(position) = mentions(kind) {
+            objects.push((position, order, kind));
         }
     }
-    found.sort_by(|left, right| right.0.cmp(&left.0).then(left.1.cmp(&right.1)));
-    found.into_iter().take(2).map(|(_, _, kind)| kind).collect()
+    objects.sort_by(|left, right| right.0.cmp(&left.0).then(left.1.cmp(&right.1)));
+    kinds.extend(objects.into_iter().map(|(_, _, kind)| kind));
+    kinds.truncate(2);
+    kinds
 }
 
 pub(crate) const ASK_VISUAL: [&str; 5] = [
@@ -527,9 +801,9 @@ const ASK_RECORDS: [&str; 5] = [
 ];
 const ASK_BATCH: [&str; 5] = [
     "要处理的文件：在哪个文件夹、一共多少个、什么格式",
-    "目标是什么：尺寸（宽 × 高 / 比例）、格式、体积上限（比如每张不超过 200KB）",
+    "目标是什么：尺寸（宽 × 高 / 比例）、格式、体积上限（比如每张不超过 200KB）；宽高比和原图不一样时怎么办（等比缩放 / 裁剪 / 留白）",
     "原文件怎么处理：默认保留原文件、结果放到新文件夹，还是直接覆盖",
-    "文件名怎么命名；有没有要加的水印、边框或品牌元素",
+    "文件名怎么命名；有没有要特别处理的地方（水印、边框、透明背景、拍摄信息要不要保留）",
     "能不能用要付费 / 要 API Key 的在线工具（预算多少）；文件能不能上传到第三方网站",
 ];
 const ASK_WRITING: [&str; 5] = [
@@ -538,6 +812,34 @@ const ASK_WRITING: [&str; 5] = [
     "有没有必须用的资料、数据、产品卖点；哪些信息不能写",
     "要不要配图、要不要排成可以直接发布的格式（Markdown / HTML / Word）",
     "能不能用要付费 / 要 API Key 的工具（预算多少）",
+];
+const ASK_SCRAPE: [&str; 5] = [
+    "要采集什么：哪个平台、哪些账号 / 关键词 / 话题 / 链接；大概要多少条、哪段时间的",
+    "结果怎么给我：存成表格（CSV / Excel）还是 Markdown 汇总；要不要带链接、点赞评论数、发布时间",
+    "需要登录才能看的内容：你不要替我登录，也不要读我的 Cookie；要用账号的话由我自己登录后告诉你怎么接上",
+    "频率和数量要克制，别一口气大量请求；遇到验证码或被平台限制就停下来告诉我",
+    "能不能用要付费 / 要 API Key / 要代理的工具（预算多少）；采到的内容能不能发给第三方 AI 服务分析",
+];
+const ASK_CONVERT: [&str; 5] = [
+    "要转换的文件：在哪、有几个、什么格式、大概多大",
+    "要转成什么格式；要保留什么（排版、表格、图片、批注、字体）",
+    "原文件怎么处理：默认保留原文件，结果放到新文件夹；文件名有没有要求",
+    "文件里有没有敏感内容：能不能用在线转换服务（会把文件传上去），还是只用本机工具",
+    "能不能用要付费 / 要 API Key 的工具（预算多少）",
+];
+const ASK_OPERATE: [&str; 5] = [
+    "要在哪个平台、用哪个账号（你不要替我登录，也不要读我的 Cookie / 密钥；要登录时由我自己登录）",
+    "发什么 / 回什么：内容从哪来（我给你，还是你按要求写）；发出去之前要不要我逐条确认（默认要）",
+    "频率和数量：每天最多几条、什么时间段；有没有不能碰的内容和对象",
+    "出问题怎么办：被平台限制或要验证码就停下来告诉我；先用「只演练、不真正发出」的方式试一遍",
+    "能不能用要付费 / 要 API Key 的工具（预算多少）",
+];
+const ASK_ANALYSIS: [&str; 5] = [
+    "要回答什么问题、给谁看、用来做什么决定",
+    "分析的对象和范围：哪些竞品 / 渠道 / 产品、哪段时间、哪些指标",
+    "数据从哪来：我给文件 / 表格，还是去公开网页上查；有没有要登录后台才能看的数据（你不要替我登录）",
+    "要交付什么：表格、图表，还是一页结论；细到什么程度（按天 / 按周 / 按渠道）",
+    "数据里有没有敏感内容（客户信息、销售数据）：能不能发给第三方 AI 服务；能不能用要付费的工具",
 ];
 const ASK_GENERAL: [&str; 5] = [
     "要做的具体内容：主题、文案原文、品牌名的写法；要处理现成素材的话，告诉我文件在哪、有几个、什么格式",
@@ -554,8 +856,21 @@ fn ask_set(kind: TaskKind) -> &'static [&'static str; 5] {
         TaskKind::Batch => &ASK_BATCH,
         TaskKind::Writing => &ASK_WRITING,
         TaskKind::Visual => &ASK_VISUAL,
+        TaskKind::Scrape => &ASK_SCRAPE,
+        TaskKind::Convert => &ASK_CONVERT,
+        TaskKind::Operate => &ASK_OPERATE,
+        TaskKind::Analysis => &ASK_ANALYSIS,
         TaskKind::General => &ASK_GENERAL,
     }
+}
+
+/// 第二类任务的第一条问题能不能插进来：只有「内容类」任务之间（图文 / 写作 / 记录整理 / 视频）和「批量处理」
+/// 可以混；批量处理、抓取、转格式、自动发布、分析自己不混别的（「批量去除图片水印」不该被问标题和品牌名）。
+fn may_mix(primary: TaskKind, secondary: TaskKind) -> bool {
+    use TaskKind::{Batch, Records, Video, Visual, Writing};
+    primary != secondary
+        && matches!(primary, Visual | Writing | Records | Video)
+        && matches!(secondary, Visual | Writing | Records | Video | Batch)
 }
 
 /// 一个项目要先问的事，用来在「开工前先问我」里列一条。
@@ -573,7 +888,7 @@ pub(crate) fn ask_items(problem: &str, flagged: &[Flagged<'_>]) -> Vec<String> {
         .iter()
         .map(|item| (*item).to_owned())
         .collect();
-    if let Some(second) = kinds.get(1) {
+    if let Some(second) = kinds.get(1).filter(|second| may_mix(primary, **second)) {
         let extra = ask_set(*second)[0];
         if !items.iter().any(|item| item == extra) {
             items.insert(1, extra.to_owned());
@@ -623,6 +938,27 @@ const DONE_WRITING: [&str; 3] = [
     "「说明.md」写清了用的工具、参数和资料来源",
 ];
 
+const DONE_SCRAPE: [&str; 3] = [
+    "采集到的条数和字段符合要求，抽查几条能点开原链接确认是真的，并用绝对路径告诉我结果放在哪",
+    "没有用我的账号登录，也没有触发平台的限制或验证码（如果有，写清楚发生了什么）",
+    "「说明.md」写清了采集范围、时间、用的工具和参数、怎么重新跑一遍",
+];
+const DONE_CONVERT: [&str; 3] = [
+    "转换后的文件能正常打开，页数、表格、图片没有丢，抽查几处和原文件对得上，并用绝对路径告诉我放在哪",
+    "原文件没有被覆盖或改动",
+    "「说明.md」写清了用的工具、参数和转换了哪些文件",
+];
+const DONE_OPERATE: [&str; 3] = [
+    "没有我的确认，就没有真的发出或回复任何东西；演练的结果（会发什么、发给谁、什么时候）写清楚给我看",
+    "没有触发平台的限制或风控（如果有，写清楚发生了什么）",
+    "「说明.md」写清了用的工具、参数、发布规则和怎么停掉它",
+];
+const DONE_ANALYSIS: [&str; 3] = [
+    "每个结论都能对回数据（写明数据位置或来源链接），没有编造的数字",
+    "表格 / 图表能直接打开，口径（时间范围、指标定义）写清楚，并用绝对路径告诉我放在哪",
+    "「说明.md」写清了数据来源、处理步骤、用的工具和怎么更新",
+];
+
 /// 「完成标准」：永远 3 条，按任务类型换。
 pub(crate) fn done_items(problem: &str) -> [&'static str; 3] {
     match task_kinds(problem).first() {
@@ -630,6 +966,10 @@ pub(crate) fn done_items(problem: &str) -> [&'static str; 3] {
         Some(TaskKind::Records) => DONE_RECORDS,
         Some(TaskKind::Batch) => DONE_BATCH,
         Some(TaskKind::Writing) => DONE_WRITING,
+        Some(TaskKind::Scrape) => DONE_SCRAPE,
+        Some(TaskKind::Convert) => DONE_CONVERT,
+        Some(TaskKind::Operate) => DONE_OPERATE,
+        Some(TaskKind::Analysis) => DONE_ANALYSIS,
         Some(TaskKind::Visual) | Some(TaskKind::General) | None => DONE_VISUAL,
     }
 }
@@ -640,6 +980,16 @@ pub(crate) fn direct_steps(problem: &str) -> [String; 3] {
         Some(TaskKind::Video) => "ffmpeg（剪辑、转码、烧字幕），macOS 自带的 afconvert 处理音频",
         Some(TaskKind::Records) | Some(TaskKind::Writing) => {
             "macOS 自带的 textutil 和 pandoc 可以转文档格式"
+        }
+        Some(TaskKind::Convert) => {
+            "macOS 自带 textutil（文档）、sips（图片）、afconvert（音频），常见的还有 pandoc、soffice（LibreOffice）、ffmpeg"
+        }
+        Some(TaskKind::Scrape) => {
+            "curl 和 python3 能抓公开网页；要做网页自动化，先看本机有没有 playwright"
+        }
+        Some(TaskKind::Analysis) => "macOS 自带 python3 和 sqlite3，处理表格和做统计够用",
+        Some(TaskKind::Operate) => {
+            "这类事会动你的账号，先别真的发：只写出「准备发什么、发给谁、什么时候」给我看"
         }
         Some(TaskKind::Batch) | Some(TaskKind::Visual) | Some(TaskKind::General) | None => {
             "macOS 自带的 sips 可以改图片尺寸和格式；常见的还有 magick（ImageMagick）、cwebp"
@@ -660,7 +1010,7 @@ mod tests {
 
     #[test]
     fn admin_money_account_and_data_out_are_recognised() {
-        let c = detect_cautions("sudo docker run -d crawler", "");
+        let c = detect_cautions("sudo wx init", "");
         assert_eq!(c.ask, vec![Caution::Admin]);
         let c = detect_cautions("下载 .pkg 安装包", "");
         assert_eq!(c.ask, vec![Caution::Admin]);
@@ -775,6 +1125,7 @@ mod tests {
         let both = Cautions {
             ask: vec![Caution::Admin, Caution::Money],
             one_line_install: true,
+            ..Cautions::default()
         };
         let text = both.ask_text().expect("要先问");
         assert!(
@@ -785,8 +1136,8 @@ mod tests {
         assert_eq!(labels.len(), 3);
         assert_eq!(labels[2], ONE_LINE_INSTALL_NOTE);
         let only_pipe = Cautions {
-            ask: Vec::new(),
             one_line_install: true,
+            ..Cautions::default()
         };
         assert_eq!(only_pipe.ask_text(), None);
         assert_eq!(only_pipe.labels(), vec![ONE_LINE_INSTALL_NOTE.to_owned()]);
@@ -805,8 +1156,25 @@ mod tests {
         );
         assert!(npx.contains("-g -y") && npx.contains("--help"), "{npx}");
         assert!(install_target(Some("mcp"), "x", None).contains("codex mcp add"));
-        let dmg = install_target(Some("app"), "x", None);
-        assert!(dmg.contains("应用程序") && dmg.contains("点不了"), "{dmg}");
+        // 装法没写安装包就不编一个 .dmg
+        let unknown_app = install_target(Some("app"), "x", None);
+        assert!(
+            unknown_app.contains("别猜安装包") && unknown_app.contains("点不了"),
+            "{unknown_app}"
+        );
+        assert!(!unknown_app.contains(".dmg"), "{unknown_app}");
+        let windows_only = install_target(Some("app"), "x", Some("winget install a.b"));
+        assert!(!windows_only.contains(".dmg"), "{windows_only}");
+        // 包名里带 download 不算「去下载安装包」
+        let named_downloader = install_target(
+            Some("app"),
+            "x",
+            Some("winget install aandrew-me.ytDownloader"),
+        );
+        assert!(!named_downloader.contains(".dmg"), "{named_downloader}");
+        let real_download = install_target(Some("app"), "x", Some("Download the latest release"));
+        assert!(real_download.contains(".dmg"), "{real_download}");
+        assert!(install_target(Some("app"), "x", Some("下载安装包")).contains(".dmg"));
         let released = install_target(Some("app"), "x", Some("从 Releases 下载 dmg 安装"));
         assert!(released.contains("应用程序"), "{released}");
         let docker_app = install_target(
@@ -818,7 +1186,11 @@ mod tests {
             docker_app.contains("Docker") && !docker_app.contains(".dmg"),
             "{docker_app}"
         );
-        assert!(docker_app.contains("点不了"), "{docker_app}");
+        assert!(
+            docker_app.contains("网页界面") && docker_app.contains("点不了"),
+            "{docker_app}"
+        );
+        assert!(!docker_app.contains("sudo docker"), "{docker_app}");
         let source_app = install_target(
             Some("app"),
             "x",
@@ -830,13 +1202,41 @@ mod tests {
         );
         let cli = install_target(Some("cli"), "x", None);
         assert!(cli.contains("独立环境") && !cli.contains("全局"));
-        let global = install_target(
+        let node = install_target(
             Some("cli"),
             "x",
             Some("npm i -g cover-kit && cover-kit init"),
         );
-        assert!(global.starts_with("优先用 brew、pipx 或 uv tool，装在独立环境里"));
-        assert!(global.contains("全局安装"), "{global}");
+        assert!(
+            node.starts_with("Node 工具") && node.contains("不要 -g 全局装"),
+            "{node}"
+        );
+        let python = install_target(Some("cli"), "x", Some("pip install foo && foo run"));
+        assert!(
+            python.starts_with("Python 工具") && python.contains("pipx"),
+            "{python}"
+        );
+        let rust = install_target(Some("cli"), "x", Some("cargo install foo"));
+        assert!(
+            rust.contains("cargo") && rust.contains("不要用 sudo"),
+            "{rust}"
+        );
+        let brew_cli = install_target(Some("cli"), "x", Some("brew install foo"));
+        assert!(brew_cli.starts_with("按装法里的 brew 命令装"), "{brew_cli}");
+        let mcp_docker = install_target(Some("mcp"), "x", Some("docker pull a/b"));
+        assert!(
+            mcp_docker.contains("Docker") && mcp_docker.contains("codex mcp add"),
+            "{mcp_docker}"
+        );
+        let already_global = install_target(
+            Some("skill"),
+            "x",
+            Some("npx skills add https://github.com/a/b -g -y"),
+        );
+        assert!(
+            !already_global.contains("npx skills add"),
+            "{already_global}"
+        );
         assert!(install_target(Some("cli"), "x", Some("docker run x")).contains("Docker"));
         let cask = install_target(Some("app"), "x", Some("brew install --cask a/tap/x"));
         assert!(
@@ -868,6 +1268,106 @@ mod tests {
         assert_eq!(task_kinds("随便做点什么"), Vec::<TaskKind>::new());
         assert_eq!(task_kinds(""), Vec::<TaskKind>::new());
         assert_eq!(task_kinds("Make a LOGO"), vec![TaskKind::Visual]);
+        assert_eq!(task_kinds("把会议录音转成文字稿"), vec![TaskKind::Records]);
+        assert_eq!(task_kinds("写周报"), vec![TaskKind::Records]);
+    }
+
+    #[test]
+    fn what_to_do_beats_what_it_is_done_to() {
+        // 动作优先：抓取视频不是视频任务，发布笔记不是图文任务
+        assert_eq!(
+            task_kinds("抓取抖音热门视频"),
+            vec![TaskKind::Scrape, TaskKind::Video]
+        );
+        assert_eq!(
+            task_kinds("批量发布小红书笔记"),
+            vec![TaskKind::Operate, TaskKind::Visual]
+        );
+        assert_eq!(task_kinds("自动回复私信"), vec![TaskKind::Operate]);
+        assert_eq!(task_kinds("把PDF转成Word"), vec![TaskKind::Convert]);
+        assert_eq!(
+            task_kinds("把图片转成webp"),
+            vec![TaskKind::Convert, TaskKind::Visual]
+        );
+        assert_eq!(task_kinds("竞品分析报告"), vec![TaskKind::Analysis]);
+        assert_eq!(task_kinds("做数据看板"), vec![TaskKind::Analysis]);
+        assert_eq!(task_kinds("做用户画像"), vec![TaskKind::Analysis]);
+        assert_eq!(
+            task_kinds("监控竞品价格"),
+            vec![TaskKind::Scrape, TaskKind::Analysis]
+        );
+        assert_eq!(
+            task_kinds("采集竞品评论"),
+            vec![TaskKind::Scrape, TaskKind::Analysis]
+        );
+        // 「批量」类任务自己是动作，不被「图片」带成图文
+        assert_eq!(
+            task_kinds("批量去除图片水印"),
+            vec![TaskKind::Batch, TaskKind::Visual]
+        );
+    }
+
+    #[test]
+    fn new_task_kinds_get_their_own_questions_and_done_lists() {
+        let scrape = ask_items("抓取抖音热门视频", &[]);
+        assert_eq!(scrape.len(), 5, "抓取不混视频的问题：{scrape:?}");
+        assert!(scrape[0].contains("要采集什么"), "{scrape:?}");
+        assert!(
+            scrape.iter().any(|item| item.contains("Cookie")),
+            "{scrape:?}"
+        );
+        assert!(
+            !scrape.iter().any(|item| item.contains("字幕")),
+            "{scrape:?}"
+        );
+        assert!(done_items("抓取抖音热门视频")[0].contains("抽查"));
+        let convert = ask_items("把PDF转成Word", &[]);
+        assert!(convert[0].contains("要转换的文件"), "{convert:?}");
+        assert!(
+            !convert.iter().any(|item| item.contains("品牌")),
+            "{convert:?}"
+        );
+        assert!(done_items("把PDF转成Word")[1].contains("原文件没有被覆盖"));
+        let operate = ask_items("批量发布小红书笔记", &[]);
+        assert_eq!(operate.len(), 5, "{operate:?}");
+        assert!(operate[0].contains("哪个平台"), "{operate:?}");
+        assert!(
+            operate.iter().any(|item| item.contains("逐条确认")),
+            "{operate:?}"
+        );
+        assert!(done_items("批量发布小红书笔记")[0].contains("没有我的确认"));
+        let analysis = ask_items("竞品分析报告", &[]);
+        assert!(analysis[0].contains("要回答什么问题"), "{analysis:?}");
+        assert!(done_items("竞品分析报告")[0].contains("编造"));
+        // 批量处理不被图文问题打扰；水印不是「要加的」
+        let batch = ask_items("批量去除图片水印", &[]);
+        assert_eq!(batch.len(), 5, "{batch:?}");
+        assert!(
+            !batch.iter().any(|item| item.contains("品牌名的写法")),
+            "{batch:?}"
+        );
+        assert!(
+            !batch.iter().any(|item| item.contains("要加的水印")),
+            "{batch:?}"
+        );
+        assert!(
+            batch.iter().any(|item| item.contains("宽高比")),
+            "{batch:?}"
+        );
+    }
+
+    #[test]
+    fn only_content_tasks_mix_their_questions() {
+        assert!(may_mix(TaskKind::Visual, TaskKind::Writing));
+        assert!(may_mix(TaskKind::Writing, TaskKind::Records));
+        assert!(may_mix(TaskKind::Visual, TaskKind::Batch));
+        assert!(may_mix(TaskKind::Video, TaskKind::Visual));
+        assert!(!may_mix(TaskKind::Batch, TaskKind::Visual));
+        assert!(!may_mix(TaskKind::Scrape, TaskKind::Video));
+        assert!(!may_mix(TaskKind::Operate, TaskKind::Visual));
+        assert!(!may_mix(TaskKind::Analysis, TaskKind::Records));
+        assert!(!may_mix(TaskKind::Visual, TaskKind::Visual));
+        assert!(!may_mix(TaskKind::Visual, TaskKind::Analysis));
     }
 
     #[test]
@@ -906,7 +1406,7 @@ mod tests {
         assert_eq!(mixed[1], ASK_WRITING[0]);
         let cautions = Cautions {
             ask: vec![Caution::Admin, Caution::DataOut],
-            one_line_install: false,
+            ..Cautions::default()
         };
         let quiet = Cautions::default();
         let listed = ask_items(
@@ -969,7 +1469,26 @@ mod tests {
         assert!(visual[0].contains("sips"), "{}", visual[0]);
         let unknown = direct_steps("随便做点什么");
         assert!(unknown[0].contains("sips"), "{}", unknown[0]);
-        for steps in [&batch, &video, &records, &writing, &visual, &unknown] {
+        let convert = direct_steps("把PDF转成Word");
+        assert!(
+            convert[0].contains("soffice") && convert[0].contains("textutil"),
+            "{}",
+            convert[0]
+        );
+        let scrape = direct_steps("抓取抖音热门视频");
+        assert!(
+            scrape[0].contains("curl") && scrape[0].contains("playwright"),
+            "{}",
+            scrape[0]
+        );
+        let analysis = direct_steps("竞品分析报告");
+        assert!(analysis[0].contains("sqlite3"), "{}", analysis[0]);
+        let operate = direct_steps("批量发布小红书笔记");
+        assert!(operate[0].contains("先别真的发"), "{}", operate[0]);
+        for steps in [
+            &batch, &video, &records, &writing, &visual, &unknown, &convert, &scrape, &analysis,
+            &operate,
+        ] {
             assert_eq!(
                 steps[1],
                 "现成的够用就直接做：可以把几条现成命令串起来完成这一次的活，但不要开发一个新软件，也不要为这件事装来路不明的东西。"
@@ -984,6 +1503,174 @@ mod tests {
     }
 
     #[test]
+    fn sudo_in_front_of_docker_or_apt_is_not_a_mac_admin_request() {
+        let c = detect_cautions("sudo docker run -d --name crawler -p 8080:8080 x/y", "");
+        assert!(c.ask.is_empty(), "{:?}", c.ask);
+        assert!(c.sudo_docker);
+        assert_eq!(c.foreign, None, "docker 是跨平台写法");
+        assert!(c.notes().contains(&SUDO_DOCKER_NOTE));
+        let c = detect_cautions("sudo apt install ./hermesoffice_1.0_amd64.deb", "");
+        assert!(c.ask.is_empty(), "{:?}", c.ask);
+        assert_eq!(c.foreign, Some(ForeignOs::Linux));
+        assert!(c.notes().contains(&LINUX_NOTE));
+        let c = detect_cautions("sudo dnf install ./x.rpm", "");
+        assert!(c.ask.is_empty());
+        assert_eq!(c.foreign, Some(ForeignOs::Linux));
+        // 真正要管理员权限的 sudo 仍然要问
+        let c = detect_cautions(
+            "git clone https://x/y && cd y && cargo build && sudo wx init",
+            "",
+        );
+        assert_eq!(c.ask, vec![Caution::Admin]);
+        assert_eq!(c.foreign, None);
+        let c = detect_cautions("sudo docker run x；sudo ./install.sh", "");
+        assert_eq!(c.ask, vec![Caution::Admin]);
+        assert!(c.sudo_docker);
+    }
+
+    #[test]
+    fn instructions_for_another_system_are_noticed_only_without_a_cross_platform_way() {
+        let c = detect_cautions("winget install aandrew-me.ytDownloader", "");
+        assert_eq!(c.foreign, Some(ForeignOs::Windows));
+        assert!(c.notes().contains(&WINDOWS_NOTE));
+        assert_eq!(
+            detect_cautions("下载 Windows 安装包安装", "").foreign,
+            Some(ForeignOs::Windows)
+        );
+        assert_eq!(
+            detect_cautions("scoop bucket add extras && scoop install navop", "").foreign,
+            Some(ForeignOs::Windows)
+        );
+        for how in [
+            "下载 Windows 安装包 (https://x/releases/latest) 安装，或 git clone https://x/y.git && ./start.sh",
+            "从 Releases 下载桌面版安装包（macOS 选 .dmg，Windows 选 -setup.exe）",
+            "brew install x；或 winget install x",
+            "docker compose up -d",
+            "下载 Release 中的 zip 包解压；或 Windows 下执行 choco install x",
+            "npm i -g x",
+            "pip install x；Windows 也可以用 .exe",
+            "",
+        ] {
+            assert_eq!(detect_cautions(how, "").foreign, None, "{how}");
+        }
+    }
+
+    #[test]
+    fn unsigned_mac_apps_get_a_note_not_a_question() {
+        for text in [
+            "应用未签名，macOS 首次打开需手动解除限制",
+            "macOS 版本未签名，需手动绕过 Gatekeeper",
+            "首次打开需手动放行",
+        ] {
+            let c = detect_cautions("", text);
+            assert!(c.unsigned, "{text}");
+            assert!(c.ask.is_empty(), "{text} → {:?}", c.ask);
+            assert!(c.notes().contains(&UNSIGNED_NOTE), "{text}");
+        }
+        assert!(!detect_cautions("brew install x", "依赖外部 yt-dlp 更新").unsigned);
+    }
+
+    #[test]
+    fn cost_account_ban_and_hosted_ocr_are_recognised_from_real_card_wording() {
+        let c = detect_cautions("", "依赖第三方 AI API 的可用性和调用成本");
+        assert_eq!(c.ask, vec![Caution::Money]);
+        let c = detect_cautions("", "依赖外部图片 API 和写作模型，成本不可控");
+        assert_eq!(c.ask, vec![Caution::Money]);
+        let c = detect_cautions("", "闲鱼账号可能因频繁访问被风控");
+        assert_eq!(c.ask, vec![Caution::Account]);
+        let c = detect_cautions("", "账号或IP被封禁风险");
+        assert_eq!(c.ask, vec![Caution::Account]);
+        let c = detect_cautions("", "自托管需自行维护 OAuth 凭证安全");
+        assert_eq!(c.ask, vec![Caution::Account]);
+        let c = detect_cautions("", "扫描版 PDF 需要依赖 Firecrawl 的托管 OCR 服务");
+        assert_eq!(c.ask, vec![Caution::DataOut]);
+        // 「自托管」不是外发
+        assert!(detect_cautions("", "需要自托管服务器").ask.is_empty());
+    }
+
+    #[test]
+    fn publishing_to_real_accounts_is_a_separate_question() {
+        let c = detect_cautions("", "推送草稿箱需要明确授权，存在误发风险");
+        assert_eq!(c.ask, vec![Caution::Publish]);
+        let c = detect_cautions("", "自动评论和私信可能触发平台风控");
+        assert_eq!(c.ask, vec![Caution::Account, Caution::Publish]);
+        let text = c.ask_text().expect("要先问");
+        assert!(
+            text.contains("只演练") && text.contains("每一条都要我确认"),
+            "{text}"
+        );
+        assert!(detect_cautions("", "发送邮件需人工审批").ask.is_empty());
+    }
+
+    #[test]
+    fn platforms_without_macos_are_a_question() {
+        let platforms =
+            |items: &[&str]| -> Vec<String> { items.iter().map(|s| (*s).to_owned()).collect() };
+        for unsupported in [
+            vec!["windows"],
+            vec!["windows", "linux"],
+            vec!["Linux"],
+            vec!["android", "ios"],
+        ] {
+            let c = Cautions::default().with_platforms(&platforms(&unsupported));
+            assert_eq!(c.ask, vec![Caution::Platform], "{unsupported:?}");
+        }
+        for fine in [
+            vec![],
+            vec!["cross"],
+            vec!["macos"],
+            vec!["macos", "windows"],
+            vec!["web"],
+            vec!["linux", "web"],
+            vec!["Cross", " MacOS "],
+            vec!["", "  "],
+        ] {
+            let c = Cautions::default().with_platforms(&platforms(&fine));
+            assert!(c.ask.is_empty(), "{fine:?}");
+        }
+        // 不重复，也不吃掉别的
+        let c = detect_cautions("", "需要付费").with_platforms(&platforms(&["windows"]));
+        assert_eq!(c.ask, vec![Caution::Money, Caution::Platform]);
+        let text = c.ask_text().expect("要先问");
+        assert!(
+            text.contains("不支持 macOS") && text.contains("先别装"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn notes_come_in_a_fixed_order_and_join_the_json_labels() {
+        let all = Cautions {
+            ask: vec![Caution::Admin],
+            one_line_install: true,
+            unsigned: true,
+            foreign: Some(ForeignOs::Windows),
+            sudo_docker: true,
+        };
+        assert_eq!(
+            all.notes(),
+            vec![
+                ONE_LINE_INSTALL_NOTE,
+                WINDOWS_NOTE,
+                SUDO_DOCKER_NOTE,
+                UNSIGNED_NOTE
+            ]
+        );
+        let labels = all.labels();
+        assert_eq!(labels.len(), 5);
+        assert_eq!(labels[0], Caution::Admin.label());
+        assert_eq!(labels[4], UNSIGNED_NOTE);
+        assert!(Cautions::default().notes().is_empty());
+        // 只有提醒、没有要问的：汇总那条不列它
+        let only_notes = Cautions {
+            unsigned: true,
+            ..Cautions::default()
+        };
+        assert_eq!(only_notes.ask_text(), None);
+        assert_eq!(only_notes.ask_short_text(), None);
+    }
+
+    #[test]
     fn pack_text_avoids_the_words_the_pack_tests_forbid() {
         let mut all: Vec<String> = Vec::new();
         for set in [
@@ -992,6 +1679,10 @@ mod tests {
             ASK_RECORDS,
             ASK_BATCH,
             ASK_WRITING,
+            ASK_SCRAPE,
+            ASK_CONVERT,
+            ASK_OPERATE,
+            ASK_ANALYSIS,
             ASK_GENERAL,
         ] {
             all.extend(set.iter().map(|s| (*s).to_owned()));
@@ -1002,17 +1693,39 @@ mod tests {
             DONE_RECORDS,
             DONE_BATCH,
             DONE_WRITING,
+            DONE_SCRAPE,
+            DONE_CONVERT,
+            DONE_OPERATE,
+            DONE_ANALYSIS,
         ] {
             all.extend(set.iter().map(|s| (*s).to_owned()));
         }
-        all.push(ONE_LINE_INSTALL_NOTE.to_owned());
+        for note in [
+            ONE_LINE_INSTALL_NOTE,
+            UNSIGNED_NOTE,
+            LINUX_NOTE,
+            WINDOWS_NOTE,
+            SUDO_DOCKER_NOTE,
+            DOCKER_TARGET,
+            APP_NOTE,
+            APP_NOTE_WEB,
+            APP_UNKNOWN,
+            NODE_TARGET,
+            PYTHON_TARGET,
+            RUST_TARGET,
+        ] {
+            all.push(note.to_owned());
+        }
         for caution in [
             Caution::Admin,
             Caution::Money,
             Caution::Account,
             Caution::DataOut,
+            Caution::Publish,
+            Caution::Platform,
         ] {
             all.push(caution.label().to_owned());
+            all.push(caution.short().to_owned());
         }
         for text in all {
             assert!(

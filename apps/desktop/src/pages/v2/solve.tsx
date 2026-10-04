@@ -14,6 +14,7 @@ import {
   noIntentNote,
   pickLocalCapabilities,
   orderedPicks,
+  packEmptyNote,
   packPlaceholder,
   pendingNote,
   todayLocalDate,
@@ -328,6 +329,7 @@ export function SolvePage(props: {
             result ? (
               <div className="flex min-h-[180px] flex-1 flex-col overflow-auto bg-background px-4 py-3.5 max-[899px]:max-h-[70vh] min-[900px]:max-h-none">
                 <pre className="m-0 font-mono text-xs leading-[1.7] break-words whitespace-pre-wrap text-foreground [overflow-wrap:anywhere]">{packPlaceholder(format)}</pre>
+                {packEmptyNote(result) ? <p className="m-0 pt-2 text-xs leading-[1.7] text-on-surface-variant">{packEmptyNote(result)}</p> : null}
                 <div className="pt-2">
                   <Button variant="text" onClick={() => setDirect(true)}>{DIRECT_LABEL}</Button>
                 </div>

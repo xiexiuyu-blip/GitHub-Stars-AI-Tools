@@ -13,6 +13,7 @@ import {
   matchBadge,
   noIntentNote,
   orderedPicks,
+  packEmptyNote,
   packPlaceholder,
   pendingNote,
   todayLocalDate,
@@ -441,7 +442,33 @@ describe('pickLocalCapabilities', () => {
       { name: 'cover-maker', oneLiner: '工具', path: 'p2' },
       { name: 'aaa-poster', oneLiner: '工具', path: 'p3' },
     ];
-    expect(pickLocalCapabilities(items, [], ['封面']).map((item) => item.name)).toEqual(['aaa-poster', 'cover-maker', 'zzz-notes']);
+    // zzz-notes 只在一句话里提到一次封面（1 分），不够 2 分，不放
+    expect(pickLocalCapabilities(items, [], ['封面']).map((item) => item.name)).toEqual(['aaa-poster', 'cover-maker']);
+    // 同一句话里提到两个任务词（2 分）就够了
+    const twice = [{ name: 'zzz-notes', oneLiner: '整理封面素材和海报模板', path: 'p1' }];
+    expect(pickLocalCapabilities(twice, [], ['封面', '海报']).map((item) => item.name)).toEqual(['zzz-notes']);
+  });
+
+  it('零星提到一次任务词的不算相关：「调整尺寸」的电子表格不是改图工具', () => {
+    const items = [
+      { name: 'lark-sheets', oneLiner: '飞书电子表格：创建和操作电子表格，支持增删行列、调整尺寸、冻结', path: '~/.agents/skills/lark-sheets' },
+      { name: 'image-resize', oneLiner: 'MCP 工具', path: '~/.codex/config.toml' },
+    ];
+    expect(pickLocalCapabilities(items, [], ['改图', '压缩', '尺寸']).map((item) => item.name)).toEqual(['image-resize']);
+  });
+
+  it('新增的任务词有近义说法：压缩 / 周报 / 转写 / 抠图能对上英文名字', () => {
+    const items = [
+      { name: 'tinypng-compress', oneLiner: '工具', path: 'p1' },
+      { name: 'weekly-report', oneLiner: '工具', path: 'p2' },
+      { name: 'whisper', oneLiner: 'MCP 工具', path: 'p3' },
+      { name: 'rembg', oneLiner: 'MCP 工具', path: 'p4' },
+      { name: 'code-review', oneLiner: '代码审查', path: 'p5' },
+    ];
+    expect(pickLocalCapabilities(items, [], ['压缩']).map((item) => item.name)).toEqual(['tinypng-compress']);
+    expect(pickLocalCapabilities(items, [], ['周报']).map((item) => item.name)).toEqual(['weekly-report']);
+    expect(pickLocalCapabilities(items, [], ['转写']).map((item) => item.name)).toEqual(['whisper']);
+    expect(pickLocalCapabilities(items, [], ['抠图']).map((item) => item.name)).toEqual(['rembg']);
   });
 
   it('没有本机能力、没有任务词，都是空', () => {
@@ -451,5 +478,25 @@ describe('pickLocalCapabilities', () => {
 
   it('仓库全名或短名（不分大小写）都能对上', () => {
     expect(pickLocalCapabilities(all, [{ fullName: 'Foo/AI-Draw' }], []).map((item) => item.name)).toEqual(['ai-draw']);
+  });
+});
+
+describe('packEmptyNote', () => {
+  it('没搜过：不说话', () => {
+    expect(packEmptyNote(null)).toBeNull();
+  });
+
+  it('一个都没搜到：说收藏里没找到', () => {
+    expect(packEmptyNote({ hits: [], preselected: [] })).toBe('收藏里没找到相关的工具。');
+  });
+
+  it('搜到了但没有默认勾选：说为什么没勾，并指出可以直接交给 Codex', () => {
+    const note = packEmptyNote({ hits: [{ id: 'a' }] as never, preselected: [] });
+    expect(note).toContain('没替你默认勾选');
+    expect(note).toContain('直接交给 Codex');
+  });
+
+  it('有默认勾选（用户自己取消的）：不解释', () => {
+    expect(packEmptyNote({ hits: [{ id: 'a' }] as never, preselected: ['a'] })).toBeNull();
   });
 });
