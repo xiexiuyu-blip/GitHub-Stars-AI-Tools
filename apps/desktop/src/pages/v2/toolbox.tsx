@@ -12,8 +12,10 @@ import {
   formatMinute,
   formatSize,
   formatTokens,
+  fullScanPanel,
   parseDailyBudget,
   type AutomationStatus,
+  type FullScanPanel,
 } from '@/lib/automation-view';
 import { describeInvokeError } from '@/lib/api';
 import { cn } from '@/lib/utils';
@@ -121,6 +123,117 @@ function Notice(props: { tone?: 'info' | 'warn'; children: ReactNode }) {
   );
 }
 
+/** 「全量整理 · 不限额」：按 fullScanPanel 的 kind 画。确认面板不调用命令，只有「确认开始」才开始。 */
+function FullScanPanelView(props: {
+  panel: FullScanPanel;
+  confirming: boolean;
+  /** 日常额度的确认框开着时，这个按钮让位，避免一页两个主按钮。 */
+  startPrimary: boolean;
+  starting: boolean;
+  stopping: boolean;
+  onAsk: () => void;
+  onCancel: () => void;
+  onStart: () => void;
+  onStop: () => void;
+}) {
+  const { panel } = props;
+  return (
+    <div className="mb-4 rounded-lg border-2 border-primary bg-card p-4">
+      <div className="mb-3 flex items-start gap-3">
+        <span className="hue-tile grid size-9 shrink-0 place-items-center rounded-[10px]" style={{ '--h': 148 } as CSSProperties}>
+          <Icon name="autorenew" size={20} fill />
+        </span>
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-center gap-2">
+            <h3 className="m-0 text-base font-semibold text-foreground">全量整理 · 不限额</h3>
+            {panel.kind === 'running' ? (
+              <span className="hue-tile ml-auto inline-flex h-5 shrink-0 items-center rounded-full px-2 text-[11px] font-medium" style={{ '--h': 148 } as CSSProperties}>
+                进行中
+              </span>
+            ) : null}
+          </div>
+          <p className="mt-1 mb-0 text-[13px] leading-[1.6] text-on-surface-variant">
+            第一次用、想一口气把全部收藏整理完，就用它。这一轮不受每天额度限制，整理完自动回到日常的增量整理。
+          </p>
+        </div>
+      </div>
+
+      {panel.kind === 'loading' ? (
+        <div className="flex items-center gap-2 text-sm text-on-surface-variant"><Spinner /> 读取中</div>
+      ) : null}
+
+      {panel.kind === 'unavailable' ? (
+        <p className="m-0 text-sm leading-[1.7] text-on-surface-variant">{panel.reason}</p>
+      ) : null}
+
+      {panel.kind === 'nothing' ? (
+        <>
+          <p className="m-0 text-sm leading-[1.7] text-foreground">全部收藏都整理好了。以后新收藏会在日常的增量整理里自动处理。</p>
+          {panel.last ? <p className="mt-2 mb-0 text-xs leading-[1.6] text-subtle">{panel.last}</p> : null}
+        </>
+      ) : null}
+
+      {panel.kind === 'ready' ? (
+        <>
+          <p className="m-0 text-sm leading-[1.7] text-foreground">
+            还有 <b className="tabular-nums">{panel.pending}</b> 个收藏没整理，预计要用 约 <b className="tabular-nums">{panel.estimate}</b> token（按每个约 5 千估算，实际会上下浮动）。
+          </p>
+          {panel.last ? <p className="mt-2 mb-0 text-xs leading-[1.6] text-subtle">{panel.last}</p> : null}
+          {props.confirming ? (
+            <div className="mt-3 rounded-lg border border-primary/40 bg-accent p-4 text-sm leading-[1.7] text-foreground">
+              <p className="m-0">
+                这会让应用在后台<b>连续调用你配置的 AI 服务</b>，一直整理到这 {panel.pending} 个收藏全部完成，<b>不受每天额度限制，按服务商的价格计费</b>。预计用 <b>约 {panel.estimate} token</b>（按每个约 5 千估算，实际会上下浮动）。
+              </p>
+              <p className="mt-2 mb-0">
+                这期间旧版的「增量 AI 解析」「生成标签网络」「AI 搜索」等功能也不受每天额度限制。最长运行 48 小时，随时可以点「停止全量整理」；连续失败时会自动暂停。整理完会自动回到日常的增量整理。
+              </p>
+              <div className="mt-3 flex flex-wrap gap-2">
+                <Button variant="primary" loading={props.starting} onClick={props.onStart}>确认开始全量整理</Button>
+                <Button disabled={props.starting} onClick={props.onCancel}>取消</Button>
+              </div>
+            </div>
+          ) : (
+            <div className="mt-3">
+              <Button variant={props.startPrimary ? 'primary' : 'default'} onClick={props.onAsk}>开始全量整理</Button>
+            </div>
+          )}
+        </>
+      ) : null}
+
+      {panel.kind === 'running' ? (
+        <>
+          <div className="h-2 overflow-hidden rounded-full bg-surface-container-low">
+            <div
+              className="h-full rounded-full bg-primary"
+              role="progressbar"
+              aria-valuenow={panel.percent}
+              aria-valuemin={0}
+              aria-valuemax={100}
+              aria-label="全量整理进度"
+              aria-valuetext={`已整理 ${panel.done} / ${panel.total} 个`}
+              style={{ width: `${panel.percent}%` }}
+            />
+          </div>
+          <p className="mt-2.5 mb-0 text-sm leading-[1.6] text-foreground tabular-nums">
+            已整理 {panel.done} / {panel.total} 个 · 已用约 {formatTokens(panel.tokensUsed)} token · 开始于 {formatMinute(panel.startedAt)}
+          </p>
+          <p className="mt-1 mb-0 text-xs leading-[1.6] text-subtle">
+            最长到 {formatMinute(panel.until)} 自动结束；随时可以停止。
+          </p>
+          {panel.paused ? (
+            <p className="mt-1.5 mb-0 text-[13px] leading-[1.6] text-error">
+              现在是暂停状态{panel.pausedReason ? `（${panel.pausedReason}）` : ''}，点上面的「继续整理」才会接着做。
+            </p>
+          ) : null}
+          <div className="mt-3">
+            <Button loading={props.stopping} onClick={props.onStop}>停止全量整理</Button>
+          </div>
+        </>
+      ) : null}
+    </div>
+  );
+}
+
 export function ToolboxPage() {
   const toast = useToast();
   const [health, setHealth] = useState('');
@@ -135,9 +248,12 @@ export function ToolboxPage() {
   const [budgetInput, setBudgetInput] = useState('');
   const [budgetLoaded, setBudgetLoaded] = useState(false);
   const [pendingBudget, setPendingBudget] = useState<number | null>(null);
+  const [pendingFullScan, setPendingFullScan] = useState(false);
+  const [fullScanBusy, setFullScanBusy] = useState<'start' | 'stop' | null>(null);
   const [customOpen, setCustomOpen] = useState(false);
   const [enqueueNote, setEnqueueNote] = useState<string | null>(null);
   const budgetTouched = useRef(false);
+  const fullScanLock = useRef(false);
 
   function say(title: string) {
     toast.show({ title });
@@ -195,6 +311,7 @@ export function ToolboxPage() {
 
   /** 选一个额度：大于 0 且和现在不同，先弹确认；0 直接关闭。 */
   function chooseBudget(tokens: number) {
+    setPendingFullScan(false);
     const current = automation?.dailyBudgetTokens ?? 0;
     if (tokens === current) {
       setPendingBudget(null);
@@ -217,12 +334,58 @@ export function ToolboxPage() {
   }
 
   function enqueueCards(scope: 'missing' | 'outdated') {
+    const unlimited = automation?.unlimited === true;
     void invoke<number>('enqueue_cards_now', { scope })
       .then((count) => {
-        setEnqueueNote(count > 0 ? `已排队 ${count} 个。是否开始整理，取决于上面的每天额度。` : '没有需要排队的仓库了。');
+        setEnqueueNote(
+          count > 0
+            ? unlimited
+              ? `已排队 ${count} 个，全量整理正在处理。`
+              : `已排队 ${count} 个。是否开始整理，取决于上面的每天额度。`
+            : '没有需要排队的仓库了。',
+        );
         return refreshAutomation();
       })
       .catch((reason: unknown) => say(errorText(reason)));
+  }
+
+  /** 只展开确认。点这里不调用命令，也不花钱。 */
+  function askFullScan() {
+    setPendingBudget(null);
+    setPendingFullScan(true);
+  }
+
+  function startFullScan() {
+    if (fullScanLock.current) return;
+    fullScanLock.current = true;
+    setFullScanBusy('start');
+    void invoke<AutomationStatus>('start_full_scan', { confirmed: true })
+      .then((next) => {
+        applyAutomation(next);
+        setPendingFullScan(false);
+        say('全量整理已开始');
+      })
+      .catch((reason: unknown) => say(errorText(reason)))
+      .finally(() => {
+        fullScanLock.current = false;
+        setFullScanBusy((current) => (current === 'start' ? null : current));
+      });
+  }
+
+  function stopFullScan() {
+    if (fullScanLock.current) return;
+    fullScanLock.current = true;
+    setFullScanBusy('stop');
+    void invoke<AutomationStatus>('stop_full_scan')
+      .then((next) => {
+        applyAutomation(next);
+        say('已停止全量整理，剩下的会按每天额度接着整理');
+      })
+      .catch((reason: unknown) => say(errorText(reason)))
+      .finally(() => {
+        fullScanLock.current = false;
+        setFullScanBusy((current) => (current === 'stop' ? null : current));
+      });
   }
 
   function pauseAutomation() {
@@ -240,6 +403,10 @@ export function ToolboxPage() {
   }
 
   useEffect(load, []);
+
+  useEffect(() => {
+    if (fullScanPanel(automation).kind !== 'ready') setPendingFullScan(false);
+  }, [automation]);
 
   function backupNow() {
     setBackingUp(true);
@@ -267,6 +434,8 @@ export function ToolboxPage() {
 
   const state = automationState(automation);
   const current = automation?.dailyBudgetTokens ?? 0;
+  const scanPanel = fullScanPanel(automation);
+  const confirmingFullScan = pendingFullScan && scanPanel.kind === 'ready';
 
   return (
     <section className="flex h-full flex-col gap-4 overflow-auto px-5 pt-4 pb-6 max-[899px]:px-4">
@@ -301,7 +470,25 @@ export function ToolboxPage() {
           </div>
         ) : null}
 
-        <div className="mb-1.5 text-[13px] font-medium text-foreground">每天最多整理多少</div>
+        <FullScanPanelView
+          panel={scanPanel}
+          confirming={confirmingFullScan}
+          startPrimary={pendingBudget === null}
+          starting={fullScanBusy === 'start'}
+          stopping={fullScanBusy === 'stop'}
+          onAsk={askFullScan}
+          onCancel={() => setPendingFullScan(false)}
+          onStart={startFullScan}
+          onStop={stopFullScan}
+        />
+
+        <b className="mb-1 block text-[13px] font-medium text-foreground">增量整理（日常）</b>
+        <p className="mt-0 mb-2 text-xs leading-[1.6] text-on-surface-variant">
+          全量整理完以后用它：只整理新收藏的、还没整理的和说明过期的，没变的不会重复花钱。每天最多用你设定的额度，用完第二天自动继续。
+        </p>
+        {automation?.unlimited === true ? (
+          <p className="mt-0 mb-2 text-xs leading-[1.6] text-on-surface-variant">全量整理进行中，这一轮不受每天额度限制；整理完才按下面的额度。</p>
+        ) : null}
         <div className="grid grid-cols-2 gap-2 min-[1000px]:grid-cols-4">
           {BUDGET_PRESETS.map((preset) => {
             const selected = preset.tokens === current;
@@ -365,7 +552,11 @@ export function ToolboxPage() {
         {automation ? (
           <div className="mt-4 grid grid-cols-3 gap-2.5 max-[699px]:grid-cols-1">
             <Metric label="24 小时内已用" value={`${formatTokens(automation.tokens24h)} token`} sub={`约整理了 ${approxRepos(automation.tokens24h)} 个`} />
-            <Metric label="24 小时内还剩" value={current > 0 ? `${formatTokens(automation.budgetRemaining)} token` : '—'} sub={current > 0 ? `约还能整理 ${approxRepos(automation.budgetRemaining)} 个` : '没有开启额度'} />
+            <Metric
+              label="24 小时内还剩"
+              value={automation.unlimited === true ? '不限额' : current > 0 ? `${formatTokens(automation.budgetRemaining)} token` : '—'}
+              sub={automation.unlimited === true ? '全量整理中' : current > 0 ? `约还能整理 ${approxRepos(automation.budgetRemaining)} 个` : '没有开启额度'}
+            />
             <Metric label="排队中" value={`${automation.queued} 个`} sub={`进行中 ${automation.running} · 失败 ${automation.failed}${automation.model ? ` · 模型 ${automation.model}` : ''}`} />
           </div>
         ) : (
@@ -373,7 +564,7 @@ export function ToolboxPage() {
         )}
 
         <div className="mt-4 flex flex-wrap items-center gap-2 border-t border-border pt-3.5">
-          <Button onClick={() => enqueueCards('missing')}>给还没有说明的仓库排队</Button>
+          <Button onClick={() => enqueueCards('missing')}>整理新增和还没整理的仓库</Button>
           <Button onClick={() => enqueueCards('outdated')}>把旧版说明排队重做</Button>
           {automation && !automation.paused && automation.enabled ? <Button variant="text" onClick={pauseAutomation}>暂停</Button> : null}
           {enqueueNote ? <span className="text-xs text-on-surface-variant">{enqueueNote}</span> : null}
