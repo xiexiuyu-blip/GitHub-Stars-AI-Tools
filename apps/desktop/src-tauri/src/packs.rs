@@ -96,6 +96,15 @@ pub struct LocalCapability {
     pub path: String,
 }
 
+/// 不传时按「用收藏里的工具」。`direct` 是收藏里没有合适工具、直接交给 Codex。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum PackMode {
+    #[default]
+    UseTools,
+    Direct,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct PackRequest {
@@ -108,6 +117,9 @@ pub struct PackRequest {
     pub items: Vec<PackItemInput>,
     #[serde(default)]
     pub local_capabilities: Vec<LocalCapability>,
+    /// 请求 JSON 里没有这个字段时按 `UseTools`。
+    #[serde(default)]
+    pub mode: PackMode,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -147,6 +159,28 @@ pub fn build_pack(
     format: PackFormat,
     generated_on: &str,
 ) -> Result<PackOutput, String> {
+    if request.mode == PackMode::Direct {
+        if !request.items.is_empty() {
+            return Err("直接交给 Codex 时不能同时选工具".to_owned());
+        }
+        if request.problem.trim().is_empty() {
+            return Err("先写一句你想做的事".to_owned());
+        }
+        // 字段保留给前端，交接单不再使用。直接交接不读库。
+        let _ = request.architecture_notes.as_deref();
+        let content = match format {
+            PackFormat::Markdown => render_direct_markdown(request, generated_on),
+            PackFormat::Agents => render_direct_agents(request, generated_on),
+            PackFormat::Json => render_json(request, &[], generated_on)?,
+        };
+        return Ok(PackOutput {
+            format,
+            content,
+            item_count: 0,
+            missing: Vec::new(),
+            warnings: Vec::new(),
+        });
+    }
     if request.items.is_empty() {
         return Err("还没有选任何参考项目".to_owned());
     }
@@ -447,6 +481,59 @@ fn render_markdown(
     lines.join("\n")
 }
 
+/// 收藏里没有合适工具时的交接单：不列项目，三步先查本机现成命令。
+fn render_direct_markdown(request: &PackRequest, generated_on: &str) -> String {
+    let mut lines = vec![
+        format!("# 任务交接：{}", problem_title(&request.problem)),
+        format!("> Fox Stars Lab 生成于 {generated_on}。{ABOUT_ME}"),
+        "> 我的收藏里没有找到合适的现成工具，所以这份交接单没有列工具。".to_owned(),
+        String::new(),
+        "## 这次要做的事".to_owned(),
+        neutralize_block(&request.problem),
+        String::new(),
+        "## 先这样做".to_owned(),
+    ];
+    for (index, step) in pack_guard::direct_steps(&request.problem)
+        .iter()
+        .enumerate()
+    {
+        lines.push(format!("{}. {step}", index + 1));
+    }
+    push_local_lines(&mut lines, &request.local_capabilities, "我本机已经有的");
+    lines.push(String::new());
+    lines.push("## 开工前先问我".to_owned());
+    for item in pack_guard::ask_items(&request.problem, &[]) {
+        lines.push(format!("- {item}"));
+    }
+    lines.push(String::new());
+    lines.push("## 完成标准".to_owned());
+    for item in pack_guard::done_items(&request.problem) {
+        lines.push(format!("- {item}"));
+    }
+    lines.push(String::new());
+    lines.push("## 工作约定".to_owned());
+    for (index, rule) in WORK_RULES.iter().enumerate() {
+        lines.push(format!("{}. {rule}", index + 1));
+    }
+    lines.join("\n")
+}
+
+fn push_local_lines(lines: &mut Vec<String>, local: &[LocalCapability], heading: &str) {
+    if local.is_empty() {
+        return;
+    }
+    lines.push(String::new());
+    lines.push(format!("## {heading}"));
+    for capability in local {
+        lines.push(format!(
+            "- {}：{}（{}）",
+            flatten(&capability.name),
+            flatten(&capability.one_liner),
+            flatten(&capability.path)
+        ));
+    }
+}
+
 fn selection_row(index: usize, project: &RenderedProject, local: &[LocalCapability]) -> String {
     let state = install_state(&project.full_name, local);
     let kind = format!(
@@ -568,6 +655,38 @@ fn render_agents(
     lines.join("\n")
 }
 
+/// 直接交给 Codex 的工作目录说明：开头两行、工作规则、验收沿用原来的，不列工具清单。
+fn render_direct_agents(request: &PackRequest, generated_on: &str) -> String {
+    let mut lines = vec![
+        format!("# {} · 工作目录说明", problem_title(&request.problem)),
+        format!(
+            "> Fox Stars Lab 生成于 {generated_on}。放在做这件事的文件夹里，Codex 每次进来都会先读它。{ABOUT_ME}"
+        ),
+        String::new(),
+        "用现成工具出成品，不开发新软件。这次我的收藏里没有找到合适的现成工具。".to_owned(),
+        String::new(),
+        "## 先这样做".to_owned(),
+    ];
+    for (index, step) in pack_guard::direct_steps(&request.problem)
+        .iter()
+        .enumerate()
+    {
+        lines.push(format!("{}. {step}", index + 1));
+    }
+    push_local_lines(&mut lines, &request.local_capabilities, "本机已经有的");
+    lines.push(String::new());
+    lines.push("## 工作规则".to_owned());
+    for (index, rule) in WORK_RULES.iter().skip(1).enumerate() {
+        lines.push(format!("{}. {rule}", index + 1));
+    }
+    lines.push(String::new());
+    lines.push("## 验收".to_owned());
+    for item in pack_guard::done_items(&request.problem) {
+        lines.push(format!("- {item}"));
+    }
+    lines.join("\n")
+}
+
 fn render_codex(project: &RenderedProject, problem: Option<&str>) -> String {
     let mut lines = vec![format!("{CODEX_OPENING}{ABOUT_ME}")];
     if let Some(task) = problem
@@ -613,8 +732,13 @@ fn render_json(
     projects: &[RenderedProject],
     generated_on: &str,
 ) -> Result<String, String> {
+    let direct = request.mode == PackMode::Direct;
     let rules = owned_list(&WORK_RULES);
-    let ask = ask_items(request, projects);
+    let ask = if direct {
+        pack_guard::ask_items(&request.problem, &[])
+    } else {
+        ask_items(request, projects)
+    };
     let verify = owned_list(&pack_guard::done_items(&request.problem));
     let mut out = String::new();
     out.push_str("{\n");
@@ -633,7 +757,7 @@ fn render_json(
         1,
         &format!(
             "\"task\": {},",
-            json_task(&neutralize_block(&request.problem))?
+            json_task(&neutralize_block(&request.problem), request.mode)?
         ),
     );
     json_line(
@@ -656,6 +780,14 @@ fn render_json(
         1,
         &format!("\"askFirst\": {},", json_string_list(&ask, 1)?),
     );
+    if direct {
+        let steps = pack_guard::direct_steps(&request.problem);
+        json_line(
+            &mut out,
+            1,
+            &format!("\"directSteps\": {},", json_string_list(&steps, 1)?),
+        );
+    }
     json_line(
         &mut out,
         1,
@@ -678,9 +810,13 @@ fn render_json(
     Ok(out)
 }
 
-fn json_task(problem: &str) -> Result<String, String> {
+fn json_task(problem: &str, mode: PackMode) -> Result<String, String> {
+    let mode_token = match mode {
+        PackMode::UseTools => "use_tools",
+        PackMode::Direct => "direct",
+    };
     Ok(format!(
-        "{{\n    \"problem\": {},\n    \"mode\": \"use_tools\"\n  }}",
+        "{{\n    \"problem\": {},\n    \"mode\": \"{mode_token}\"\n  }}",
         json_encode(problem)?
     ))
 }
@@ -1672,6 +1808,7 @@ mod tests {
                 why: why.map(str::to_owned),
             }],
             local_capabilities: Vec::new(),
+            mode: PackMode::UseTools,
         }
     }
 
@@ -1782,6 +1919,7 @@ mod tests {
                 one_liner: "能搜本地知识库".to_owned(),
                 path: "~/.agents/skills/web-search".to_owned(),
             }],
+            mode: PackMode::UseTools,
         }
     }
 
@@ -2750,6 +2888,7 @@ mod tests {
                 })
                 .collect(),
             local_capabilities: Vec::new(),
+            mode: PackMode::UseTools,
         };
         let json = pack_of(&db.connection, &request, PackFormat::Json);
         let parsed: Value = serde_json::from_str(&json.content).expect("应能解析");
@@ -2878,6 +3017,7 @@ mod tests {
                 },
             ],
             local_capabilities: Vec::new(),
+            mode: PackMode::UseTools,
         };
         let json = pack_of(&db.connection, &request, PackFormat::Json);
         let parsed: Value = serde_json::from_str(&json.content).expect("应能解析");
@@ -3022,6 +3162,7 @@ mod tests {
                 },
             ],
             local_capabilities: Vec::new(),
+            mode: PackMode::UseTools,
         };
         let output = pack_of(&db.connection, &request, PackFormat::Markdown);
         assert_eq!(
@@ -3067,6 +3208,7 @@ mod tests {
             architecture_notes: None,
             items: Vec::new(),
             local_capabilities: Vec::new(),
+            mode: PackMode::UseTools,
         };
         let error = build_pack(&connection, &request, PackFormat::Json, GENERATED_ON)
             .expect_err("空选择应失败");
@@ -3247,6 +3389,7 @@ mod tests {
                 why: Some("   ".to_owned()),
             }],
             local_capabilities: Vec::new(),
+            mode: PackMode::UseTools,
         };
         for format in [PackFormat::Markdown, PackFormat::Agents, PackFormat::Json] {
             let output = pack_of(&db.connection, &request, format);
@@ -3485,6 +3628,7 @@ mod tests {
                 },
             ],
             local_capabilities: Vec::new(),
+            mode: PackMode::UseTools,
         };
         let output = pack_of(&db.connection, &request, PackFormat::Markdown);
         assert!(output.content.contains("- 是什么：摘。"));
@@ -3619,6 +3763,7 @@ mod tests {
                 one_liner: "能搜本地知识库".to_owned(),
                 path: "~/.agents/skills/web-search".to_owned(),
             }],
+            mode: PackMode::UseTools,
         };
         let markdown = pack_of(&db.connection, &request, PackFormat::Markdown);
         let real = render_item_for_codex(&db.connection, "real").expect("单项");
@@ -3643,5 +3788,347 @@ mod tests {
         assert!(real.contains("MIT"));
         assert!(placeholder.contains("未知（先核实）"));
         assert!(plain.contains("（GitHub 原文）A scratch pad for notes"));
+    }
+
+    fn memory_connection() -> Connection {
+        Connection::open_in_memory().expect("应能打开内存库")
+    }
+
+    fn direct_request(problem: &str) -> PackRequest {
+        PackRequest {
+            title: format!("直接交给 Codex：{problem}"),
+            problem: problem.to_owned(),
+            architecture_notes: Some("ARCH_SHOULD_NOT_APPEAR".to_owned()),
+            items: Vec::new(),
+            local_capabilities: Vec::new(),
+            mode: PackMode::Direct,
+        }
+    }
+
+    fn direct_output(problem: &str, format: PackFormat) -> PackOutput {
+        build_pack(
+            &memory_connection(),
+            &direct_request(problem),
+            format,
+            GENERATED_ON,
+        )
+        .expect("直接交接应能生成")
+    }
+
+    #[test]
+    fn direct_mode_with_empty_items_succeeds_and_does_not_read_the_database() {
+        let connection = memory_connection();
+        let request = direct_request("批量改图尺寸和压缩");
+        for format in [PackFormat::Markdown, PackFormat::Agents, PackFormat::Json] {
+            let output = build_pack(&connection, &request, format, GENERATED_ON).expect("应能生成");
+            assert_eq!(output.item_count, 0, "{format:?}");
+            assert!(output.missing.is_empty(), "{format:?}");
+            assert!(output.warnings.is_empty(), "{format:?}");
+            assert!(!output.content.is_empty(), "{format:?}");
+        }
+    }
+
+    #[test]
+    fn direct_mode_rejects_selected_tools() {
+        let mut request = direct_request("批量改图尺寸和压缩");
+        request.items.push(PackItemInput {
+            repo_id: "r1".to_owned(),
+            role: PackRole::Main,
+            why: None,
+        });
+        let error = build_pack(
+            &memory_connection(),
+            &request,
+            PackFormat::Markdown,
+            GENERATED_ON,
+        )
+        .expect_err("选了工具应失败");
+        assert_eq!(error, "直接交给 Codex 时不能同时选工具");
+    }
+
+    #[test]
+    fn direct_mode_rejects_blank_problem() {
+        for problem in ["", "   ", "\n\t", " \n "] {
+            let error = build_pack(
+                &memory_connection(),
+                &direct_request(problem),
+                PackFormat::Json,
+                GENERATED_ON,
+            )
+            .expect_err("空白问题应失败");
+            assert_eq!(error, "先写一句你想做的事", "{problem:?}");
+        }
+    }
+
+    #[test]
+    fn use_tools_mode_still_rejects_empty_selection() {
+        let mut request = direct_request("问题");
+        request.mode = PackMode::UseTools;
+        let error = build_pack(
+            &memory_connection(),
+            &request,
+            PackFormat::Markdown,
+            GENERATED_ON,
+        )
+        .expect_err("空选择应失败");
+        assert_eq!(error, "还没有选任何参考项目");
+    }
+
+    #[test]
+    fn missing_mode_deserializes_as_use_tools() {
+        let request: PackRequest =
+            serde_json::from_str(r#"{"title":"标题","problem":"问题","items":[]}"#)
+                .expect("应能反序列化");
+        assert_eq!(request.mode, PackMode::UseTools);
+        let named: PackRequest =
+            serde_json::from_str(r#"{"title":"标题","problem":"问题","mode":"useTools"}"#)
+                .expect("应能反序列化");
+        assert_eq!(named.mode, PackMode::UseTools);
+    }
+
+    #[test]
+    fn direct_mode_string_deserializes() {
+        let request: PackRequest =
+            serde_json::from_str(r#"{"title":"标题","problem":"批量改图","mode":"direct"}"#)
+                .expect("应能反序列化");
+        assert_eq!(request.mode, PackMode::Direct);
+        assert!(request.items.is_empty());
+    }
+
+    #[test]
+    fn direct_markdown_has_the_handoff_sections_without_projects() {
+        let output = direct_output("批量改图尺寸和压缩", PackFormat::Markdown);
+        let content = &output.content;
+        assert_eq!(output.item_count, 0);
+        for heading in [
+            "## 这次要做的事",
+            "## 先这样做",
+            "## 开工前先问我",
+            "## 完成标准",
+            "## 工作约定",
+        ] {
+            assert!(content.contains(heading), "{heading}");
+        }
+        assert!(!content.contains("## 怎么选"), "{content}");
+        assert!(!content.contains("## 1. "), "{content}");
+        assert!(!content.contains("（主参考）"), "{content}");
+        assert!(!content.contains("## 我本机已经有的"), "{content}");
+        assert!(!content.contains("ARCH_SHOULD_NOT_APPEAR"), "{content}");
+        assert_eq!(content.matches("## ").count(), 5);
+        let steps = pack_guard::direct_steps("批量改图尺寸和压缩");
+        assert_eq!(steps.len(), 3);
+        for (index, step) in steps.iter().enumerate() {
+            assert!(
+                content.contains(&format!("{}. {step}", index + 1)),
+                "缺第 {} 步",
+                index + 1
+            );
+        }
+        for (index, rule) in WORK_RULES.iter().enumerate() {
+            assert!(
+                content.contains(&format!("{}. {rule}", index + 1)),
+                "{rule}"
+            );
+        }
+        let task_at = content.find("## 这次要做的事").expect("任务");
+        let steps_at = content.find("## 先这样做").expect("步骤");
+        let ask_at = content.find("## 开工前先问我").expect("先问");
+        let done_at = content.find("## 完成标准").expect("标准");
+        let rules_at = content.find("## 工作约定").expect("约定");
+        assert!(task_at < steps_at && steps_at < ask_at && ask_at < done_at && done_at < rules_at);
+        assert_forbidden_phrases(content);
+    }
+
+    #[test]
+    fn direct_markdown_local_capabilities_add_one_heading() {
+        let connection = memory_connection();
+        let mut request = direct_request("批量改图尺寸和压缩");
+        let without = build_pack(&connection, &request, PackFormat::Markdown, GENERATED_ON)
+            .expect("应能生成");
+        assert_eq!(without.content.matches("## ").count(), 5);
+        assert!(!without.content.contains("## 我本机已经有的"));
+        request.local_capabilities.push(LocalCapability {
+            name: "sips".to_owned(),
+            one_liner: "改图片尺寸".to_owned(),
+            path: "/usr/bin/sips".to_owned(),
+        });
+        let with_local = build_pack(&connection, &request, PackFormat::Markdown, GENERATED_ON)
+            .expect("应能生成");
+        assert_eq!(with_local.content.matches("## ").count(), 6);
+        assert!(with_local.content.contains("## 我本机已经有的"));
+        assert!(with_local
+            .content
+            .contains("- sips：改图片尺寸（/usr/bin/sips）"));
+        let agents =
+            build_pack(&connection, &request, PackFormat::Agents, GENERATED_ON).expect("应能生成");
+        assert!(agents.content.contains("## 本机已经有的"));
+        assert!(agents
+            .content
+            .contains("- sips：改图片尺寸（/usr/bin/sips）"));
+        assert!(!agents.content.contains("## 我本机已经有的"));
+    }
+
+    #[test]
+    fn direct_hints_for_batch_visual_and_unknown_name_sips() {
+        for problem in ["批量改图尺寸和压缩", "做小红书封面", "随便做点什么"] {
+            let content = direct_output(problem, PackFormat::Markdown).content;
+            assert!(
+                content.contains("macOS 自带的 sips 可以改图片尺寸和格式"),
+                "{problem}\n{content}"
+            );
+            assert!(content.contains("magick（ImageMagick）"), "{problem}");
+            assert!(content.contains("cwebp"), "{problem}");
+        }
+    }
+
+    #[test]
+    fn direct_hint_for_video_names_ffmpeg() {
+        let content = direct_output("给短视频加字幕", PackFormat::Markdown).content;
+        assert!(
+            content.contains("ffmpeg（剪辑、转码、烧字幕）"),
+            "{content}"
+        );
+        assert!(content.contains("afconvert"), "{content}");
+        assert!(!content.contains("sips"), "{content}");
+        assert!(!content.contains("pandoc"), "{content}");
+    }
+
+    #[test]
+    fn direct_hint_for_records_and_writing_names_pandoc() {
+        for problem in ["把群聊记录整理成日报", "写爆款标题"] {
+            let content = direct_output(problem, PackFormat::Markdown).content;
+            assert!(
+                content.contains("macOS 自带的 textutil 和 pandoc 可以转文档格式"),
+                "{problem}\n{content}"
+            );
+            assert!(!content.contains("sips"), "{problem}");
+            assert!(!content.contains("ffmpeg"), "{problem}");
+        }
+    }
+
+    #[test]
+    fn direct_questions_and_done_follow_the_task_without_tool_flags() {
+        let video = direct_output("给短视频加字幕", PackFormat::Markdown).content;
+        assert!(
+            video.contains(
+                "- 要处理的视频：文件在哪、有几个、多长、说什么语言（有没有口播、配乐、现成字幕）"
+            ),
+            "{video}"
+        );
+        assert!(video.contains("- 成品视频能正常播放，画面比例和时长符合要求，字幕和声音对得上、没有错字，并用绝对路径告诉我放在哪"), "{video}");
+        let records = direct_output("把群聊记录整理成日报", PackFormat::Markdown).content;
+        assert!(records.contains("- 这些记录能不能发给第三方 AI 服务（含聊天内容、客户信息）；有没有只在本机跑的办法"), "{records}");
+        assert!(records.contains("- 涉及隐私的内容（聊天、姓名、客户信息）没有发给任何第三方服务；做了什么处理写清楚"), "{records}");
+        for content in [&video, &records] {
+            assert!(!content.contains("这几个工具装之前要先问我"), "{content}");
+            assert_eq!(content.matches("## 开工前先问我").count(), 1);
+        }
+    }
+
+    #[test]
+    fn direct_agents_replaces_the_tool_list() {
+        let content = direct_output("批量改图尺寸和压缩", PackFormat::Agents).content;
+        assert!(content.starts_with("# 批量改图尺寸和压缩 · 工作目录说明"));
+        assert!(content.contains("放在做这件事的文件夹里，Codex 每次进来都会先读它。"));
+        assert!(content.contains(ABOUT_ME));
+        assert!(content.contains("这次我的收藏里没有找到合适的现成工具"));
+        assert!(content.contains("## 先这样做"));
+        assert!(content.contains("## 工作规则"));
+        assert!(content.contains("## 验收"));
+        assert!(!content.contains("## 可用的工具（按顺序）"));
+        assert!(!content.contains("## 本机已经有的"));
+        for (index, rule) in WORK_RULES.iter().skip(1).enumerate() {
+            assert!(
+                content.contains(&format!("{}. {rule}", index + 1)),
+                "{rule}"
+            );
+        }
+        assert!(!content.contains(&format!("1. {}", WORK_RULES[0])));
+        let steps = pack_guard::direct_steps("批量改图尺寸和压缩");
+        for (index, step) in steps.iter().enumerate() {
+            assert!(content.contains(&format!("{}. {step}", index + 1)));
+        }
+        assert_forbidden_phrases(&content);
+    }
+
+    #[test]
+    fn direct_json_adds_direct_steps_and_keeps_empty_items() {
+        let mut request = direct_request("给短视频加字幕");
+        request.local_capabilities.push(LocalCapability {
+            name: "ffmpeg".to_owned(),
+            one_liner: "转码".to_owned(),
+            path: "/opt/homebrew/bin/ffmpeg".to_owned(),
+        });
+        let output = build_pack(
+            &memory_connection(),
+            &request,
+            PackFormat::Json,
+            GENERATED_ON,
+        )
+        .expect("应能生成");
+        let parsed: Value = serde_json::from_str(&output.content).expect("JSON 应能解析");
+        assert_eq!(parsed["task"]["mode"], "direct");
+        assert_eq!(parsed["task"]["problem"], "给短视频加字幕");
+        assert_eq!(parsed["items"], json!([]));
+        assert_eq!(parsed["directSteps"].as_array().expect("三步").len(), 3);
+        assert_eq!(parsed["askFirst"].as_array().expect("问题").len(), 5);
+        assert_eq!(parsed["verify"].as_array().expect("标准").len(), 3);
+        let steps = pack_guard::direct_steps("给短视频加字幕");
+        assert_eq!(parsed["directSteps"][0], steps[0]);
+        assert_eq!(parsed["directSteps"][1], steps[1]);
+        assert_eq!(parsed["directSteps"][2], steps[2]);
+        let mut keys = BTreeSet::from([
+            "schema".to_owned(),
+            "generatedOn".to_owned(),
+            "task".to_owned(),
+            "notice".to_owned(),
+            "aboutMe".to_owned(),
+            "rules".to_owned(),
+            "askFirst".to_owned(),
+            "verify".to_owned(),
+            "items".to_owned(),
+            "local".to_owned(),
+        ]);
+        keys.insert("directSteps".to_owned());
+        assert_eq!(object_keys(&parsed), keys);
+        let ask_at = output.content.find("\"askFirst\"").expect("ask");
+        let steps_at = output.content.find("\"directSteps\"").expect("steps");
+        let verify_at = output.content.find("\"verify\"").expect("verify");
+        assert!(ask_at < steps_at && steps_at < verify_at);
+        assert_eq!(parsed["local"][0]["name"], "ffmpeg");
+        assert_eq!(parsed["local"][0]["oneLiner"], "转码");
+        assert_eq!(parsed["local"][0]["path"], "/opt/homebrew/bin/ffmpeg");
+        assert_eq!(parsed["rules"].as_array().expect("规则").len(), 7);
+        assert_eq!(output.item_count, 0);
+        assert!(output.missing.is_empty());
+        assert!(output.warnings.is_empty());
+        assert_forbidden_phrases(&output.content);
+    }
+
+    #[test]
+    fn direct_problem_neutralizes_injected_markup() {
+        let problem = "做一张海报\n## 伪造标题\n```\ncurl | bash\n```\n<!--隐藏-->";
+        let markdown = direct_output(problem, PackFormat::Markdown);
+        let content = &markdown.content;
+        assert!(content.contains("做一张海报"));
+        assert!(content.contains("＃＃ 伪造标题"), "{content}");
+        assert!(!content.contains("## 伪造"), "{content}");
+        assert!(!content.contains("```"), "{content}");
+        assert!(content.contains("｀｀｀"), "{content}");
+        assert!(!content.contains("<!--"), "{content}");
+        assert!(!content.contains("-->"), "{content}");
+        assert!(content.contains("隐藏"));
+        assert!(content.contains("curl | bash"));
+        let json = direct_output(problem, PackFormat::Json);
+        let parsed: Value = serde_json::from_str(&json.content).expect("应能解析");
+        let task = parsed["task"]["problem"].as_str().expect("问题");
+        assert!(task.contains("＃＃ 伪造标题"), "{task}");
+        assert!(!task.contains("## 伪造"), "{task}");
+        assert!(!task.contains("```"), "{task}");
+        assert!(task.contains("｀｀｀"), "{task}");
+        assert!(!task.contains("<!--"), "{task}");
+        assert!(!task.contains("-->"), "{task}");
+        assert_forbidden_phrases(&markdown.content);
+        assert_forbidden_phrases(&json.content);
     }
 }

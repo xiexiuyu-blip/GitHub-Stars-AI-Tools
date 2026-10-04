@@ -3,8 +3,10 @@ import type { LocalCapabilityInput, PackFormat, PackOutput } from '@/lib/api';
 import { buildReferencePack, describeInvokeError, listScenarios, scanLocalCapabilities, solveV2 } from '@/lib/api';
 import type { ScenarioSummary, SolveResult } from '@/lib/contracts';
 import {
+  BACK_TO_PICK_LABEL,
   buildPackRequest,
   crossNote,
+  DIRECT_LABEL,
   formatOptions,
   gapNote,
   initialPicks,
@@ -55,12 +57,13 @@ export function SolvePage(props: {
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<SolveResult | null>(draft?.result ?? null);
   const [picked, setPicked] = useState<string[]>(draft?.picked ?? []);
+  const [direct, setDirect] = useState(draft?.direct ?? false);
   const [scenarios, setScenarios] = useState<ScenarioSummary[]>([]);
   const [format, setFormat] = useState<PackFormat>(draft?.format ?? 'markdown');
   const [openedId, setOpenedId] = useState<string | null>(null);
   const [localCapabilities, setLocalCapabilities] = useState<LocalCapabilityInput[]>([]);
   const [showRaw, setShowRaw] = useState(false);
-  const lastPack = useRef<PackOutput | null>(null);
+  const lastPack = useRef<{ mode: 'direct' | 'pick'; output: PackOutput } | null>(null);
   const [packState, setPackState] = useState<PackState | null>(null);
   const [packAttempt, setPackAttempt] = useState(0);
   const [copied, setCopied] = useState(false);
@@ -73,6 +76,7 @@ export function SolvePage(props: {
     setPhase('loading');
     setError(null);
     setResult(null);
+    setDirect(false);
     setPicked([]);
     void solveV2(text).then((next) => {
       if (seq !== searchSeq.current) return;
@@ -124,29 +128,31 @@ export function SolvePage(props: {
   }, []);
 
   useEffect(() => {
-    if (result) saveSolveDraft({ query, activeQuery, result, picked, format });
-  }, [query, activeQuery, result, picked, format]);
+    if (result) saveSolveDraft({ query, activeQuery, result, picked, format, direct });
+  }, [query, activeQuery, result, picked, format, direct]);
 
   const selectedHits = result ? orderedPicks(result.hits, picked) : [];
-  const packKey = `${format}\u0001${selectedHits.map((hit) => hit.id).join('\u0001')}`;
+  // direct 写进 key，免得「一个都没勾」和「直接交给 Codex」共用同一份预览
+  const packKey = `${format}\u0001${direct ? 'direct' : 'pick'}\u0001${selectedHits.map((hit) => hit.id).join('\u0001')}`;
   const packView = packState && packState.key === packKey ? packState : null;
-  if (packView?.output) lastPack.current = packView.output;
-  const loadingPack = selectedHits.length > 0 && !packView?.output && !packView?.error;
-  // 重新生成时先留着上一份，别把预览整块清空
-  const pack = packView?.output ?? (selectedHits.length > 0 ? lastPack.current : null);
+  const packMode = direct ? 'direct' : 'pick';
+  if (packView?.output) lastPack.current = { mode: packMode, output: packView.output };
+  const awaitingPack = direct || selectedHits.length > 0;
+  const loadingPack = awaitingPack && !packView?.output && !packView?.error;
+  // 重新生成时先留着同一模式下的上一份，别把预览整块清空；换模式不拿另一份来充数
+  const pack = packView?.output ?? (awaitingPack && lastPack.current?.mode === packMode ? lastPack.current.output : null);
   const hasResult = result !== null;
-  const canCopy = selectedHits.length > 0 && Boolean(pack?.content);
+  const canCopy = direct ? Boolean(pack?.content) : selectedHits.length > 0 && Boolean(pack?.content);
 
   useEffect(() => {
     if (!result) return;
     const hits = orderedPicks(result.hits, picked);
-    if (hits.length === 0) return;
+    if (!direct && hits.length === 0) return;
     const key = packKey;
-    const request = buildPackRequest(
-      result.query.trim() || activeQuery,
-      hits,
-      pickLocalCapabilities(localCapabilities, hits, result.intents),
-    );
+    const queryText = result.query.trim() || activeQuery;
+    const request = direct
+      ? buildPackRequest(queryText, [], pickLocalCapabilities(localCapabilities, [], result.intents), true)
+      : buildPackRequest(queryText, hits, pickLocalCapabilities(localCapabilities, hits, result.intents));
     let cancelled = false;
     const timer = window.setTimeout(() => {
       if (cancelled) return;
@@ -162,7 +168,7 @@ export function SolvePage(props: {
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [packKey, result, picked, format, packAttempt, activeQuery, localCapabilities]);
+  }, [packKey, result, picked, format, packAttempt, activeQuery, localCapabilities, direct]);
 
   // 复制成功后按钮上显示一会儿「已复制」
   useEffect(() => {
@@ -181,9 +187,16 @@ export function SolvePage(props: {
   }
 
   async function copyToCodex() {
-    if (!pack?.content || selectedHits.length === 0) return;
-    const count = Number.isFinite(pack.itemCount) ? pack.itemCount : selectedHits.length;
-    if (await copy(pack.content, '已复制，去 Codex 里粘贴', `${count} 个参考项目`)) setCopied(true);
+    if (!pack?.content || (!direct && selectedHits.length === 0)) return;
+    const detail = direct
+      ? '直接交给 Codex'
+      : `${Number.isFinite(pack.itemCount) ? pack.itemCount : selectedHits.length} 个参考项目`;
+    if (await copy(pack.content, '已复制，去 Codex 里粘贴', detail)) setCopied(true);
+  }
+
+  function updatePicked(update: (current: string[]) => string[]) {
+    setDirect(false);
+    setPicked(update);
   }
 
   function retryPack() {
@@ -266,9 +279,9 @@ export function SolvePage(props: {
               error={error}
               result={result}
               picked={picked}
-              onToggle={(id) => setPicked((current) => togglePick(current, id))}
+              onToggle={(id) => updatePicked((current) => togglePick(current, id))}
               onOpen={(id) => setOpenedId(id)}
-              onMakeMain={(id) => setPicked((current) => makeMain(current, id))}
+              onMakeMain={(id) => updatePicked((current) => makeMain(current, id))}
               onRetry={() => runSearch(query)}
               onOpenDiscover={openDiscover}
             />
@@ -281,14 +294,17 @@ export function SolvePage(props: {
           <div className="flex min-h-12 shrink-0 flex-wrap items-center gap-2.5 border-b border-muted px-4 py-2">
             <h3 className="m-0 text-base font-semibold whitespace-nowrap text-foreground">参考包</h3>
             <span className="text-xs font-medium text-on-surface-variant">
-              已选 {selectedHits.length} 个
-              {selectedHits.length > 0 && pack?.content ? ` · 约 ${pack.content.length.toLocaleString('zh-CN')} 字` : ''}
+              {direct ? '不选工具 · 直接交给 Codex' : `已选 ${selectedHits.length} 个`}
+              {(direct || selectedHits.length > 0) && pack?.content ? ` · 约 ${pack.content.length.toLocaleString('zh-CN')} 字` : ''}
             </span>
             <div className="min-w-2 flex-1" />
-            {format !== 'json' && selectedHits.length > 0 ? (
+            {format !== 'json' && (direct || selectedHits.length > 0) ? (
               <Button variant="text" size="sm" onClick={() => setShowRaw((current) => !current)}>
                 {showRaw ? '看排版' : '看原文'}
               </Button>
+            ) : null}
+            {direct ? (
+              <Button variant="text" size="sm" onClick={() => setDirect(false)}>{BACK_TO_PICK_LABEL}</Button>
             ) : null}
             <Segmented
               options={formatOptions}
@@ -308,8 +324,17 @@ export function SolvePage(props: {
           {pack && pack.missing.length > 0 ? (
             <p className="m-0 shrink-0 px-4 pt-2.5 text-xs text-on-surface-variant">有 {pack.missing.length} 个项目已不在库里，已跳过</p>
           ) : null}
-          {selectedHits.length === 0 ? (
-            <pre className={PREVIEW_CLASS}>{packPlaceholder(format)}</pre>
+          {!direct && selectedHits.length === 0 ? (
+            result ? (
+              <div className="flex min-h-[180px] flex-1 flex-col overflow-auto bg-background px-4 py-3.5 max-[899px]:max-h-[70vh] min-[900px]:max-h-none">
+                <pre className="m-0 font-mono text-xs leading-[1.7] break-words whitespace-pre-wrap text-foreground [overflow-wrap:anywhere]">{packPlaceholder(format)}</pre>
+                <div className="pt-2">
+                  <Button variant="text" onClick={() => setDirect(true)}>{DIRECT_LABEL}</Button>
+                </div>
+              </div>
+            ) : (
+              <pre className={PREVIEW_CLASS}>{packPlaceholder(format)}</pre>
+            )
           ) : packView?.error ? (
             <div className="flex flex-1 flex-col items-start justify-center gap-2 px-4 py-6">
               <p className="m-0 text-sm text-on-surface-variant">{packView.error}</p>
@@ -338,8 +363,8 @@ export function SolvePage(props: {
             scenarios={scenarios}
             picked={picked.includes(hit.id)}
             isMain={picked[0] === hit.id}
-            onTogglePick={() => setPicked((current) => togglePick(current, hit.id))}
-            onMakeMain={() => setPicked((current) => makeMain(current, hit.id))}
+            onTogglePick={() => updatePicked((current) => togglePick(current, hit.id))}
+            onMakeMain={() => updatePicked((current) => makeMain(current, hit.id))}
             onClose={() => setOpenedId(null)}
             onOpenToolbox={props.onOpenToolbox}
           />

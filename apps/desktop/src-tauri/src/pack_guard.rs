@@ -634,6 +634,26 @@ pub(crate) fn done_items(problem: &str) -> [&'static str; 3] {
     }
 }
 
+/// 没有合适的收藏、直接交给 Codex 时的三步。工具提示只看第一类任务，不写具体项目。
+pub(crate) fn direct_steps(problem: &str) -> [String; 3] {
+    let hint = match task_kinds(problem).first() {
+        Some(TaskKind::Video) => "ffmpeg（剪辑、转码、烧字幕），macOS 自带的 afconvert 处理音频",
+        Some(TaskKind::Records) | Some(TaskKind::Writing) => {
+            "macOS 自带的 textutil 和 pandoc 可以转文档格式"
+        }
+        Some(TaskKind::Batch) | Some(TaskKind::Visual) | Some(TaskKind::General) | None => {
+            "macOS 自带的 sips 可以改图片尺寸和格式；常见的还有 magick（ImageMagick）、cwebp"
+        }
+    };
+    [
+        format!(
+            "先查这台电脑上已经有什么：已装的 Skill 和 MCP（只看名字，不要读里面的密钥），以及命令行里现成的工具（{hint}）；用 which 查有没有。"
+        ),
+        "现成的够用就直接做：可以把几条现成命令串起来完成这一次的活，但不要开发一个新软件，也不要为这件事装来路不明的东西。".to_owned(),
+        "不够用就停下来，告诉我缺什么、已经试过什么，我来决定换办法，还是去找新工具。".to_owned(),
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -928,6 +948,39 @@ mod tests {
         assert!(done_items("把群聊记录整理成日报")[1].contains("隐私"));
         assert!(done_items("批量改图尺寸和压缩")[0].contains("数量"));
         assert!(done_items("写爆款标题")[1].contains("逐字核对"));
+    }
+
+    #[test]
+    fn direct_steps_pick_a_hint_and_keep_the_other_two_lines() {
+        let batch = direct_steps("批量改图尺寸和压缩");
+        assert!(batch[0].contains("sips"), "{}", batch[0]);
+        assert!(batch[0].contains("magick"), "{}", batch[0]);
+        assert!(batch[0].contains("cwebp"), "{}", batch[0]);
+        let video = direct_steps("给短视频加字幕");
+        assert!(video[0].contains("ffmpeg"), "{}", video[0]);
+        assert!(video[0].contains("afconvert"), "{}", video[0]);
+        assert!(!video[0].contains("sips"), "{}", video[0]);
+        let records = direct_steps("把群聊记录整理成日报");
+        assert!(records[0].contains("textutil"), "{}", records[0]);
+        assert!(records[0].contains("pandoc"), "{}", records[0]);
+        let writing = direct_steps("写爆款标题");
+        assert!(writing[0].contains("pandoc"), "{}", writing[0]);
+        let visual = direct_steps("做小红书封面");
+        assert!(visual[0].contains("sips"), "{}", visual[0]);
+        let unknown = direct_steps("随便做点什么");
+        assert!(unknown[0].contains("sips"), "{}", unknown[0]);
+        for steps in [&batch, &video, &records, &writing, &visual, &unknown] {
+            assert_eq!(
+                steps[1],
+                "现成的够用就直接做：可以把几条现成命令串起来完成这一次的活，但不要开发一个新软件，也不要为这件事装来路不明的东西。"
+            );
+            assert_eq!(
+                steps[2],
+                "不够用就停下来，告诉我缺什么、已经试过什么，我来决定换办法，还是去找新工具。"
+            );
+            assert!(steps[0].starts_with("先查这台电脑上已经有什么"));
+            assert!(steps[0].contains("用 which 查有没有。"));
+        }
     }
 
     #[test]

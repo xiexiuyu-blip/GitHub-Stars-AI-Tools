@@ -188,12 +188,30 @@ export function pickLocalCapabilities(
   return [...installed, ...scored.slice(0, Math.max(0, limit)).map((entry) => entry.item)];
 }
 
-/** 第一个是主参考，其余是备选。why 原样带上。local 是本机已装的相关能力（见 pickLocalCapabilities）。 */
+/** 参考包面板里，一个工具都没勾时的入口。 */
+export const DIRECT_LABEL = '没有合适的？直接交给 Codex';
+/** 从直接交接单回到勾选工具。 */
+export const BACK_TO_PICK_LABEL = '改回挑工具';
+
+/**
+ * 第一个是主参考，其余是备选。why 原样带上。local 是本机已装的相关能力（见 pickLocalCapabilities）。
+ * direct 为真时不带任何工具：标题换成「直接交给 Codex」，mode 写成 direct。为假时不写 mode。
+ */
 export function buildPackRequest(
   query: string,
   hits: readonly SolveHit[],
   local: readonly LocalCapabilityInput[] = [],
+  direct = false,
 ): PackRequest {
+  if (direct) {
+    return {
+      title: `直接交给 Codex：${query}`,
+      problem: query,
+      items: [],
+      localCapabilities: [...local],
+      mode: 'direct',
+    };
+  }
   return {
     title: `参考包：${query}`,
     problem: query,
