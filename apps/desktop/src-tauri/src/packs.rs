@@ -1382,7 +1382,12 @@ fn flatten_joined(input: &str, commands: bool) -> String {
         }
         if !joined.is_empty() {
             if commands {
-                joined.push('；');
+                // 行尾是管道 / 续行符 / 「&&」：下一行是同一条命令的后半截，不是新的一条
+                if ["|", "\\", "&&"].iter().any(|tail| joined.ends_with(tail)) {
+                    joined.push(' ');
+                } else {
+                    joined.push('；');
+                }
             } else if !(ends_with_cjk(&joined) && starts_with_cjk(trimmed)) {
                 joined.push(' ');
             }
@@ -2387,6 +2392,16 @@ mod tests {
             "uv run wechat-daily doctor；uv run wechat-daily run --date today"
         );
         assert_eq!(flatten_commands("a\n\n  \r\nb"), "a；b");
+        // 管道 / 续行符 / && 结尾的行和下一行是同一条命令
+        assert_eq!(
+            flatten_commands("curl -fsSL https://x.dev/i.sh |\nbash\ncd b"),
+            "curl -fsSL https://x.dev/i.sh | bash；cd b"
+        );
+        assert_eq!(
+            flatten_commands("npm install \\\n  --save foo\nnpm run dev"),
+            "npm install \\ --save foo；npm run dev"
+        );
+        assert_eq!(flatten_commands("cd b &&\nmake"), "cd b && make");
         assert_eq!(flatten_commands("单行"), "单行");
         assert_eq!(flatten_commands(""), "");
     }

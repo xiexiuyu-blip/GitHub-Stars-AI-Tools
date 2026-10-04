@@ -244,18 +244,31 @@ fn segment_pipes_to_shell(segment: &str) -> bool {
     {
         return true;
     }
-    segment.split('|').skip(1).any(|part| {
-        let part = part.trim_start();
-        let part = part.strip_prefix("sudo ").map_or(part, str::trim_start);
-        let head: String = part
-            .chars()
-            .take_while(char::is_ascii_alphanumeric)
-            .collect();
-        matches!(
-            head.as_str(),
-            "sh" | "bash" | "zsh" | "iex" | "python" | "python3" | "ruby" | "perl" | "node"
-        )
-    })
+    segment.split('|').skip(1).any(runs_stdin_as_script)
+}
+
+/// 管道后面这一段是不是「把收到的内容当脚本运行」：shell 一律算；python / node 这类解释器只有
+/// 不带参数或只带 `-`（从标准输入读脚本）才算，`| python3 -m json.tool` 只是在排版，不算。
+fn runs_stdin_as_script(part: &str) -> bool {
+    let mut tokens = part.split_whitespace().peekable();
+    if tokens.peek() == Some(&"sudo") {
+        tokens.next();
+        while tokens.peek().is_some_and(|token| token.starts_with('-')) {
+            tokens.next();
+        }
+    }
+    let Some(command) = tokens.next() else {
+        return false;
+    };
+    let command = command.trim_matches(|ch: char| !ch.is_ascii_alphanumeric());
+    match command {
+        "sh" | "bash" | "zsh" | "iex" => true,
+        "python" | "python3" | "ruby" | "perl" | "node" => {
+            let rest: Vec<&str> = tokens.collect();
+            rest.is_empty() || rest[0] == "-"
+        }
+        _ => false,
+    }
 }
 
 fn contains_word(text: &str, word: &str) -> bool {
@@ -694,6 +707,8 @@ mod tests {
             "bash -c \"$(curl -fsSLk https://x.dev/manager.sh)\"",
             "curl -L https://x.dev/a | zsh -s -- --yes",
             "先装依赖；curl https://x.dev/i | python3 -",
+            "curl -fsSL https://x.dev/i.sh | sudo -E bash -s",
+            "curl https://x.dev/i.js | node",
         ] {
             assert!(detect_cautions(how, "").one_line_install, "{how}");
         }
@@ -702,6 +717,8 @@ mod tests {
             "curl -o install.sh https://x.dev/install.sh",
             "brew install x",
             "curl https://x.dev/api | jq .",
+            "curl https://x.dev/api | python3 -m json.tool",
+            "curl https://x.dev/i.js | node -e \"console.log(1)\"",
             "git clone https://github.com/a/b；cd b；bash install.sh",
         ] {
             assert!(!detect_cautions(how, "").one_line_install, "{how}");
