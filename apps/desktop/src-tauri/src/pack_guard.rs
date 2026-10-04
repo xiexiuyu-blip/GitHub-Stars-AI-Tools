@@ -342,45 +342,53 @@ pub(crate) fn detect_cautions(how_to_try: &str, risks: &str) -> Cautions {
         foreign: foreign_install(&how_for_admin, sudo_linux),
         sudo_docker,
         claude_plugin: how.contains("/plugin "),
-        clone_outside: clone_outside_task_folder(&how),
+        clone_outside: clone_outside_task_folder(how_to_try),
     }
 }
 
 /// `git clone <地址> <目录>` 里的目录：不是任务目录（以 `~/`、`/`、`$home` 开头），又不是 skills 目录
-/// （Skill 就该 clone 进 skills 目录）。返回那个路径。
+/// （Skill 就该 clone 进 skills 目录）。返回那个路径（保留原来的大小写，写给 Codex 看的）。
 fn clone_outside_task_folder(how: &str) -> Option<String> {
-    let tokens: Vec<&str> = how.split_whitespace().collect();
+    let lowered = how.to_lowercase();
+    let original: Vec<&str> = how.split_whitespace().collect();
+    let tokens: Vec<&str> = lowered.split_whitespace().collect();
+    if original.len() != tokens.len() {
+        return None;
+    }
+    let trailing = ['，', '；', ',', ';', '。', ')', '）'];
     for (index, token) in tokens.iter().enumerate() {
         if *token != "clone" || index == 0 || tokens[index - 1] != "git" {
             continue;
         }
-        let mut positional: Vec<&str> = Vec::new();
-        let mut rest = tokens[index + 1..].iter();
-        while let Some(token) = rest.next() {
-            if matches!(*token, "&&" | ";" | "|" | "；") {
+        let mut positional: Vec<usize> = Vec::new();
+        let mut cursor = index + 1;
+        while cursor < tokens.len() {
+            let token = tokens[cursor];
+            cursor += 1;
+            if matches!(token, "&&" | ";" | "|" | "；") {
                 break;
             }
             if token.starts_with('-') {
-                if matches!(*token, "--depth" | "-b" | "--branch" | "--config" | "-c") {
-                    rest.next();
+                if matches!(token, "--depth" | "-b" | "--branch" | "--config" | "-c") {
+                    cursor += 1;
                 }
                 continue;
             }
-            positional.push(token);
+            positional.push(cursor - 1);
             if positional.len() == 2 {
                 break;
             }
         }
-        let Some(dest) = positional.get(1) else {
+        let Some(&dest_index) = positional.get(1) else {
             continue;
         };
-        let dest = dest.trim_end_matches(['，', '；', ',', ';', '。', ')', '）']);
+        let dest = tokens[dest_index].trim_end_matches(trailing);
         let outside = dest.starts_with("~/")
             || dest == "~"
             || (dest.starts_with('/') && !dest.starts_with("//"))
             || dest.starts_with("$home");
         if outside && !dest.contains("/skills") {
-            return Some(dest.to_owned());
+            return Some(original[dest_index].trim_end_matches(trailing).to_owned());
         }
     }
     None
@@ -2136,6 +2144,19 @@ mod tests {
             .notes()
             .iter()
             .any(|note| note.contains("~/y") && note.contains("目标文件夹")));
+        // 写给 Codex 看的路径保留原来的大小写；大小写不同的 Git Clone / ~/Skills 照样认
+        let mixed = detect_cautions(
+            "Git Clone https://x/y ~/Developer/Video-Use && cd ~/Developer/Video-Use",
+            "",
+        );
+        assert_eq!(
+            mixed.clone_outside.as_deref(),
+            Some("~/Developer/Video-Use")
+        );
+        assert_eq!(
+            clone_outside_task_folder("git clone https://x/y ~/.Claude/Skills/y"),
+            None
+        );
     }
 
     #[test]
