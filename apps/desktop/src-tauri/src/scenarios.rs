@@ -260,6 +260,51 @@ pub fn has_evidence(slug: &str, meta_lower: &str, readme_lower: &str) -> bool {
     seed_evidence(slug).satisfied(meta_lower, readme_lower)
 }
 
+/// 种子里每个场景的关键词（小写；用户自己加的场景没有）。
+fn seed_keywords(slug: &str) -> Vec<String> {
+    static KEYWORDS: std::sync::OnceLock<std::collections::HashMap<String, Vec<String>>> =
+        std::sync::OnceLock::new();
+    KEYWORDS
+        .get_or_init(|| {
+            load_seed()
+                .map(|seed| {
+                    seed.scenarios
+                        .into_iter()
+                        .map(|scenario| {
+                            let words = scenario
+                                .keywords
+                                .iter()
+                                .map(|word| word.trim().to_lowercase())
+                                .filter(|word| !word.is_empty())
+                                .collect::<Vec<_>>();
+                            (scenario.slug, words)
+                        })
+                        .collect()
+                })
+                .unwrap_or_default()
+        })
+        .get(slug)
+        .cloned()
+        .unwrap_or_default()
+}
+
+/// 材料里有没有这个场景自己的关键词作依据：名称 / 描述 / topics 里有一个，或 README 里这些词一共出现至少两次。
+/// 返回第一个命中的词（给理解卡当「证据」写进去）。种子里没有这个场景（用户自己加的）就返回 `None`。
+pub fn keyword_support(slug: &str, meta_lower: &str, readme_lower: &str) -> Option<String> {
+    let keywords = seed_keywords(slug);
+    if let Some(hit) = keyword_hits(meta_lower, &keywords).into_iter().next() {
+        return Some(hit);
+    }
+    let mentions: usize = keywords
+        .iter()
+        .map(|word| count_keyword(readme_lower, word))
+        .sum();
+    if mentions >= README_EVIDENCE_MIN_MENTIONS {
+        return keyword_hits(readme_lower, &keywords).into_iter().next();
+    }
+    None
+}
+
 /// 关键词和文本都按小写比较。
 /// 全是 ASCII 字母数字、且长度不超过 4 的词，只从词首匹配：左边不能是字母或数字，右边可以继续。
 /// 这样 `ppt` 能命中 `pptx-tools`，`rag` 不会从 `storage` 中间命中，`seo` 不会从 `videoseoul` 中间命中；
@@ -1758,6 +1803,34 @@ mod tests {
         assert_eq!(
             apply_ai_scenarios(&mut connection, "acct", "dev", &slugs, 0.8).expect("应写入"),
             0
+        );
+    }
+
+    #[test]
+    fn keyword_support_needs_one_hit_in_the_repo_text_or_two_mentions_in_the_readme() {
+        assert_eq!(
+            keyword_support("xhs", "做小红书封面", ""),
+            Some("小红书".to_owned())
+        );
+        assert_eq!(
+            keyword_support("img", "封面工具", ""),
+            Some("封面".to_owned())
+        );
+        // README：同一个词两次、或两个不同的词，都算；只有一次不算
+        assert_eq!(
+            keyword_support("xhs", "", "小红书图文，小红书封面"),
+            Some("小红书".to_owned())
+        );
+        assert_eq!(
+            keyword_support("img", "", "做海报，也做封面"),
+            Some("海报".to_owned())
+        );
+        assert_eq!(keyword_support("img", "", "顺带能做海报"), None);
+        assert_eq!(keyword_support("vid", "做封面", ""), None);
+        // 用户自己加的场景：种子里没有，没法核对
+        assert_eq!(
+            keyword_support("my-own", "什么都有", "什么都有 什么都有"),
+            None
         );
     }
 

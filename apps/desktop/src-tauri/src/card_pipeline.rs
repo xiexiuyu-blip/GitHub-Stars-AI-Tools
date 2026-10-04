@@ -799,8 +799,10 @@ fn squash(text: &str) -> String {
 }
 
 /// 模型写完之后再核一遍（不花 token）：
-/// - 场景标签必须有证据：`scenario_evidence` 里的原话要真的出现在材料里（仓库名 / 描述 / topics / README 摘录），
-///   平台类、自动化、SEO 还要字面出现证据词（见 `scenarios::has_evidence`）；不过关的标签去掉。
+/// - 场景标签必须有依据：`scenario_evidence` 里的原话要真的出现在材料里（仓库名 / 描述 / topics / README 摘录）；
+///   原话对不上（改写、翻译）时，场景自己的关键词在材料里字面出现也行（`scenarios::keyword_support`）；
+///   平台类、自动化、SEO 还要字面出现证据词（`scenarios::has_evidence`）；不过关的标签去掉。
+/// - 项目已停更（maturity=stale）：场景标签整个去掉。
 /// - `audience` 是 developer、又只剩「自动化」一个标签：整个去掉（开发者工具不是运营自动化）。
 /// - 工具类的卡「用之前注意」不能空：补一句「README 没写限制，需要自己试」。
 fn refine_card(card: &mut ValidCard, input: &CardInput, warnings: &mut Vec<String>) {
@@ -848,16 +850,22 @@ fn refine_card(card: &mut ValidCard, input: &CardInput, warnings: &mut Vec<Strin
                 .and_then(Value::as_str)
                 .map(str::trim)
                 .unwrap_or("");
-            if quote.is_empty() || !haystack.contains(&squash(quote)) {
-                warnings.push(format!("场景「{slug}」没有可核对的原话，已去掉"));
+            // 依据：模型给的原话真的在材料里；原话对不上（改写、翻译）时，场景自己的关键词在材料里字面出现也行
+            let basis = if !quote.is_empty() && haystack.contains(&squash(quote)) {
+                Some(quote.to_owned())
+            } else {
+                crate::scenarios::keyword_support(slug, &meta, &readme)
+            };
+            let Some(basis) = basis else {
+                warnings.push(format!("场景「{slug}」没有可核对的依据，已去掉"));
                 continue;
-            }
+            };
             if !crate::scenarios::has_evidence(slug, &meta, &readme) {
                 warnings.push(format!("场景「{slug}」在材料里没有字面证据，已去掉"));
                 continue;
             }
             kept.push(slug.clone());
-            kept_evidence.insert(slug.clone(), Value::String(quote.to_owned()));
+            kept_evidence.insert(slug.clone(), Value::String(basis));
         }
         kept.truncate(3);
         if object.get("audience").and_then(Value::as_str) == Some("developer")
@@ -865,6 +873,11 @@ fn refine_card(card: &mut ValidCard, input: &CardInput, warnings: &mut Vec<Strin
             && kept[0] == "auto"
         {
             warnings.push("开发者工具只剩「自动化」一个场景，已去掉".to_owned());
+            kept.clear();
+        }
+        // 已弃用 / 已清空 / 已迁移的项目（maturity=stale）不该再被「按场景」推荐
+        if object.get("maturity").and_then(Value::as_str) == Some("stale") && !kept.is_empty() {
+            warnings.push("项目已停更，场景标签已去掉".to_owned());
             kept.clear();
         }
         kept_evidence.retain(|slug, _| kept.contains(slug));
@@ -3136,6 +3149,8 @@ https://img.shields.io/github/stars/fox/demo
 
     fn refine_input(readme: Option<&str>, description: &str) -> CardInput {
         let mut input = sample_input(true);
+        // 名字里别带平台词：免得「名称里有 xhs」让规则替模型把标签补上，盖住要测的东西
+        input.full_name = "fox/tool".to_owned();
         input.description = description.to_owned();
         input.topics = vec!["cover".to_owned()];
         input.readme = readme.map(|text| ReadmeExcerpt {
@@ -3272,7 +3287,10 @@ https://img.shields.io/github/stars/fox/demo
 
     #[test]
     fn refine_keeps_a_tag_only_when_its_quote_is_really_in_the_material() {
-        let input = refine_input(Some("# 工具\n\n用来做小红书封面，也能出海报。"), "封面工具");
+        let input = refine_input(
+            Some("# 工具\n\n用来做小红书封面，小红书图文也行，也能出海报。"),
+            "封面工具",
+        );
         let mut warnings = Vec::new();
         // 原话在 README 里（空白、大小写不同也认）
         let mut card = refinable(
@@ -3285,17 +3303,42 @@ https://img.shields.io/github/stars/fox/demo
         assert_eq!(card.value["scenario_tags"], json!(["xhs", "img"]));
         assert_eq!(card.value["scenario_evidence"]["img"], "也能出海报");
         assert!(warnings.is_empty(), "{warnings:?}");
-        // 原话是编的 / 没写 / 空：去掉
+        // 原话是编的 / 没写：退一步看场景自己的关键词在材料里有没有字面出现。
+        // xhs：「小红书」在 README 里出现两次；img：「封面」在描述里；依据换成命中的关键词。vid：一个视频的词都没有，去掉
         let mut card = refinable(
             &["xhs", "img", "vid"],
             json!({"xhs": "支持一键发布到小红书", "img": ""}),
             "business",
             "app",
         );
+        let mut warnings = Vec::new();
+        refine_card(&mut card, &input, &mut warnings);
+        assert_eq!(card.value["scenario_tags"], json!(["xhs", "img"]));
+        assert_eq!(card.value["scenario_evidence"]["xhs"], "小红书");
+        assert_eq!(card.value["scenario_evidence"]["img"], "封面");
+        assert!(card.value["scenario_evidence"].get("vid").is_none());
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("vid"));
+    }
+
+    #[test]
+    fn refine_drops_every_scenario_tag_of_a_stale_project() {
+        let input = refine_input(Some("# 工具\n\n用来做海报，也能做封面。"), "海报封面工具");
+        let mut card = refinable(&["img"], json!({"img": "用来做海报"}), "business", "app");
+        card.value["maturity"] = json!("stale");
+        let mut warnings = Vec::new();
         refine_card(&mut card, &input, &mut warnings);
         assert_eq!(card.value["scenario_tags"], json!([]));
         assert_eq!(card.value["scenario_evidence"], json!({}));
-        assert_eq!(warnings.len(), 3, "{warnings:?}");
+        assert!(
+            warnings.iter().any(|text| text.contains("停更")),
+            "{warnings:?}"
+        );
+        // 现行的项目照常保留
+        let mut card = refinable(&["img"], json!({"img": "用来做海报"}), "business", "app");
+        card.value["maturity"] = json!("usable");
+        refine_card(&mut card, &input, &mut Vec::new());
+        assert_eq!(card.value["scenario_tags"], json!(["img"]));
     }
 
     #[test]
@@ -3334,7 +3377,7 @@ https://img.shields.io/github/stars/fox/demo
     #[test]
     fn refine_clears_a_lone_automation_tag_on_developer_tools_and_caps_the_list() {
         let input = refine_input(
-            Some("# x\n\n用 n8n 做流程，n8n 模板，做小红书封面，做海报，做配图，做文案。"),
+            Some("# x\n\n用 n8n 做流程，n8n 模板，做小红书封面，小红书笔记，做海报，做配图，做文案。"),
             "封面工具 自动化",
         );
         let quotes = json!({"auto": "用 n8n 做流程", "xhs": "做小红书封面", "img": "做海报", "wr": "做文案"});
