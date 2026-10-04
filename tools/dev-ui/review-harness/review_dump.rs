@@ -932,6 +932,7 @@ fn review_tasks_dump() {
                 })
                 .collect(),
             local_capabilities: vec![],
+            mode: packs::PackMode::UseTools,
         };
         let generated_on = packs::resolve_generated_on(None);
         let markdown = packs::build_pack(&connection, &request, packs::PackFormat::Markdown, &generated_on)
@@ -1034,6 +1035,7 @@ fn review_cautions_stats() {
                 })
                 .collect(),
             local_capabilities: vec![],
+            mode: packs::PackMode::UseTools,
         };
         let json = packs::build_pack(&connection, &request, packs::PackFormat::Json, "2026-10-05")
             .expect("JSON 参考包");
