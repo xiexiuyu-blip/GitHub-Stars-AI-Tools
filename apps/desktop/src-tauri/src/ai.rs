@@ -2782,6 +2782,7 @@ mod card_chat {
             &body,
             api_key,
             parse_openai_chat_reply,
+            call_timeout_seconds(max_output_tokens),
         )
     }
 
@@ -2817,7 +2818,15 @@ mod card_chat {
             &body,
             config.api_key.trim(),
             parse_anthropic_reply,
+            call_timeout_seconds(max_output_tokens),
         )
+    }
+
+    /// 一次调用等多久：输出额度越大，模型写得越久。思考型模型约 60 token/s（2026-10-04 真实记录：2048 token 的被截断调用
+    /// 用了 23–60 秒，平均 33 秒），固定 120 秒的时限会把写到 7000 多 token 的调用掐断（已经计费的白花）。
+    /// 按「每秒至少 40 token」给：2048 → 120 秒（不低于原来的），8192 → 264 秒，16384 → 469 秒。
+    pub(super) fn call_timeout_seconds(max_output_tokens: u32) -> u64 {
+        (60 + u64::from(max_output_tokens) / 40).max(u64::from(AI_REQUEST_TIMEOUT_SECONDS))
     }
 
     fn post_json(
@@ -2826,10 +2835,11 @@ mod card_chat {
         body: &str,
         api_key: &str,
         parse: fn(&str) -> Result<ChatReply, ChatError>,
+        timeout_seconds: u64,
     ) -> Result<ChatReply, ChatError> {
         let client = reqwest::blocking::Client::builder()
             .connect_timeout(Duration::from_secs(u64::from(AI_CONNECT_TIMEOUT_SECONDS)))
-            .timeout(Duration::from_secs(u64::from(AI_REQUEST_TIMEOUT_SECONDS)))
+            .timeout(Duration::from_secs(timeout_seconds))
             .build()
             .map_err(|_| ChatError {
                 kind: ChatErrorKind::Network,
@@ -2842,7 +2852,7 @@ mod card_chat {
         let response = request
             .body(body.to_owned())
             .send()
-            .map_err(|error| map_transport_error(&error, api_key))?;
+            .map_err(|error| map_transport_error(&error, api_key, timeout_seconds))?;
         let status = response.status();
         let retry_after = response
             .headers()
@@ -2865,12 +2875,16 @@ mod card_chat {
         })
     }
 
-    fn map_transport_error(error: &reqwest::Error, api_key: &str) -> ChatError {
+    fn map_transport_error(
+        error: &reqwest::Error,
+        api_key: &str,
+        timeout_seconds: u64,
+    ) -> ChatError {
         let (kind, message) = if error.is_timeout() {
             (
                 ChatErrorKind::Timeout,
                 format!(
-                    "AI 接口请求超时，请检查请求地址、模型或网络（已等待 {AI_REQUEST_TIMEOUT_SECONDS} 秒）。"
+                    "AI 接口请求超时，请检查请求地址、模型或网络（已等待 {timeout_seconds} 秒）。"
                 ),
             )
         } else if error.is_connect() || error.is_request() {
@@ -4422,6 +4436,19 @@ mod tests {
 
         assert_eq!(error.kind, ChatErrorKind::Other);
         assert!(error.message.contains("没有可用内容"));
+    }
+
+    #[test]
+    fn a_bigger_output_limit_gets_a_longer_wait() {
+        // 思考型模型约 60 token/s：2048 → 不低于原来的 120 秒；8192 → 264 秒；16384 → 469 秒（原来固定 120 秒会掐断写到 7000 多 token 的调用）
+        assert_eq!(card_chat::call_timeout_seconds(0), 120);
+        assert_eq!(card_chat::call_timeout_seconds(2_048), 120);
+        assert_eq!(card_chat::call_timeout_seconds(8_192), 264);
+        assert_eq!(card_chat::call_timeout_seconds(16_384), 469);
+        assert!(
+            card_chat::call_timeout_seconds(8_192) > 8_192 / 65 + 60,
+            "按每秒 65 token 写满 8192 也等得起"
+        );
     }
 
     #[test]
