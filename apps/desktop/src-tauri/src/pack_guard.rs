@@ -1561,6 +1561,11 @@ mod tests {
             vec![TaskKind::Transcribe]
         );
         assert_eq!(task_kinds("做表情包"), vec![TaskKind::Visual]);
+        assert_eq!(task_kinds("做微信贴纸"), vec![TaskKind::Visual]);
+        assert_eq!(
+            task_kinds("把视频做成动图"),
+            vec![TaskKind::Visual, TaskKind::Video]
+        );
         assert_eq!(task_kinds("写周报"), vec![TaskKind::Records]);
     }
 
@@ -1829,9 +1834,39 @@ mod tests {
         assert!(analysis[0].contains("sqlite3"), "{}", analysis[0]);
         let operate = direct_steps("批量发布小红书笔记");
         assert!(operate[0].contains("先别真的发"), "{}", operate[0]);
+        let transcribe = direct_steps("把会议录音转成文字稿");
+        assert!(
+            transcribe[0].contains("ffmpeg") && transcribe[0].contains("whisper"),
+            "{}",
+            transcribe[0]
+        );
+        assert!(
+            transcribe[0].contains("本机没有就先告诉我"),
+            "{}",
+            transcribe[0]
+        );
+        assert!(!transcribe[0].contains("sips"), "{}", transcribe[0]);
+        let watermark = direct_steps("批量去除图片水印");
+        assert!(
+            watermark[0].contains("sips") && watermark[0].contains("magick"),
+            "{}",
+            watermark[0]
+        );
+        assert!(watermark[0].contains("ffmpeg"), "{}", watermark[0]);
+        assert!(watermark[0].contains("AI 修补"), "{}", watermark[0]);
         for steps in [
-            &batch, &video, &records, &writing, &visual, &unknown, &convert, &scrape, &analysis,
+            &batch,
+            &video,
+            &records,
+            &writing,
+            &visual,
+            &unknown,
+            &convert,
+            &scrape,
+            &analysis,
             &operate,
+            &transcribe,
+            &watermark,
         ] {
             assert_eq!(
                 steps[1],
