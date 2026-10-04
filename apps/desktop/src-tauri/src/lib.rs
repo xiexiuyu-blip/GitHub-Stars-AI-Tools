@@ -1095,6 +1095,25 @@ fn enqueue_cards_now(app_handle: tauri::AppHandle, scope: String) -> Result<usiz
     card_handler::enqueue_cards_for_scope(storage.database_path(), &scope)
 }
 
+/// 开始「全量整理」：这一轮不受每天额度限制（最长 48 小时，整理完自动回到每天额度）。
+/// 花钱的决定只能由 Fox 本人做：界面先弹确认，确认后带 `confirmed = true` 调用，没带就拒绝。
+#[tauri::command]
+fn start_full_scan(
+    app_handle: tauri::AppHandle,
+    confirmed: bool,
+) -> Result<card_handler::AutomationStatus, String> {
+    let storage = AppStorage::from_app_handle(&app_handle)?;
+    let settings = read_app_settings_value(&app_handle)?;
+    card_handler::start_full_scan(storage.database_path(), &settings, confirmed)
+}
+
+#[tauri::command]
+fn stop_full_scan(app_handle: tauri::AppHandle) -> Result<card_handler::AutomationStatus, String> {
+    let storage = AppStorage::from_app_handle(&app_handle)?;
+    let settings = read_app_settings_value(&app_handle)?;
+    card_handler::stop_full_scan(storage.database_path(), &settings)
+}
+
 #[tauri::command]
 fn get_local_api_status(app_handle: tauri::AppHandle) -> Result<local_api::LocalApiStatus, String> {
     let storage = AppStorage::from_app_handle(&app_handle)?;
@@ -7272,6 +7291,8 @@ pub fn run() {
             get_ai_automation,
             set_ai_automation,
             enqueue_cards_now,
+            start_full_scan,
+            stop_full_scan,
             list_scenarios,
             reclassify_scenarios,
             set_repository_scenario,
@@ -7416,6 +7437,14 @@ mod tests {
             breaker.failed(engine, true),
             Some(BATCH_STOP_AFTER_FAILURES)
         );
+    }
+
+    #[test]
+    fn full_scan_commands_are_allowed_by_main_capability() {
+        let permissions = include_str!("../permissions/gsat-commands.toml");
+
+        assert!(permissions.contains("\"start_full_scan\""));
+        assert!(permissions.contains("\"stop_full_scan\""));
     }
 
     #[test]

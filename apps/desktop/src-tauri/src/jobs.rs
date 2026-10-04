@@ -6,6 +6,9 @@
 //! 后一次认领一定看得见前一次的预留；任务结束时预留换成真实用量（失败按种类记）。
 //! 取消、崩溃、被打断的任务保留预留，账不会消失。旧版 AI 功能不走队列，由 `spend_guard` 记进同一本账。
 //!
+//! 唯一的例外是「全量整理」（`fullScan`）：Fox 亲手点了确认之后，这一轮不看每天额度，一直整理到全部完成，
+//! 最长 `FULL_SCAN_SECS`（48 小时），之后自动回到每天额度。用量照常记账；用量超过「预计 × 4」的刹车线也会自动结束。
+//!
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -18,6 +21,15 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 const MAX_DAILY_BUDGET: u64 = 2_000_000;
+
+/// 「全量整理」最长运行多久（从开始算）。Fox 点了确认才开，到点自动结束，免得忘了关就一直不限额。
+pub(crate) const FULL_SCAN_SECS: i64 = 48 * 60 * 60;
+/// 一张理解卡用多少 token（2026-10-04 试跑实测约 5k，含思考）。只用来给全量整理算「远超预计」的刹车线。
+const FULL_SCAN_TOKENS_PER_CARD: i64 = 5_200;
+/// 全量整理的用量超过「预计 × 4」（至少 300 万）就自动结束：说明哪里不对劲了（死循环、反复重试、提示词暴涨），
+/// 比让它一直不限额地花下去强。正常整理远到不了这条线。
+const FULL_SCAN_CEILING_FACTOR: i64 = 4;
+const FULL_SCAN_MIN_CEILING: i64 = 3_000_000;
 pub(crate) const DAY_SECS: i64 = 24 * 60 * 60;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -137,6 +149,8 @@ pub struct ClaimCandidate {
 pub struct BudgetGate {
     pub paused: bool,
     pub daily_budget_tokens: u64,
+    /// 全量整理进行中：花钱的任务不看每天额度（暂停照样拦）。
+    pub unlimited: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -145,6 +159,50 @@ pub struct QueueControl {
     pub paused: bool,
     pub daily_budget_tokens: u64,
     pub pause_reason: Option<PauseReason>,
+    /// 全量整理正在进行（Fox 亲手确认过）。没有这一项就按每天额度。
+    pub full_scan: Option<FullScan>,
+    /// 上一轮全量整理怎么结束的，只用来显示。
+    pub last_full_scan: Option<LastFullScan>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FullScan {
+    pub started_at: String,
+    /// 只用来显示。是否还在进行以 `started_at + FULL_SCAN_SECS` 为准，手改这一项不会让它一直不限额。
+    pub until: String,
+    /// 开始时要整理的个数（排队 + 进行中）。
+    pub total: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LastFullScan {
+    pub started_at: String,
+    pub finished_at: String,
+    pub tokens_used: i64,
+    /// `completed` / `stopped` / `expired` / `ceiling`
+    pub reason: String,
+    pub total: i64,
+    /// 结束时还剩几个没整理（排队 + 进行中）。
+    pub remaining: i64,
+    /// 开始以来失败了几个。
+    #[serde(default)]
+    pub failed: i64,
+}
+
+impl QueueControl {
+    /// 全量整理现在是不是在进行。以开始时间为准（开始后 `FULL_SCAN_SECS` 内）：文件里的 `until` 只用来显示，
+    /// 被手改成很远的未来也不会让它一直不限额；时钟倒退、时间读不懂都按「没在进行」算（保守）。
+    pub fn full_scan_active(&self, now: &str) -> bool {
+        let Some(scan) = &self.full_scan else {
+            return false;
+        };
+        let Ok(deadline) = shift_db_time(&scan.started_at, FULL_SCAN_SECS) else {
+            return false;
+        };
+        scan.started_at.as_str() <= now && now < deadline.as_str()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -167,6 +225,8 @@ pub struct QueueStatus {
     pub tokens_24h: i64,
     pub daily_budget: u64,
     pub budget_remaining: u64,
+    /// 全量整理进行中（不看每天额度）。
+    pub unlimited: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -272,9 +332,10 @@ pub fn claim_next(
         .map_err(|error| format!("任务认领失败：{error}"))?;
     // 在跑任务的预留已经写在它们自己的行里，算在 used 里；再加上这一条自己的预留也放得下才认领。
     let used = tokens_used_since(&tx, &cutoff)?.max(0);
-    let spending_open = budget_gate.daily_budget_tokens > 0
-        && (used as u64).saturating_add(CLAIM_RESERVE_TOKENS as u64)
-            <= budget_gate.daily_budget_tokens;
+    let spending_open = budget_gate.unlimited
+        || (budget_gate.daily_budget_tokens > 0
+            && (used as u64).saturating_add(CLAIM_RESERVE_TOKENS as u64)
+                <= budget_gate.daily_budget_tokens);
     let mut eligible: Vec<&str> = Vec::new();
     for candidate in handled_types {
         if candidate.job_type.is_empty() {
@@ -523,12 +584,14 @@ pub fn queue_status(db_path: &Path) -> Result<QueueStatus, String> {
         )
         .map_err(|error| format!("任务计数失败：{error}"))?;
     let tokens_24h = tokens_used_since(&conn, &cutoff)?.max(0);
+    let unlimited = control.full_scan_active(&now_db_time());
     let state = queue_state(
         control.paused,
         control.pause_reason.is_some(),
         running,
         control.daily_budget_tokens,
         tokens_24h,
+        unlimited,
     );
     Ok(QueueStatus {
         state: state.to_owned(),
@@ -540,6 +603,7 @@ pub fn queue_status(db_path: &Path) -> Result<QueueStatus, String> {
         tokens_24h,
         daily_budget: control.daily_budget_tokens,
         budget_remaining: budget_remaining(control.daily_budget_tokens, tokens_24h),
+        unlimited,
     })
 }
 
@@ -735,10 +799,16 @@ fn claim_for_worker(
     db_path: &Path,
     handlers: &[Arc<dyn JobHandler>],
 ) -> Result<Option<JobRecord>, String> {
-    let control = read_control(&queue_control_path(db_path));
+    let control_path = queue_control_path(db_path);
+    let now = now_db_time();
+    let mut conn = open_db(db_path)?;
+    // 全量整理该收尾就先收尾（整理完了 / 到时间 / 用量远超预计），再按收尾后的控制文件认领
+    settle_full_scan(&conn, &control_path, &now)?;
+    let control = read_control(&control_path);
     let gate = BudgetGate {
         paused: control.paused,
         daily_budget_tokens: control.daily_budget_tokens,
+        unlimited: control.full_scan_active(&now),
     };
     let handled = handlers
         .iter()
@@ -747,8 +817,7 @@ fn claim_for_worker(
             spends_tokens: handler.spends_tokens(),
         })
         .collect::<Vec<_>>();
-    let mut conn = open_db(db_path)?;
-    claim_next(&mut conn, &now_db_time(), &handled, &gate)
+    claim_next(&mut conn, &now, &handled, &gate)
 }
 
 fn run_handler(
@@ -896,6 +965,150 @@ pub(crate) fn tokens_used_since(conn: &Connection, cutoff: &str) -> Result<i64, 
 
 /// 队列里某个状态的任务数。旧功能（`spend_guard`）的账本行不算：它们不是队列任务，
 /// 数进去，一次 AI 搜索在途时界面就会说「正在后台整理」「进行中 1」。用量（`tokens_used_since`）照旧含它们。
+/// 全量整理的刹车线：用量超过它就自动结束。按开始时要整理的个数估（每张约 5k，乘 4），至少 300 万。
+pub(crate) fn full_scan_ceiling(total: i64) -> i64 {
+    total
+        .max(0)
+        .saturating_mul(FULL_SCAN_TOKENS_PER_CARD)
+        .saturating_mul(FULL_SCAN_CEILING_FACTOR)
+        .max(FULL_SCAN_MIN_CEILING)
+}
+
+/// 还没整理完的理解卡任务数（排队 + 进行中）。
+pub(crate) fn count_open_cards(conn: &Connection) -> Result<i64, String> {
+    conn.query_row(
+        "SELECT COUNT(*) FROM ai_jobs WHERE job_type = 'repo_card' AND status IN ('queued', 'running')",
+        [],
+        |row| row.get(0),
+    )
+    .map_err(|error| format!("任务计数失败：{error}"))
+}
+
+/// 从 `since` 起失败了几个理解卡任务。
+pub(crate) fn count_failed_cards_since(conn: &Connection, since: &str) -> Result<i64, String> {
+    conn.query_row(
+        "SELECT COUNT(*) FROM ai_jobs
+         WHERE job_type = 'repo_card' AND status = 'failed' AND finished_at IS NOT NULL AND finished_at >= ?1",
+        [since],
+        |row| row.get(0),
+    )
+    .map_err(|error| format!("任务计数失败：{error}"))
+}
+
+/// 现在能不能不看每天额度：全量整理进行中，且用量没超过刹车线。只读，不收尾；读不出用量就当不能（保守）。
+pub(crate) fn full_scan_open(conn: &Connection, control: &QueueControl, now: &str) -> bool {
+    if !control.full_scan_active(now) {
+        return false;
+    }
+    let Some(scan) = &control.full_scan else {
+        return false;
+    };
+    match tokens_used_since(conn, &scan.started_at) {
+        Ok(used) => used <= full_scan_ceiling(scan.total),
+        Err(_) => false,
+    }
+}
+
+/// 全量整理该收尾就收尾：用量超过刹车线、整理完了、或者到时间了。没有在进行就什么也不做。
+/// 每次认领前和读状态时都可以调；多个线程同时调也只会收尾一次。
+pub(crate) fn settle_full_scan(
+    conn: &Connection,
+    control_path: &Path,
+    now: &str,
+) -> Result<(), String> {
+    let control = read_control(control_path);
+    let Some(scan) = control.full_scan.clone() else {
+        return Ok(());
+    };
+    let used = tokens_used_since(conn, &scan.started_at)?.max(0);
+    let remaining = count_open_cards(conn)?;
+    let reason = if used > full_scan_ceiling(scan.total) {
+        "ceiling"
+    } else if remaining == 0 {
+        "completed"
+    } else if !control.full_scan_active(now) {
+        "expired"
+    } else {
+        return Ok(());
+    };
+    let failed = count_failed_cards_since(conn, &scan.started_at)?;
+    finish_full_scan(control_path, &scan, reason, used, remaining, failed, now)
+}
+
+/// 停止全量整理（Fox 点了停止）。没有在进行就什么也不做。已经在跑的任务会做完，之后按每天额度。
+pub(crate) fn stop_full_scan(
+    conn: &Connection,
+    control_path: &Path,
+    now: &str,
+) -> Result<(), String> {
+    let control = read_control(control_path);
+    let Some(scan) = control.full_scan.clone() else {
+        return Ok(());
+    };
+    let used = tokens_used_since(conn, &scan.started_at)?.max(0);
+    let remaining = count_open_cards(conn)?;
+    let failed = count_failed_cards_since(conn, &scan.started_at)?;
+    finish_full_scan(control_path, &scan, "stopped", used, remaining, failed, now)
+}
+
+fn finish_full_scan(
+    path: &Path,
+    scan: &FullScan,
+    reason: &str,
+    used: i64,
+    remaining: i64,
+    failed: i64,
+    now: &str,
+) -> Result<(), String> {
+    let record = serde_json::to_value(LastFullScan {
+        started_at: scan.started_at.clone(),
+        finished_at: now.to_owned(),
+        tokens_used: used,
+        reason: reason.to_owned(),
+        total: scan.total,
+        remaining,
+        failed,
+    })
+    .map_err(|error| format!("全量整理记录序列化失败：{error}"))?;
+    with_control_file(path, |map| {
+        // 别的线程已经收尾了（或者又开了新的一轮）：什么也不做
+        let current = map
+            .get("fullScan")
+            .and_then(|value| value.get("startedAt"))
+            .and_then(Value::as_str);
+        if current != Some(scan.started_at.as_str()) {
+            return Ok(());
+        }
+        map.remove("fullScan");
+        map.insert("lastFullScan".to_owned(), record.clone());
+        Ok(())
+    })
+}
+
+/// 开始全量整理。已经在进行就原样返回（不重置开始时间）。同时恢复暂停：Fox 点了开始，就是要它跑。
+pub(crate) fn begin_full_scan(path: &Path, now: &str, total: i64) -> Result<FullScan, String> {
+    let existing = read_control(path);
+    if existing.full_scan_active(now) {
+        if let Some(scan) = existing.full_scan {
+            return Ok(scan);
+        }
+    }
+    let scan = FullScan {
+        started_at: now.to_owned(),
+        until: shift_db_time(now, FULL_SCAN_SECS)?,
+        total,
+    };
+    let value =
+        serde_json::to_value(&scan).map_err(|error| format!("全量整理记录序列化失败：{error}"))?;
+    with_control_file(path, |map| {
+        map.insert("fullScan".to_owned(), value.clone());
+        map.insert("paused".to_owned(), Value::Bool(false));
+        map.remove("pauseReason");
+        Ok(())
+    })?;
+    Ok(scan)
+}
+
 fn count_status(conn: &Connection, status: &str) -> Result<i64, String> {
     conn.query_row(
         "SELECT COUNT(*) FROM ai_jobs WHERE status = ?1 AND target_id NOT LIKE 'legacy-%'",
@@ -940,6 +1153,7 @@ fn queue_state(
     running: i64,
     budget: u64,
     tokens_24h: i64,
+    unlimited: bool,
 ) -> &'static str {
     if paused && has_reason {
         "stopped"
@@ -947,7 +1161,8 @@ fn queue_state(
         "paused"
     } else if running > 0 {
         "running"
-    } else if budget > 0
+    } else if !unlimited
+        && budget > 0
         && tokens_24h.saturating_add(CLAIM_RESERVE_TOKENS)
             > i64::try_from(budget).unwrap_or(i64::MAX)
     {
@@ -1027,10 +1242,19 @@ fn control_from_map(map: &Map<String, Value>) -> QueueControl {
             serde_json::from_value(value.clone()).ok()
         }
     });
+    // 读不懂的 fullScan 当作没有（保守：不会因为文件坏了就不限额）
+    let full_scan = map
+        .get("fullScan")
+        .and_then(|value| serde_json::from_value::<FullScan>(value.clone()).ok());
+    let last_full_scan = map
+        .get("lastFullScan")
+        .and_then(|value| serde_json::from_value::<LastFullScan>(value.clone()).ok());
     QueueControl {
         paused,
         daily_budget_tokens,
         pause_reason,
+        full_scan,
+        last_full_scan,
     }
 }
 
@@ -1297,6 +1521,7 @@ mod tests {
         BudgetGate {
             paused,
             daily_budget_tokens: budget,
+            unlimited: false,
         }
     }
 
@@ -3045,6 +3270,327 @@ mod tests {
             "旧功能的预留行没有处理器认领，变成排队中就是永远的幽灵行"
         );
         assert_eq!(snap(&conn, "legacy-run").status, "cancelled");
+    }
+
+    // —— 全量整理：Fox 亲手确认后，这一轮不看每天额度 ——
+
+    fn full_scan_control(started_at: &str, total: i64) -> QueueControl {
+        QueueControl {
+            full_scan: Some(FullScan {
+                started_at: started_at.to_owned(),
+                until: "不重要，只用来显示".to_owned(),
+                total,
+            }),
+            ..QueueControl::default()
+        }
+    }
+
+    fn unlimited_gate(budget: u64) -> BudgetGate {
+        BudgetGate {
+            paused: false,
+            daily_budget_tokens: budget,
+            unlimited: true,
+        }
+    }
+
+    fn at(seconds_after_now: i64) -> String {
+        shift_db_time(NOW, seconds_after_now).unwrap()
+    }
+
+    #[test]
+    fn a_full_scan_claims_past_the_daily_budget_but_never_past_a_pause() {
+        let db = TestDb::new("full-scan-gate");
+        let mut conn = db.conn();
+        insert_job(&conn, "a", "repo_card", 6, NOW, None, "queued");
+        insert_job(&conn, "b", "repo_card", 6, NOW, None, "queued");
+        conn.execute(
+            "INSERT INTO ai_jobs(id, account_id, job_type, target_type, target_id, status, input_tokens, output_tokens, finished_at, created_at)
+             VALUES ('spent', 'acct', 'repo_card', 'repository', 'spent', 'succeeded', 70000, 20000, ?1, ?1)",
+            [NOW],
+        )
+        .unwrap();
+        let handled = free_and_spend();
+        // 额度 5 万、24 小时已用 9 万：每天额度模式领不到
+        assert!(claim_one(&mut conn, &handled, &gate(false, 50_000)).is_none());
+        // 全量整理：领得到，而且额度是 0（日常额度关着）也一样
+        assert!(claim_one(&mut conn, &handled, &unlimited_gate(50_000)).is_some());
+        assert!(claim_one(&mut conn, &handled, &unlimited_gate(0)).is_some());
+        // 暂停照样拦
+        insert_job(&conn, "c", "repo_card", 6, NOW, None, "queued");
+        let paused = BudgetGate {
+            paused: true,
+            daily_budget_tokens: 50_000,
+            unlimited: true,
+        };
+        assert!(claim_one(&mut conn, &handled, &paused).is_none());
+    }
+
+    #[test]
+    fn a_full_scan_lasts_48_hours_from_its_start_and_a_broken_record_is_ignored() {
+        let control = full_scan_control(NOW, 10);
+        assert!(control.full_scan_active(NOW));
+        assert!(control.full_scan_active(&at(48 * 3600 - 1)));
+        assert!(!control.full_scan_active(&at(48 * 3600)));
+        assert!(!control.full_scan_active(&at(-1)), "时钟倒退：按没在进行算");
+        // 文件里的 until 只用来显示：改到很远的未来也不会让它一直不限额
+        let mut edited = full_scan_control(NOW, 10);
+        edited.full_scan.as_mut().unwrap().until = "9999-01-01T00:00:00.000Z".to_owned();
+        assert!(!edited.full_scan_active(&at(49 * 3600)));
+        // 开始时间读不懂：按没在进行算
+        assert!(!full_scan_control("昨天", 10).full_scan_active(NOW));
+        assert!(!QueueControl::default().full_scan_active(NOW));
+
+        let db = TestDb::new("full-scan-broken");
+        let path = queue_control_path(db.path());
+        for text in [
+            r#"{"fullScan":"yes"}"#,
+            r#"{"fullScan":{"startedAt":5,"until":"x","total":1}}"#,
+            r#"{"fullScan":{"startedAt":"2026-10-03T12:00:00.000Z"}}"#,
+            r#"{"fullScan":null}"#,
+        ] {
+            fs::write(&path, text).unwrap();
+            assert!(read_control(&path).full_scan.is_none(), "{text}");
+        }
+        fs::write(
+            &path,
+            r#"{"dailyBudgetTokens":7,"fullScan":{"startedAt":"2026-10-03T12:00:00.000Z","until":"2026-10-05T12:00:00.000Z","total":3}}"#,
+        )
+        .unwrap();
+        let read = read_control(&path);
+        assert_eq!(read.daily_budget_tokens, 7);
+        assert_eq!(read.full_scan.as_ref().map(|scan| scan.total), Some(3));
+    }
+
+    #[test]
+    fn beginning_a_full_scan_resumes_the_queue_keeps_the_rest_and_never_restarts_one_in_progress() {
+        let db = TestDb::new("full-scan-begin");
+        let path = queue_control_path(db.path());
+        fs::write(
+            &path,
+            r#"{"paused":true,"dailyBudgetTokens":50000,"captureToken":"keep-me","pauseReason":{"kind":"auth","message":"密钥无效","at":"2026-10-03T00:00:00.000Z"}}"#,
+        )
+        .unwrap();
+        let first = begin_full_scan(&path, NOW, 388).unwrap();
+        assert_eq!(first.started_at, NOW);
+        assert_eq!(first.until, at(48 * 3600));
+        assert_eq!(first.total, 388);
+        let control = read_control(&path);
+        assert!(!control.paused, "点了开始就是要它跑：恢复暂停");
+        assert!(control.pause_reason.is_none());
+        assert_eq!(control.daily_budget_tokens, 50_000, "日常额度原样保留");
+        let raw: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(raw["captureToken"], "keep-me", "控制文件里别的键不能丢");
+        // 已经在进行：原样返回，不重置开始时间、不改个数
+        let again = begin_full_scan(&path, &at(3600), 5).unwrap();
+        assert_eq!(again, first);
+        assert_eq!(read_control(&path).full_scan, Some(first));
+    }
+
+    fn open_job_row(
+        conn: &Connection,
+        id: &str,
+        status: &str,
+        tokens: i64,
+        finished: Option<&str>,
+    ) {
+        conn.execute(
+            "INSERT INTO ai_jobs(id, account_id, job_type, target_type, target_id, status, input_tokens, finished_at, created_at)
+             VALUES (?1, 'acct', 'repo_card', 'repository', ?1, ?2, ?3, ?4, ?5)",
+            params![id, status, tokens, finished, NOW],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn a_full_scan_ends_when_nothing_is_left_and_remembers_how_it_went() {
+        let db = TestDb::new("full-scan-complete");
+        let path = queue_control_path(db.path());
+        begin_full_scan(&path, NOW, 3).unwrap();
+        let conn = db.conn();
+        open_job_row(&conn, "q", "queued", 0, None);
+        // 还有排队的：继续
+        settle_full_scan(&conn, &path, &at(60)).unwrap();
+        assert!(read_control(&path).full_scan.is_some());
+        conn.execute("DELETE FROM ai_jobs WHERE id = 'q'", [])
+            .unwrap();
+        open_job_row(&conn, "a", "succeeded", 5_000, Some(&at(10)));
+        open_job_row(&conn, "b", "succeeded", 6_000, Some(&at(20)));
+        open_job_row(&conn, "c", "failed", 1_000, Some(&at(30)));
+        // 开始之前就结束的任务不算这一轮的
+        open_job_row(&conn, "old", "succeeded", 99_000, Some(&at(-3600)));
+        settle_full_scan(&conn, &path, &at(60)).unwrap();
+        let control = read_control(&path);
+        assert!(control.full_scan.is_none());
+        let last = control.last_full_scan.expect("应留下记录");
+        assert_eq!(last.reason, "completed");
+        assert_eq!(last.tokens_used, 12_000);
+        assert_eq!((last.total, last.remaining, last.failed), (3, 0, 1));
+        assert_eq!(last.started_at, NOW);
+        assert_eq!(last.finished_at, at(60));
+        // 再调一次什么也不会变（多个线程同时调也只收尾一次）
+        settle_full_scan(&conn, &path, &at(120)).unwrap();
+        assert_eq!(read_control(&path).last_full_scan, Some(last));
+    }
+
+    #[test]
+    fn a_full_scan_expires_after_48_hours_even_with_jobs_left() {
+        let db = TestDb::new("full-scan-expire");
+        let path = queue_control_path(db.path());
+        begin_full_scan(&path, NOW, 9).unwrap();
+        let conn = db.conn();
+        open_job_row(&conn, "q1", "queued", 0, None);
+        open_job_row(&conn, "q2", "queued", 0, None);
+        settle_full_scan(&conn, &path, &at(48 * 3600 - 1)).unwrap();
+        assert!(read_control(&path).full_scan.is_some());
+        settle_full_scan(&conn, &path, &at(48 * 3600)).unwrap();
+        let last = read_control(&path).last_full_scan.expect("应留下记录");
+        assert_eq!(last.reason, "expired");
+        assert_eq!(last.remaining, 2);
+    }
+
+    #[test]
+    fn a_full_scan_stops_itself_far_beyond_its_estimate() {
+        // 开始时只有 1 个要整理：刹车线是至少 300 万。用量超过它说明哪里不对劲，自动结束，而不是一直不限额地花
+        assert_eq!(full_scan_ceiling(1), 3_000_000);
+        assert_eq!(full_scan_ceiling(0), 3_000_000);
+        assert_eq!(full_scan_ceiling(388), 388 * 5_200 * 4);
+        let db = TestDb::new("full-scan-ceiling");
+        let path = queue_control_path(db.path());
+        begin_full_scan(&path, NOW, 1).unwrap();
+        let conn = db.conn();
+        open_job_row(&conn, "q", "queued", 0, None);
+        open_job_row(&conn, "big", "succeeded", 3_000_000, Some(&at(10)));
+        let control = read_control(&path);
+        assert!(full_scan_open(&conn, &control, &at(20)), "刚好到线还算没超");
+        open_job_row(&conn, "more", "failed", 1, Some(&at(15)));
+        assert!(!full_scan_open(&conn, &control, &at(20)));
+        settle_full_scan(&conn, &path, &at(20)).unwrap();
+        let last = read_control(&path).last_full_scan.expect("应留下记录");
+        assert_eq!(last.reason, "ceiling");
+        assert_eq!(last.remaining, 1, "排队的还在，之后按每天额度");
+        assert!(read_control(&path).full_scan.is_none());
+    }
+
+    #[test]
+    fn stopping_a_full_scan_hands_the_queue_back_to_the_daily_budget() {
+        let db = TestDb::new("full-scan-stop");
+        let path = queue_control_path(db.path());
+        set_daily_budget(&path, 20_000).unwrap();
+        begin_full_scan(&path, NOW, 3).unwrap();
+        let mut conn = db.conn();
+        for id in ["a", "b", "c"] {
+            open_job_row(&conn, id, "queued", 0, None);
+        }
+        open_job_row(&conn, "done", "succeeded", 30_000, Some(&at(5)));
+        stop_full_scan(&conn, &path, &at(10)).unwrap();
+        let control = read_control(&path);
+        assert!(control.full_scan.is_none());
+        let last = control.last_full_scan.clone().expect("应留下记录");
+        assert_eq!(last.reason, "stopped");
+        assert_eq!(last.remaining, 3);
+        assert_eq!(last.tokens_used, 30_000);
+        assert_eq!(control.daily_budget_tokens, 20_000, "日常额度原样保留");
+        // 没有在进行时再停一次：什么也不做，记录不变
+        stop_full_scan(&conn, &path, &at(20)).unwrap();
+        assert_eq!(read_control(&path).last_full_scan, Some(last));
+        // 之后认领按每天额度：已用 3 万超过 2 万，领不到
+        let gate = BudgetGate {
+            paused: false,
+            daily_budget_tokens: control.daily_budget_tokens,
+            unlimited: control.full_scan_active(&at(20)),
+        };
+        assert!(claim_one(&mut conn, &free_and_spend(), &gate).is_none());
+    }
+
+    struct BigSpender;
+
+    impl JobHandler for BigSpender {
+        fn job_type(&self) -> &'static str {
+            "repo_card"
+        }
+        fn spends_tokens(&self) -> bool {
+            true
+        }
+        fn run(&self, _job: &JobRecord, _db_path: &Path) -> Result<JobSuccess, JobFailure> {
+            Ok(JobSuccess {
+                input_tokens: 30_000,
+                output_tokens: 10_000,
+                ..ok_success(false)
+            })
+        }
+    }
+
+    #[test]
+    fn a_full_scan_works_through_the_whole_queue_past_the_budget_then_the_budget_is_back() {
+        let db = TestDb::new("full-scan-e2e");
+        let conn = db.conn();
+        for index in 0..5 {
+            insert_job(
+                &conn,
+                &format!("job-{index}"),
+                "repo_card",
+                6,
+                "2026-10-03T10:00:00.000Z",
+                None,
+                "queued",
+            );
+        }
+        drop(conn);
+        let path = queue_control_path(db.path());
+        set_daily_budget(&path, 50_000).unwrap();
+        let handlers: Vec<Arc<dyn JobHandler>> = vec![Arc::new(BigSpender)];
+        let drain = |expected: usize| {
+            let mut done = 0;
+            while let Some(job) = claim_for_worker(db.path(), &handlers).unwrap() {
+                let outcome = run_handler(&handlers, &job, db.path());
+                finish_job(db.path(), &job, &now_db_time(), outcome, 0.0).unwrap();
+                done += 1;
+                assert!(done <= expected + 1, "不该领到这么多");
+            }
+            done
+        };
+        // 每天额度模式：领第一个（预留 1.2 万 ≤ 5 万），花 4 万之后第二个领不到
+        assert_eq!(drain(1), 1);
+        // 全量整理：剩下 4 个一口气做完，用量远超每天额度也不停
+        let remaining = count_open_cards(&db.conn()).unwrap();
+        assert_eq!(remaining, 4);
+        begin_full_scan(&path, &now_db_time(), remaining).unwrap();
+        assert_eq!(drain(4), 4);
+        let status = queue_status(db.path()).unwrap();
+        assert_eq!(status.tokens_24h, 5 * 40_000);
+        // 最后一次认领时发现没有要整理的了：自动收尾，留下记录
+        let control = read_control(&path);
+        assert!(control.full_scan.is_none());
+        let last = control.last_full_scan.expect("应留下记录");
+        assert_eq!(
+            (last.reason.as_str(), last.remaining, last.failed),
+            ("completed", 0, 0)
+        );
+        assert_eq!(last.tokens_used, 4 * 40_000);
+        assert!(!status.unlimited, "收尾之后界面读到的是回到日常额度");
+        // 新来的任务又按每天额度：已用 20 万，领不到
+        insert_job(&db.conn(), "late", "repo_card", 6, NOW, None, "queued");
+        assert!(claim_for_worker(db.path(), &handlers).unwrap().is_none());
+    }
+
+    #[test]
+    fn queue_status_says_unlimited_during_a_full_scan_and_never_budget_reached() {
+        let db = TestDb::new("full-scan-state");
+        let path = queue_control_path(db.path());
+        set_daily_budget(&path, 20_000).unwrap();
+        let conn = db.conn();
+        conn.execute(
+            "INSERT INTO ai_jobs(id, account_id, job_type, target_type, target_id, status, input_tokens, finished_at, created_at)
+             VALUES ('spent', 'acct', 'repo_card', 'repository', 'spent', 'succeeded', 90000, ?1, ?1)",
+            [now_db_time()],
+        )
+        .unwrap();
+        drop(conn);
+        assert_eq!(queue_status(db.path()).unwrap().state, "budget_reached");
+        begin_full_scan(&path, &now_db_time(), 5).unwrap();
+        let status = queue_status(db.path()).unwrap();
+        assert!(status.unlimited);
+        assert_eq!(status.state, "idle");
     }
 
     #[test]

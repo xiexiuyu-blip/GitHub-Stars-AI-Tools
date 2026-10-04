@@ -190,6 +190,15 @@ fn call(work: &Path, cmd: &str, args: &serde_json::Value) -> Result<serde_json::
             &serde_json::json!({"ai": {"provider": "openai", "model": "LongCat-2.0"}}),
             args.get("dailyBudgetTokens").and_then(|v| v.as_u64()).unwrap_or(0),
         )?)),
+        "start_full_scan" => ser(to_value(crate::card_handler::start_full_scan(
+            work,
+            &serde_json::json!({"ai": {"provider": "openai", "model": "LongCat-2.0"}}),
+            args.get("confirmed").and_then(|v| v.as_bool()).unwrap_or(false),
+        )?)),
+        "stop_full_scan" => ser(to_value(crate::card_handler::stop_full_scan(
+            work,
+            &serde_json::json!({"ai": {"provider": "openai", "model": "LongCat-2.0"}}),
+        )?)),
         "enqueue_cards_now" => Ok(Value::from(
             crate::card_handler::enqueue_cards_for_scope(work, &arg_str(args, "scope")?)? as i64,
         )),

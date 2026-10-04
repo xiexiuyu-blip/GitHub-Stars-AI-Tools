@@ -363,29 +363,88 @@ pub fn enqueue_cards_for_scope(db_path: &Path, scope: &str) -> Result<usize, Str
     enqueue_cards(&mut conn, scope, BACKFILL_PRIORITY)
 }
 
+/// 全量整理进行中的样子（给界面画进度）。
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FullScanView {
+    pub started_at: String,
+    /// 兜底截止（开始后 48 小时），到点自动结束。
+    pub until: String,
+    /// 开始以来已用 token（含在跑任务的预留）。
+    pub tokens_used: i64,
+    /// 开始时要整理的个数。
+    pub total: i64,
+    /// 现在还剩（排队 + 进行中）。
+    pub remaining: i64,
+    /// 开始以来失败了几个。
+    pub failed: i64,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AutomationStatus {
+    /// 日常额度开着、或全量整理在进行，并且没有暂停。
     pub enabled: bool,
     pub daily_budget_tokens: u64,
     pub paused: bool,
     pub pause_reason: Option<jobs::PauseReason>,
     pub tokens_24h: i64,
+    /// 日常额度还剩多少。全量整理期间它不代表队列会不会停，界面要先看 `unlimited`。
     pub budget_remaining: u64,
     pub queued: i64,
     pub running: i64,
     pub failed: i64,
     pub provider_configured: bool,
     pub model: Option<String>,
+    /// 全量整理正在进行（Fox 亲手确认过；这一轮不看每天额度）。
+    pub unlimited: bool,
+    pub full_scan: Option<FullScanView>,
+    pub last_full_scan: Option<jobs::LastFullScan>,
+    /// 现在还没整理好的有效仓库数（没有理解卡 + 说明过期、没被确认），用来估全量整理要多少。
+    pub needs_organizing: i64,
+}
+
+/// 有效仓库里「全量整理」要处理的：没有理解卡的，加上还是第 2 版之前结构的（没被确认的都算）。
+/// 和 `insert_scoped` 的两个范围一致。
+fn count_needs_organizing(conn: &Connection) -> Result<i64, String> {
+    let sql = format!(
+        "SELECT COUNT(*) FROM repositories
+         LEFT JOIN repo_ai_documents ON repo_ai_documents.repo_id = repositories.id
+         WHERE repositories.sync_status = 'active'
+           AND (
+             (repo_ai_documents.repo_id IS NULL OR IFNULL(trim(repo_ai_documents.card_json), '') = '')
+             OR (IFNULL(trim(repo_ai_documents.card_json), '') <> '' AND IFNULL(repo_ai_documents.card_schema_version, 0) < 2)
+           )
+           AND {NOT_CONFIRMED_SQL}"
+    );
+    conn.query_row(&sql, [], |row| row.get(0))
+        .map_err(|error| format!("待整理数读取失败：{error}"))
 }
 
 /// `settings` 是设置文件里的 JSON。不读钥匙串，也不看 `apiKey`。
 pub fn automation_status(db_path: &Path, settings: &Value) -> Result<AutomationStatus, String> {
-    let control = jobs::read_control(&jobs::queue_control_path(db_path));
+    let control_path = jobs::queue_control_path(db_path);
+    let now = jobs::now_db_time();
+    let conn = open_db(db_path)?;
+    // 全量整理整理完了 / 到时间了：先收尾，界面读到的就是收尾后的样子
+    jobs::settle_full_scan(&conn, &control_path, &now)?;
+    let control = jobs::read_control(&control_path);
     let queue = jobs::queue_status(db_path)?;
     let (provider_configured, model) = provider_from_settings(settings);
+    let unlimited = control.full_scan_active(&now);
+    let full_scan = match (&control.full_scan, unlimited) {
+        (Some(scan), true) => Some(FullScanView {
+            started_at: scan.started_at.clone(),
+            until: scan.until.clone(),
+            tokens_used: jobs::tokens_used_since(&conn, &scan.started_at)?.max(0),
+            total: scan.total,
+            remaining: jobs::count_open_cards(&conn)?,
+            failed: jobs::count_failed_cards_since(&conn, &scan.started_at)?,
+        }),
+        _ => None,
+    };
     Ok(AutomationStatus {
-        enabled: control.daily_budget_tokens > 0 && !control.paused,
+        enabled: (control.daily_budget_tokens > 0 || unlimited) && !control.paused,
         daily_budget_tokens: control.daily_budget_tokens,
         paused: control.paused,
         pause_reason: control.pause_reason,
@@ -396,7 +455,57 @@ pub fn automation_status(db_path: &Path, settings: &Value) -> Result<AutomationS
         failed: queue.failed,
         provider_configured,
         model,
+        unlimited,
+        full_scan,
+        last_full_scan: control.last_full_scan,
+        needs_organizing: count_needs_organizing(&conn)?,
     })
+}
+
+/// 开始「全量整理」：这一轮不受每天额度限制，一直整理到全部完成（最长 48 小时），然后自动回到每天额度。
+/// 花钱的决定只能由 Fox 本人做：界面必须先弹确认，调用时带 `confirmed = true`，没带就拒绝。
+/// 开始时把没有理解卡的、说明过期的都排进队列（已经排着的不重复），并恢复暂停。已经在进行就原样返回。
+pub fn start_full_scan(
+    db_path: &Path,
+    settings: &Value,
+    confirmed: bool,
+) -> Result<AutomationStatus, String> {
+    if !confirmed {
+        return Err("全量整理会花钱，需要你确认之后才能开始。".to_owned());
+    }
+    let (provider_configured, _) = provider_from_settings(settings);
+    if !provider_configured {
+        return Err(
+            "还没配置 AI 服务，先到「设置 → 引擎」里选好服务商和模型、保存密钥。".to_owned(),
+        );
+    }
+    let control_path = jobs::queue_control_path(db_path);
+    let now = jobs::now_db_time();
+    let mut conn = open_db(db_path)?;
+    // 上一轮如果到时间了还没收尾，先收尾（留下记录），再看现在是不是已经在进行
+    jobs::settle_full_scan(&conn, &control_path, &now)?;
+    if jobs::read_control(&control_path).full_scan_active(&now) {
+        return automation_status(db_path, settings);
+    }
+    enqueue_cards(&mut conn, CardEnqueueScope::Missing, BACKFILL_PRIORITY)?;
+    enqueue_cards(&mut conn, CardEnqueueScope::Outdated, BACKFILL_PRIORITY)?;
+    let total = jobs::count_open_cards(&conn)?;
+    if total == 0 {
+        return Err("没有需要整理的仓库了。".to_owned());
+    }
+    jobs::begin_full_scan(&control_path, &now, total)?;
+    automation_status(db_path, settings)
+}
+
+/// 停止全量整理（随时可以，不需要确认）。已经在跑的任务会做完，之后按每天额度。没有在进行就什么也不做。
+pub fn stop_full_scan(db_path: &Path, settings: &Value) -> Result<AutomationStatus, String> {
+    let conn = open_db(db_path)?;
+    jobs::stop_full_scan(
+        &conn,
+        &jobs::queue_control_path(db_path),
+        &jobs::now_db_time(),
+    )?;
+    automation_status(db_path, settings)
 }
 
 pub fn set_automation_budget(
@@ -2025,10 +2134,158 @@ mod tests {
             "failed",
             "providerConfigured",
             "model",
+            "unlimited",
+            "fullScan",
+            "lastFullScan",
+            "needsOrganizing",
         ]
         .into_iter()
         .map(str::to_owned)
         .collect()
+    }
+
+    // —— 全量整理 ——
+
+    fn fs_settings() -> Value {
+        json!({"ai": {"provider": "openai", "model": "fake-model"}})
+    }
+
+    fn open_jobs(db: &TempDb) -> i64 {
+        cell_i64(
+            &db.open(),
+            "SELECT COUNT(*) FROM ai_jobs WHERE job_type = 'repo_card' AND status IN ('queued', 'running')",
+        )
+    }
+
+    /// r1 没有卡；r2 旧版卡（第 1 版）；r3 现行卡；r4 旧版但已确认；r5 已移除；r6 卡是空串。需要整理的是 r1、r2、r6。
+    fn seed_mixed_cards(db: &TempDb) {
+        prepare_many_runnable(db, 6);
+        let conn = db.open();
+        insert_card(&conn, "r2", r#"{"review_status":"suggested"}"#, 1, "h2");
+        insert_card(&conn, "r3", r#"{"review_status":"suggested"}"#, 2, "h3");
+        insert_card(&conn, "r4", r#"{"review_status":"confirmed"}"#, 1, "h4");
+        insert_card(&conn, "r6", "", 2, "h6");
+        conn.execute(
+            "UPDATE repositories SET sync_status = 'removed' WHERE id = 'r5'",
+            [],
+        )
+        .expect("应能标记已移除");
+    }
+
+    #[test]
+    fn a_full_scan_needs_confirmation_and_a_configured_provider() {
+        let db = TempDb::new("fs-guard");
+        seed_mixed_cards(&db);
+        let error = start_full_scan(db.path(), &fs_settings(), false).expect_err("没确认应拒绝");
+        assert!(error.contains("确认"), "{error}");
+        let error = start_full_scan(db.path(), &json!({}), true).expect_err("没配置 AI 服务应拒绝");
+        assert!(error.contains("还没配置 AI 服务"), "{error}");
+        let none = json!({"ai": {"provider": "none", "model": "m"}});
+        assert!(start_full_scan(db.path(), &none, true).is_err());
+        // 什么也没发生：没排队、没写全量整理
+        assert_eq!(open_jobs(&db), 0);
+        assert!(jobs::read_control(&jobs::queue_control_path(db.path()))
+            .full_scan
+            .is_none());
+    }
+
+    #[test]
+    fn a_full_scan_queues_everything_that_needs_a_card_and_reports_progress() {
+        let db = TempDb::new("fs-start");
+        seed_mixed_cards(&db);
+        let control = jobs::queue_control_path(db.path());
+        // 日常额度关着（0）、而且被暂停了：点开始就是要它跑
+        fs::write(
+            &control,
+            r#"{"paused":true,"dailyBudgetTokens":0,"pauseReason":{"kind":"auth","message":"旧原因","at":"2026-10-03T00:00:00.000Z"}}"#,
+        )
+        .expect("控制文件应能写入");
+        let before = automation_status(db.path(), &fs_settings()).expect("状态应能读出");
+        assert_eq!(
+            before.needs_organizing, 3,
+            "r1、r2、r6；已确认、现行卡、已移除的不算"
+        );
+        assert!(!before.unlimited && before.full_scan.is_none() && before.last_full_scan.is_none());
+        assert!(!before.enabled);
+
+        let status = start_full_scan(db.path(), &fs_settings(), true).expect("应能开始");
+        assert!(status.unlimited);
+        assert!(status.enabled, "全量整理期间即使日常额度是 0 也算开着");
+        assert!(!status.paused && status.pause_reason.is_none());
+        assert_eq!(status.queued, 3);
+        let scan = status.full_scan.clone().expect("应有进度");
+        assert_eq!((scan.total, scan.remaining, scan.failed), (3, 3, 0));
+        assert_eq!(scan.tokens_used, 0);
+        assert_eq!(open_jobs(&db), 3);
+        assert_eq!(status.daily_budget_tokens, 0, "日常额度原样保留");
+        let queued: Vec<String> = {
+            let conn = db.open();
+            let mut statement = conn
+                .prepare("SELECT target_id FROM ai_jobs ORDER BY target_id")
+                .expect("应能查询");
+            statement
+                .query_map([], |row| row.get(0))
+                .expect("应能读取")
+                .map(|row| row.expect("行应可读"))
+                .collect()
+        };
+        assert_eq!(queued, vec!["r1", "r2", "r6"]);
+
+        // 再点一次：原样返回，不重置、不重复排队
+        let again = start_full_scan(db.path(), &fs_settings(), true).expect("重复开始应无害");
+        assert_eq!(
+            again.full_scan.map(|scan| scan.started_at),
+            Some(scan.started_at.clone())
+        );
+        assert_eq!(open_jobs(&db), 3);
+
+        // 停止：回到日常额度，排队的留着，留下记录
+        let stopped = stop_full_scan(db.path(), &fs_settings()).expect("应能停止");
+        assert!(!stopped.unlimited && stopped.full_scan.is_none());
+        assert!(!stopped.enabled, "日常额度是 0：停止后回到「未开启」");
+        let last = stopped.last_full_scan.expect("应留下记录");
+        assert_eq!(last.reason, "stopped");
+        assert_eq!((last.total, last.remaining), (3, 3));
+        assert_eq!(open_jobs(&db), 3);
+        // 没有在进行时再停：无害
+        assert!(stop_full_scan(db.path(), &fs_settings()).is_ok());
+    }
+
+    #[test]
+    fn a_full_scan_with_nothing_to_organize_says_so_and_changes_nothing() {
+        let db = TempDb::new("fs-nothing");
+        prepare_many_runnable(&db, 2);
+        let conn = db.open();
+        insert_card(&conn, "r1", r#"{"review_status":"suggested"}"#, 2, "h1");
+        insert_card(&conn, "r2", r#"{"review_status":"suggested"}"#, 2, "h2");
+        drop(conn);
+        let error = start_full_scan(db.path(), &fs_settings(), true).expect_err("没有要整理的");
+        assert!(error.contains("没有需要整理"), "{error}");
+        assert!(jobs::read_control(&jobs::queue_control_path(db.path()))
+            .full_scan
+            .is_none());
+    }
+
+    #[test]
+    fn the_status_finishes_a_full_scan_that_ended_while_nobody_was_looking() {
+        let db = TempDb::new("fs-settle");
+        prepare_many_runnable(&db, 1);
+        let started = jobs::shift_db_time(&jobs::now_db_time(), -3 * 3600).expect("时间应能计算");
+        fs::write(
+            jobs::queue_control_path(db.path()),
+            format!(
+                r#"{{"dailyBudgetTokens":100000,"fullScan":{{"startedAt":"{started}","until":"x","total":4}}}}"#
+            ),
+        )
+        .expect("控制文件应能写入");
+        // 没有排队的、没有进行的：整理完了
+        let status = automation_status(db.path(), &fs_settings()).expect("状态应能读出");
+        assert!(!status.unlimited && status.full_scan.is_none());
+        let last = status.last_full_scan.expect("读状态时应收尾并留下记录");
+        assert_eq!(
+            (last.reason.as_str(), last.total, last.remaining),
+            ("completed", 4, 0)
+        );
     }
 
     #[test]
