@@ -875,7 +875,8 @@ fn review_tasks_dump() {
     migrate_database(&work).expect("迁移");
     scenarios::ensure_initial_classification(&work).expect("首次归类");
 
-    let tasks = [
+    // 默认是 6 个真实任务；FSL_REVIEW_TASKS 指向一个文本文件（每行一句）时用它
+    let default_tasks = [
         "做小红书封面",
         "公众号文章配图",
         "给短视频加字幕",
@@ -883,14 +884,36 @@ fn review_tasks_dump() {
         "把群聊记录整理成日报",
         "批量改图尺寸和压缩",
     ];
+    let from_file: Option<Vec<String>> = std::env::var("FSL_REVIEW_TASKS").ok().map(|path| {
+        fs::read_to_string(path)
+            .expect("读任务文件")
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(str::to_owned)
+            .collect()
+    });
+    let tasks: Vec<&str> = match &from_file {
+        Some(lines) => lines.iter().map(String::as_str).collect(),
+        None => default_tasks.to_vec(),
+    };
     let connection = Connection::open(&work).expect("打开副本");
     let mut index = serde_json::Map::new();
     for (number, task) in tasks.iter().enumerate() {
         let result = solve::solve_query(&work, task).expect("找方案");
         let name = format!("task{}", number + 1);
         dump(&out, &format!("{name}_solve"), &result);
-        // 前 3 个有理解卡的命中：第 1 个主参考，其余备选
-        let picks: Vec<&solve::SolveHit> = result.hits.iter().filter(|hit| hit.has_card).take(3).collect();
+        // 界面默认勾选的（preselected）；一个都没有时才退回前 3 个有理解卡的命中，看「如果 Fox 自己勾了」会得到什么
+        let preselected: Vec<&solve::SolveHit> = result
+            .preselected
+            .iter()
+            .filter_map(|id| result.hits.iter().find(|hit| &hit.id == id))
+            .collect();
+        let picks: Vec<&solve::SolveHit> = if preselected.is_empty() {
+            result.hits.iter().filter(|hit| hit.has_card).take(3).collect()
+        } else {
+            preselected
+        };
         if picks.is_empty() {
             index.insert((*task).to_owned(), serde_json::json!({"files": [], "note": "没有命中"}));
             continue;
