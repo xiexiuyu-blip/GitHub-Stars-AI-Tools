@@ -446,6 +446,9 @@ struct ScoreParts {
     score: f64,
     matched: Vec<String>,
     missing: Vec<String>,
+    /// 对上的意图词全靠 README 里提到（名称、一句话、能力、描述、话题里一处都没对上，同义词也没有）。
+    /// 这种命中证据最弱：可以列出来，但不默认勾选。
+    readme_only: bool,
 }
 
 /// 一个仓库 README 里各意图词出现了几次（含同义词），以及 README 有多长。
@@ -532,8 +535,11 @@ pub fn solve_query(db_path: &Path, query: &str) -> Result<SolveResult, String> {
     let mut terms = main.clone();
     terms.extend(extra.iter().cloned());
     let mut hits = Vec::new();
+    // 和 hits 一一对应：这条命中是不是只靠 README 里提到（见 `ScoreParts::readme_only`）。
+    let mut readme_only = Vec::new();
     for (index, parts) in scored.into_iter().take(HIT_LIMIT) {
         let repo = &repos[index];
+        readme_only.push(parts.readme_only);
         // 没有意图词时不知道用户要什么，不能说「全部对上」。
         let full_match = !main.is_empty() && parts.missing.is_empty();
         let why = why_text(repo, &main, &parts.matched, &extra, readme.get(&repo.id));
@@ -564,11 +570,15 @@ pub fn solve_query(db_path: &Path, query: &str) -> Result<SolveResult, String> {
         })
         .cloned()
         .collect::<Vec<_>>();
+    // 默认勾选：全都对上、且至少有一个意图词在内容里对上的前 3 条。
+    // 只靠 README 里提到几次的命中（「做表情包」「写周报」这类收藏里没有专门工具的问题）不默认勾选，免得
+    // 一打开参考包托盘里就是三个不太相关的工具；它们仍在列表里，要用自己勾。
     let preselected = hits
         .iter()
-        .filter(|hit| hit.full_match)
+        .zip(&readme_only)
+        .filter(|(hit, weak)| hit.full_match && !**weak)
         .take(3)
-        .map(|hit| hit.id.clone())
+        .map(|(hit, _)| hit.id.clone())
         .collect::<Vec<_>>();
     let full_match_count = hits.iter().filter(|hit| hit.full_match).count() as i64;
     // 没进前 8、没有卡、且名称或描述单独含全部意图词。两个字段拼在一起不算。
@@ -835,6 +845,7 @@ fn score_repo(
     let mut score = 0.0;
     let mut matched = Vec::new();
     let mut missing = Vec::new();
+    let mut content_evidence = false;
     for intent in main {
         let weight = cached_idf(cache, intent, repos);
         let content = field_score(&repo.blocks, intent, weight);
@@ -842,8 +853,10 @@ fn score_repo(
         // 内容里没有中文词时，英文同义词按「描述」那一档（1.0 × idf）算对上。
         // README 里反复提到：已经对上的再加一点；只有 README 提到的也算对上，但分很低（补召回，不抢排名）。
         let gained = if content > 0.0 {
+            content_evidence = true;
             content + README_BOOST * evidence * weight
         } else if synonym_matches(&repo.blocks, intent) {
+            content_evidence = true;
             weight + README_BOOST * evidence * weight
         } else if evidence > 0.0 {
             README_ONLY * evidence * weight
@@ -885,10 +898,12 @@ fn score_repo(
         }
     }
     if score > 0.0 {
+        let readme_only = !matched.is_empty() && !content_evidence;
         Some(ScoreParts {
             score,
             matched,
             missing,
+            readme_only,
         })
     } else {
         None
@@ -4510,6 +4525,62 @@ mod tests {
     }
 
     #[test]
+    fn concepts_keep_three_character_words_and_drop_glued_slices() {
+        let repos = vec![
+            text_repo("m1", "聊天机器人"),
+            text_repo("m2", "客服机器人系统"),
+            text_repo("m3", "机器人控制器"),
+            text_repo("m4", "写作机器人助手"),
+        ];
+        let (main, extra) = concepts("做机器人", &base_lexicon(), &repos);
+        assert!(main.is_empty(), "{main:?}");
+        assert_eq!(extra, vec!["机器人".to_owned()]);
+        // 「机器」后面几乎总是「人」（右边凝固），「器人」前面几乎总是「机」（左边凝固）：单独问也不留
+        let (_main, extra) = concepts("机器", &base_lexicon(), &repos);
+        assert!(!has_term(&extra, "机器"), "{extra:?}");
+        let (_main, extra) = concepts("器人", &base_lexicon(), &repos);
+        assert!(!has_term(&extra, "器人"), "{extra:?}");
+    }
+
+    #[test]
+    fn concepts_prefer_the_whole_word_over_a_common_prefix() {
+        // 「数据」几乎到处都有，「数据库」只在 3 个仓库里：问「数据库」要得到一个词，
+        // 而不是「数据」加一个被跳过的「库」
+        let tails: Vec<char> = "分析清洗治理采集建模标注".chars().collect();
+        let mut repos: Vec<RepoRecord> = (0..60)
+            .map(|index| {
+                text_repo(
+                    &format!("d{index}"),
+                    &format!("数据{}", tails[index % tails.len()]),
+                )
+            })
+            .collect();
+        for index in 0..3 {
+            repos.push(text_repo(&format!("db{index}"), "数据库"));
+        }
+        let (_main, extra) = concepts("数据库", &base_lexicon(), &repos);
+        assert_eq!(extra, vec!["数据库".to_owned()]);
+    }
+
+    #[test]
+    fn concepts_keep_the_more_common_of_two_overlapping_words() {
+        // 「写稿」只在 2 个仓库里、「稿件」在 20 个里：「写稿件」切成「稿件」，不是「写稿」
+        let tails: Vec<char> = "分析清洗治理采集建模标注".chars().collect();
+        let mut repos: Vec<RepoRecord> = (0..20)
+            .map(|index| {
+                text_repo(
+                    &format!("g{index}"),
+                    &format!("{}稿件", tails[index % tails.len()]),
+                )
+            })
+            .collect();
+        repos.push(text_repo("w1", "写稿"));
+        repos.push(text_repo("w2", "写稿"));
+        let (_main, extra) = concepts("写稿件", &base_lexicon(), &repos);
+        assert_eq!(extra, vec!["稿件".to_owned()]);
+    }
+
+    #[test]
     fn concepts_cohesion_threshold_is_strictly_above_three_quarters() {
         let mut dominant = HashMap::new();
         dominant.insert('对', 4usize);
@@ -4762,6 +4833,85 @@ mod tests {
             "{}",
             result.hits[0].why
         );
+    }
+
+    #[test]
+    fn readme_only_hits_are_listed_but_not_preselected() {
+        let db = prepare("readme-only-preselect", |conn| {
+            insert_repo(
+                conn,
+                &readme_repo("min", "lab/image-minifier", "a general image utility"),
+            );
+            insert_readme(
+                conn,
+                "min",
+                "Please compress this file. Then compress it again. Finally compress the backup.",
+            );
+        });
+        let result = run(&db, "压缩");
+        assert_eq!(result.hits.len(), 1);
+        assert!(result.hits[0].full_match, "仍然算全都对上");
+        assert_eq!(result.full_match_count, 1);
+        assert!(
+            result.preselected.is_empty(),
+            "只靠 README 提到的不默认勾选：{:?}",
+            result.preselected
+        );
+    }
+
+    #[test]
+    fn content_evidence_is_preselected_next_to_readme_only_hits() {
+        let db = prepare("readme-only-mixed", |conn| {
+            insert_repo(conn, &readme_repo("real", "lab/real", "图片压缩工具"));
+            insert_repo(
+                conn,
+                &readme_repo("min", "lab/image-minifier", "a general image utility"),
+            );
+            insert_readme(
+                conn,
+                "min",
+                "Please compress this file. Then compress it again. Finally compress the backup.",
+            );
+            // 一个意图词在内容里对上、另一个只在 README 里提到：证据够，照常勾选
+            insert_repo(conn, &readme_repo("mix", "lab/mixed", "批量压缩工具"));
+            insert_readme(
+                conn,
+                "mix",
+                "Resize photos. Then resize the covers. Finally resize the avatars.",
+            );
+        });
+        let result = run(&db, "压缩");
+        assert_eq!(result.full_match_count, 3, "{:?}", result.hits);
+        assert_eq!(result.preselected.len(), 2, "{:?}", result.preselected);
+        assert!(result.preselected.iter().any(|id| id == "real"));
+        assert!(result.preselected.iter().any(|id| id == "mix"));
+        assert!(!result.preselected.iter().any(|id| id == "min"));
+        let mixed = run(&db, "压缩尺寸");
+        let mix = mixed
+            .hits
+            .iter()
+            .find(|hit| hit.id == "mix")
+            .expect("mix 应在结果里");
+        assert!(mix.full_match, "{mix:?}");
+        assert!(
+            mixed.preselected.iter().any(|id| id == "mix"),
+            "{:?}",
+            mixed.preselected
+        );
+    }
+
+    #[test]
+    fn english_synonym_in_the_description_counts_as_content_for_preselect() {
+        let db = prepare("synonym-preselect", |conn| {
+            insert_repo(
+                conn,
+                &readme_repo("en", "lab/squeezer", "Compress images in one click"),
+            );
+        });
+        let result = run(&db, "压缩");
+        assert_eq!(result.hits.len(), 1);
+        assert!(result.hits[0].full_match);
+        assert_eq!(result.preselected, vec!["en".to_owned()]);
     }
 
     #[test]
