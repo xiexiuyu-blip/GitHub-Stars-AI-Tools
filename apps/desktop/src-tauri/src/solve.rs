@@ -125,6 +125,10 @@ const TASK_LEXICON_EXTRA: &[&str] = &[
     "社群",
     "朋友圈",
     "知识图谱",
+    "转录",
+    "数据看板",
+    "仪表盘",
+    "抓取",
 ];
 
 /// 汉字动态规划里，跳过这些字不扣分：它们是连接词或虚词，本身不是要找的任务。
@@ -168,8 +172,11 @@ const README_BOOST: f64 = 1.5;
 const README_ONLY: f64 = 1.5;
 const ONE_LINER_LIMIT: usize = 120;
 
-/// 中文意图词 → 英文同义词（全小写）。只在内容字段没有直接命中时用来补「对上」。
-/// 长度 ≤ 3 的词，以及任务卡点名的 `i18n`，匹配时要词边界。
+/// 中文意图词 → 同义词（全小写）：多数是英文，少数是中文近义说法（「抓取」↔「采集」「爬虫」）。
+/// 只在内容字段没有直接命中时用来补「对上」，按「描述」那一档（1.0 × idf）算。
+/// 英文词整词命中：左边不能紧贴字母 / 数字，右边只允许多一个常见词尾（s / es / ed / d / ing），
+/// 所以 `meme` 不会命中 techmeme，`cover` 不会命中 coverage；长度 ≤ 3 的词和 `i18n` 两边都要严格整词。
+/// 中文同义词直接查全部内容字段。
 const SYNONYMS: &[(&str, &[&str])] = &[
     (
         "字幕",
@@ -211,6 +218,8 @@ const SYNONYMS: &[(&str, &[&str])] = &[
             "tts",
             "text-to-speech",
             "dubbing",
+            "语音合成",
+            "文字转语音",
         ],
     ),
     ("口播", &["talking head", "voiceover"]),
@@ -228,8 +237,22 @@ const SYNONYMS: &[(&str, &[&str])] = &[
     ("ppt", &["slides", "presentation", "pptx", "powerpoint"]),
     ("文档", &["document", "documents", "docx"]),
     ("翻译", &["translate", "translation", "i18n"]),
-    ("采集", &["crawler", "scraper", "scraping", "spider"]),
-    ("爬虫", &["crawler", "scraper", "scraping", "spider"]),
+    (
+        "采集",
+        &["crawler", "scraper", "scraping", "spider", "抓取", "爬取"],
+    ),
+    (
+        "爬虫",
+        &[
+            "crawler", "scraper", "scraping", "spider", "抓取", "爬取", "采集",
+        ],
+    ),
+    (
+        "抓取",
+        &[
+            "scrape", "scraper", "scraping", "crawl", "crawler", "采集", "爬取", "爬虫",
+        ],
+    ),
     ("总结", &["summarize", "summary"]),
     ("知识库", &["knowledge base", "rag"]),
     ("自动化", &["automation", "workflow"]),
@@ -258,9 +281,19 @@ const SYNONYMS: &[(&str, &[&str])] = &[
             "photo editing",
             "image editor",
             "retouch",
+            "图片编辑",
         ],
     ),
-    ("修图", &["retouch", "photo editing", "image editing"]),
+    (
+        "修图",
+        &[
+            "retouch",
+            "photo editing",
+            "image editing",
+            "图片编辑",
+            "改图",
+        ],
+    ),
     (
         "抠图",
         &[
@@ -268,6 +301,9 @@ const SYNONYMS: &[(&str, &[&str])] = &[
             "remove background",
             "matting",
             "rembg",
+            "去背景",
+            "背景移除",
+            "透明背景",
         ],
     ),
     ("水印", &["watermark", "watermarks"]),
@@ -294,6 +330,18 @@ const SYNONYMS: &[(&str, &[&str])] = &[
             "speech-to-text",
             "asr",
             "stt",
+            "转录",
+            "语音转文字",
+        ],
+    ),
+    (
+        "转录",
+        &[
+            "转写",
+            "语音转文字",
+            "transcribe",
+            "transcription",
+            "whisper",
         ],
     ),
     (
@@ -302,7 +350,17 @@ const SYNONYMS: &[(&str, &[&str])] = &[
     ),
     ("会议", &["meeting", "meetings"]),
     ("会议纪要", &["meeting notes", "meeting minutes"]),
-    ("文字稿", &["transcript", "transcripts"]),
+    (
+        "文字稿",
+        &[
+            "transcript",
+            "transcripts",
+            "转录",
+            "转写",
+            "逐字稿",
+            "语音转文字",
+        ],
+    ),
     ("排版", &["typesetting", "typography"]),
     ("标题", &["headline", "headlines"]),
     ("爆款", &["viral"]),
@@ -360,7 +418,7 @@ const SYNONYMS: &[(&str, &[&str])] = &[
     ("剪映", &["capcut", "jianying"]),
     ("旁白", &["narration", "voiceover"]),
     ("短剧", &["short drama", "micro drama"]),
-    ("用户画像", &["user persona", "user profile"]),
+    ("用户画像", &["user persona"]),
     ("架构图", &["architecture diagram"]),
     ("朋友圈", &["wechat moments"]),
 ];
@@ -961,14 +1019,48 @@ fn count_mentions(lower: &str, intent: &str) -> usize {
     let mut total = count_plain(lower, intent);
     if let Some(words) = synonym_list(intent) {
         for word in words {
-            total += if synonym_needs_boundary(word) {
-                count_whole_word(lower, word)
-            } else {
-                count_plain(lower, word)
-            };
+            total += count_synonym(lower, word);
         }
     }
     total
+}
+
+/// 一个同义词在文本里出现几次：中文直接数；英文按上面的整词规则数。
+fn count_synonym(haystack: &str, word: &str) -> usize {
+    if word.chars().any(is_han) {
+        count_plain(haystack, word)
+    } else if synonym_needs_boundary(word) {
+        count_whole_word(haystack, word)
+    } else {
+        count_word_with_endings(haystack, word)
+    }
+}
+
+/// 数英文词出现几次：左边不能紧贴字母 / 数字；右边要么是词尾，要么只多一个常见词尾（s / es / ed / d / ing）。
+/// `compress` 命中 compressed / compressing，`meme` 不命中 techmeme，`cover` 不命中 coverage。
+fn count_word_with_endings(haystack: &str, word: &str) -> usize {
+    const ENDINGS: [&str; 5] = ["ing", "es", "ed", "s", "d"];
+    if word.is_empty() {
+        return 0;
+    }
+    let bytes = haystack.as_bytes();
+    let is_alnum = |index: usize| bytes[index].is_ascii_alphanumeric();
+    haystack
+        .match_indices(word)
+        .filter(|(start, _)| {
+            if *start > 0 && is_alnum(*start - 1) {
+                return false;
+            }
+            let end = start + word.len();
+            if end >= bytes.len() || !is_alnum(end) {
+                return true;
+            }
+            ENDINGS.iter().any(|ending| {
+                let after = end + ending.len();
+                haystack[end..].starts_with(ending) && (after >= bytes.len() || !is_alnum(after))
+            })
+        })
+        .count()
 }
 
 fn count_plain(haystack: &str, needle: &str) -> usize {
@@ -1057,26 +1149,45 @@ fn synonym_matches(blocks: &TextBlocks, intent: &str) -> bool {
     let Some(words) = synonym_list(intent) else {
         return false;
     };
-    let fields = [
+    // 英文同义词只看名称、描述、话题、摘要、关键词；中文近义说法在一句话、能力、问题里才会出现，查全部内容字段。
+    let english_fields = [
         blocks.name.as_str(),
         blocks.description.as_str(),
         blocks.topics.as_str(),
         blocks.summary.as_str(),
         blocks.keywords.as_str(),
     ];
-    words
-        .iter()
-        .any(|word| fields.iter().any(|field| field_has_synonym(field, word)))
+    let han_fields = [
+        blocks.name.as_str(),
+        blocks.one_liner.as_str(),
+        blocks.capabilities.as_str(),
+        blocks.problems.as_str(),
+        blocks.keywords.as_str(),
+        blocks.summary.as_str(),
+        blocks.description.as_str(),
+        blocks.topics.as_str(),
+    ];
+    words.iter().any(|word| {
+        if word.chars().any(is_han) {
+            han_fields.iter().any(|field| field.contains(word))
+        } else {
+            english_fields
+                .iter()
+                .any(|field| field_has_synonym(field, word))
+        }
+    })
 }
 
 fn field_has_synonym(field: &str, word: &str) -> bool {
     if word.is_empty() {
         return false;
     }
-    if synonym_needs_boundary(word) {
+    if word.chars().any(is_han) {
+        field.contains(word)
+    } else if synonym_needs_boundary(word) {
         contains_word(field, word)
     } else {
-        field.contains(word)
+        count_word_with_endings(field, word) > 0
     }
 }
 
@@ -1582,8 +1693,30 @@ fn synonym_label(repo: &RepoRecord, intent: &str) -> Option<String> {
         (repo.blocks.topics.as_str(), "话题"),
     ];
     for (field, label) in fields {
-        if words.iter().any(|word| field_has_synonym(field, word)) {
+        if words
+            .iter()
+            .any(|word| !word.chars().any(is_han) && field_has_synonym(field, word))
+        {
             return Some(label.to_owned());
+        }
+    }
+    // 中文近义说法：写出是哪个词，免得「对上：抓取（一句话）」让人以为那句话里有「抓取」
+    let han_fields = [
+        (repo.blocks.name.as_str(), "名称"),
+        (repo.blocks.one_liner.as_str(), "一句话"),
+        (repo.blocks.capabilities.as_str(), "能力"),
+        (repo.blocks.problems.as_str(), "问题"),
+        (repo.blocks.keywords.as_str(), "关键词"),
+        (repo.blocks.summary.as_str(), "摘要"),
+        (repo.blocks.description.as_str(), "描述"),
+        (repo.blocks.topics.as_str(), "话题"),
+    ];
+    for (field, label) in han_fields {
+        if let Some(word) = words
+            .iter()
+            .find(|word| word.chars().any(is_han) && field.contains(**word))
+        {
+            return Some(format!("近义「{word}」·{label}"));
         }
     }
     None
@@ -4940,6 +5073,198 @@ mod tests {
         assert_eq!(result.hits.len(), 1);
         assert!(result.hits[0].full_match);
         assert_eq!(result.preselected, vec!["en".to_owned()]);
+    }
+
+    #[test]
+    fn english_synonyms_match_whole_words_with_common_endings() {
+        // 词尾：compress 命中 compressed / compressing，不命中 compression（那是另一个同义词）
+        assert_eq!(count_word_with_endings("compressed images", "compress"), 1);
+        assert_eq!(
+            count_word_with_endings("compressing, compress, compresses", "compress"),
+            3
+        );
+        assert_eq!(count_word_with_endings("compression", "compress"), 0);
+        // 左边不能紧贴字母：techmeme 不是 meme；右边多出别的字母也不行：coverage 不是 cover
+        assert_eq!(count_word_with_endings("techmeme digest", "meme"), 0);
+        assert_eq!(count_word_with_endings("memes and a meme.", "meme"), 2);
+        assert_eq!(count_word_with_endings("code coverage report", "cover"), 0);
+        assert_eq!(count_word_with_endings("book covers", "cover"), 1);
+        assert_eq!(count_word_with_endings("microcrop", "crop"), 0);
+        assert_eq!(count_word_with_endings("watermarked", "watermark"), 1);
+        assert_eq!(count_word_with_endings("resized", "resize"), 1);
+        assert_eq!(count_word_with_endings("a-resize-b", "resize"), 1);
+        assert_eq!(count_word_with_endings("", "meme"), 0);
+        assert_eq!(count_word_with_endings("meme", ""), 0);
+        // 短词和 i18n 仍然严格：cut 不放宽词尾
+        assert_eq!(count_synonym("cutting", "cut"), 0);
+        assert_eq!(count_synonym("i18next", "i18n"), 0);
+        // 中文同义词直接数
+        assert_eq!(count_synonym("采集和采集", "采集"), 2);
+    }
+
+    #[test]
+    fn meme_synonym_does_not_match_techmeme() {
+        let db = prepare("techmeme", |conn| {
+            insert_repo(
+                conn,
+                &readme_repo("news", "lab/techmeme-digest", "Techmeme news digest"),
+            );
+            insert_readme(
+                conn,
+                "news",
+                "Techmeme is a news site. Read Techmeme daily. Techmeme again.",
+            );
+            insert_repo(
+                conn,
+                &readme_repo("fun", "lab/meme-maker", "A meme generator"),
+            );
+        });
+        let result = run(&db, "表情包");
+        let names: Vec<&str> = result
+            .hits
+            .iter()
+            .map(|hit| hit.full_name.as_str())
+            .collect();
+        assert_eq!(names, vec!["lab/meme-maker"], "{names:?}");
+    }
+
+    #[test]
+    fn user_profile_page_does_not_count_as_user_persona() {
+        let card = rich_card(
+            "app",
+            &["管理账号"],
+            &["账号乱"],
+            &["需要管理账号时"],
+            "管理 User Profile 页面",
+        );
+        let db = prepare("user-profile", |conn| {
+            insert_repo(
+                conn,
+                &NewRepo {
+                    id: "panel",
+                    full_name: "lab/panel",
+                    description: "Agent control panel",
+                    stars: 1,
+                    status: "active",
+                    one_liner: Some("控制面板"),
+                    summary: "含 User Profile 设置",
+                    keywords_json: "[]",
+                    card_json: Some(&card),
+                },
+            );
+        });
+        let result = run(&db, "做用户画像");
+        assert!(result.hits.is_empty(), "{:?}", result.hits);
+    }
+
+    #[test]
+    fn chinese_synonyms_match_content_fields_and_say_which_word() {
+        let card = rich_card(
+            "app",
+            &["内容监控与采集"],
+            &["想看别人发了什么"],
+            &["需要盯着对手账号时"],
+            "一个本地面板",
+        );
+        let db = prepare("han-synonym", |conn| {
+            insert_repo(
+                conn,
+                &NewRepo {
+                    id: "hub",
+                    full_name: "lab/creator-hub",
+                    description: "dashboard",
+                    stars: 1,
+                    status: "active",
+                    one_liner: Some("本地内容采集面板"),
+                    summary: "面板",
+                    keywords_json: "[]",
+                    card_json: Some(&card),
+                },
+            );
+        });
+        let result = run(&db, "抓取");
+        assert_eq!(result.hits.len(), 1, "{:?}", result.hits);
+        assert!(has_term(&result.hits[0].matched, "抓取"));
+        assert!(
+            result.hits[0].why.contains("近义「采集」"),
+            "{}",
+            result.hits[0].why
+        );
+        // 反过来也通：问「采集」，只写了「抓取」的也算对上
+        let db = prepare("han-synonym-reverse", |conn| {
+            insert_repo(
+                conn,
+                &NewRepo {
+                    id: "grab",
+                    full_name: "lab/grabber",
+                    description: "grabber",
+                    stars: 1,
+                    status: "active",
+                    one_liner: Some("一键抓取网页内容"),
+                    summary: "工具",
+                    keywords_json: "[]",
+                    card_json: None,
+                },
+            );
+        });
+        let result = run(&db, "采集");
+        assert_eq!(result.hits.len(), 1, "{:?}", result.hits);
+    }
+
+    #[test]
+    fn data_dashboard_is_its_own_word_not_kanban() {
+        let db = prepare("dashboard", |conn| {
+            insert_repo(
+                conn,
+                &readme_repo("board", "lab/kanboard", "项目看板：拖拽任务卡片"),
+            );
+            insert_repo(
+                conn,
+                &readme_repo(
+                    "screen",
+                    "lab/bi-screen",
+                    "把销售数据做成数据看板，一页看全",
+                ),
+            );
+        });
+        let result = run(&db, "做数据看板");
+        assert!(
+            has_term(&result.intents, "数据看板"),
+            "{:?}",
+            result.intents
+        );
+        assert!(!has_term(&result.intents, "看板"), "{:?}", result.intents);
+        let names: Vec<&str> = result
+            .hits
+            .iter()
+            .map(|hit| hit.full_name.as_str())
+            .collect();
+        assert_eq!(
+            names,
+            vec!["lab/bi-screen"],
+            "项目看板不是数据看板：{names:?}"
+        );
+        // 单问「看板」仍然是看板
+        let kanban = run(&db, "做看板");
+        assert!(kanban
+            .hits
+            .iter()
+            .any(|hit| hit.full_name == "lab/kanboard"));
+    }
+
+    #[test]
+    fn transcript_words_are_interchangeable() {
+        let db = prepare("transcribe", |conn| {
+            insert_repo(
+                conn,
+                &readme_repo("asr", "lab/meeting-notes", "把录音语音转文字，生成会议记录"),
+            );
+        });
+        let result = run(&db, "文字稿");
+        assert_eq!(result.hits.len(), 1, "{:?}", result.hits);
+        let result = run(&db, "转录");
+        assert!(has_term(&result.intents, "转录"), "{:?}", result.intents);
+        assert_eq!(result.hits.len(), 1, "{:?}", result.hits);
     }
 
     #[test]
