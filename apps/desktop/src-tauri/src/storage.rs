@@ -1,7 +1,7 @@
 use crate::auth::GitHubUser;
 use crate::github::{GitHubRepositoryRecommendation, ReadmeDocument, StarredRepository};
 use crate::ranking_query::personal_ranking_order_clause;
-use rusqlite::{types::ValueRef, Connection};
+use rusqlite::{params, types::ValueRef, Connection};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
@@ -996,6 +996,59 @@ ON CONFLICT(repo_id) DO UPDATE SET
         );
 
         self.execute_sql(&sql)
+    }
+
+    /// README 内容没变时，只把「最近检查时间」往前拨，避免每次同步都重抓。
+    pub fn touch_readme_fetched(&self, repo_id: &str, fetched_at: &str) -> Result<(), String> {
+        let connection = self.open_follow_connection()?;
+        connection
+            .execute(
+                "UPDATE repo_readmes SET fetched_at = ?1 WHERE repo_id = ?2",
+                params![fetched_at, repo_id],
+            )
+            .map_err(|error| format!("README 检查时间更新失败：{error}"))?;
+        Ok(())
+    }
+
+    /// 这个账号下还在收藏里的仓库，以及各自缓存 README 的抓取时间。没有缓存时抓取时间是空。
+    pub fn list_readme_states(
+        &self,
+        account_id: &str,
+    ) -> Result<Vec<crate::readme_follow::RepoReadmeState>, String> {
+        let connection = self.open_follow_connection()?;
+        let mut statement = connection
+            .prepare(
+                "SELECT r.id, r.full_name, r.pushed_at, rr.fetched_at
+                 FROM repositories r
+                 LEFT JOIN repo_readmes rr ON rr.repo_id = r.id
+                 WHERE r.sync_status = 'active' AND r.account_id = ?1
+                 ORDER BY r.id",
+            )
+            .map_err(|error| format!("README 跟进列表读取失败：{error}"))?;
+        let rows = statement
+            .query_map(params![account_id], |row| {
+                Ok(crate::readme_follow::RepoReadmeState {
+                    id: row.get(0)?,
+                    full_name: row.get(1)?,
+                    pushed_at: row.get(2)?,
+                    readme_fetched_at: row.get(3)?,
+                })
+            })
+            .map_err(|error| format!("README 跟进列表读取失败：{error}"))?;
+        let mut states = Vec::new();
+        for row in rows {
+            states.push(row.map_err(|error| format!("README 跟进列表读取失败：{error}"))?);
+        }
+        Ok(states)
+    }
+
+    fn open_follow_connection(&self) -> Result<Connection, String> {
+        let connection = Connection::open(&self.database_path)
+            .map_err(|error| format!("SQLite 数据库打开失败：{error}"))?;
+        connection
+            .busy_timeout(std::time::Duration::from_millis(5000))
+            .map_err(|error| format!("SQLite 数据库打开失败：{error}"))?;
+        Ok(connection)
     }
 
     pub fn get_github_ranking_cache(
@@ -8118,6 +8171,52 @@ VALUES
             .iter()
             .all(|repository| repository.language.as_deref() == Some("Rust")));
 
+        let _ = std::fs::remove_file(database_path);
+    }
+
+    #[test]
+    fn list_readme_states_skips_removed_and_touch_only_updates_fetched_at() {
+        let (storage, database_path) = temp_storage("readme-follow-state");
+        storage
+            .execute_sql(
+                "
+INSERT INTO github_accounts(id, login, token_ref) VALUES ('acct', 'fox', 'test');
+INSERT INTO repositories(id, account_id, owner, name, full_name, html_url, starred_at, sync_status, pushed_at) VALUES
+  ('r1', 'acct', 'fox', 'demo', 'fox/demo', 'https://github.com/fox/demo', '2026-01-01T00:00:00Z', 'active', '2026-10-01T00:00:00Z'),
+  ('r2', 'acct', 'fox', 'gone', 'fox/gone', 'https://github.com/fox/gone', '2026-01-01T00:00:00Z', 'removed', '2026-10-01T00:00:00Z');
+INSERT INTO repo_readmes(repo_id, raw_markdown, content_hash, source_path, fetched_at) VALUES
+  ('r1', 'hello', 'h1', 'README.md', '2026-09-01T00:00:00Z');
+",
+            )
+            .expect("夹具应能写入");
+        let states = storage.list_readme_states("acct").expect("应能列出");
+        assert_eq!(states.len(), 1);
+        assert_eq!(states[0].id, "r1");
+        assert_eq!(states[0].full_name, "fox/demo");
+        assert_eq!(states[0].pushed_at.as_deref(), Some("2026-10-01T00:00:00Z"));
+        assert_eq!(
+            states[0].readme_fetched_at.as_deref(),
+            Some("2026-09-01T00:00:00Z")
+        );
+        storage
+            .touch_readme_fetched("r1", "2026-10-05T00:00:00Z")
+            .expect("应能拨动检查时间");
+        let states = storage.list_readme_states("acct").expect("应能再列出");
+        assert_eq!(
+            states[0].readme_fetched_at.as_deref(),
+            Some("2026-10-05T00:00:00Z")
+        );
+        assert_eq!(
+            storage
+                .get_readme_hash("r1")
+                .expect("哈希应能读")
+                .as_deref(),
+            Some("h1")
+        );
+        let bare = storage
+            .list_readme_states("other")
+            .expect("别的账号应是空的");
+        assert!(bare.is_empty());
         let _ = std::fs::remove_file(database_path);
     }
 }

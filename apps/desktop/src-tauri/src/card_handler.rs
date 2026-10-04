@@ -20,7 +20,7 @@ const BACKFILL_PRIORITY: i64 = 6;
 const NEW_STAR_PRIORITY: i64 = 3;
 const REGENERATE_PRIORITY: i64 = 2;
 /// 空串和坏 JSON 上直接 `json_extract` 会让整句失败。`CASE` 只在合法 JSON 上取值。
-const NOT_CONFIRMED_SQL: &str = "CASE WHEN json_valid(repo_ai_documents.card_json) THEN IFNULL(json_extract(repo_ai_documents.card_json, '$.review_status'), '') ELSE '' END <> 'confirmed'";
+pub(crate) const NOT_CONFIRMED_SQL: &str = "CASE WHEN json_valid(repo_ai_documents.card_json) THEN IFNULL(json_extract(repo_ai_documents.card_json, '$.review_status'), '') ELSE '' END <> 'confirmed'";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CardEnqueueScope {
@@ -352,12 +352,15 @@ pub fn request_regenerate(db_path: &Path, repo_id: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// 只入队，不写预算。`scope` 是 `missing` 或 `outdated`。补旧账的优先级是 6。
+/// 只入队，不写预算。`scope` 是 `missing`、`outdated` 或 `readme_changed`。补旧账的优先级是 6。
 pub fn enqueue_cards_for_scope(db_path: &Path, scope: &str) -> Result<usize, String> {
+    if scope == "readme_changed" {
+        return Ok(crate::readme_follow::enqueue_changed(db_path)?.queued);
+    }
     let scope = match scope {
         "missing" => CardEnqueueScope::Missing,
         "outdated" => CardEnqueueScope::Outdated,
-        _ => return Err("排队范围只能是 missing 或 outdated".to_owned()),
+        _ => return Err("排队范围只能是 missing、outdated 或 readme_changed".to_owned()),
     };
     let mut conn = open_db(db_path)?;
     enqueue_cards(&mut conn, scope, BACKFILL_PRIORITY)
@@ -400,6 +403,8 @@ pub struct AutomationStatus {
     pub unlimited: bool,
     pub full_scan: Option<FullScanView>,
     pub last_full_scan: Option<jobs::LastFullScan>,
+    /// 上次 README 更新检查。没有检查过就是空。
+    pub last_readme_check: Option<jobs::LastReadmeCheck>,
     /// 现在还没整理好的有效仓库数（没有理解卡 + 说明过期、没被确认），用来估全量整理要多少。
     pub needs_organizing: i64,
 }
@@ -458,6 +463,7 @@ pub fn automation_status(db_path: &Path, settings: &Value) -> Result<AutomationS
         unlimited,
         full_scan,
         last_full_scan: control.last_full_scan,
+        last_readme_check: control.last_readme_check,
         needs_organizing: count_needs_organizing(&conn)?,
     })
 }
@@ -2121,6 +2127,52 @@ mod tests {
             .collect()
     }
 
+    #[test]
+    fn automation_status_surfaces_last_readme_check() {
+        let db = TempDb::new("readme-status");
+        fs::write(
+            jobs::queue_control_path(db.path()),
+            r#"{"paused":false,"dailyBudgetTokens":1000,"lastReadmeCheck":{"checkedAt":"2026-10-05T10:20:00.000Z","checked":23,"refreshed":8,"material":3,"queued":2}}"#,
+        )
+        .expect("控制文件应能写入");
+        let status = automation_status(db.path(), &json!({})).expect("状态应能读出");
+        let check = status.last_readme_check.clone().expect("应带出上次检查");
+        assert_eq!(check.checked_at, "2026-10-05T10:20:00.000Z");
+        assert_eq!(check.checked, 23);
+        assert_eq!(check.refreshed, 8);
+        assert_eq!(check.material, 3);
+        assert_eq!(check.queued, 2);
+        let text = serde_json::to_string(&status).expect("状态应能序列化");
+        assert!(text.contains("lastReadmeCheck"));
+    }
+
+    #[test]
+    fn readme_changed_scope_enqueues_at_priority_five_without_touching_budget() {
+        let db = TempDb::new("scope-readme");
+        let conn = db.open();
+        insert_repo(&conn, "fresh", "active");
+        insert_readme(&conn, "fresh");
+        insert_card(&conn, "fresh", r#"{"review_status":"suggested"}"#, 2, "h");
+        drop(conn);
+        assert!(!jobs::queue_control_path(db.path()).exists());
+        assert_eq!(
+            enqueue_cards_for_scope(db.path(), "readme_changed").expect("应能入队"),
+            1
+        );
+        assert!(!jobs::queue_control_path(db.path()).exists());
+        assert_eq!(
+            cell_i64(
+                &db.open(),
+                "SELECT priority FROM ai_jobs WHERE target_id = 'fresh'"
+            ),
+            5
+        );
+        assert_eq!(
+            enqueue_cards_for_scope(db.path(), "readme_changed").expect("重复入队应为 0"),
+            0
+        );
+    }
+
     fn expected_status_keys() -> BTreeSet<String> {
         [
             "enabled",
@@ -2137,6 +2189,7 @@ mod tests {
             "unlimited",
             "fullScan",
             "lastFullScan",
+            "lastReadmeCheck",
             "needsOrganizing",
         ]
         .into_iter()
@@ -2428,7 +2481,7 @@ mod tests {
             77
         );
         let error = enqueue_cards_for_scope(db.path(), "all").expect_err("未知范围应失败");
-        assert_eq!(error, "排队范围只能是 missing 或 outdated");
+        assert_eq!(error, "排队范围只能是 missing、outdated 或 readme_changed");
         assert_eq!(cell_i64(&db.open(), "SELECT COUNT(*) FROM ai_jobs"), 2);
         assert_eq!(
             cell_i64(

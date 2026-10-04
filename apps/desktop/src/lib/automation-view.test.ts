@@ -15,6 +15,8 @@ import {
   itemPendingNote,
   lastFullScanText,
   parseDailyBudget,
+  readmeCheckText,
+  type LastReadmeCheck,
   regenerateNote,
   roundedEstimate,
   TOKENS_PER_REPO,
@@ -588,5 +590,55 @@ describe('额度用完时指出可以开全量整理', () => {
     expect(itemPendingNote(status({ budgetRemaining: 0 })).text).toContain('明天');
     expect(itemPendingNote(status({ queued: 1 })).text).toContain('整理队列');
     expect(regenerateNote(status({ budgetRemaining: 0 })).sub).toContain('明天');
+  });
+});
+
+describe('readmeCheckText', () => {
+  const now = new Date(2026, 9, 5, 12, 0, 0);
+  function check(overrides: Partial<LastReadmeCheck> = {}): LastReadmeCheck {
+    return {
+      checkedAt: new Date(2026, 9, 4, 18, 20, 0).toISOString(),
+      checked: 23,
+      refreshed: 8,
+      material: 3,
+      queued: 2,
+      ...overrides,
+    };
+  }
+
+  it('没检查过不显示', () => {
+    expect(readmeCheckText(null, now)).toBeNull();
+    expect(readmeCheckText(undefined, now)).toBeNull();
+  });
+
+  it('有明显改动时写出排队', () => {
+    expect(readmeCheckText(check(), now)).toBe(
+      'README 更新检查：昨天 18:20 · 看了 23 个 · 有明显改动 3 个，已排队重新整理',
+    );
+  });
+
+  it('没有明显改动时不说排队', () => {
+    expect(readmeCheckText(check({ material: 0, queued: 0 }), now)).toBe(
+      'README 更新检查：昨天 18:20 · 看了 23 个 · 没有明显改动',
+    );
+    expect(readmeCheckText(check({ material: Number.NaN }), now)).toContain('没有明显改动');
+    expect(readmeCheckText(check({ material: -2 }), now)).toContain('没有明显改动');
+  });
+
+  it('更早的日期只写月日，当天写今天，不到一小时写刚刚', () => {
+    expect(readmeCheckText(check({ checkedAt: new Date(2026, 8, 1, 8, 0, 0).toISOString() }), now)).toContain('9月1日');
+    expect(readmeCheckText(check({ checkedAt: new Date(2026, 9, 5, 9, 30, 0).toISOString() }), now)).toContain('今天 09:30');
+    expect(readmeCheckText(check({ checkedAt: new Date(2026, 9, 5, 11, 30, 0).toISOString() }), now)).toContain('刚刚');
+    expect(readmeCheckText(check({ checkedAt: new Date(2026, 9, 5, 11, 0, 0).toISOString() }), now)).toContain('今天 11:00');
+  });
+
+  it('看了 0 个也照实写', () => {
+    expect(readmeCheckText(check({ checked: 0, material: 0 }), now)).toBe(
+      'README 更新检查：昨天 18:20 · 看了 0 个 · 没有明显改动',
+    );
+  });
+
+  it('时间读不懂就整行不显示', () => {
+    expect(readmeCheckText(check({ checkedAt: '不是时间' }), now)).toBeNull();
   });
 });
