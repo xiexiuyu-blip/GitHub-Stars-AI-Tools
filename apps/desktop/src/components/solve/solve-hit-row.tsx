@@ -1,6 +1,6 @@
-import type { ScenarioSummary, SolveHit } from '@/lib/contracts';
+import type { RerankFit, ScenarioSummary, SolveHit } from '@/lib/contracts';
 import { formLabel } from '@/lib/library-filters';
-import { matchBadge, whyLine } from '@/lib/solve-view';
+import { matchBadge, RERANK_FIT_LABEL, whyLine } from '@/lib/solve-view';
 import { CoverImage, RepoAvatar, ScenarioChip, StarCount, Tag } from '@/components/kit';
 import { useRepoCover } from '@/hooks/use-repo-cover';
 import { Icon } from '@/components/ui/icon';
@@ -19,6 +19,8 @@ export function SolveHitRow(props: {
   onToggle: () => void;
   onOpen?: () => void;
   onMakeMain?: () => void;
+  /** 有 AI 精选时才传。不传就和原来一样。 */
+  ai?: { fit: RerankFit; reason: string };
 }) {
   const { hit } = props;
   const badge = matchBadge(hit, props.intents);
@@ -35,6 +37,7 @@ export function SolveHitRow(props: {
       className={cn(
         'group grid grid-cols-[32px_40px_minmax(0,1fr)] items-start gap-2 border-t border-muted px-3 py-3 transition-colors first:border-t-0 min-[1000px]:grid-cols-[32px_40px_minmax(0,1fr)_88px]',
         props.onOpen && 'cursor-pointer hover:bg-surface-container-low',
+        props.ai?.fit === 'poor' && 'opacity-60',
       )}
       onClick={props.onOpen}
     >
@@ -67,6 +70,7 @@ export function SolveHitRow(props: {
           {form ? <Tag>{form}</Tag> : null}
           {hit.hasCard === false ? <Tag>待整理</Tag> : null}
           {badge ? <Tag tone={badge.tone}>{badge.text}</Tag> : null}
+          {props.ai ? <Tag tone={props.ai.fit === 'best' ? 'blue' : 'gray'}>{RERANK_FIT_LABEL[props.ai.fit]}</Tag> : null}
           {chips.map((scenario) => (
             <ScenarioChip key={scenario.id} name={scenario.nameZh} scenarioKey={scenario.slug || scenario.id} />
           ))}
@@ -76,6 +80,9 @@ export function SolveHitRow(props: {
             {hit.hasCard === false ? <span className="mr-1 text-xs text-subtle">GitHub 原文</span> : null}
             {oneLiner}
           </p>
+        ) : null}
+        {props.ai?.reason ? (
+          <div className="mt-0.5 text-xs leading-5 text-on-surface-variant">{props.ai.reason}</div>
         ) : null}
         {related ? (
           <div className="mt-0.5 text-xs leading-5 text-on-surface-variant">

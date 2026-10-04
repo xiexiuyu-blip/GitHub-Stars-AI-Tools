@@ -12,6 +12,7 @@ import type {
   RepoCommunity,
   ScenarioSummary,
   SetInboxStatusRequest,
+  RerankResult,
   SolveResult,
   TodayView,
 } from '@/lib/contracts';
@@ -111,6 +112,10 @@ export function getTodayView(): Promise<TodayView> {
 
 export function solveV2(query: string): Promise<SolveResult> {
   return call<SolveResult>('solve_v2', { query });
+}
+
+export function solveRerankV2(request: { query: string; candidateIds: string[] }): Promise<RerankResult> {
+  return call<RerankResult>('solve_rerank_v2', { request });
 }
 
 export function buildReferencePack(
