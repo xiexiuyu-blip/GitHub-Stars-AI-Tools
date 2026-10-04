@@ -2983,9 +2983,37 @@ mod card_chat {
     /// 响应体说的是「max_tokens 比允许的输出上限大」，而不是「输入太长」（同时提到上下文的算输入太长，不在这里认）。
     fn rejects_output_limit(body: &str) -> bool {
         let normalized = body.to_ascii_lowercase();
-        (normalized.contains("max_tokens") || normalized.contains("max_completion_tokens"))
-            && !normalized.contains("context")
-            && !body.contains("上下文")
+        if !(normalized.contains("max_tokens") || normalized.contains("max_completion_tokens")) {
+            return false;
+        }
+        if normalized.contains("context") || body.contains("上下文") {
+            return false;
+        }
+        // 「这个模型不支持 max_tokens 这个参数」（OpenAI 的 o 系列）降档没用，别当成上限被拒
+        if normalized.contains("unsupported") || normalized.contains("not supported") {
+            return false;
+        }
+        // 光提到 max_tokens 不够：有的网关在 422 里把整个请求体回显出来，请求体里本来就有 max_tokens。
+        // 要同时带着「太大 / 超过 / 最大 / 范围」这类说它超限的字眼（OpenAI、DeepSeek、Anthropic、阿里 DashScope 的常见写法都有）
+        const LIMIT_WORDS: [&str; 14] = [
+            "too large",
+            "too big",
+            "too high",
+            "exceed",
+            "maximum",
+            "at most",
+            "less than",
+            "must be",
+            "valid range",
+            "range of",
+            "limit",
+            "greater than",
+            "上限",
+            "最大",
+        ];
+        LIMIT_WORDS
+            .iter()
+            .any(|word| normalized.contains(word) || body.contains(word))
     }
 
     fn looks_like_context_overflow(body: &str) -> bool {
@@ -4631,6 +4659,29 @@ mod tests {
             None,
         );
         assert!(unprocessable.message.contains(OUTPUT_LIMIT_REJECTED));
+        // 几家常见写法都要认得（降档重试靠它）
+        for sample in [
+            r#"{"error":{"message":"Invalid max_tokens value, the valid range of max_tokens is [1, 8192]"}}"#,
+            r#"{"error":{"message":"Range of max_tokens should be [1, 8192]"}}"#,
+            r#"{"error":{"message":"max_tokens must be less than or equal to 4096"}}"#,
+            r#"{"error":{"message":"max_tokens: 20000 exceeds the model's output limit"}}"#,
+        ] {
+            let error = classify_http_failure(400, sample, None);
+            assert!(error.message.contains(OUTPUT_LIMIT_REJECTED), "{sample}");
+        }
+        // 认错的代价：每张卡白多 3 次不计费请求，5 张后整条队列暂停。这些不是「输出上限被拒」：
+        for sample in [
+            // OpenAI o 系列：不支持 max_tokens 这个参数，降档没用
+            r#"{"error":{"message":"Unsupported parameter: 'max_tokens' is not supported with this model. Use 'max_completion_tokens' instead."}}"#,
+            // 同时带着「不支持」和超限字眼（只有靠「不支持」这条才排除得掉）
+            r#"{"error":{"message":"Unsupported parameter: max_tokens exceeds the maximum supported value, use max_completion_tokens"}}"#,
+            // 有的网关在 422 里把请求体整个回显出来，请求体里本来就有 max_tokens
+            r#"{"detail":[{"type":"missing","loc":["body","messages"],"msg":"Field required","input":{"model":"x","max_tokens":8192}}]}"#,
+            r#"{"error":{"message":"bad request"}}"#,
+        ] {
+            let error = classify_http_failure(422, sample, None);
+            assert!(!error.message.contains(OUTPUT_LIMIT_REJECTED), "{sample}");
+        }
         // 真的是内容太长的几种写法照旧认得（包括同时提到 max_tokens 和上下文窗口的）
         for genuine in [
             "This model's maximum context length is 8192 tokens. However, your messages resulted in 9000 tokens.",

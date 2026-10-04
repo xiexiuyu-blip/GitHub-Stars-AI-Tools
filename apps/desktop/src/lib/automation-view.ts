@@ -57,18 +57,18 @@ export type AutomationStatus = {
   needsOrganizing?: number | null;
 };
 
-/** 整理一个仓库大约用多少 token（输入约 3000 + 输出约 600，取整到 4000）。只用来估「约整理多少个」。 */
-export const TOKENS_PER_REPO = 4000;
+/** 整理一个仓库大约用多少 token（2026-10-04 真实记录：输入约 4300 + 输出约 1500，成功的卡平均约 5.7–6.3 千，取 6000）。只用来估「约整理多少个」。 */
+export const TOKENS_PER_REPO = 6000;
 
-/** 全量整理估算：2026-10-04 真实记录里成功的卡平均约 6.3 千 token（含思考），偶尔被截断要重试，取 7500。只用于全量整理的预计花费，不用于日常额度折算。 */
-export const FULL_SCAN_TOKENS_PER_REPO = 7500;
+/** 全量整理估算：2026-10-04 真实记录里成功的卡平均约 5.7–6.3 千 token（含思考），偶尔被截断要重试，取 6500（略高于平均）。只用于全量整理的预计花费，不用于日常额度折算。 */
+export const FULL_SCAN_TOKENS_PER_REPO = 6500;
 
 /** 额度档位：名字 + 每天约整理多少个。0 是关闭。 */
 export const BUDGET_PRESETS: ReadonlyArray<{ tokens: number; title: string; hint: string }> = [
   { tokens: 0, title: '关闭', hint: '不自动整理，一分钱不花' },
-  { tokens: 100_000, title: '试跑', hint: '每天约 25 个，先看看效果' },
-  { tokens: 200_000, title: '日常', hint: '每天约 50 个' },
-  { tokens: 600_000, title: '集中补齐', hint: '每天约 150 个，尽快补完旧收藏' },
+  { tokens: 100_000, title: '试跑', hint: '每天约 16 个，先看看效果' },
+  { tokens: 200_000, title: '日常', hint: '每天约 33 个' },
+  { tokens: 600_000, title: '集中补齐', hint: '每天约 100 个，尽快补完旧收藏' },
 ];
 
 /** 开始整理一个仓库前，先按「两次调用都用满」预留的量（Rust 的 `CLAIM_RESERVE_TOKENS`）。额度比它小，一个仓库也领不到。 */

@@ -34,6 +34,10 @@ const FULL_SCAN_MIN_CEILING: i64 = 3_000_000;
 /// 全量整理里失败的个数达到「预计个数的五分之一（至少 25 个）」就自动结束：失败的调用多半已经计费（输出被截断、校验不过），
 /// 失败这么多说明模型 / 提示词 / 服务商哪里不对，继续整理只是在白花钱，先停下检查。
 const FULL_SCAN_MIN_FAILURE_LIMIT: i64 = 25;
+/// 开始之后一个成功都没有、失败已经到这个数：多半是模型 / 密钥 / 服务商哪里整个不对，不用等攒到上面那条线。
+const FULL_SCAN_NO_SUCCESS_FAILURES: i64 = 10;
+/// 失败比成功还多（并且至少这么多个）：失败率超过一半，说明有系统性问题。
+const FULL_SCAN_MAJORITY_FAILURES: i64 = 20;
 pub(crate) const DAY_SECS: i64 = 24 * 60 * 60;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -70,6 +74,10 @@ impl ErrorKind {
 /// 估计值取一张理解卡的平均用量（2026-10-04 真模型试跑：每张约 5k token，其中输入约 3k）。
 pub const FAILED_ATTEMPT_TOKEN_ESTIMATE: i64 = 4000;
 
+/// 等到超时才失败的调用：模型已经写了很久（理解卡的等待时限随输出额度放大，最长 469 秒，约 60 token/s），
+/// 服务商多半已经按写出来的计费，4000 明显偏低：按提示词约 3–4k + 已写出的约 6k 估。
+pub const TIMEOUT_ATTEMPT_TOKEN_ESTIMATE: i64 = 10_000;
+
 /// 理解卡没通过校验（坏 JSON、字段不对）一定已经调用了两次模型：第一次，加一次带着上次输出的修复调用。
 /// 修复调用要把整份提示词和上一次输出再发一遍，合计约 10k–12k，只记 4000 会低估两倍多。
 pub const REPAIRED_FAILURE_TOKEN_ESTIMATE: i64 = 10_000;
@@ -87,7 +95,8 @@ pub const CLAIM_RESERVE_TOKENS: i64 = 12_000;
 fn failure_charge(kind: ErrorKind) -> i64 {
     match kind {
         ErrorKind::BadJson | ErrorKind::Schema => REPAIRED_FAILURE_TOKEN_ESTIMATE,
-        ErrorKind::Timeout | ErrorKind::Other => FAILED_ATTEMPT_TOKEN_ESTIMATE,
+        ErrorKind::Timeout => TIMEOUT_ATTEMPT_TOKEN_ESTIMATE,
+        ErrorKind::Other => FAILED_ATTEMPT_TOKEN_ESTIMATE,
         ErrorKind::Interrupted
         | ErrorKind::RateLimit
         | ErrorKind::Auth
@@ -985,6 +994,26 @@ pub(crate) fn full_scan_failure_limit(total: i64) -> i64 {
     (total.max(0) / 5).max(FULL_SCAN_MIN_FAILURE_LIMIT)
 }
 
+/// 全量整理失败得太多了吗：达到按预计个数算的线、或开始后一个成功都没有就已经失败 10 个、或失败超过一半（至少 20 个）。
+/// 2026-10-04 真实记录里输出额度不够时 84 次调用失败了 57 次，按第一条线要攒 77 个失败（约 4.5 小时、300 万 token）才停，
+/// 后两条把这种整体不对劲的情况压到 10–20 个失败（约 10 万 token）就停。
+pub(crate) fn full_scan_failing_too_much(total: i64, failed: i64, succeeded: i64) -> bool {
+    failed >= full_scan_failure_limit(total)
+        || (succeeded == 0 && failed >= FULL_SCAN_NO_SUCCESS_FAILURES)
+        || (failed >= FULL_SCAN_MAJORITY_FAILURES && failed > succeeded)
+}
+
+/// 从 `since` 起成功了几个理解卡任务（真的调过模型并成功的；跳过的不算）。
+pub(crate) fn count_succeeded_cards_since(conn: &Connection, since: &str) -> Result<i64, String> {
+    conn.query_row(
+        "SELECT COUNT(*) FROM ai_jobs
+         WHERE job_type = 'repo_card' AND status = 'succeeded' AND finished_at IS NOT NULL AND finished_at >= ?1",
+        [since],
+        |row| row.get(0),
+    )
+    .map_err(|error| format!("任务计数失败：{error}"))
+}
+
 /// 还没整理完的理解卡任务数（排队 + 进行中）。
 pub(crate) fn count_open_cards(conn: &Connection) -> Result<i64, String> {
     conn.query_row(
@@ -1034,6 +1063,7 @@ pub(crate) fn settle_full_scan(
     let used = tokens_used_since(conn, &scan.started_at)?.max(0);
     let remaining = count_open_cards(conn)?;
     let failed = count_failed_cards_since(conn, &scan.started_at)?;
+    let succeeded = count_succeeded_cards_since(conn, &scan.started_at)?;
     // 到时间：开始后满 48 小时（开始时间读不懂也算到时间）。时钟倒退（现在比开始时间还早）不算——
     // 那只是暂时不满足「在进行」，等时钟走回来再说，不能把刚开始的全量整理永久收尾
     let expired = match shift_db_time(&scan.started_at, FULL_SCAN_SECS) {
@@ -1044,7 +1074,7 @@ pub(crate) fn settle_full_scan(
         "ceiling"
     } else if remaining == 0 {
         "completed"
-    } else if failed >= full_scan_failure_limit(scan.total) {
+    } else if full_scan_failing_too_much(scan.total, failed, succeeded) {
         "failures"
     } else if expired {
         "expired"
@@ -1807,12 +1837,16 @@ mod tests {
             spends_tokens: true,
         }];
         let mut conn = db.conn();
-        let claimed = claim_one(&mut conn, &handled, &gate(false, 100_000)).unwrap();
+        // 用真实的现在：下面的 `queue_status` 读的是真实时钟的最近 24 小时，写死的日期过了一天就不在窗口里了
+        let now = now_db_time();
+        let claimed = claim_next(&mut conn, &now, &handled, &gate(false, 100_000))
+            .unwrap()
+            .unwrap();
         drop(conn);
         // 跑的过程中被取消：请求已经发出去，取不回来，预留保留；
         // 之后处理器返回成功也不能再改这条任务（update 都带 status = 'running'）。
         crate::v2_ops::cancel_job(db.path(), "job").unwrap();
-        assert!(!finish_job(db.path(), &claimed, NOW, Ok(ok_success(false)), 0.0).unwrap());
+        assert!(!finish_job(db.path(), &claimed, &now, Ok(ok_success(false)), 0.0).unwrap());
         let row = snap(&db.conn(), "job");
         assert_eq!(row.status, "cancelled");
         assert_eq!(row.input_tokens, CLAIM_RESERVE_TOKENS);
@@ -1898,7 +1932,7 @@ mod tests {
         for (kind, expected) in [
             (ErrorKind::BadJson, REPAIRED_FAILURE_TOKEN_ESTIMATE),
             (ErrorKind::Schema, REPAIRED_FAILURE_TOKEN_ESTIMATE),
-            (ErrorKind::Timeout, FAILED_ATTEMPT_TOKEN_ESTIMATE),
+            (ErrorKind::Timeout, TIMEOUT_ATTEMPT_TOKEN_ESTIMATE),
             (ErrorKind::Other, FAILED_ATTEMPT_TOKEN_ESTIMATE),
             (ErrorKind::Network, 0),
             (ErrorKind::RateLimit, 0),
@@ -3706,7 +3740,7 @@ mod tests {
 
     #[test]
     fn too_many_failures_end_the_scan_instead_of_burning_money() {
-        // 预计 388 个：失败达到 max(25, 388/5 = 77) 就停；差一个不停
+        // 预计 388 个：失败达到 max(25, 388/5 = 77) 就停；差一个不停（成功的占多数，所以不会被「失败过半」先拦住）
         assert_eq!(full_scan_failure_limit(388), 77);
         assert_eq!(full_scan_failure_limit(10), 25);
         let db = TestDb::new("full-scan-failures");
@@ -3714,6 +3748,15 @@ mod tests {
         begin_full_scan(&path, NOW, 388).unwrap();
         let conn = db.conn();
         open_job_row(&conn, "q", "queued", 0, None);
+        for index in 0..150 {
+            open_job_row(
+                &conn,
+                &format!("ok{index}"),
+                "succeeded",
+                5_000,
+                Some(&at(5)),
+            );
+        }
         for index in 0..76 {
             open_job_row(&conn, &format!("f{index}"), "failed", 5_000, Some(&at(10)));
         }
@@ -3730,6 +3773,61 @@ mod tests {
         open_job_row(&conn, "old", "failed", 100, Some(&at(-3600)));
         open_job_row(&conn, "new", "failed", 100, Some(&at(10)));
         assert_eq!(count_failed_cards_since(&conn, NOW).unwrap(), 1);
+        open_job_row(&conn, "ok-old", "succeeded", 100, Some(&at(-3600)));
+        open_job_row(&conn, "ok-new", "succeeded", 100, Some(&at(10)));
+        open_job_row(&conn, "skip-new", "skipped", 0, Some(&at(10)));
+        assert_eq!(
+            count_succeeded_cards_since(&conn, NOW).unwrap(),
+            1,
+            "跳过的不算成功"
+        );
+    }
+
+    #[test]
+    fn a_scan_where_nothing_works_stops_after_ten_failures_not_seventy_seven() {
+        // 2026-10-04 真实记录：输出额度不够时 84 次调用失败 57 次。整体不对劲，别等攒到 77 个失败（约 300 万 token）才停
+        assert!(!full_scan_failing_too_much(388, 9, 0));
+        assert!(full_scan_failing_too_much(388, 10, 0));
+        let db = TestDb::new("full-scan-no-success");
+        let path = queue_control_path(db.path());
+        begin_full_scan(&path, NOW, 388).unwrap();
+        let conn = db.conn();
+        open_job_row(&conn, "q", "queued", 0, None);
+        for index in 0..9 {
+            open_job_row(&conn, &format!("f{index}"), "failed", 5_000, Some(&at(10)));
+        }
+        settle_full_scan(&conn, &path, &at(60)).unwrap();
+        assert!(read_control(&path).full_scan.is_some(), "9 个失败还没到线");
+        open_job_row(&conn, "f9", "failed", 5_000, Some(&at(11)));
+        settle_full_scan(&conn, &path, &at(61)).unwrap();
+        assert_eq!(
+            read_control(&path).last_full_scan.expect("应收尾").reason,
+            "failures"
+        );
+    }
+
+    #[test]
+    fn more_failures_than_successes_stops_the_scan_once_there_are_twenty() {
+        // 有成功、但失败过半（至少 20 个）：系统性问题。成功不少于失败就不拦
+        assert!(!full_scan_failing_too_much(388, 19, 0 + 1));
+        assert!(!full_scan_failing_too_much(388, 20, 20));
+        assert!(full_scan_failing_too_much(388, 20, 19));
+        assert!(
+            !full_scan_failing_too_much(388, 76, 150),
+            "失败 76 个、成功 150 个：不拦"
+        );
+        assert!(
+            full_scan_failing_too_much(388, 77, 150),
+            "到了按预计个数算的线：照样拦"
+        );
+    }
+
+    #[test]
+    fn a_call_that_timed_out_is_charged_like_a_long_generation_not_a_short_one() {
+        // 理解卡的等待时限最长 469 秒（约 60 token/s）：等到超时才失败的调用，服务商多半已经按写出来的计费
+        assert_eq!(failure_charge(ErrorKind::Timeout), 10_000);
+        assert_eq!(failure_charge(ErrorKind::Other), 4_000);
+        assert_eq!(failure_charge(ErrorKind::Network), 0);
     }
 
     #[test]

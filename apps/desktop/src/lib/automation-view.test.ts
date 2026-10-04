@@ -67,11 +67,11 @@ describe('parseDailyBudget', () => {
 });
 
 describe('approxRepos / formatTokens', () => {
-  it('按每个仓库 4000 token 估，向下取整', () => {
-    expect(TOKENS_PER_REPO).toBe(4000);
-    expect(approxRepos(100_000)).toBe(25);
-    expect(approxRepos(200_000)).toBe(50);
-    expect(approxRepos(3999)).toBe(0);
+  it('按每个仓库 6000 token 估（真实记录：成功的卡平均约 5.7–6.3 千），向下取整', () => {
+    expect(TOKENS_PER_REPO).toBe(6000);
+    expect(approxRepos(100_000)).toBe(16);
+    expect(approxRepos(200_000)).toBe(33);
+    expect(approxRepos(5999)).toBe(0);
     expect(approxRepos(-1)).toBe(0);
     expect(approxRepos(Number.NaN)).toBe(0);
   });
@@ -194,7 +194,7 @@ describe('automationHint', () => {
 
   it('整理中显示今天用了多少，没有按钮', () => {
     const hint = automationHint(status({ queued: 2, tokens24h: 40_000 }), 7);
-    expect(hint?.detail).toBe('最近 24 小时已用约 4 万 token，约整理了 10 个。');
+    expect(hint?.detail).toBe('最近 24 小时已用约 4 万 token，约整理了 6 个。');
     expect(hint?.actionLabel).toBeNull();
   });
 });
@@ -267,11 +267,11 @@ function lastScan(overrides: Partial<LastFullScan> = {}): LastFullScan {
 }
 
 describe('estimateFullScanTokens', () => {
-  it('按每个 7500 token 估算（真实记录：成功的卡平均约 6.3 千，偶尔被截断重试更多），向最接近的整数取整', () => {
-    expect(FULL_SCAN_TOKENS_PER_REPO).toBe(7500);
-    expect(estimateFullScanTokens(388)).toBe(2_910_000);
-    expect(estimateFullScanTokens(1)).toBe(7500);
-    expect(estimateFullScanTokens(1.2)).toBe(9000);
+  it('按每个 6500 token 估算（真实记录：成功的卡平均约 5.7–6.3 千，略高一点留给偶尔的重试），向最接近的整数取整', () => {
+    expect(FULL_SCAN_TOKENS_PER_REPO).toBe(6500);
+    expect(estimateFullScanTokens(388)).toBe(2_522_000);
+    expect(estimateFullScanTokens(1)).toBe(6500);
+    expect(estimateFullScanTokens(1.2)).toBe(7800);
   });
 
   it('不是有限数或 ≤ 0 时返回 0', () => {
@@ -352,12 +352,12 @@ describe('fullScanPanel', () => {
     expect(panel.last).toBe('上次全量整理：2026-10-04 12:30 完成，整理了 388 个，用了约 201.8 万 token。');
   });
 
-  it('有要整理的是 ready：388 个约 290 万 token', () => {
+  it('有要整理的是 ready：388 个约 250 万 token', () => {
     const panel = fullScanPanel(status({ needsOrganizing: 388, lastFullScan: lastScan() }));
     expect(panel).toMatchObject({
       kind: 'ready',
       pending: 388,
-      estimate: '290 万',
+      estimate: '250 万',
       last: '上次全量整理：2026-10-04 12:30 被停止，已整理 120 / 388 个，用了约 62 万 token。',
     });
   });

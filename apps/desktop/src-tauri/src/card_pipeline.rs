@@ -625,17 +625,17 @@ pub fn run_repo_card(
             match interpret(&second.content, &input) {
                 Ok(card) => card,
                 Err(AttemptFail::BadJson) => {
-                    return Err(card_error(
+                    return Err(failure_with_known_spend(
                         CardRunErrorKind::BadJson,
                         "模型两次都没有返回可解析的 JSON",
-                        None,
+                        &tokens,
                     ))
                 }
                 Err(AttemptFail::Schema(errors)) => {
-                    return Err(card_error(
+                    return Err(failure_with_known_spend(
                         CardRunErrorKind::Schema,
                         &format!("理解卡未通过校验：{}", errors.join("；")),
-                        None,
+                        &tokens,
                     ))
                 }
             }
@@ -2442,6 +2442,20 @@ fn not_found() -> CardRunError {
     card_error(CardRunErrorKind::NotFound, "找不到这个仓库", None)
 }
 
+/// 两次调用都拿到了回复、但都不能用：用量是知道的（含被截断重试那次）。队列处理这类失败时，会再按种类记一笔
+/// `jobs::REPAIRED_FAILURE_TOKEN_ESTIMATE`（不知道真实用量时对「两次调用」的估计）。这里把「真实用量比估计多出来的部分」
+/// 带出去，合计就不会比真实用量少——有被截断的重试时，两次调用可达 1.5 万到 3 万，只记 1 万会低估。
+fn failure_with_known_spend(
+    kind: CardRunErrorKind,
+    message: &str,
+    tokens: &TokenSum,
+) -> CardRunError {
+    let mut error = card_error(kind, message, None);
+    let actual = tokens.input.saturating_add(tokens.output);
+    error.spent_tokens = actual.saturating_sub(crate::jobs::REPAIRED_FAILURE_TOKEN_ESTIMATE as u64);
+    error
+}
+
 fn card_error(
     kind: CardRunErrorKind,
     message: &str,
@@ -3487,6 +3501,55 @@ https://img.shields.io/github/stars/fox/demo
             "修复调用被截断那次也花了钱：{}",
             report.input_tokens
         );
+    }
+
+    #[test]
+    fn a_card_that_is_unusable_after_a_cut_off_retry_and_a_repair_carries_the_real_spend() {
+        // 被截断 → 放大重试拿到回复但 JSON 坏 → 修复还是坏：三次调用都计费。队列失败时还会再按种类记 1 万（对「两次调用」的估计），
+        // 所以这里要把「真实用量比 1 万多出来的部分」带出去，合计才不会比真实用量少
+        let db = TempDb::new();
+        let mut conn = db.open();
+        seed_repo(&conn, Some(&usable_readme()));
+        let client = ScriptedClient::new(vec![
+            cut_off(),
+            ok_reply("不是 JSON", "m", 3_000, 500),
+            ok_reply("还是不是", "m", 3_500, 600),
+        ]);
+        let error = run_repo_card(
+            &mut conn,
+            &client,
+            "r1",
+            &options(false, "2026-10-03T00:00:00Z"),
+        )
+        .expect_err("应失败");
+        assert_eq!(error.kind, CardRunErrorKind::BadJson);
+        let estimate = crate::jobs::REPAIRED_FAILURE_TOKEN_ESTIMATE as u64;
+        let actual_at_least = 8_192 + 3_000 + 500 + 3_500 + 600;
+        assert!(
+            error.spent_tokens + estimate >= actual_at_least,
+            "合计 {} 不能比真实用量 {actual_at_least} 少",
+            error.spent_tokens + estimate
+        );
+    }
+
+    #[test]
+    fn two_small_calls_that_both_fail_keep_the_conservative_estimate_and_carry_nothing_extra() {
+        // 真实用量没超过 1 万：不额外带（队列那边会记 1 万，宁多勿少）
+        let db = TempDb::new();
+        let mut conn = db.open();
+        seed_repo(&conn, Some(&usable_readme()));
+        let client = ScriptedClient::new(vec![
+            ok_reply("你好", "m1", 1, 1),
+            ok_reply("还是不好", "m2", 1, 1),
+        ]);
+        let error = run_repo_card(
+            &mut conn,
+            &client,
+            "r1",
+            &options(false, "2026-10-03T00:00:00Z"),
+        )
+        .expect_err("应失败");
+        assert_eq!(error.spent_tokens, 0);
     }
 
     #[test]
