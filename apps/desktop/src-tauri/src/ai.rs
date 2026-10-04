@@ -2114,9 +2114,12 @@ fn execute_json_post(
         };
         let answered_after = sent_at.elapsed();
         let status = response.status();
-        let body = response
-            .text()
-            .map_err(|error| format!("AI 接口响应读取失败：{error}"))?;
+        let body = match response.text() {
+            Ok(text) => text,
+            // 失败状态码的响应体读不出来（网关中途断开）：照样按状态码走重试 / 退回，别因为读不出错误详情就跳过
+            Err(_) if !status.is_success() => String::new(),
+            Err(error) => return Err(format!("AI 接口响应读取失败：{error}")),
+        };
         let api_response = HttpResponse {
             status_success: status.is_success(),
             http_code: Some(status.as_u16()),
@@ -2180,9 +2183,7 @@ where
         if response_may_be_billed(Some(status.as_u16()), answered_after) {
             crate::spend_guard::mark_possibly_billed();
         }
-        let body = response
-            .text()
-            .map_err(|error| format!("AI 接口响应读取失败：{error}"))?;
+        let body = response.text().unwrap_or_default();
         return Err(format_ai_http_error("AI", Some(status.as_u16()), &body));
     }
     // 收到了成功的状态行：服务商已经开始生成，之后不管怎么断掉都可能已经计费
@@ -4179,6 +4180,28 @@ mod tests {
         request_handle.join().expect("测试服务应正常退出");
     }
 
+    /// 等一个连接，最多 15 秒：客户端少发了请求（实现改动、被额度闸门拒绝）时，假服务别永远阻塞、把整个测试进程挂死。
+    fn accept_within(listener: &TcpListener) -> Option<std::net::TcpStream> {
+        listener.set_nonblocking(true).expect("应能设置非阻塞");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        loop {
+            match listener.accept() {
+                Ok((stream, _)) => {
+                    // 有的系统上，接进来的连接会继承监听口的非阻塞模式
+                    stream.set_nonblocking(false).expect("应能恢复阻塞");
+                    return Some(stream);
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    if std::time::Instant::now() >= deadline {
+                        return None;
+                    }
+                    thread::sleep(std::time::Duration::from_millis(2));
+                }
+                Err(error) => panic!("接收本地 HTTP 请求失败：{error}"),
+            }
+        }
+    }
+
     fn spawn_http_server(
         status: &'static str,
         response_body: &'static str,
@@ -4186,7 +4209,9 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").expect("应能启动本地测试 HTTP 服务");
         let address = listener.local_addr().expect("应能读取本地监听地址");
         let handle = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().expect("应能接收本地 HTTP 请求");
+            let Some(mut stream) = accept_within(&listener) else {
+                return String::new();
+            };
             stream
                 .set_read_timeout(Some(std::time::Duration::from_secs(2)))
                 .expect("应能设置读取超时");
@@ -4212,7 +4237,9 @@ mod tests {
         let handle = thread::spawn(move || {
             let mut requests = Vec::new();
             for (status, response_body) in responses {
-                let (mut stream, _) = listener.accept().expect("应能接收本地 HTTP 请求");
+                let Some(mut stream) = accept_within(&listener) else {
+                    break;
+                };
                 stream
                     .set_read_timeout(Some(std::time::Duration::from_secs(2)))
                     .expect("应能设置读取超时");
@@ -4598,7 +4625,9 @@ mod tests {
         let handle = thread::spawn(move || {
             let mut requests = Vec::new();
             for step in steps {
-                let (mut stream, _) = listener.accept().expect("应能接收本地 HTTP 请求");
+                let Some(mut stream) = accept_within(&listener) else {
+                    break;
+                };
                 stream
                     .set_read_timeout(Some(std::time::Duration::from_secs(2)))
                     .expect("应能设置读取超时");
@@ -4632,6 +4661,38 @@ mod tests {
         fn drop(&mut self) {
             FAST_FAILURE_LIMIT.with(|limit| limit.set(None));
         }
+    }
+
+    /// 回完状态行和响应头（声明的 Content-Length 比实际多）就断开：响应体读到一半断了。返回真正回过的次数。
+    fn spawn_truncated_server(
+        connections: usize,
+        status: &'static str,
+        partial: &'static str,
+    ) -> (String, thread::JoinHandle<usize>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("应能启动本地测试 HTTP 服务");
+        let address = listener.local_addr().expect("应能读取本地监听地址");
+        let handle = thread::spawn(move || {
+            let mut served = 0;
+            for _ in 0..connections {
+                let Some(mut stream) = accept_within(&listener) else {
+                    break;
+                };
+                stream
+                    .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+                    .expect("应能设置读取超时");
+                read_http_request(&mut stream);
+                let response = format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{partial}",
+                    partial.len() + 500
+                );
+                stream
+                    .write_all(response.as_bytes())
+                    .expect("应能写入本地 HTTP 响应");
+                served += 1;
+            }
+            served
+        });
+        (format!("http://{address}/test"), handle)
     }
 
     fn prompt_of_1000_tokens() -> String {
@@ -4700,7 +4761,9 @@ mod tests {
         let _slow = SlowFailures::enter();
         let mut config = loopback_config("http://127.0.0.1:9/test".to_owned());
         config.api_key = "sk-\u{7}broken".to_owned();
-        request_openai(&config, &prompt_of_1000_tokens()).expect_err("请求头不合法应失败");
+        let error =
+            request_openai(&config, &prompt_of_1000_tokens()).expect_err("请求头不合法应失败");
+        assert!(error.contains("请求失败"), "{error}");
         assert_eq!(ledger(&dir), ("cancelled".to_owned(), 0, 0));
     }
 
@@ -4733,8 +4796,12 @@ mod tests {
         dir.control(SPEND_BUDGET);
         let _scope = dir.use_in_this_thread();
         let (url, server) = spawn_mixed_server(vec![None; AI_API_MAX_ATTEMPTS]);
-        ask(url).expect_err("应失败");
-        server.join().expect("假服务应正常结束");
+        let error = ask(url).expect_err("应失败");
+        assert_eq!(
+            server.join().expect("假服务应正常结束").len(),
+            AI_API_MAX_ATTEMPTS
+        );
+        assert!(error.contains("请求失败"), "{error}");
         assert_eq!(ledger(&dir), ("cancelled".to_owned(), 0, 0));
         assert_eq!(dir.used(), 0);
     }
@@ -4772,8 +4839,9 @@ mod tests {
         let _slow = SlowFailures::enter();
         let (url, server) =
             spawn_http_server("401 Unauthorized", r#"{"error":{"message":"bad key"}}"#);
-        ask(url).expect_err("应失败");
+        let error = ask(url).expect_err("应失败");
         server.join().expect("假服务应正常结束");
+        assert!(error.contains("401"), "{error}");
         assert_eq!(ledger(&dir), ("cancelled".to_owned(), 0, 0));
     }
 
@@ -4828,8 +4896,12 @@ mod tests {
         let _scope = dir.use_in_this_thread();
         let _slow = SlowFailures::enter();
         let (url, server) = spawn_http_sequence_server(vec![BUSY; AI_API_MAX_ATTEMPTS]);
-        ask(url).expect_err("持续 503 应失败");
-        server.join().expect("假服务应正常结束");
+        let error = ask(url).expect_err("持续 503 应失败");
+        assert_eq!(
+            server.join().expect("假服务应正常结束").len(),
+            AI_API_MAX_ATTEMPTS
+        );
+        assert!(error.contains("503"), "{error}");
         assert_eq!(ledger(&dir), ("cancelled".to_owned(), 3 * 1000, 0));
     }
 
@@ -4979,19 +5051,50 @@ mod tests {
             true,
             vec![("401 Unauthorized", r#"{"error":{"message":"bad key"}}"#)],
         );
-        assert!(result.is_err());
+        assert!(result.expect_err("应失败").contains("401"));
         assert_eq!(row, ("cancelled".to_owned(), 0, 0));
         // 持续快速 503：没有计费；持续慢 503：三次尝试都记
         let (result, row) = run(false, vec![BUSY; AI_API_MAX_ATTEMPTS]);
-        assert!(result.is_err());
+        assert!(result.expect_err("应失败").contains("503"));
         assert_eq!(row, ("cancelled".to_owned(), 0, 0));
         let (result, row) = run(true, vec![BUSY; AI_API_MAX_ATTEMPTS]);
-        assert!(result.is_err());
+        assert!(result.expect_err("应失败").contains("503"));
         assert_eq!(row, ("cancelled".to_owned(), 3 * 1000, 0));
         // 慢 503 后重试成功：真实用量加上失败那次
         let (result, row) = run(true, vec![BUSY, ("200 OK", ANTHROPIC_REPLY)]);
         assert_eq!(result.expect("重试后应成功"), "好的");
         assert_eq!(row, ("succeeded".to_owned(), 700 + 1000, 50));
+    }
+
+    #[test]
+    fn a_failed_status_whose_body_cannot_be_read_is_still_released() {
+        // 401 / 503 的响应体读到一半断了：照样按状态码处理——401 退回，503 重试到终败（快失败）后也退回
+        for (status, connections) in [
+            ("401 Unauthorized", 1),
+            ("503 Service Unavailable", AI_API_MAX_ATTEMPTS),
+        ] {
+            let dir = crate::spend_guard::testing::Dir::new();
+            dir.control(SPEND_BUDGET);
+            let _scope = dir.use_in_this_thread();
+            let (url, server) = spawn_truncated_server(connections, status, r#"{"error":"#);
+            let error = ask(url).expect_err("应失败");
+            assert_eq!(server.join().expect("假服务应正常结束"), connections);
+            assert!(error.contains(&status[..3]), "{status}：{error}");
+            assert_eq!(ledger(&dir), ("cancelled".to_owned(), 0, 0), "{status}");
+        }
+    }
+
+    #[test]
+    fn a_success_status_whose_body_cannot_be_read_stays_on_the_books() {
+        // 200 的响应体读到一半断了：服务商已经生成完了，只是我们没收到——不能退回，留提示词那部分
+        let dir = crate::spend_guard::testing::Dir::new();
+        dir.control(SPEND_BUDGET);
+        let _scope = dir.use_in_this_thread();
+        let (url, server) = spawn_truncated_server(1, "200 OK", r#"{"choices":["#);
+        let error = ask(url).expect_err("应失败");
+        assert_eq!(server.join().expect("假服务应正常结束"), 1);
+        assert!(error.contains("响应读取失败"), "{error}");
+        assert_eq!(ledger(&dir), ("cancelled".to_owned(), 1000, 0));
     }
 
     #[test]
@@ -5075,6 +5178,42 @@ mod tests {
                 "OpenAI",
                 Some(400),
                 r#"{"error":{"message":"账户余额不足，请先充值"}}"#,
+            ),
+            format_ai_http_error(
+                "OpenAI",
+                Some(400),
+                r#"{"error":{"message":"套餐额度已用完"}}"#,
+            ),
+            format_ai_http_error("OpenAI", Some(400), r#"{"error":{"message":"账户已欠费"}}"#),
+            format_ai_http_error(
+                "OpenAI",
+                Some(400),
+                r#"{"error":{"message":"Out of credit for this project"}}"#,
+            ),
+            format_ai_http_error(
+                "OpenAI",
+                Some(400),
+                r#"{"error":{"message":"Your balance is zero"}}"#,
+            ),
+            format_ai_http_error(
+                "OpenAI",
+                Some(400),
+                r#"{"error":{"message":"Please update your billing information"}}"#,
+            ),
+            format_ai_http_error(
+                "OpenAI",
+                Some(400),
+                r#"{"error":{"message":"Daily quota exhausted"}}"#,
+            ),
+            format_ai_http_error(
+                "OpenAI",
+                Some(400),
+                r#"{"error":{"message":"insufficient funds"}}"#,
+            ),
+            format_ai_http_error(
+                "OpenAI",
+                Some(400),
+                r#"{"error":{"message":"Payment required for this model"}}"#,
             ),
             "AI 接口请求超时，请检查请求地址、模型 ID 或网络连接（已等待 120 秒）。".to_owned(),
             "AI 接口请求失败：error sending request".to_owned(),

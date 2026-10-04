@@ -954,6 +954,18 @@ mod tests {
             !handler.is_proven(&config_fingerprint(&other_model)),
             "换了模型，之前的成功不再证明什么"
         );
+        let mut other_address = ok_config();
+        other_address.base_url = Some("https://gateway.example.com/v1".to_owned());
+        assert!(
+            !handler.is_proven(&config_fingerprint(&other_address)),
+            "换了地址，之前的成功不再证明什么"
+        );
+        let mut other_provider = ok_config();
+        other_provider.provider = "anthropic".to_owned();
+        assert!(
+            !handler.is_proven(&config_fingerprint(&other_provider)),
+            "换了服务商，之前的成功不再证明什么"
+        );
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert_eq!(success.input_tokens, 111);
         assert_eq!(success.output_tokens, 22);
@@ -2281,6 +2293,123 @@ mod tests {
                 ),
                 JobFailure::Fatal { .. }
             ));
+        }
+    }
+
+    /// 种 `count` 个能跑的仓库 r1..r{count}，每个都有 README。
+    fn prepare_many_runnable(db: &TempDb, count: usize) {
+        let conn = db.open();
+        seed_catalog(&conn);
+        for index in 1..=count {
+            let id = format!("r{index}");
+            insert_repo(&conn, &id, "active");
+            insert_readme(&conn, &id);
+        }
+    }
+
+    fn rejection_reply() -> Result<LlmReply, LlmError> {
+        llm_err(
+            LlmErrorKind::Other,
+            "AI 接口请求失败（HTTP 400）：Content Exists Risk",
+        )
+    }
+
+    #[test]
+    fn run_pauses_after_five_rejections_when_nothing_has_worked_yet() {
+        let db = TempDb::new("rejections-unproven");
+        prepare_many_runnable(&db, 6);
+        let (handler, _) = scripted(Ok(ok_config()), (0..6).map(|_| rejection_reply()).collect());
+        for index in 1..=4 {
+            match handler.run(
+                &job(&format!("j{index}"), "repository", &format!("r{index}")),
+                db.path(),
+            ) {
+                Err(JobFailure::Fatal { .. }) => {}
+                other => panic!("第 {index} 个只应各自失败，实际 {other:?}"),
+            }
+        }
+        match handler.run(&job("j5", "repository", "r5"), db.path()) {
+            Err(JobFailure::PauseQueue { message, .. }) => {
+                assert!(message.contains("连续 5 个"), "{message}");
+            }
+            other => panic!("第 5 个应暂停整条队列，实际 {other:?}"),
+        }
+    }
+
+    #[test]
+    fn run_widens_the_limit_only_after_a_real_success_with_the_same_config() {
+        let db = TempDb::new("rejections-proven");
+        prepare_many_runnable(&db, 25);
+        let mut replies = vec![reply(&valid_json(), "fake-model", 111, 22)];
+        replies.extend((0..22).map(|_| rejection_reply()));
+        let (handler, _) = scripted(Ok(ok_config()), replies);
+        handler
+            .run(&job("j1", "repository", "r1"), db.path())
+            .expect("第一张应成功");
+        // 成功之后：连着 19 个内容被拒绝，只是各自失败
+        for index in 2..=20 {
+            match handler.run(
+                &job(&format!("j{index}"), "repository", &format!("r{index}")),
+                db.path(),
+            ) {
+                Err(JobFailure::Fatal { .. }) => {}
+                other => panic!("第 {index} 个只应各自失败，实际 {other:?}"),
+            }
+        }
+        // 第 20 个还是停下（比如账户余额没了、Anthropic 也回 400）
+        match handler.run(&job("j21", "repository", "r21"), db.path()) {
+            Err(JobFailure::PauseQueue { message, .. }) => {
+                assert!(message.contains("连续 20 个"), "{message}");
+            }
+            other => panic!("第 20 个应暂停整条队列，实际 {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_success_with_another_model_does_not_widen_the_limit_for_this_one() {
+        // 用模型 A 成功过，之后配置换成模型 B：A 的成功不证明 B 的配置是对的
+        let db = TempDb::new("rejections-other-model");
+        prepare_many_runnable(&db, 8);
+        let model = Arc::new(Mutex::new("model-a".to_owned()));
+        let model_for_config = Arc::clone(&model);
+        let replies = Arc::new(Mutex::new({
+            let mut list = vec![reply(&valid_json(), "fake-model", 111, 22)];
+            list.extend((0..6).map(|_| rejection_reply()));
+            list
+        }));
+        let replies_for_factory = Arc::clone(&replies);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let handler = RepoCardHandler::with_client_factory(
+            Arc::new(move || {
+                let mut config = ok_config();
+                config.model = model_for_config.lock().expect("模型锁应可用").clone();
+                Ok(config)
+            }),
+            Arc::new(move || {
+                Box::new(Scripted {
+                    replies: Arc::clone(&replies_for_factory),
+                    calls: Arc::clone(&calls),
+                })
+            }),
+        );
+        handler
+            .run(&job("j1", "repository", "r1"), db.path())
+            .expect("模型 A 应成功");
+        *model.lock().expect("模型锁应可用") = "model-b".to_owned();
+        for index in 2..=5 {
+            match handler.run(
+                &job(&format!("j{index}"), "repository", &format!("r{index}")),
+                db.path(),
+            ) {
+                Err(JobFailure::Fatal { .. }) => {}
+                other => panic!("第 {index} 个只应各自失败，实际 {other:?}"),
+            }
+        }
+        match handler.run(&job("j6", "repository", "r6"), db.path()) {
+            Err(JobFailure::PauseQueue { message, .. }) => {
+                assert!(message.contains("连续 5 个"), "{message}");
+            }
+            other => panic!("换了模型后，第 5 个被拒绝就该暂停，实际 {other:?}"),
         }
     }
 
