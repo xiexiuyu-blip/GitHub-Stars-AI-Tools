@@ -1089,3 +1089,89 @@ fn review_cautions_stats() {
     }
     dump(&out, "cautions_stats", &serde_json::json!({"total": ids.len(), "flagged": any, "counts": counts, "items": flagged, "installs": installs}));
 }
+
+/// 场景标签重跑：对副本做「更新种子 → 重做规则归类 → 去掉没有证据的标签」，输出每个仓库最后带哪些场景。
+/// 只读副本、不花钱。输出 FSL_REVIEW_OUT/scenarios_after.json。
+#[test]
+#[ignore]
+fn review_scenarios_rerun() {
+    let source = PathBuf::from(std::env::var("FSL_REVIEW_DB").expect("需要 FSL_REVIEW_DB"));
+    let out = PathBuf::from(std::env::var("FSL_REVIEW_OUT").expect("需要 FSL_REVIEW_OUT"));
+    fs::create_dir_all(&out).expect("建输出目录");
+    let work = out.join("scenarios.sqlite3");
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = fs::remove_file(format!("{}{suffix}", work.display()));
+    }
+    fs::copy(&source, &work).expect("复制副本");
+    migrate_database(&work).expect("迁移");
+    let before = scenarios::list_scenarios_summary(&work).expect("场景摘要");
+    let stats = scenarios::ensure_initial_classification(&work).expect("重跑");
+    println!("[重跑] 规则归类：{stats:?}");
+    let audit = scenarios::audit_scenario_tags(&work).expect("复核");
+    println!("[重跑] 复核：{audit:?}");
+    let after = scenarios::list_scenarios_summary(&work).expect("场景摘要");
+    for (old, new) in before.iter().zip(after.iter()) {
+        println!("[场景] {}：{} → {}", new.name_zh, old.count, new.count);
+    }
+    let connection = Connection::open(&work).expect("打开副本");
+    let mut statement = connection
+        .prepare(
+            "SELECT r.full_name, s.name_zh, e.origin, e.confidence FROM entity_scenarios e
+             JOIN repositories r ON r.id = e.entity_id JOIN scenarios s ON s.id = e.scenario_id
+             WHERE e.entity_type = 'repository' AND e.status <> 'rejected' AND r.sync_status = 'active'
+             ORDER BY r.full_name, s.sort_order",
+        )
+        .expect("查询");
+    let rows: Vec<(String, String, String, f64)> = statement
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))
+        .expect("读取")
+        .filter_map(Result::ok)
+        .collect();
+    let mut by_repo: std::collections::BTreeMap<String, Vec<serde_json::Value>> = Default::default();
+    for (repo, scenario, origin, confidence) in &rows {
+        by_repo
+            .entry(repo.clone())
+            .or_default()
+            .push(serde_json::json!({"scenario": scenario, "origin": origin, "confidence": confidence}));
+    }
+    let total: i64 = connection
+        .query_row("SELECT COUNT(*) FROM repositories WHERE sync_status = 'active'", [], |row| row.get(0))
+        .expect("计数");
+    println!("[重跑] 有效仓库 {total}，带场景的 {}，标签共 {}", by_repo.len(), rows.len());
+    dump(&out, "scenarios_after", &by_repo);
+}
+
+/// 把理解卡的提示词（系统 + 用户）按真实输入拼出来，写成文件，给「替身模型」试跑用。
+/// FSL_REVIEW_REPOS 是一个文本文件，每行一个 full_name。只读副本、不联网、不花钱。
+/// 输出 FSL_REVIEW_OUT/prompt_<序号>.txt 和 index.json。
+#[test]
+#[ignore]
+fn review_card_prompts() {
+    let source = PathBuf::from(std::env::var("FSL_REVIEW_DB").expect("需要 FSL_REVIEW_DB"));
+    let out = PathBuf::from(std::env::var("FSL_REVIEW_OUT").expect("需要 FSL_REVIEW_OUT"));
+    let repos = fs::read_to_string(std::env::var("FSL_REVIEW_REPOS").expect("需要 FSL_REVIEW_REPOS"))
+        .expect("读仓库清单");
+    fs::create_dir_all(&out).expect("建输出目录");
+    let work = out.join("prompts.sqlite3");
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = fs::remove_file(format!("{}{suffix}", work.display()));
+    }
+    fs::copy(&source, &work).expect("复制副本");
+    migrate_database(&work).expect("迁移");
+    scenarios::seed_scenarios(&work).expect("种子");
+    let connection = Connection::open(&work).expect("打开副本");
+    let mut index = Vec::new();
+    for (number, name) in repos.lines().map(str::trim).filter(|line| !line.is_empty()).enumerate() {
+        let id: String = connection
+            .query_row("SELECT id FROM repositories WHERE full_name = ?1", [name], |row| row.get(0))
+            .unwrap_or_else(|error| panic!("找不到 {name}：{error}"));
+        let input = crate::card_pipeline::load_card_input(&connection, &id)
+            .unwrap_or_else(|error| panic!("读 {name} 失败：{}", error.message));
+        let request = crate::card_pipeline::build_prompt(&input);
+        let text = format!("【系统提示词】\n{}\n\n【用户消息】\n{}\n", request.system, request.user);
+        fs::write(out.join(format!("prompt_{}.txt", number + 1)), &text).expect("写提示词");
+        println!("[提示词] {} → prompt_{}.txt（{} 字）", name, number + 1, text.chars().count());
+        index.push(serde_json::json!({"n": number + 1, "fullName": name, "chars": text.chars().count(), "hasReadme": input.readme.is_some()}));
+    }
+    dump(&out, "index", &index);
+}

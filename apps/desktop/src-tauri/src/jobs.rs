@@ -178,6 +178,8 @@ pub struct QueueControl {
     pub full_scan: Option<FullScan>,
     /// 上一轮全量整理怎么结束的，只用来显示。
     pub last_full_scan: Option<LastFullScan>,
+    /// 上次 README 更新检查。没有、或读不懂，就当没有。
+    pub last_readme_check: Option<LastReadmeCheck>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -204,6 +206,17 @@ pub struct LastFullScan {
     /// 开始以来失败了几个。
     #[serde(default)]
     pub failed: i64,
+}
+
+/// 一次 README 更新检查的结果。写在控制文件的 `lastReadmeCheck` 里，只用来显示。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LastReadmeCheck {
+    pub checked_at: String,
+    pub checked: i64,
+    pub refreshed: i64,
+    pub material: i64,
+    pub queued: i64,
 }
 
 impl QueueControl {
@@ -302,6 +315,16 @@ pub fn set_paused(path: &Path, paused: bool) -> Result<(), String> {
         if !paused {
             map.remove("pauseReason");
         }
+        Ok(())
+    })
+}
+
+/// 记下这次 README 更新检查。其它键原样保留；读不懂的旧记录会被这整份换掉。
+pub fn record_readme_check(path: &Path, check: LastReadmeCheck) -> Result<(), String> {
+    let value = serde_json::to_value(&check)
+        .map_err(|error| format!("README 检查记录序列化失败：{error}"))?;
+    with_control_file(path, |map| {
+        map.insert("lastReadmeCheck".to_owned(), value);
         Ok(())
     })
 }
@@ -1330,12 +1353,21 @@ fn control_from_map(map: &Map<String, Value>) -> QueueControl {
     let last_full_scan = map
         .get("lastFullScan")
         .and_then(|value| serde_json::from_value::<LastFullScan>(value.clone()).ok());
+    // 读不懂的 lastReadmeCheck 当作没有，不挡预算和全量整理。
+    let last_readme_check = map.get("lastReadmeCheck").and_then(|value| {
+        if value.is_null() {
+            None
+        } else {
+            serde_json::from_value::<LastReadmeCheck>(value.clone()).ok()
+        }
+    });
     QueueControl {
         paused,
         daily_budget_tokens,
         pause_reason,
         full_scan,
         last_full_scan,
+        last_readme_check,
     }
 }
 
@@ -4021,5 +4053,65 @@ mod tests {
             "真实用量 1.5 万一定要在窗口里，实际 {}",
             status.tokens_24h
         );
+    }
+
+    #[test]
+    fn record_readme_check_keeps_other_control_keys() {
+        let db = TestDb::new("readme-check");
+        let path = queue_control_path(db.path());
+        fs::write(
+            &path,
+            r#"{"dailyBudgetTokens":80000,"paused":true,"note":"keep","fullScan":{"startedAt":"2026-10-01T00:00:00.000Z","until":"2026-10-03T00:00:00.000Z","total":4},"lastFullScan":{"startedAt":"2026-09-01T00:00:00.000Z","finishedAt":"2026-09-01T01:00:00.000Z","tokensUsed":10,"reason":"completed","total":4,"remaining":0,"failed":0}}"#,
+        )
+        .unwrap();
+        let check = LastReadmeCheck {
+            checked_at: "2026-10-05T10:20:00.000Z".to_owned(),
+            checked: 23,
+            refreshed: 8,
+            material: 3,
+            queued: 3,
+        };
+        record_readme_check(&path, check.clone()).unwrap();
+        let control = read_control(&path);
+        assert_eq!(control.last_readme_check, Some(check));
+        assert_eq!(control.daily_budget_tokens, 80_000);
+        assert!(control.paused);
+        assert!(control.full_scan.is_some());
+        assert_eq!(
+            control
+                .last_full_scan
+                .as_ref()
+                .map(|item| item.reason.as_str()),
+            Some("completed")
+        );
+        let raw: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(raw["note"], "keep");
+        assert_eq!(raw["dailyBudgetTokens"], 80_000);
+        assert_eq!(raw["paused"], true);
+        assert!(raw.get("fullScan").is_some());
+        assert!(raw.get("lastFullScan").is_some());
+        assert_eq!(raw["lastReadmeCheck"]["checked"], 23);
+    }
+
+    #[test]
+    fn unreadable_last_readme_check_is_none_and_budget_stays() {
+        let db = TestDb::new("readme-check-bad");
+        let path = queue_control_path(db.path());
+        fs::write(
+            &path,
+            r#"{"dailyBudgetTokens":12345,"paused":false,"lastReadmeCheck":"nope"}"#,
+        )
+        .unwrap();
+        let control = read_control(&path);
+        assert!(control.last_readme_check.is_none());
+        assert_eq!(control.daily_budget_tokens, 12_345);
+        fs::write(
+            &path,
+            r#"{"dailyBudgetTokens":7,"lastReadmeCheck":{"checkedAt":1}}"#,
+        )
+        .unwrap();
+        let control = read_control(&path);
+        assert!(control.last_readme_check.is_none());
+        assert_eq!(control.daily_budget_tokens, 7);
     }
 }

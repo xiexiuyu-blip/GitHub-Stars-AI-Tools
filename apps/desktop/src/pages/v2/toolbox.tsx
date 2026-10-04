@@ -14,6 +14,7 @@ import {
   formatTokens,
   fullScanPanel,
   parseDailyBudget,
+  readmeCheckText,
   type AutomationStatus,
   type FullScanPanel,
 } from '@/lib/automation-view';
@@ -445,6 +446,7 @@ export function ToolboxPage() {
   const state = automationState(automation);
   const current = automation?.dailyBudgetTokens ?? 0;
   const scanPanel = fullScanPanel(automation);
+  const readmeLine = readmeCheckText(automation?.lastReadmeCheck);
   const confirmingFullScan = pendingFullScan && scanPanel.kind === 'ready';
 
   return (
@@ -491,6 +493,7 @@ export function ToolboxPage() {
           onStart={startFullScan}
           onStop={stopFullScan}
         />
+        {readmeLine ? <p className="mt-0 mb-3 text-xs leading-[1.6] text-subtle">{readmeLine}</p> : null}
 
         <b className="mb-1 block text-[13px] font-medium text-foreground">增量整理（日常）</b>
         <p className="mt-0 mb-2 text-xs leading-[1.6] text-on-surface-variant">

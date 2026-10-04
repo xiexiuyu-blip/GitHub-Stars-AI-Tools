@@ -23,6 +23,7 @@ mod pack_guard;
 mod packs;
 mod ranking_query;
 mod rankings_live;
+mod readme_follow;
 mod repo_facts;
 mod scenarios;
 mod solve;
@@ -3957,6 +3958,259 @@ async fn sync_github_stars(app_handle: tauri::AppHandle) -> Result<StarSyncSumma
     .await
 }
 
+struct ReadmeRefresh {
+    refreshed: usize,
+    listed: bool,
+}
+
+fn usize_to_i64(value: usize) -> i64 {
+    i64::try_from(value).unwrap_or(i64::MAX)
+}
+
+fn readme_follow_message(checked: usize, refreshed: usize, material: usize) -> String {
+    if material > 0 {
+        format!(
+            "README 跟进：看了 {checked} 个，更新了 {refreshed} 个，有明显改动 {material} 个，已排队重新整理"
+        )
+    } else {
+        format!("README 跟进：看了 {checked} 个，更新了 {refreshed} 个，没有明显改动")
+    }
+}
+
+fn follow_name_label(names: &[String]) -> String {
+    let shown = names
+        .iter()
+        .take(3)
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .join("、");
+    let rest = names.len().saturating_sub(3);
+    if rest > 0 {
+        format!("{shown}，另 {rest} 个")
+    } else {
+        shown
+    }
+}
+
+/// 同步里的 README 跟进：先发出开始和进行中，再按批次抓取。失败只记数，不让同步失败。
+fn refresh_stale_readmes(
+    app_handle: &tauri::AppHandle,
+    storage: &AppStorage,
+    account_id: &str,
+    token: &str,
+) -> ReadmeRefresh {
+    emit_task_progress(
+        app_handle,
+        TaskProgressEvent::running(
+            "readme-follow",
+            "readme",
+            "fetch",
+            0,
+            0,
+            "开始检查哪些 README 需要更新",
+            None,
+        ),
+    );
+    let states = match storage.list_readme_states(account_id) {
+        Ok(states) => states,
+        Err(error) => {
+            eprintln!("README 跟进：列出仓库失败：{error}");
+            emit_task_progress(
+                app_handle,
+                TaskProgressEvent::running(
+                    "readme-follow",
+                    "readme",
+                    "fetch",
+                    0,
+                    0,
+                    "README 跟进没能列出要检查的仓库",
+                    None,
+                ),
+            );
+            return ReadmeRefresh {
+                refreshed: 0,
+                listed: false,
+            };
+        }
+    };
+    let ids = readme_follow::refresh_targets(&states);
+    let names = states
+        .iter()
+        .map(|state| (state.id.as_str(), state.full_name.as_str()))
+        .collect::<HashMap<_, _>>();
+    let targets = ids
+        .iter()
+        .filter_map(|id| {
+            names
+                .get(id.as_str())
+                .map(|full_name| ((*id).clone(), (*full_name).to_owned()))
+        })
+        .collect::<Vec<_>>();
+    let total = targets.len();
+    emit_task_progress(
+        app_handle,
+        TaskProgressEvent::running(
+            "readme-follow",
+            "readme",
+            "fetch",
+            0,
+            total,
+            format!("正在检查 README，这次要重新抓取 {total} 个"),
+            None,
+        ),
+    );
+    if targets.is_empty() {
+        return ReadmeRefresh {
+            refreshed: 0,
+            listed: true,
+        };
+    }
+
+    let mut refreshed = 0usize;
+    let mut missed = 0usize;
+    let mut failed = 0usize;
+    let mut processed = 0usize;
+    let mut pending = targets.into_iter();
+    loop {
+        let batch = pending
+            .by_ref()
+            .take(README_FETCH_CONCURRENCY)
+            .collect::<Vec<_>>();
+        if batch.is_empty() {
+            break;
+        }
+        let label = follow_name_label(
+            &batch
+                .iter()
+                .map(|(_, full_name)| full_name.clone())
+                .collect::<Vec<_>>(),
+        );
+        emit_task_progress(
+            app_handle,
+            TaskProgressEvent::running(
+                "readme-follow",
+                "readme",
+                "fetch",
+                processed,
+                total,
+                format!("正在抓取 README：{label}"),
+                None,
+            ),
+        );
+        let handles = batch
+            .into_iter()
+            .map(|(id, full_name)| {
+                let token = token.to_owned();
+                thread::spawn(move || {
+                    let result = github::fetch_readme(&token, &id, &full_name);
+                    (id, result)
+                })
+            })
+            .collect::<Vec<_>>();
+        for handle in handles {
+            processed += 1;
+            let (id, result) = match handle.join() {
+                Ok(output) => output,
+                Err(_) => {
+                    failed += 1;
+                    continue;
+                }
+            };
+            match result {
+                Ok(Some(readme)) => match storage.get_readme_hash(&id) {
+                    Ok(existing) if existing.as_deref() == Some(readme.content_hash.as_str()) => {
+                        match storage.touch_readme_fetched(&id, &readme.fetched_at) {
+                            Ok(()) => refreshed += 1,
+                            Err(_) => failed += 1,
+                        }
+                    }
+                    Ok(_) => match storage.save_readme(&readme) {
+                        Ok(()) => refreshed += 1,
+                        Err(_) => failed += 1,
+                    },
+                    Err(_) => failed += 1,
+                },
+                Ok(None) => missed += 1,
+                Err(_) => failed += 1,
+            }
+        }
+    }
+    if missed > 0 || failed > 0 {
+        eprintln!("README 跟进：{missed} 个仓库没有 README，{failed} 个抓取失败");
+    }
+    ReadmeRefresh {
+        refreshed,
+        listed: true,
+    }
+}
+
+fn finish_readme_follow(
+    app_handle: &tauri::AppHandle,
+    storage: &AppStorage,
+    refresh: ReadmeRefresh,
+) {
+    if !refresh.listed {
+        emit_task_progress(
+            app_handle,
+            TaskProgressEvent::failed("readme-follow", "readme", "README 跟进：这次检查没完成"),
+        );
+        return;
+    }
+    match readme_follow::enqueue_changed(storage.database_path()) {
+        Ok(report) => {
+            let check = jobs::LastReadmeCheck {
+                checked_at: jobs::now_db_time(),
+                checked: usize_to_i64(report.checked),
+                refreshed: usize_to_i64(refresh.refreshed),
+                material: usize_to_i64(report.material),
+                queued: usize_to_i64(report.queued),
+            };
+            if let Err(error) =
+                jobs::record_readme_check(&jobs::queue_control_path(storage.database_path()), check)
+            {
+                eprintln!("README 跟进：检查结果没能记下：{error}");
+            }
+            emit_task_progress(
+                app_handle,
+                TaskProgressEvent::succeeded(
+                    "readme-follow",
+                    "readme",
+                    report.checked,
+                    report.checked,
+                    readme_follow_message(report.checked, refresh.refreshed, report.material),
+                ),
+            );
+        }
+        Err(error) => {
+            eprintln!("README 跟进：评估失败：{error}");
+            emit_task_progress(
+                app_handle,
+                TaskProgressEvent::failed("readme-follow", "readme", "README 跟进：这次检查没完成"),
+            );
+        }
+    }
+}
+
+fn record_manual_readme_follow(storage: &AppStorage, refreshed: usize) {
+    match readme_follow::enqueue_changed(storage.database_path()) {
+        Ok(report) => {
+            let check = jobs::LastReadmeCheck {
+                checked_at: jobs::now_db_time(),
+                checked: usize_to_i64(report.checked),
+                refreshed: usize_to_i64(refreshed),
+                material: usize_to_i64(report.material),
+                queued: usize_to_i64(report.queued),
+            };
+            if let Err(error) =
+                jobs::record_readme_check(&jobs::queue_control_path(storage.database_path()), check)
+            {
+                eprintln!("README 跟进：检查结果没能记下：{error}");
+            }
+        }
+        Err(error) => eprintln!("README 跟进：评估失败：{error}"),
+    }
+}
+
 fn sync_github_stars_worker(app_handle: tauri::AppHandle) -> Result<StarSyncSummary, String> {
     emit_task_progress(
         &app_handle,
@@ -4047,6 +4301,8 @@ fn sync_github_stars_worker(app_handle: tauri::AppHandle) -> Result<StarSyncSumm
             ),
         ),
     );
+    // 先把该更新的 README 抓下来，再给新收藏排队。失败只记日志，同步结果照常返回。
+    let refresh = refresh_stale_readmes(&app_handle, &storage, &account_id, &token);
     // 只给这次新出现的仓库排队。失败只记日志，同步结果照常返回。
     if let Err(error) = card_handler::enqueue_new_stars(storage.database_path(), &created_ids) {
         eprintln!("新收藏的仓库入队失败：{error}");
@@ -4056,6 +4312,7 @@ fn sync_github_stars_worker(app_handle: tauri::AppHandle) -> Result<StarSyncSumm
     {
         eprintln!("新收藏的场景归类失败：{error}");
     }
+    finish_readme_follow(&app_handle, &storage, refresh);
 
     Ok(StarSyncSummary {
         account_login: user.login,
@@ -4374,6 +4631,7 @@ fn fetch_repository_readmes_worker(
         )
     };
     emit_task_progress(&app_handle, completion_progress);
+    record_manual_readme_follow(&storage, fetched_count);
 
     let failed_count = failures.len();
     Ok(ReadmeFetchSummary {

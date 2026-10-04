@@ -157,6 +157,8 @@ export type SolveResult = {
   extras: string[];
   /** 最多 8 条，按得分从高到低 */
   hits: SolveHit[];
+  /** 本地排名 9–16 的后备候选：默认不显示，只在 AI 精选从里面点了名时才拿出来（旧后端没有这一项） */
+  moreHits?: SolveHit[];
   /** 默认勾选：只有「所有意图都对上了」的前 3 条；没有就是空数组，不硬凑 */
   preselected: string[];
   fullMatchCount: number;

@@ -216,7 +216,11 @@ const MIGRATIONS: &[Migration] = &[
         name: "inbox_repos",
         sql: include_str!("../../../../../packages/storage/migrations/fox/034_inbox_repos.sql"),
     },
-    // 035 留给同时在做的卡 29（readme_basis）。本卡用 036，合并时由总控处理编号冲突。
+    Migration {
+        version: "035",
+        name: "readme_basis",
+        sql: include_str!("../../../../../packages/storage/migrations/fox/035_readme_basis.sql"),
+    },
     Migration {
         version: "036",
         name: "solve_rerank_cache",
@@ -510,7 +514,7 @@ mod tests {
         let path = temp_db("web-content");
         let report = migrate_database(&path).expect("空库应能迁到 031");
         assert_eq!(report.applied.len(), MIGRATIONS.len());
-        assert_eq!(MIGRATIONS.len(), 35);
+        assert_eq!(MIGRATIONS.len(), 36);
         assert_eq!(latest_migration().version, "036");
         assert_eq!(latest_migration().name, "solve_rerank_cache");
         assert!(report.applied.iter().any(|item| item == "031 web_content"));
@@ -753,6 +757,11 @@ INSERT INTO ai_task_items(id, run_id, repository_id, full_name, status, reason) 
         assert!(report.applied.iter().any(|item| item == "032 repo_license"));
         assert!(report.applied.iter().any(|item| item == "033 inbox_fetch"));
         assert!(report.applied.iter().any(|item| item == "034 inbox_repos"));
+        assert!(report.applied.iter().any(|item| item == "035 readme_basis"));
+        assert!(report
+            .applied
+            .iter()
+            .any(|item| item == "036 solve_rerank_cache"));
         assert_eq!(latest_migration().version, "036");
         assert_eq!(latest_migration().name, "solve_rerank_cache");
         let columns = license_columns(&path);
@@ -799,13 +808,14 @@ INSERT INTO repositories(id, account_id, owner, name, full_name, topics_json, ht
             assert_eq!(count_query(&path, "SELECT COUNT(*) FROM repositories"), 2);
         }
 
-        let report = migrate_database(&path).expect("031 库应能升到 034");
+        let report = migrate_database(&path).expect("031 库应能升到 035");
         assert_eq!(
             report.applied,
             vec![
                 "032 repo_license".to_owned(),
                 "033 inbox_fetch".to_owned(),
                 "034 inbox_repos".to_owned(),
+                "035 readme_basis".to_owned(),
                 "036 solve_rerank_cache".to_owned(),
             ]
         );
@@ -864,12 +874,13 @@ INSERT INTO inbox_items(id, account_id, original_url, normalized_url, title, ite
             assert!(columns.is_empty(), "032 的库还没有读取列");
         }
 
-        let report = migrate_database(&path).expect("032 库应能升到 034");
+        let report = migrate_database(&path).expect("032 库应能升到 035");
         assert_eq!(
             report.applied,
             vec![
                 "033 inbox_fetch".to_owned(),
                 "034 inbox_repos".to_owned(),
+                "035 readme_basis".to_owned(),
                 "036 solve_rerank_cache".to_owned(),
             ]
         );
@@ -990,6 +1001,7 @@ INSERT INTO inbox_items(id, account_id, original_url, normalized_url, title, ite
             report.applied,
             vec![
                 "034 inbox_repos".to_owned(),
+                "035 readme_basis".to_owned(),
                 "036 solve_rerank_cache".to_owned(),
             ]
         );
@@ -1093,7 +1105,10 @@ INSERT INTO inbox_items(id, account_id, original_url, normalized_url, title, ite
         let report_034 = migrate_database(&from_034).expect("034 库应能升到 036");
         assert_eq!(
             report_034.applied,
-            vec!["036 solve_rerank_cache".to_owned()]
+            vec![
+                "035 readme_basis".to_owned(),
+                "036 solve_rerank_cache".to_owned()
+            ]
         );
         assert_eq!(cache_table(&from_034), 1);
         assert_eq!(latest_migration().version, "036");
@@ -1177,6 +1192,135 @@ INSERT INTO inbox_items(id, account_id, original_url, normalized_url, title, ite
                 )
             })
             .collect()
+    }
+
+    #[test]
+    fn upgrade_from_034_backfills_readme_hash_only_when_readme_is_not_newer() {
+        let path = temp_db("readme-basis-034");
+        {
+            let mut connection = Connection::open(&path).expect("应能创建 034 夹具");
+            connection
+                .execute_batch("PRAGMA foreign_keys = ON;")
+                .expect("应能打开外键");
+            for migration in MIGRATIONS
+                .iter()
+                .filter(|migration| migration.version <= "034")
+            {
+                apply_one(&mut connection, migration).expect("夹具迁移应成功");
+            }
+            connection
+                .execute_batch(
+                    "
+INSERT INTO github_accounts(id, login, token_ref) VALUES ('acct', 'fox', 'test');
+INSERT INTO repositories(id, account_id, owner, name, full_name, topics_json, html_url, sync_status, starred_at) VALUES
+  ('early', 'acct', 'a', 'early', 'a/early', '[]', 'https://github.com/a/early', 'active', '2026-01-01T00:00:00Z'),
+  ('same', 'acct', 'a', 'same', 'a/same', '[]', 'https://github.com/a/same', 'active', '2026-01-02T00:00:00Z'),
+  ('late', 'acct', 'a', 'late', 'a/late', '[]', 'https://github.com/a/late', 'active', '2026-01-03T00:00:00Z'),
+  ('empty', 'acct', 'a', 'empty', 'a/empty', '[]', 'https://github.com/a/empty', 'active', '2026-01-04T00:00:00Z'),
+  ('nocard', 'acct', 'a', 'nocard', 'a/nocard', '[]', 'https://github.com/a/nocard', 'active', '2026-01-05T00:00:00Z');
+INSERT INTO repo_readmes(repo_id, raw_markdown, content_hash, source_path, fetched_at) VALUES
+  ('early', '早于卡的说明', 'hash-early', 'README.md', '2026-05-01T00:00:00Z'),
+  ('same', '同一时刻的说明', 'hash-same', 'README.md', '2026-06-01T00:00:00Z'),
+  ('late', '晚于卡的说明', 'hash-late', 'README.md', '2026-08-01T00:00:00Z'),
+  ('empty', '空卡不该回填', 'hash-empty', 'README.md', '2026-01-01T00:00:00Z'),
+  ('nocard', '没有卡', 'hash-nocard', 'README.md', '2026-01-01T00:00:00Z');
+INSERT INTO repo_ai_documents(repo_id, summary_zh, model, prompt_version, source_hash, generated_at, card_json) VALUES
+  ('early', '早', 'm', 'card-v2', 's', '2026-06-01T00:00:00Z', '{\"review_status\":\"suggested\"}'),
+  ('same', '同时', 'm', 'card-v2', 's', '2026-06-01T00:00:00Z', '{\"review_status\":\"suggested\"}'),
+  ('late', '晚', 'm', 'card-v2', 's', '2026-06-01T00:00:00Z', '{\"review_status\":\"suggested\"}'),
+  ('empty', '空', 'm', 'card-v2', 's', '2026-06-01T00:00:00Z', '');
+",
+                )
+                .expect("夹具数据应能写入");
+            let columns: Vec<String> = {
+                let mut statement = connection
+                    .prepare("PRAGMA table_info(repo_ai_documents)")
+                    .expect("应能读取表结构");
+                statement
+                    .query_map([], |row| row.get::<_, String>(1))
+                    .expect("应能遍历列")
+                    .map(|row| row.expect("应能读取列名"))
+                    .collect()
+            };
+            assert!(
+                !columns.iter().any(|name| name == "readme_hash"),
+                "034 的库还没有 readme_hash"
+            );
+            assert!(
+                !columns.iter().any(|name| name == "readme_basis"),
+                "034 的库还没有 readme_basis"
+            );
+        }
+
+        let report = migrate_database(&path).expect("034 库应能升到 036");
+        assert_eq!(
+            report.applied,
+            vec![
+                "035 readme_basis".to_owned(),
+                "036 solve_rerank_cache".to_owned()
+            ]
+        );
+        assert_eq!(latest_migration().version, "036");
+        assert_eq!(latest_migration().name, "solve_rerank_cache");
+        assert!(MIGRATIONS
+            .iter()
+            .any(|migration| { migration.version == "035" && migration.name == "readme_basis" }));
+
+        let connection = Connection::open(&path).expect("应能打开升级后的库");
+        let hash_of = |id: &str| -> Option<String> {
+            connection
+                .query_row(
+                    "SELECT readme_hash FROM repo_ai_documents WHERE repo_id = ?1",
+                    [id],
+                    |row| row.get(0),
+                )
+                .expect("理解卡应还在")
+        };
+        let basis_of = |id: &str| -> Option<String> {
+            connection
+                .query_row(
+                    "SELECT readme_basis FROM repo_ai_documents WHERE repo_id = ?1",
+                    [id],
+                    |row| row.get(0),
+                )
+                .expect("理解卡应还在")
+        };
+        assert_eq!(hash_of("early").as_deref(), Some("hash-early"));
+        assert_eq!(hash_of("same").as_deref(), Some("hash-same"));
+        assert!(
+            hash_of("late").is_none(),
+            "README 晚于卡，不能当成这张卡读过它"
+        );
+        assert!(hash_of("empty").is_none(), "空卡不算有理解卡，不回填");
+        assert!(basis_of("early").is_none(), "摘录回填不了，留给后面惰性补");
+        assert!(basis_of("late").is_none());
+        let nocard: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM repo_ai_documents WHERE repo_id = 'nocard'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("应能计数");
+        assert_eq!(nocard, 0, "没有卡的仓库不该被迁出一行");
+        let summary: String = connection
+            .query_row(
+                "SELECT summary_zh FROM repo_ai_documents WHERE repo_id = 'late'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("旧卡应还在");
+        assert_eq!(summary, "晚");
+        drop(connection);
+
+        let again = migrate_database(&path).expect("第二次迁移应幂等");
+        assert!(again.applied.is_empty());
+
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_file(format!("{}-wal", path.display()));
+        let _ = fs::remove_file(format!("{}-shm", path.display()));
+        if let Some(backup) = report.backup_path {
+            let _ = fs::remove_file(backup);
+        }
     }
 
     #[test]
