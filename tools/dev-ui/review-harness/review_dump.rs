@@ -953,6 +953,9 @@ fn review_solve_batch() {
             "intents": result.intents,
             "extras": result.extras,
             "fullMatchCount": result.full_match_count,
+            "preselected": result.preselected.iter().map(|id| {
+                result.hits.iter().find(|hit| &hit.id == id).map(|hit| hit.full_name.clone()).unwrap_or_default()
+            }).collect::<Vec<_>>(),
             "gapIntents": result.gap_intents,
             "hits": result.hits.iter().map(|hit| serde_json::json!({
                 "name": hit.full_name,
