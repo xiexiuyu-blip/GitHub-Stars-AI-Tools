@@ -1018,6 +1018,7 @@ fn review_cautions_stats() {
         .filter_map(Result::ok)
         .collect();
     let mut flagged = serde_json::Map::new();
+    let mut installs = serde_json::Map::new();
     let mut counts: std::collections::BTreeMap<String, usize> = Default::default();
     let mut pipes = 0usize;
     let mut any = 0usize;
@@ -1041,6 +1042,10 @@ fn review_cautions_stats() {
             .expect("JSON 参考包");
         let parsed: serde_json::Value = serde_json::from_str(&json.content).expect("解析");
         for item in parsed["items"].as_array().expect("items") {
+            installs.insert(
+                item["fullName"].as_str().unwrap_or_default().to_owned(),
+                serde_json::json!({"kind": item["kind"], "howToTry": item["howToTry"], "installTarget": item["installTarget"]}),
+            );
             let labels: Vec<String> = item["cautions"]
                 .as_array()
                 .expect("cautions")
@@ -1068,5 +1073,5 @@ fn review_cautions_stats() {
     for (key, count) in &counts {
         println!("[统计] {key}… × {count}");
     }
-    dump(&out, "cautions_stats", &serde_json::json!({"total": ids.len(), "flagged": any, "counts": counts, "items": flagged}));
+    dump(&out, "cautions_stats", &serde_json::json!({"total": ids.len(), "flagged": any, "counts": counts, "items": flagged, "installs": installs}));
 }

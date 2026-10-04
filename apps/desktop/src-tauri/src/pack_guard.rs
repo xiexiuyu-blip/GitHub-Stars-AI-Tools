@@ -485,7 +485,7 @@ fn contains_word(text: &str, word: &str) -> bool {
     false
 }
 
-const DOCKER_TARGET: &str = "用 Docker 跑：先确认本机装了 Docker 并已启动（没有就先问我）；端口和目录按我本机 AGENTS.md 的规则登记；命令前的 sudo 去掉（Mac 上的 Docker 不需要）";
+const DOCKER_TARGET: &str = "用 Docker 跑：先确认本机装了 Docker 并已启动（没有就先问我）；端口和目录按我本机 AGENTS.md 的规则登记";
 const APP_NOTE: &str = "（桌面应用：你点不了它的界面。先看它有没有命令行 / MCP 入口，没有就告诉我，由我自己操作或换备选）";
 const APP_NOTE_WEB: &str = "（装好后是个网页界面：你点不了它的界面。先看它有没有 API / 命令行入口，没有就告诉我，由我自己操作或换备选）";
 const APP_UNKNOWN: &str = "按装法里写的方式装；装法没写清楚就先读它的 README，别猜安装包";
@@ -494,14 +494,25 @@ const PYTHON_TARGET: &str =
     "Python 工具：用 pipx 或 uv tool 装，或者放进项目自己的 venv，不要装进系统 Python";
 const RUST_TARGET: &str = "按装法里的 cargo / go 命令装在用户目录里，不要用 sudo";
 const CLI_DEFAULT: &str = "优先用 brew、pipx 或 uv tool，装在独立环境里";
-/// 装法里说的是「去下载一个现成安装包」：英文词要整词（`ytdownloader` 里的 download 不算）。
+const SCRIPT_TARGET: &str =
+    "装法是一行安装脚本：先把脚本下载下来通读，没问题再运行；装在用户目录里，不要用 sudo";
+/// 装法里说的是「去下载一个现成安装包」：英文词要整词（`ytdownloader` 里的 download 不算）；
+/// 中文只认「安装包」「发行包」「官网」，不认单独的「下载」（「下载打包结果后运行」「下载视频」都不是装安装包）。
 fn mentions_release(how: &str) -> bool {
     ["release", "releases", "download", "dmg", "homebrew"]
         .iter()
         .any(|word| contains_word(how, word))
-        || [".app", "brew install --cask", "下载", "安装包", "官网"]
+        || [".app", "brew install --cask", "安装包", "发行包", "官网"]
             .iter()
             .any(|word| how.contains(word))
+}
+
+/// 装法里的安装包是 Windows 的（`.exe` / `.msi` / 「Windows 安装包」），而且没提 macOS 的包。
+fn windows_installer_only(how: &str) -> bool {
+    let windows = ["windows 安装包", "windows 安装器", ".exe", ".msi"]
+        .iter()
+        .any(|word| how.contains(word));
+    windows && !(how.contains("dmg") || how.contains("macos") || how.contains("mac os"))
 }
 const SOURCE_COMMANDS: [&str; 10] = [
     "git clone",
@@ -553,7 +564,10 @@ pub(crate) fn install_target(
             } else {
                 let base = if how.contains("brew install") {
                     "按装法里的 brew 命令装；brew 要输入密码或管理员权限时先停下来问我"
-                } else if mentions_release(&how) {
+                } else if mentions_release(&how)
+                    && !(windows_installer_only(&how)
+                        && SOURCE_COMMANDS.iter().any(|command| how.contains(command)))
+                {
                     "从 Releases 下载 .dmg，拖进「应用程序」；只有 .pkg 的话先告诉我（安装包可能要管理员权限）"
                 } else if SOURCE_COMMANDS.iter().any(|command| how.contains(command)) {
                     "按装法里的命令，装在这次任务的目录里，不要装进系统；先查本机有没有它要的运行环境（Node / Python），缺了先告诉我"
@@ -568,6 +582,8 @@ pub(crate) fn install_target(
                 DOCKER_TARGET.to_owned()
             } else if how.contains("brew install") {
                 "按装法里的 brew 命令装；brew 要输入密码或管理员权限时先停下来问我".to_owned()
+            } else if pipes_to_shell(&how) {
+                SCRIPT_TARGET.to_owned()
             } else if NODE_COMMANDS.iter().any(|command| how.contains(command)) {
                 NODE_TARGET.to_owned()
             } else if PYTHON_COMMANDS.iter().any(|command| how.contains(command)) {
@@ -578,7 +594,21 @@ pub(crate) fn install_target(
                 CLI_DEFAULT.to_owned()
             }
         }
-        Some("library") => "项目自己的虚拟环境（venv），不要装进系统 Python".to_owned(),
+        Some("library") => {
+            if NODE_COMMANDS.iter().any(|command| how.contains(command)) {
+                NODE_TARGET.to_owned()
+            } else if how.contains("<script") || how.contains("script 标签") || how.contains("cdn")
+            {
+                "前端库：只在这次任务的页面里引入，不要装进系统".to_owned()
+            } else if PYTHON_COMMANDS.iter().any(|command| how.contains(command))
+                || how.contains("conda")
+                || how.is_empty()
+            {
+                "项目自己的虚拟环境（venv），不要装进系统 Python".to_owned()
+            } else {
+                "按装法里写的方式，在这次任务的目录里用（Python 用 venv、Node 用项目本地），不要装进系统全局".to_owned()
+            }
+        }
         Some("service") => {
             if uses_docker || how.is_empty() {
                 "用 Docker 跑，并按我本机 AGENTS.md 的规则登记端口和目录".to_owned()
@@ -1172,9 +1202,37 @@ mod tests {
             Some("winget install aandrew-me.ytDownloader"),
         );
         assert!(!named_downloader.contains(".dmg"), "{named_downloader}");
+        // 单独的「下载」不算装安装包：Fork 仓库、用 Actions 构建、下载打包结果
+        let actions = install_target(
+            Some("app"),
+            "x",
+            Some("Fork 本仓库，启用 GitHub Actions，手动触发构建工作流，下载打包结果后运行。"),
+        );
+        assert!(
+            !actions.contains(".dmg") && actions.contains("别猜安装包"),
+            "{actions}"
+        );
+        // Windows 安装包 + 源码装法：按源码装，不让人去拖 .dmg
+        let windows_or_source = install_target(
+            Some("app"),
+            "x",
+            Some("下载 Windows 安装包 (https://github.com/a/b/releases/latest) 安装，或 git clone https://github.com/a/b.git && ./start.sh"),
+        );
+        assert!(
+            windows_or_source.contains("任务的目录") && !windows_or_source.contains(".dmg"),
+            "{windows_or_source}"
+        );
+        // 同时给了 macOS 的包：仍然是 .dmg
+        let both = install_target(
+            Some("app"),
+            "x",
+            Some("从 Releases 下载桌面版安装包（macOS 选 .dmg，Windows 选 -setup.exe）"),
+        );
+        assert!(both.contains(".dmg"), "{both}");
         let real_download = install_target(Some("app"), "x", Some("Download the latest release"));
         assert!(real_download.contains(".dmg"), "{real_download}");
         assert!(install_target(Some("app"), "x", Some("下载安装包")).contains(".dmg"));
+        assert!(!install_target(Some("app"), "x", Some("下载视频后运行")).contains(".dmg"));
         let released = install_target(Some("app"), "x", Some("从 Releases 下载 dmg 安装"));
         assert!(released.contains("应用程序"), "{released}");
         let docker_app = install_target(
@@ -1221,6 +1279,18 @@ mod tests {
             rust.contains("cargo") && rust.contains("不要用 sudo"),
             "{rust}"
         );
+        let script_cli = install_target(
+            Some("cli"),
+            "x",
+            Some("curl -fsSL https://x.dev/install.sh | sh && x run"),
+        );
+        assert!(script_cli.starts_with("装法是一行安装脚本"), "{script_cli}");
+        assert!(!script_cli.contains("brew"), "{script_cli}");
+        let docker_plain = install_target(Some("app"), "x", Some("docker compose up -d"));
+        assert!(
+            !docker_plain.contains("sudo"),
+            "没有 sudo 就不提 sudo：{docker_plain}"
+        );
         let brew_cli = install_target(Some("cli"), "x", Some("brew install foo"));
         assert!(brew_cli.starts_with("按装法里的 brew 命令装"), "{brew_cli}");
         let mcp_docker = install_target(Some("mcp"), "x", Some("docker pull a/b"));
@@ -1245,6 +1315,32 @@ mod tests {
         );
         assert!(cask.contains("点不了"), "{cask}");
         assert!(install_target(Some("library"), "x", None).contains("venv"));
+        assert!(install_target(Some("library"), "x", Some("pip install foo")).contains("venv"));
+        assert!(install_target(
+            Some("library"),
+            "x",
+            Some("conda create -n a && pip install b")
+        )
+        .contains("venv"));
+        assert!(
+            install_target(Some("library"), "x", Some("npx @a/b report.docx"))
+                .starts_with("Node 工具")
+        );
+        assert!(install_target(
+            Some("library"),
+            "x",
+            Some("通过两个 script 标签引入页面使用")
+        )
+        .starts_with("前端库"));
+        let hosted = install_target(
+            Some("library"),
+            "x",
+            Some("访问 https://x.dev 在线体验，或通过某个 Skills 集成"),
+        );
+        assert!(
+            hosted.contains("这次任务的目录") && !hosted.contains("系统 Python"),
+            "{hosted}"
+        );
         assert!(install_target(Some("service"), "x", None).contains("Docker"));
         assert!(install_target(Some("service"), "x", Some("docker compose up")).contains("Docker"));
         assert!(install_target(Some("service"), "x", Some("npm start")).contains("任务的目录"));
