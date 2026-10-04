@@ -4593,6 +4593,28 @@ mod tests {
     }
 
     #[test]
+    fn readme_mentions_of_something_being_absent_are_not_counted() {
+        let db = prepare("readme-negated", |conn| {
+            insert_repo(conn, &readme_repo("dl", "lab/dl", "视频下载"));
+            insert_repo(conn, &readme_repo("rm", "lab/rm", "图片工具"));
+            insert_readme(
+                conn,
+                "dl",
+                &"支持无水印下载，免水印，watermark-free。".repeat(10),
+            );
+            insert_readme(conn, "rm", &"批量去水印。".repeat(10));
+        });
+        let connection = open_read(&db.path).unwrap();
+        let stats = load_readme_stats(&connection, &["水印".to_owned()]).unwrap();
+        assert!(
+            !stats.contains_key("dl"),
+            "{:?}",
+            stats.keys().collect::<Vec<_>>()
+        );
+        assert!(stats.contains_key("rm"));
+    }
+
+    #[test]
     fn readme_stats_ignore_inactive_repos_and_empty_readmes() {
         let db = prepare("readme-inactive", |conn| {
             let mut gone = readme_repo("gone", "lab/gone", "封面");
@@ -5342,6 +5364,7 @@ mod tests {
             "批量去水印，做广告创意"
         );
         assert_eq!(mask_negated("无需登录"), "无需登录");
+        assert_eq!(mask_negated("免水印、免广告"), "免▒▒、免▒▒");
         assert_eq!(
             mask_negated("video downloader, no watermark; watermark-free exports"),
             "video downloader, no ▒▒▒▒▒▒▒▒▒; ▒▒▒▒▒▒▒▒▒-free exports"

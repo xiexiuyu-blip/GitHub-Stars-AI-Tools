@@ -1606,6 +1606,14 @@ mod tests {
             task_kinds("抓取无水印视频"),
             vec![TaskKind::Scrape, TaskKind::Video]
         );
+        // 各种「没有水印」的说法都不算要去水印
+        for negated in ["无水印", "免水印", "不带水印", "不含水印", "没有水印"] {
+            assert_eq!(
+                task_kinds(&format!("抓取{negated}视频")),
+                vec![TaskKind::Scrape, TaskKind::Video],
+                "{negated}"
+            );
+        }
         // 整理会议记录是记录整理（记录在句尾），转写会议录音是转写
         assert_eq!(
             task_kinds("整理会议记录"),
@@ -1711,6 +1719,10 @@ mod tests {
         assert!(may_mix(TaskKind::Writing, TaskKind::Records));
         assert!(may_mix(TaskKind::Visual, TaskKind::Batch));
         assert!(may_mix(TaskKind::Video, TaskKind::Visual));
+        assert!(may_mix(TaskKind::Transcribe, TaskKind::Records));
+        assert!(may_mix(TaskKind::Records, TaskKind::Transcribe));
+        assert!(!may_mix(TaskKind::Transcribe, TaskKind::Transcribe));
+        assert!(!may_mix(TaskKind::Watermark, TaskKind::Transcribe));
         assert!(!may_mix(TaskKind::Batch, TaskKind::Visual));
         assert!(!may_mix(TaskKind::Scrape, TaskKind::Video));
         assert!(!may_mix(TaskKind::Operate, TaskKind::Visual));
