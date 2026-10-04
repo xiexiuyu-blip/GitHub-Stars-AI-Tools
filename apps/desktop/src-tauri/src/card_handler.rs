@@ -2267,6 +2267,39 @@ mod tests {
     }
 
     #[test]
+    fn starting_again_first_archives_a_scan_that_ran_out_of_time() {
+        let db = TempDb::new("fs-restart");
+        seed_mixed_cards(&db);
+        let long_ago = jobs::shift_db_time(&jobs::now_db_time(), -49 * 3600).expect("时间应能计算");
+        // 49 小时前开始的一轮已经到时间、还没来得及收尾；队列里还有排着的
+        db.open()
+            .execute(
+                "INSERT INTO ai_jobs(id, account_id, job_type, target_type, target_id, status, created_at)
+                 VALUES ('old-q', 'acct', 'repo_card', 'repository', 'r1', 'queued', ?1)",
+                [&long_ago],
+            )
+            .expect("任务应能写入");
+        fs::write(
+            jobs::queue_control_path(db.path()),
+            format!(
+                r#"{{"dailyBudgetTokens":0,"fullScan":{{"startedAt":"{long_ago}","until":"x","total":9}}}}"#
+            ),
+        )
+        .expect("控制文件应能写入");
+        let status = start_full_scan(db.path(), &fs_settings(), true).expect("应能开始新的一轮");
+        let last = status
+            .last_full_scan
+            .expect("上一轮到时间的要留下记录，不能被新的一轮盖掉");
+        assert_eq!(
+            (last.reason.as_str(), last.started_at.as_str()),
+            ("expired", long_ago.as_str())
+        );
+        let scan = status.full_scan.expect("新的一轮应在进行");
+        assert!(scan.started_at > long_ago);
+        assert_eq!(scan.total, 3, "r1（已在排队）、r2、r6");
+    }
+
+    #[test]
     fn the_status_finishes_a_full_scan_that_ended_while_nobody_was_looking() {
         let db = TempDb::new("fs-settle");
         prepare_many_runnable(&db, 1);

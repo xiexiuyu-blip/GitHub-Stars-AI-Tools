@@ -147,8 +147,8 @@ function FullScanPanelView(props: {
           <div className="flex flex-wrap items-center gap-2">
             <h3 className="m-0 text-base font-semibold text-foreground">全量整理 · 不限额</h3>
             {panel.kind === 'running' ? (
-              <span className="hue-tile ml-auto inline-flex h-5 shrink-0 items-center rounded-full px-2 text-[11px] font-medium" style={{ '--h': 148 } as CSSProperties}>
-                进行中
+              <span className="hue-tile ml-auto inline-flex h-5 shrink-0 items-center rounded-full px-2 text-[11px] font-medium" style={{ '--h': panel.paused ? 4 : 148 } as CSSProperties}>
+                {panel.paused ? '已暂停' : '进行中'}
               </span>
             ) : null}
           </div>
@@ -176,16 +176,16 @@ function FullScanPanelView(props: {
       {panel.kind === 'ready' ? (
         <>
           <p className="m-0 text-sm leading-[1.7] text-foreground">
-            还有 <b className="tabular-nums">{panel.pending}</b> 个收藏没整理，预计要用 约 <b className="tabular-nums">{panel.estimate}</b> token（按每个约 5 千估算，实际会上下浮动）。
+            还有 <b className="tabular-nums">{panel.pending}</b> 个收藏没整理，预计要用 约 <b className="tabular-nums">{panel.estimate}</b> token（按每个约 7 千估算，实际会上下浮动）。
           </p>
           {panel.last ? <p className="mt-2 mb-0 text-xs leading-[1.6] text-subtle">{panel.last}</p> : null}
           {props.confirming ? (
             <div className="mt-3 rounded-lg border border-primary/40 bg-accent p-4 text-sm leading-[1.7] text-foreground">
               <p className="m-0">
-                这会让应用在后台<b>连续调用你配置的 AI 服务</b>，一直整理到这 {panel.pending} 个收藏全部完成，<b>不受每天额度限制，按服务商的价格计费</b>。预计用 <b>约 {panel.estimate} token</b>（按每个约 5 千估算，实际会上下浮动）。
+                这会让应用在后台<b>连续调用你配置的 AI 服务</b>，一直整理到这 {panel.pending} 个收藏全部完成，<b>不受每天额度限制，按服务商的价格计费</b>。预计用 <b>约 {panel.estimate} token</b>（按每个约 7 千估算，实际会上下浮动）。
               </p>
               <p className="mt-2 mb-0">
-                这期间旧版的「增量 AI 解析」「生成标签网络」「AI 搜索」等功能也不受每天额度限制。最长运行 48 小时，随时可以点「停止全量整理」；连续失败时会自动暂停。整理完会自动回到日常的增量整理。
+                这期间旧版的「增量 AI 解析」「生成标签网络」「AI 搜索」等功能也不受每天额度限制。最长运行 48 小时，随时可以点「停止全量整理」；服务商拒绝请求（密钥、余额、地址不对）、失败太多、或用量远超预计（约 4 倍）时会自动停下。整理完会自动回到日常的增量整理。
               </p>
               <div className="mt-3 flex flex-wrap gap-2">
                 <Button variant="primary" loading={props.starting} onClick={props.onStart}>确认开始全量整理</Button>
@@ -215,7 +215,7 @@ function FullScanPanelView(props: {
             />
           </div>
           <p className="mt-2.5 mb-0 text-sm leading-[1.6] text-foreground tabular-nums">
-            已整理 {panel.done} / {panel.total} 个 · 已用约 {formatTokens(panel.tokensUsed)} token · 开始于 {formatMinute(panel.startedAt)}
+            已整理 {panel.done - panel.failed} / {panel.total} 个{panel.failed > 0 ? `，失败 ${panel.failed} 个` : ''} · 已用约 {formatTokens(panel.tokensUsed)} token · 开始于 {formatMinute(panel.startedAt)}
           </p>
           <p className="mt-1 mb-0 text-xs leading-[1.6] text-subtle">
             最长到 {formatMinute(panel.until)} 自动结束；随时可以停止。
@@ -407,6 +407,16 @@ export function ToolboxPage() {
   useEffect(() => {
     if (fullScanPanel(automation).kind !== 'ready') setPendingFullScan(false);
   }, [automation]);
+
+  // 全量整理进行中：页面开着时每 5 秒刷新一次进度（整理完 / 被停下后 unlimited 变回 false，轮询自己停）
+  const scanning = automation?.unlimited === true;
+  useEffect(() => {
+    if (!scanning) return undefined;
+    const timer = window.setInterval(() => {
+      void refreshAutomation().catch(() => undefined);
+    }, 5000);
+    return () => window.clearInterval(timer);
+  }, [scanning]);
 
   function backupNow() {
     setBackingUp(true);

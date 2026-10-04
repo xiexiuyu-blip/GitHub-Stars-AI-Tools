@@ -1457,9 +1457,10 @@ fn apply_pending_restore_at_startup(
             eprintln!("启动恢复没有完成：{error}");
         } else {
             // 恢复会把整个数据库换回旧的，旧库里的用量记录比现在少，「最近 24 小时已用」会倒退，
-            // 而额度在数据库外的控制文件里。恢复后额度归零，要继续花钱得在工具箱里重新开启。
+            // 而额度在数据库外的控制文件里。恢复后额度归零、全量整理也一并结束（`fullScan` 的刹车线按旧库的用量算，对不上了），
+            // 要继续花钱得在工具箱里重新开启。
             let database_path = data_dir.join(storage::SQLITE_DATABASE_FILE_NAME);
-            let _ = jobs::set_daily_budget(&jobs::queue_control_path(&database_path), 0);
+            let _ = jobs::reset_spending_authorization(&jobs::queue_control_path(&database_path));
         }
     }
     Ok(())

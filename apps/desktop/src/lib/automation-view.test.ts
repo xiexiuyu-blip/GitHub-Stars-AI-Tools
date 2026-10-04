@@ -267,11 +267,11 @@ function lastScan(overrides: Partial<LastFullScan> = {}): LastFullScan {
 }
 
 describe('estimateFullScanTokens', () => {
-  it('按每个 5200 token 估算，向最接近的整数取整', () => {
-    expect(FULL_SCAN_TOKENS_PER_REPO).toBe(5200);
-    expect(estimateFullScanTokens(388)).toBe(2_017_600);
-    expect(estimateFullScanTokens(1)).toBe(5200);
-    expect(estimateFullScanTokens(1.2)).toBe(6240);
+  it('按每个 7500 token 估算（真实记录：成功的卡平均约 6.3 千，偶尔被截断重试更多），向最接近的整数取整', () => {
+    expect(FULL_SCAN_TOKENS_PER_REPO).toBe(7500);
+    expect(estimateFullScanTokens(388)).toBe(2_910_000);
+    expect(estimateFullScanTokens(1)).toBe(7500);
+    expect(estimateFullScanTokens(1.2)).toBe(9000);
   });
 
   it('不是有限数或 ≤ 0 时返回 0', () => {
@@ -352,12 +352,12 @@ describe('fullScanPanel', () => {
     expect(panel.last).toBe('上次全量整理：2026-10-04 12:30 完成，整理了 388 个，用了约 201.8 万 token。');
   });
 
-  it('有要整理的是 ready：388 个约 200 万 token', () => {
+  it('有要整理的是 ready：388 个约 290 万 token', () => {
     const panel = fullScanPanel(status({ needsOrganizing: 388, lastFullScan: lastScan() }));
     expect(panel).toMatchObject({
       kind: 'ready',
       pending: 388,
-      estimate: '200 万',
+      estimate: '290 万',
       last: '上次全量整理：2026-10-04 12:30 被停止，已整理 120 / 388 个，用了约 62 万 token。',
     });
   });
@@ -375,11 +375,23 @@ describe('fullScanPanel', () => {
       total: 388,
       percent: 30,
       tokensUsed: 620_000,
+      failed: 0,
       startedAt: '2026-10-04T04:00:00Z',
       until: '2026-10-06T04:00:00Z',
       paused: true,
       pausedReason: '连续失败',
     });
+  });
+
+  it('后台给了失败个数就带上，缺失、负数、非数字都当 0', () => {
+    const run = (failed: number | undefined) => {
+      const panel = fullScanPanel(status({ unlimited: true, fullScan: fullScan({ failed }) }));
+      return panel.kind === 'running' ? panel.failed : -1;
+    };
+    expect(run(7)).toBe(7);
+    expect(run(undefined)).toBe(0);
+    expect(run(-3)).toBe(0);
+    expect(run(Number.NaN)).toBe(0);
   });
 
   it('有 fullScan 时，就算还没配好服务也是 running（进行中优先于没配服务）', () => {
@@ -434,6 +446,30 @@ describe('lastFullScanText', () => {
     );
   });
 
+  it('有失败的，整理好的个数要扣掉失败，并单独说一句；没有失败字段（旧后台）和以前完全一样', () => {
+    expect(lastFullScanText(lastScan({ reason: 'completed', remaining: 0, total: 388, tokensUsed: 2_018_000, failed: 24 }))).toBe(
+      '上次全量整理：2026-10-04 12:30 完成，整理了 364 个，另有 24 个没整理成功（可以再开一次全量整理重试），用了约 201.8 万 token。',
+    );
+    expect(lastFullScanText(lastScan({ reason: 'stopped', failed: 5 }))).toBe(
+      '上次全量整理：2026-10-04 12:30 被停止，已整理 115 / 388 个，另有 5 个没整理成功，用了约 62 万 token。',
+    );
+    expect(lastFullScanText(lastScan({ reason: 'ceiling', failed: 1 }))).toContain('另有 1 个没整理成功');
+    expect(lastFullScanText(lastScan({ reason: 'stopped', failed: 0 }))).not.toContain('没整理成功');
+    expect(lastFullScanText(lastScan({ reason: 'stopped', failed: -2 }))).not.toContain('没整理成功');
+    // 全部失败：整理好的是 0，不是 3
+    expect(lastFullScanText(lastScan({ reason: 'completed', total: 3, remaining: 0, failed: 3, tokensUsed: 30_000 }))).toBe(
+      '上次全量整理：2026-10-04 12:30 完成，整理了 0 个，另有 3 个没整理成功（可以再开一次全量整理重试），用了约 3 万 token。',
+    );
+    // 失败数比处理数还大（数据不一致）：不出现负数
+    expect(lastFullScanText(lastScan({ reason: 'stopped', total: 10, remaining: 8, failed: 9 }))).toContain('已整理 0 / 10 个');
+  });
+
+  it('失败太多被自动停下：说清原因、让人先检查模型', () => {
+    expect(lastFullScanText(lastScan({ reason: 'failures', total: 388, remaining: 300, failed: 77, tokensUsed: 700_000 }))).toBe(
+      '上次全量整理：2026-10-04 12:30 因为失败太多，已自动停下（已整理 11 / 388 个，另有 77 个没整理成功，用了约 70 万 token）。先到「设置 → 引擎」检查模型，再重试。',
+    );
+  });
+
   it('没有记录，或 reason 认不出，返回 null', () => {
     expect(lastFullScanText(null)).toBeNull();
     expect(lastFullScanText(undefined)).toBeNull();
@@ -473,6 +509,18 @@ describe('全量整理期间不说额度用完', () => {
     });
     expect(hint?.title).not.toContain('额度用完');
     expect(hint?.detail).not.toContain('用完');
+  });
+
+  it('这一批已经排完、最后几个在收尾（队列是 0）：提示不落到「它们还没进整理队列」', () => {
+    const hint = automationHint(status({ unlimited: true, budgetRemaining: 0, queued: 0, running: 0, fullScan: fullScan({ tokensUsed: 2_000_000 }) }), 3);
+    expect(hint).toEqual({
+      hue: 148,
+      icon: 'autorenew',
+      title: '正在全量整理（不限额）',
+      detail: '队列里这一批已经排完，整理完会自动回到日常整理。已用约 200 万 token。',
+      actionLabel: '查看进度',
+    });
+    expect(hint?.detail).not.toContain('还没进整理队列');
   });
 
   it('没有 fullScan.tokensUsed 时，提示改用最近 24 小时的用量', () => {

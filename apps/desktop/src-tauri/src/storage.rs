@@ -714,8 +714,10 @@ impl AppStorage {
         let database_path = Self::database_path_from_app_handle(app_handle)?;
         remove_sqlite_database_files(&database_path)?;
         // 用量记在数据库里，清空后「最近 24 小时已用」归零，而额度写在数据库外的控制文件里还留着：
-        // 下一次同步会把所有仓库重新排队，不重新授权就又开始花钱。清空时把额度一并归零。
-        let _ = crate::jobs::set_daily_budget(&crate::jobs::queue_control_path(&database_path), 0);
+        // 下一次同步会把所有仓库重新排队，不重新授权就又开始花钱。清空时把额度一并归零、全量整理也一并结束。
+        let _ = crate::jobs::reset_spending_authorization(&crate::jobs::queue_control_path(
+            &database_path,
+        ));
         Ok(())
     }
 

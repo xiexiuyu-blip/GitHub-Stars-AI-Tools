@@ -14,6 +14,8 @@ export type FullScan = {
   total: number;
   /** 现在还剩（排队 + 进行中） */
   remaining: number;
+  /** 开始以来失败了几个（旧后台没有这个字段，当 0） */
+  failed?: number;
 };
 
 /** 上一轮全量整理的结果。reason 认不出就当没有。 */
@@ -21,11 +23,13 @@ export type LastFullScan = {
   startedAt: string;
   finishedAt: string;
   tokensUsed: number;
-  /** 整理完 / 他点了停止 / 到 48 小时 / 用量远超预计被自动停下 */
-  reason: 'completed' | 'stopped' | 'expired' | 'ceiling';
+  /** 整理完 / 他点了停止 / 到 48 小时 / 用量远超预计被自动停下 / 失败太多被自动停下 */
+  reason: 'completed' | 'stopped' | 'expired' | 'ceiling' | 'failures';
   total: number;
   /** 结束时还剩几个没整理 */
   remaining: number;
+  /** 这一轮失败了几个（旧后台没有这个字段，当 0） */
+  failed?: number;
 };
 
 export type AutomationStatus = {
@@ -56,8 +60,8 @@ export type AutomationStatus = {
 /** 整理一个仓库大约用多少 token（输入约 3000 + 输出约 600，取整到 4000）。只用来估「约整理多少个」。 */
 export const TOKENS_PER_REPO = 4000;
 
-/** 全量整理估算：实测一张理解卡约 5 千 token（含思考），取 5200。只用于全量整理的预计花费，不用于日常额度折算。 */
-export const FULL_SCAN_TOKENS_PER_REPO = 5200;
+/** 全量整理估算：2026-10-04 真实记录里成功的卡平均约 6.3 千 token（含思考），偶尔被截断要重试，取 7500。只用于全量整理的预计花费，不用于日常额度折算。 */
+export const FULL_SCAN_TOKENS_PER_REPO = 7500;
 
 /** 额度档位：名字 + 每天约整理多少个。0 是关闭。 */
 export const BUDGET_PRESETS: ReadonlyArray<{ tokens: number; title: string; hint: string }> = [
@@ -132,6 +136,11 @@ export function fullScanProgress(scan: FullScan): { done: number; total: number;
   return { done, total, percent };
 }
 
+function failedCount(raw: number | undefined): number {
+  if (raw == null || !Number.isFinite(raw) || raw < 0) return 0;
+  return Math.floor(raw);
+}
+
 function organizedCount(total: number, remaining: number): number {
   if (!Number.isFinite(total) || !Number.isFinite(remaining)) return 0;
   const done = total - remaining;
@@ -145,18 +154,26 @@ export function lastFullScanText(last: LastFullScan | null | undefined): string 
   const when = formatMinute(last.finishedAt);
   const used = formatTokens(last.tokensUsed);
   const total = Number.isFinite(last.total) ? last.total : 0;
-  const done = organizedCount(last.total, last.remaining);
+  // 处理过的（含失败）；失败的单独说，别让人以为都整理成功了
+  const processed = organizedCount(last.total, last.remaining);
+  const failed = Math.min(failedCount(last.failed), processed);
+  const ok = processed - failed;
+  const failedNote = failed > 0 ? `，另有 ${failed} 个没整理成功` : '';
   if (last.reason === 'completed') {
-    return `上次全量整理：${when} 完成，整理了 ${done} 个，用了约 ${used} token。`;
+    const retry = failed > 0 ? '（可以再开一次全量整理重试）' : '';
+    return `上次全量整理：${when} 完成，整理了 ${ok} 个${failedNote}${retry}，用了约 ${used} token。`;
   }
   if (last.reason === 'stopped') {
-    return `上次全量整理：${when} 被停止，已整理 ${done} / ${total} 个，用了约 ${used} token。`;
+    return `上次全量整理：${when} 被停止，已整理 ${ok} / ${total} 个${failedNote}，用了约 ${used} token。`;
   }
   if (last.reason === 'expired') {
-    return `上次全量整理：${when} 到时间自动结束，已整理 ${done} / ${total} 个，用了约 ${used} token。`;
+    return `上次全量整理：${when} 到时间自动结束，已整理 ${ok} / ${total} 个${failedNote}，用了约 ${used} token。`;
   }
   if (last.reason === 'ceiling') {
-    return `上次全量整理：${when} 因为用量远超预计，已自动停下（已整理 ${done} / ${total} 个，用了约 ${used} token）。要继续可以再开一次。`;
+    return `上次全量整理：${when} 因为用量远超预计，已自动停下（已整理 ${ok} / ${total} 个${failedNote}，用了约 ${used} token）。要继续可以再开一次。`;
+  }
+  if (last.reason === 'failures') {
+    return `上次全量整理：${when} 因为失败太多，已自动停下（已整理 ${ok} / ${total} 个${failedNote}，用了约 ${used} token）。先到「设置 → 引擎」检查模型，再重试。`;
   }
   return null;
 }
@@ -172,6 +189,7 @@ export type FullScanPanel =
       total: number;
       percent: number;
       tokensUsed: number;
+      failed: number;
       startedAt: string;
       until: string;
       paused: boolean;
@@ -197,6 +215,7 @@ export function fullScanPanel(status: AutomationStatus | null): FullScanPanel {
       total: progress.total,
       percent: progress.percent,
       tokensUsed,
+      failed: failedCount(scan.failed),
       startedAt: typeof scan.startedAt === 'string' ? scan.startedAt : '',
       until: typeof scan.until === 'string' ? scan.until : '',
       paused: status.paused === true,
@@ -274,13 +293,23 @@ export function automationHint(status: AutomationStatus | null, pending: number)
       actionLabel: '去处理',
     };
   }
-  if (status.unlimited === true && status.queued + status.running > 0) {
+  if (status.unlimited === true) {
     const used = status.fullScan?.tokensUsed ?? status.tokens24h;
+    if (status.queued + status.running > 0) {
+      return {
+        hue: 148,
+        icon: 'autorenew',
+        title: `正在全量整理（不限额），还剩 ${pending} 个`,
+        detail: `不受每天额度限制，已用约 ${formatTokens(used)} token。整理完会自动回到日常整理。`,
+        actionLabel: '查看进度',
+      };
+    }
+    // 这一批已经排完、最后几个在收尾：别落到「它们还没进整理队列」
     return {
       hue: 148,
       icon: 'autorenew',
-      title: `正在全量整理（不限额），还剩 ${pending} 个`,
-      detail: `不受每天额度限制，已用约 ${formatTokens(used)} token。整理完会自动回到日常整理。`,
+      title: '正在全量整理（不限额）',
+      detail: `队列里这一批已经排完，整理完会自动回到日常整理。已用约 ${formatTokens(used)} token。`,
       actionLabel: '查看进度',
     };
   }
@@ -293,7 +322,8 @@ export function automationHint(status: AutomationStatus | null, pending: number)
       actionLabel: '开启自动整理',
     };
   }
-  if (status.unlimited !== true && status.budgetRemaining <= 0) {
+  // 走到这里一定不是全量整理（上面已经返回了），所以「额度用完」只指日常额度
+  if (status.budgetRemaining <= 0) {
     return {
       hue: 36,
       icon: 'schedule',
