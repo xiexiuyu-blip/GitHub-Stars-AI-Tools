@@ -590,7 +590,7 @@ pub fn queue_status(db_path: &Path) -> Result<QueueStatus, String> {
     let cutoff = shift_db_time(&now_db_time(), -DAY_SECS)?;
     let queued = count_status(&conn, "queued")?;
     let running = count_status(&conn, "running")?;
-    let failed = count_status(&conn, "failed")?;
+    let failed = count_unresolved_failures(&conn)?;
     let succeeded_24h: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM ai_jobs WHERE status = 'succeeded' AND finished_at IS NOT NULL AND finished_at >= ?1",
@@ -1168,6 +1168,26 @@ pub(crate) fn begin_full_scan(path: &Path, now: &str, total: i64) -> Result<Full
         Ok(())
     })?;
     Ok(scan)
+}
+
+/// 还需要处理的失败：失败的任务里，理解卡任务要看那个仓库现在有没有现行的理解卡（后来整理成功了、或者全量整理补上了的，
+/// 那条失败记录只是历史，不能还显示成「失败 60」让人以为有 60 个没整理好）；别的类型的任务照旧，失败了就算。
+/// 一个仓库失败过好几次也只算一个。
+fn count_unresolved_failures(conn: &Connection) -> Result<i64, String> {
+    conn.query_row(
+        "SELECT COUNT(*) FROM (
+           SELECT DISTINCT j.job_type, j.target_id FROM ai_jobs j
+           WHERE j.status = 'failed' AND j.target_id NOT LIKE 'legacy-%'
+             AND (j.job_type <> 'repo_card' OR NOT EXISTS (
+                   SELECT 1 FROM repo_ai_documents d
+                   WHERE d.repo_id = j.target_id
+                     AND IFNULL(d.card_schema_version, 0) >= 2
+                     AND IFNULL(trim(d.card_json), '') <> ''))
+         )",
+        [],
+        |row| row.get(0),
+    )
+    .map_err(|error| format!("任务计数失败：{error}"))
 }
 
 fn count_status(conn: &Connection, status: &str) -> Result<i64, String> {
@@ -3820,6 +3840,74 @@ mod tests {
             full_scan_failing_too_much(388, 77, 150),
             "到了按预计个数算的线：照样拦"
         );
+    }
+
+    #[test]
+    fn failures_whose_repo_now_has_a_current_card_are_history_not_a_to_do() {
+        // 2026-10-04：上午 60 个理解卡任务失败（输出额度不够），晚上全量整理把这些仓库都补上了卡：界面不能还写「失败 60」
+        let db = TestDb::new("stale-failures");
+        let conn = db.conn();
+        let now = now_db_time();
+        for id in ["r-fixed", "r-still", "r-fixed-twice"] {
+            conn.execute(
+                "INSERT INTO repositories(id, account_id, owner, name, full_name, html_url, starred_at, sync_status)
+                 VALUES (?1, 'acct', 'o', ?1, 'o/' || ?1, 'https://github.com/o/x', '2026-09-01T00:00:00Z', 'active')",
+                [id],
+            )
+            .unwrap();
+        }
+        // r-fixed 失败过一次，后来有了现行卡；r-fixed-twice 失败过两次，后来也有了；r-still 失败后一直没有卡；
+        // 一个非理解卡任务失败了，照旧算
+        for (id, target) in [
+            ("f1", "r-fixed"),
+            ("f2", "r-still"),
+            ("f3", "r-fixed-twice"),
+            ("f4", "r-fixed-twice"),
+        ] {
+            conn.execute(
+                "INSERT INTO ai_jobs(id, account_id, job_type, target_type, target_id, status, finished_at, created_at)
+                 VALUES (?1, 'acct', 'repo_card', 'repository', ?2, 'failed', ?3, ?3)",
+                params![id, target, now],
+            )
+            .unwrap();
+        }
+        conn.execute(
+            "INSERT INTO ai_jobs(id, account_id, job_type, target_type, target_id, status, finished_at, created_at)
+             VALUES ('f5', 'acct', 'categorize', 'repository', 'r-fixed', 'failed', ?1, ?1)",
+            [&now],
+        )
+        .unwrap();
+        for id in ["r-fixed", "r-fixed-twice"] {
+            conn.execute(
+                "INSERT INTO repo_ai_documents(repo_id, summary_zh, model, prompt_version, source_hash, generated_at, card_json, card_schema_version)
+                 VALUES (?1, 's', 'm', 'card-v2', 'h', ?2, '{\"one_liner_zh\":\"x\"}', 2)",
+                params![id, now],
+            )
+            .unwrap();
+        }
+        // r-old：只有第 1 版的旧卡，失败记录还要算
+        conn.execute(
+            "INSERT INTO repositories(id, account_id, owner, name, full_name, html_url, starred_at, sync_status)
+             VALUES ('r-old', 'acct', 'o', 'r-old', 'o/r-old', 'https://github.com/o/x', '2026-09-01T00:00:00Z', 'active')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO repo_ai_documents(repo_id, summary_zh, model, prompt_version, source_hash, generated_at, card_json, card_schema_version)
+             VALUES ('r-old', 's', 'm', 'card-v1', 'h', ?1, '{\"one_liner_zh\":\"旧\"}', 1)",
+            [&now],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO ai_jobs(id, account_id, job_type, target_type, target_id, status, finished_at, created_at)
+             VALUES ('f6', 'acct', 'repo_card', 'repository', 'r-old', 'failed', ?1, ?1)",
+            [&now],
+        )
+        .unwrap();
+        drop(conn);
+        let status = queue_status(db.path()).unwrap();
+        // r-still、r-old（repo_card 没卡 / 只有旧卡）+ f5（categorize）= 3；r-fixed、r-fixed-twice 的失败是历史
+        assert_eq!(status.failed, 3);
     }
 
     #[test]
