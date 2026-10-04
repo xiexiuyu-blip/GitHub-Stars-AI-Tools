@@ -656,6 +656,14 @@ fn review_full_scan_rehearsal() {
             })
         });
     let handler = crate::card_handler::RepoCardHandler::new(config_fn);
+    let baseline = {
+        let connection = Connection::open(&work).expect("打开副本");
+        let one = |sql: &str| -> i64 { connection.query_row(sql, [], |r| r.get(0)).expect(sql) };
+        (
+            one("SELECT COUNT(*) FROM ai_jobs WHERE status='succeeded' AND input_tokens > 0"),
+            one("SELECT COUNT(*) FROM ai_jobs WHERE status='failed'"),
+        )
+    };
     let worker = crate::jobs::start_worker(&work, vec![Arc::new(handler)]);
     let control = crate::jobs::queue_control_path(&work);
     let calls = || served.load(AtomicOrdering::SeqCst);
@@ -742,9 +750,9 @@ fn review_full_scan_rehearsal() {
     // 4) 账：调用次数 = 成功的任务数（没有白花的调用）；回到每天额度
     let connection = Connection::open(&work).expect("打开副本");
     let one = |sql: &str| -> i64 { connection.query_row(sql, [], |r| r.get(0)).expect(sql) };
-    let succeeded = one("SELECT COUNT(*) FROM ai_jobs WHERE status='succeeded' AND input_tokens > 0");
-    let failed = one("SELECT COUNT(*) FROM ai_jobs WHERE status='failed'");
-    println!("[演练] 成功 {succeeded}，失败 {failed}，模型调用 {}", calls());
+    let succeeded = one("SELECT COUNT(*) FROM ai_jobs WHERE status='succeeded' AND input_tokens > 0") - baseline.0;
+    let failed = one("SELECT COUNT(*) FROM ai_jobs WHERE status='failed'") - baseline.1;
+    println!("[演练] 这一轮新增：成功 {succeeded}，失败 {failed}，模型调用 {}", calls());
     assert_eq!(calls() as i64, succeeded + failed, "每次调用都应有对应的任务记账");
     worker.stop();
     println!(
@@ -788,6 +796,17 @@ fn review_output_room_rehearsal() {
                 .expect("只留 10 个");
             connection.execute("DELETE FROM ai_jobs WHERE status <> 'queued'", []).expect("清掉别的");
         }
+        // 副本里排队的任务可能带着以前失败尝试记的账：用「增量」比，不比绝对值
+        let baseline_tokens: i64 = {
+            let connection = Connection::open(&work).expect("打开副本");
+            connection
+                .query_row(
+                    "SELECT COALESCE(SUM(input_tokens + output_tokens), 0) FROM ai_jobs WHERE status = 'queued'",
+                    [],
+                    |r| r.get(0),
+                )
+                .expect("基线")
+        };
         let served = Arc::new(AtomicUsize::new(0));
         let port = start_fake_llm_with(served.clone(), 0, mode);
         let config_fn: Arc<dyn Fn() -> Result<crate::ai::AiRequestConfig, String> + Send + Sync> =
@@ -818,7 +837,7 @@ fn review_output_room_rehearsal() {
         let failed = one("SELECT COUNT(*) FROM ai_jobs WHERE status='failed'");
         let tokens = one("SELECT COALESCE(SUM(input_tokens + output_tokens), 0) FROM ai_jobs WHERE status='succeeded'");
         let calls = served.load(AtomicOrdering::SeqCst) as i64;
-        let per_job = if succeeded > 0 { tokens / succeeded } else { 0 };
+        let per_job = if succeeded > 0 { (tokens - baseline_tokens) / succeeded } else { 0 };
         println!("[演练·{label}] 成功 {succeeded} 失败 {failed}；模型被调用 {calls} 次；成功任务平均记账 {per_job} token（总 {tokens}）");
         assert_eq!(succeeded, 10, "{label}：10 个都应成功");
         assert_eq!(failed, 0);
