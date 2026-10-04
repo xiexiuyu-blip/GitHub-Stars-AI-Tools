@@ -348,21 +348,29 @@ fn is_wide(ch: char) -> bool {
     )
 }
 
-/// 额度的规矩（纯函数）：暂停、额度是 0、放不下。
-fn refusal_for(control: &jobs::QueueControl, used: u64, estimated: u64) -> Result<(), String> {
+/// 额度的规矩（纯函数）：暂停、额度是 0、放不下。`unlimited`：Fox 亲手开了「全量整理」，这一轮不看每天额度（暂停照样拦）。
+fn refusal_for(
+    control: &jobs::QueueControl,
+    used: u64,
+    estimated: u64,
+    unlimited: bool,
+) -> Result<(), String> {
     if control.paused {
         return Err(format!(
             "{REFUSAL_PREFIX}AI 整理现在是暂停状态，旧版的 AI 功能也一起停着。要继续请先在工具箱里点「继续整理」。"
         ));
     }
+    if unlimited {
+        return Ok(());
+    }
     if control.daily_budget_tokens == 0 {
         return Err(format!(
-            "{REFUSAL_PREFIX}每天的 AI 额度是 0，所有 AI 功能（包括旧版的整批解析、标签网络、AI 搜索）都还不能用。要用请先在工具箱的「AI 自动整理」里开启额度。"
+            "{REFUSAL_PREFIX}每天的 AI 额度是 0，所有 AI 功能（包括旧版的整批解析、标签网络、AI 搜索）都还不能用。要用请先在工具箱的「AI 自动整理」里开启额度，或开启「全量整理」。"
         ));
     }
     if used.saturating_add(estimated) > control.daily_budget_tokens {
         return Err(format!(
-            "{REFUSAL_PREFIX}最近 24 小时已经用了约 {}，这一次预计还要约 {}，会超过每天 {} 的额度，所以没有发请求。过一阵额度恢复后再试，或在工具箱里调高额度。",
+            "{REFUSAL_PREFIX}最近 24 小时已经用了约 {}，这一次预计还要约 {}，会超过每天 {} 的额度，所以没有发请求。过一阵额度恢复后再试，或在工具箱里调高额度；想一次性整理完，可以开启「全量整理」（不限额）。",
             readable_tokens(used),
             readable_tokens(estimated),
             readable_tokens(control.daily_budget_tokens),
@@ -384,7 +392,9 @@ fn reserve_at(database_path: &Path, now: &str, estimated: u64) -> Result<String,
     let used = jobs::tokens_used_since(&transaction, &cutoff)
         .map_err(refuse)?
         .max(0) as u64;
-    refusal_for(&control, used, estimated)?;
+    // 全量整理进行中（Fox 亲手确认过、没超时、用量没超过刹车线）：这一轮不看每天额度。预留照常写，用量照常记账
+    let unlimited = jobs::full_scan_open(&transaction, &control, now);
+    refusal_for(&control, used, estimated, unlimited)?;
     let id: String = transaction
         .query_row("SELECT lower(hex(randomblob(8)))", [], |row| row.get(0))
         .map_err(|error| format!("{REFUSAL_PREFIX}额度预留失败：{error}"))?;
@@ -1089,6 +1099,73 @@ mod tests {
             before,
             "上一次的「可能计费」标记和累计不能带进下一次请求：这一次被拒绝，应当整笔退回"
         );
+    }
+
+    // —— 全量整理：Fox 亲手确认后，旧版功能这一轮也不看每天额度 ——
+
+    /// 控制文件：每天额度 `budget`，并且全量整理从 `started_at` 开始、预计整理 `total` 个。
+    fn control_with_full_scan(budget: u64, paused: bool, started_at: &str, total: i64) -> String {
+        format!(
+            r#"{{"dailyBudgetTokens":{budget},"paused":{paused},"fullScan":{{"startedAt":"{started_at}","until":"{}","total":{total}}}}}"#,
+            jobs::shift_db_time(started_at, jobs::FULL_SCAN_SECS).unwrap()
+        )
+    }
+
+    #[test]
+    fn a_full_scan_lets_legacy_requests_through_past_the_daily_budget() {
+        let dir = Dir::new();
+        let now = jobs::now_db_time();
+        // 额度 10 万，24 小时已经用了 13 万
+        dir.control(BUDGET_100K);
+        record_at(dir.path(), &now, "p", "m", 90_000, 40_000).unwrap();
+        let error = begin(Some(dir.path()), &"说".repeat(1000))
+            .err()
+            .expect("每天额度模式下应拒绝");
+        assert!(is_refusal(&error), "{error}");
+        assert!(
+            error.contains("全量整理"),
+            "拒绝的话要告诉他还有这条路：{error}"
+        );
+        // 全量整理进行中：放行，预留照常写、用量照常记
+        dir.control(&control_with_full_scan(100_000, false, &now, 300));
+        let permit = begin(Some(dir.path()), &"说".repeat(1000)).expect("全量整理期间应放行");
+        assert_eq!(dir.used(), 130_000 + 4_000);
+        drop(permit);
+        // 日常额度关着（0）也一样
+        dir.control(&control_with_full_scan(0, false, &now, 300));
+        assert!(begin(Some(dir.path()), "提示词").is_ok());
+    }
+
+    #[test]
+    fn a_full_scan_does_not_override_a_pause_or_outlive_its_48_hours() {
+        let dir = Dir::new();
+        let now = jobs::now_db_time();
+        record_at(dir.path(), &now, "p", "m", 90_000, 40_000).unwrap();
+        dir.control(&control_with_full_scan(100_000, true, &now, 300));
+        let error = begin(Some(dir.path()), "提示词")
+            .err()
+            .expect("暂停时应拒绝");
+        assert!(error.contains("暂停"), "{error}");
+        // 开始于 49 小时前：已经到时间，回到每天额度
+        let long_ago = jobs::shift_db_time(&now, -49 * 3600).unwrap();
+        dir.control(&control_with_full_scan(100_000, false, &long_ago, 300));
+        let error = begin(Some(dir.path()), "提示词")
+            .err()
+            .expect("到时间之后应按每天额度拒绝");
+        assert!(error.contains("额度"), "{error}");
+    }
+
+    #[test]
+    fn a_full_scan_far_beyond_its_estimate_no_longer_lifts_the_cap() {
+        // 预计只有 1 个：刹车线 300 万。用量超过它，说明哪里不对劲，旧功能也要拦
+        let dir = Dir::new();
+        let now = jobs::now_db_time();
+        dir.control(&control_with_full_scan(100_000, false, &now, 1));
+        record_at(dir.path(), &now, "p", "m", 3_000_000, 1).unwrap();
+        let error = begin(Some(dir.path()), "提示词")
+            .err()
+            .expect("超过刹车线应拒绝");
+        assert!(is_refusal(&error), "{error}");
     }
 
     #[test]
