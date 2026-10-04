@@ -857,3 +857,73 @@ fn review_output_room_rehearsal() {
         }
     }
 }
+
+/// 真任务演练：对 Fox 的几件真实业务（小红书封面、公众号配图、短视频字幕、电商详情页……）跑「找方案」，
+/// 取前几名做参考包（Markdown 任务交接单）和单项「复制给 Codex」，全部写进 FSL_REVIEW_OUT，
+/// 给「站在 Codex 角度」的审读员看：这份东西能不能让 Codex 直接开工。只读副本，不花钱。
+#[test]
+#[ignore]
+fn review_tasks_dump() {
+    let source = PathBuf::from(std::env::var("FSL_REVIEW_DB").expect("需要 FSL_REVIEW_DB"));
+    let out = PathBuf::from(std::env::var("FSL_REVIEW_OUT").expect("需要 FSL_REVIEW_OUT"));
+    fs::create_dir_all(&out).expect("建输出目录");
+    let work = out.join("tasks.sqlite3");
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = fs::remove_file(format!("{}{suffix}", work.display()));
+    }
+    fs::copy(&source, &work).expect("复制副本");
+    migrate_database(&work).expect("迁移");
+    scenarios::ensure_initial_classification(&work).expect("首次归类");
+
+    let tasks = [
+        "做小红书封面",
+        "公众号文章配图",
+        "给短视频加字幕",
+        "做电商商品详情页",
+        "把群聊记录整理成日报",
+        "批量改图尺寸和压缩",
+    ];
+    let connection = Connection::open(&work).expect("打开副本");
+    let mut index = serde_json::Map::new();
+    for (number, task) in tasks.iter().enumerate() {
+        let result = solve::solve_query(&work, task).expect("找方案");
+        let name = format!("task{}", number + 1);
+        dump(&out, &format!("{name}_solve"), &result);
+        // 前 3 个有理解卡的命中：第 1 个主参考，其余备选
+        let picks: Vec<&solve::SolveHit> = result.hits.iter().filter(|hit| hit.has_card).take(3).collect();
+        if picks.is_empty() {
+            index.insert((*task).to_owned(), serde_json::json!({"files": [], "note": "没有命中"}));
+            continue;
+        }
+        let request = packs::PackRequest {
+            title: (*task).to_owned(),
+            problem: (*task).to_owned(),
+            architecture_notes: None,
+            items: picks
+                .iter()
+                .enumerate()
+                .map(|(position, hit)| packs::PackItemInput {
+                    repo_id: hit.id.clone(),
+                    role: if position == 0 { packs::PackRole::Main } else { packs::PackRole::Alternative },
+                    why: Some(hit.why.clone()),
+                })
+                .collect(),
+            local_capabilities: vec![],
+        };
+        let generated_on = packs::resolve_generated_on(None);
+        let markdown = packs::build_pack(&connection, &request, packs::PackFormat::Markdown, &generated_on)
+            .expect("参考包 Markdown");
+        fs::write(out.join(format!("{name}_pack.md")), &markdown.content).expect("写参考包");
+        let single = packs::render_item_for_codex_with(&connection, &picks[0].id, Some(task)).expect("单项复制");
+        fs::write(out.join(format!("{name}_single.txt")), &single).expect("写单项");
+        index.insert(
+            (*task).to_owned(),
+            serde_json::json!({
+                "files": [format!("{name}_solve.json"), format!("{name}_pack.md"), format!("{name}_single.txt")],
+                "top": picks.iter().map(|hit| format!("{} · {} · {}", hit.full_name, hit.one_liner.clone().unwrap_or_default(), hit.why)).collect::<Vec<_>>(),
+            }),
+        );
+    }
+    dump(&out, "index", &index);
+    println!("[完成] 输出目录：{}", out.display());
+}
