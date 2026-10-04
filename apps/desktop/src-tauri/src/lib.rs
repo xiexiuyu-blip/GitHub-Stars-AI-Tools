@@ -26,6 +26,7 @@ mod rankings_live;
 mod repo_facts;
 mod scenarios;
 mod solve;
+mod solve_rerank;
 mod spend_guard;
 mod storage;
 mod v2_ops;
@@ -1264,6 +1265,46 @@ fn solve_problem(
 fn solve_v2(app_handle: tauri::AppHandle, query: String) -> Result<solve::SolveResult, String> {
     let storage = AppStorage::from_app_handle(&app_handle)?;
     solve::solve_query(storage.database_path(), &query)
+}
+
+/// 找方案的 AI 精选。本地结果已经先返回；这里最多等 60 秒，失败都折成结果里的 status。
+#[tauri::command]
+async fn solve_rerank_v2(
+    app_handle: tauri::AppHandle,
+    request: solve_rerank::RerankRequest,
+) -> Result<solve_rerank::RerankResult, String> {
+    let task =
+        tauri::async_runtime::spawn_blocking(move || solve_rerank_v2_worker(app_handle, request));
+    match tokio::time::timeout(Duration::from_secs(60), task).await {
+        Ok(Ok(result)) => result,
+        Ok(Err(_)) => Ok(solve_rerank::RerankResult::failed(
+            "AI 精选没成功，这次按本地排序",
+        )),
+        Err(_) => Ok(solve_rerank::RerankResult::failed(
+            "AI 精选超时了，这次按本地排序",
+        )),
+    }
+}
+
+fn solve_rerank_v2_worker(
+    app_handle: tauri::AppHandle,
+    request: solve_rerank::RerankRequest,
+) -> Result<solve_rerank::RerankResult, String> {
+    let storage = AppStorage::from_app_handle(&app_handle)?;
+    let config = match load_card_ai_config(&app_handle) {
+        Ok(config) => config,
+        Err(_) => {
+            return Ok(solve_rerank::RerankResult::skipped(
+                "还没配置 AI 服务，这次按本地排序",
+            ))
+        }
+    };
+    Ok(solve_rerank::rerank_with(
+        storage.database_path(),
+        &request,
+        &config.model,
+        |prompt| ai::complete_solve_rerank(&config, prompt),
+    ))
 }
 
 #[tauri::command]
@@ -7271,6 +7312,7 @@ pub fn run() {
             get_graph_overview,
             solve_problem,
             solve_v2,
+            solve_rerank_v2,
             create_reference_pack,
             build_reference_pack_v2,
             copy_item_for_codex,
@@ -7496,6 +7538,14 @@ mod tests {
         let manifest = include_str!("../gen/schemas/acl-manifests.json");
         assert!(manifest.contains("\"build_reference_pack_v2\""));
         assert!(manifest.contains("\"copy_item_for_codex\""));
+    }
+
+    #[test]
+    fn solve_rerank_v2_command_is_allowed_by_main_capability() {
+        let permissions = include_str!("../permissions/gsat-commands.toml");
+        assert!(permissions.contains("\"solve_rerank_v2\""));
+        let manifest = include_str!("../gen/schemas/acl-manifests.json");
+        assert!(manifest.contains("\"solve_rerank_v2\""));
     }
 
     #[test]

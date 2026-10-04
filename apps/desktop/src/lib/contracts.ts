@@ -170,6 +170,31 @@ export type SolveResult = {
   pendingMatches: number;
 };
 
+/** 找方案 AI 精选的档位。best 最合适，good 合适，maybe 备选，poor 不太合适。 */
+export type RerankFit = 'best' | 'good' | 'maybe' | 'poor';
+
+/** 命令 `solve_rerank_v2` 里的一条判断。 */
+export type RerankItem = {
+  repoId: string;
+  fit: RerankFit;
+  reason: string;
+};
+
+/** 命令 `solve_rerank_v2({ request })` → RerankResult。本地排序之外，模型再挑一次。 */
+export type RerankResult = {
+  status: 'ok' | 'cached' | 'skipped' | 'refused' | 'failed';
+  /** 按 AI 的顺序；只在 ok / cached 时非空 */
+  items: RerankItem[];
+  /** 没有任何一个是 best / good */
+  noneFit: boolean;
+  /** 一句话建议，没有就是 null */
+  note: string | null;
+  /** skipped / refused / failed 时给界面的原因 */
+  message: string | null;
+  /** 这次大约花的 token；缓存命中是 0；没调用是 null */
+  tokens: number | null;
+};
+
 /** 命令 `preview_capture({ text })` → CapturePreview：在入库前先告诉 Fox 每条链接会怎么处理 */
 export type CapturePreviewRow = {
   url: string;

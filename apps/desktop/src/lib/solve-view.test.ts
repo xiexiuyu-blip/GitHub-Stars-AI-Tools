@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import type { ScenarioSummary, SolveHit, SolveResult } from '@/lib/contracts';
+import type { RerankResult, ScenarioSummary, SolveHit, SolveResult } from '@/lib/contracts';
 import {
+  applyRerank,
   BACK_TO_PICK_LABEL,
   buildPackRequest,
   crossNote,
@@ -17,6 +18,10 @@ import {
   packEmptyNote,
   packPlaceholder,
   pendingNote,
+  RERANK_FIT_LABEL,
+  RERANK_TOGGLE_LABEL,
+  rerankPicks,
+  rerankStatusText,
   todayLocalDate,
   togglePick,
   whyLine,
@@ -504,5 +509,191 @@ describe('packEmptyNote', () => {
 
   it('有默认勾选（用户自己取消的）：不解释', () => {
     expect(packEmptyNote({ hits: [{ id: 'a' }] as never, preselected: ['a'] })).toBeNull();
+  });
+});
+
+function rerank(partial: Partial<RerankResult> = {}): RerankResult {
+  return {
+    status: partial.status ?? 'ok',
+    items: partial.items ?? [],
+    noneFit: partial.noneFit ?? false,
+    note: partial.note ?? null,
+    message: partial.message ?? null,
+    tokens: partial.tokens === undefined ? null : partial.tokens,
+  };
+}
+
+describe('applyRerank', () => {
+  const hits = [hit({ id: 'a' }), hit({ id: 'b' }), hit({ id: 'c' })];
+
+  it('不可用或没有条目时返回原数组', () => {
+    expect(applyRerank(hits, null)).toBe(hits);
+    expect(applyRerank(hits, rerank({ status: 'failed', items: [{ repoId: 'c', fit: 'best', reason: '好' }] }))).toBe(hits);
+    expect(applyRerank(hits, rerank({ status: 'skipped' }))).toBe(hits);
+    expect(applyRerank(hits, rerank({ status: 'ok', items: [] }))).toBe(hits);
+  });
+
+  it('按精选顺序重排', () => {
+    const next = applyRerank(hits, rerank({
+      items: [
+        { repoId: 'c', fit: 'best', reason: '最对口' },
+        { repoId: 'a', fit: 'good', reason: '能用' },
+        { repoId: 'b', fit: 'maybe', reason: '沾边' },
+      ],
+    }));
+    expect(next.map((item) => item.id)).toEqual(['c', 'a', 'b']);
+    expect(next).not.toBe(hits);
+  });
+
+  it('精选里没有的命中按原顺序放在最后', () => {
+    const next = applyRerank(hits, rerank({
+      items: [{ repoId: 'c', fit: 'best', reason: '最对口' }],
+    }));
+    expect(next.map((item) => item.id)).toEqual(['c', 'a', 'b']);
+  });
+
+  it('精选里多出来的 id 忽略', () => {
+    const next = applyRerank(hits, rerank({
+      items: [
+        { repoId: 'gone', fit: 'best', reason: '没有这个' },
+        { repoId: 'b', fit: 'good', reason: '能用' },
+      ],
+    }));
+    expect(next.map((item) => item.id)).toEqual(['b', 'a', 'c']);
+  });
+
+  it('不改入参', () => {
+    const source = [hit({ id: 'a' }), hit({ id: 'b' })];
+    const snapshot = source.map((item) => item.id);
+    applyRerank(source, rerank({
+      items: [
+        { repoId: 'b', fit: 'best', reason: '好' },
+        { repoId: 'a', fit: 'good', reason: '行' },
+      ],
+    }));
+    expect(source.map((item) => item.id)).toEqual(snapshot);
+  });
+});
+
+describe('rerankPicks', () => {
+  const hits = [hit({ id: 'a' }), hit({ id: 'b' }), hit({ id: 'c' }), hit({ id: 'd' })];
+
+  it('best 排在 good 前面', () => {
+    const picks = rerankPicks(rerank({
+      items: [
+        { repoId: 'a', fit: 'good', reason: '能用' },
+        { repoId: 'b', fit: 'best', reason: '最对口' },
+        { repoId: 'c', fit: 'maybe', reason: '沾边' },
+      ],
+    }), hits);
+    expect(picks).toEqual(['b', 'a']);
+  });
+
+  it('最多勾 3 个', () => {
+    const picks = rerankPicks(rerank({
+      items: [
+        { repoId: 'a', fit: 'best', reason: '1' },
+        { repoId: 'b', fit: 'best', reason: '2' },
+        { repoId: 'c', fit: 'good', reason: '3' },
+        { repoId: 'd', fit: 'good', reason: '4' },
+      ],
+    }), hits);
+    expect(picks).toEqual(['a', 'b', 'c']);
+  });
+
+  it('没有合适的时候返回空数组', () => {
+    expect(rerankPicks(rerank({
+      noneFit: true,
+      items: [{ repoId: 'a', fit: 'best', reason: '模型写了也不信' }],
+    }), hits)).toEqual([]);
+  });
+
+  it('精选不可用时返回 null', () => {
+    const items = [{ repoId: 'a', fit: 'best' as const, reason: '好' }];
+    expect(rerankPicks(null, hits)).toBeNull();
+    expect(rerankPicks(rerank({ status: 'failed', items }), hits)).toBeNull();
+    expect(rerankPicks(rerank({ status: 'skipped', items }), hits)).toBeNull();
+    expect(rerankPicks(rerank({ status: 'refused', items }), hits)).toBeNull();
+  });
+
+  it('只保留命中里有的 id', () => {
+    expect(rerankPicks(rerank({
+      items: [
+        { repoId: 'gone', fit: 'best', reason: '没有' },
+        { repoId: 'c', fit: 'good', reason: '有' },
+      ],
+    }), hits)).toEqual(['c']);
+  });
+});
+
+describe('rerankStatusText', () => {
+  it('关着就不说话', () => {
+    expect(rerankStatusText({ phase: 'loading', result: null, enabled: false })).toBeNull();
+    expect(rerankStatusText({ phase: 'done', result: rerank({ status: 'ok', tokens: 12 }), enabled: false })).toBeNull();
+  });
+
+  it('正在挑', () => {
+    expect(rerankStatusText({ phase: 'loading', result: null, enabled: true })).toBe('AI 正在帮你挑…');
+  });
+
+  it('挑完并带上这次的用量', () => {
+    expect(rerankStatusText({ phase: 'done', result: rerank({ status: 'ok', tokens: 12 }), enabled: true })).toBe('AI 已挑过 · 本次约 12 token');
+  });
+
+  it('没有用量时只说挑过', () => {
+    expect(rerankStatusText({ phase: 'done', result: rerank({ status: 'ok' }), enabled: true })).toBe('AI 已挑过');
+  });
+
+  it('用量过千写成一位小数', () => {
+    expect(rerankStatusText({ phase: 'done', result: rerank({ status: 'ok', tokens: 4200 }), enabled: true })).toBe('AI 已挑过 · 本次约 4.2 千 token');
+  });
+
+  it('用了上次的结果', () => {
+    expect(rerankStatusText({ phase: 'done', result: rerank({ status: 'cached', tokens: 0 }), enabled: true })).toBe('AI 已挑过 · 用的是上次的结果，没花 token');
+  });
+
+  it('跳过时用返回的说明', () => {
+    expect(rerankStatusText({
+      phase: 'done',
+      result: rerank({ status: 'skipped', message: '候选太少，不用 AI 再挑' }),
+      enabled: true,
+    })).toBe('候选太少，不用 AI 再挑');
+  });
+
+  it('额度用完时用返回的说明', () => {
+    expect(rerankStatusText({
+      phase: 'done',
+      result: rerank({ status: 'refused', message: '今天的额度用完了，这次按本地排序' }),
+      enabled: true,
+    })).toBe('今天的额度用完了，这次按本地排序');
+  });
+
+  it('失败时用返回的说明', () => {
+    expect(rerankStatusText({
+      phase: 'done',
+      result: rerank({ status: 'failed', message: 'AI 精选没成功，这次按本地排序' }),
+      enabled: true,
+    })).toBe('AI 精选没成功，这次按本地排序');
+  });
+
+  it('还没开始时不说话', () => {
+    expect(rerankStatusText({ phase: 'idle', result: null, enabled: true })).toBeNull();
+    expect(rerankStatusText({ phase: 'done', result: null, enabled: true })).toBeNull();
+    expect(rerankStatusText({
+      phase: 'done',
+      result: rerank({ status: 'failed', message: '   ' }),
+      enabled: true,
+    })).toBeNull();
+  });
+});
+
+describe('精选文案', () => {
+  it('档位用白话', () => {
+    expect(RERANK_FIT_LABEL).toEqual({ best: '最合适', good: '合适', maybe: '备选', poor: '不太合适' });
+  });
+
+  it('开关写出开或关', () => {
+    expect(RERANK_TOGGLE_LABEL(true)).toBe('AI 精选：开');
+    expect(RERANK_TOGGLE_LABEL(false)).toBe('AI 精选：关');
   });
 });

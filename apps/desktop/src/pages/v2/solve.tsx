@@ -1,8 +1,9 @@
 import { FormEvent, Suspense, lazy, useCallback, useEffect, useRef, useState } from 'react';
 import type { LocalCapabilityInput, PackFormat, PackOutput } from '@/lib/api';
-import { buildReferencePack, describeInvokeError, listScenarios, scanLocalCapabilities, solveV2 } from '@/lib/api';
-import type { ScenarioSummary, SolveResult } from '@/lib/contracts';
+import { buildReferencePack, describeInvokeError, listScenarios, scanLocalCapabilities, solveRerankV2, solveV2 } from '@/lib/api';
+import type { RerankFit, RerankResult, ScenarioSummary, SolveResult } from '@/lib/contracts';
 import {
+  applyRerank,
   BACK_TO_PICK_LABEL,
   buildPackRequest,
   crossNote,
@@ -18,10 +19,13 @@ import {
   packEmptyNote,
   packPlaceholder,
   pendingNote,
+  RERANK_TOGGLE_LABEL,
+  rerankPicks,
+  rerankStatusText,
   todayLocalDate,
   togglePick,
 } from '@/lib/solve-view';
-import { loadSolveDraft, saveSolveDraft } from '@/lib/solve-draft';
+import { loadSolveDraft, saveSolveDraft, type SolveRerankPhase } from '@/lib/solve-draft';
 import { useCopy } from '@/hooks/use-copy';
 import { Button, Card, CardHeader, EmptyState, PageHeader, Segmented, Spinner } from '@/components/kit';
 import { Icon } from '@/components/ui/icon';
@@ -33,6 +37,52 @@ import { SolveHitRow } from '@/components/solve/solve-hit-row';
 const ReadmeRenderer = lazy(() => import('@/components/readme-renderer').then((module) => ({ default: module.ReadmeRenderer })));
 
 const EXAMPLES = ['做小红书封面', '给公众号文章配图', '短视频加字幕', '做 PPT 和文档', '做电商详情页图片'];
+const AI_STORAGE_KEY = 'fsl.solve.ai';
+
+function readAiEnabled(): boolean {
+  try {
+    const raw = window.localStorage.getItem(AI_STORAGE_KEY);
+    if (raw == null) return true;
+    return raw !== '0' && raw !== 'false' && raw !== 'off';
+  } catch {
+    return true;
+  }
+}
+
+function writeAiEnabled(on: boolean): void {
+  try {
+    window.localStorage.setItem(AI_STORAGE_KEY, on ? '1' : '0');
+  } catch {
+    // 写不进去就只在这一次里记住，下次再读默认开。
+  }
+}
+
+function failedRerank(): RerankResult {
+  return {
+    status: 'failed',
+    items: [],
+    noneFit: false,
+    note: null,
+    message: 'AI 精选没成功，这次按本地排序',
+    tokens: null,
+  };
+}
+
+function readRerank(value: RerankResult | null | undefined): RerankResult {
+  if (!value || !Array.isArray(value.items) || typeof value.status !== 'string') return failedRerank();
+  return value;
+}
+
+function restoredRerank(draft: ReturnType<typeof loadSolveDraft>): { rerank: RerankResult | null; phase: SolveRerankPhase } {
+  if (!draft || draft.rerankPhase === 'loading' || draft.rerankPhase !== 'done') {
+    return { rerank: null, phase: 'idle' };
+  }
+  return { rerank: draft.rerank ?? null, phase: 'done' };
+}
+
+function isFit(value: string): value is RerankFit {
+  return value === 'best' || value === 'good' || value === 'maybe' || value === 'poor';
+}
 
 const PREVIEW_CLASS = 'm-0 min-h-[180px] flex-1 overflow-auto bg-background px-4 py-3.5 font-mono text-xs leading-[1.7] break-words whitespace-pre-wrap text-foreground [overflow-wrap:anywhere] max-[899px]:max-h-[70vh] min-[900px]:max-h-none';
 
@@ -50,9 +100,14 @@ export function SolvePage(props: {
 }) {
   const copy = useCopy();
   const searchSeq = useRef(0);
+  const rerankSeq = useRef(0);
   const openingQuery = props.initialQuestion?.trim() ?? '';
   // 切到别的页面再回来：接着上次的问题、结果和勾选，不要白做一遍
   const draft = openingQuery ? null : loadSolveDraft();
+  const restored = restoredRerank(draft);
+  const picksTouched = useRef(draft !== null);
+  const aiEnabledRef = useRef(readAiEnabled());
+  const rerankUsefulRef = useRef(restored.phase === 'done' && (restored.rerank?.status === 'ok' || restored.rerank?.status === 'cached'));
   const [query, setQuery] = useState(props.initialQuestion || draft?.query || '');
   const [activeQuery, setActiveQuery] = useState(draft?.activeQuery ?? '');
   const [phase, setPhase] = useState<'idle' | 'loading' | 'error' | 'ready'>(openingQuery ? 'loading' : draft ? 'ready' : 'idle');
@@ -60,6 +115,9 @@ export function SolvePage(props: {
   const [result, setResult] = useState<SolveResult | null>(draft?.result ?? null);
   const [picked, setPicked] = useState<string[]>(draft?.picked ?? []);
   const [direct, setDirect] = useState(draft?.direct ?? false);
+  const [aiEnabled, setAiEnabled] = useState(aiEnabledRef.current);
+  const [rerank, setRerank] = useState<RerankResult | null>(restored.rerank);
+  const [rerankPhase, setRerankPhase] = useState<SolveRerankPhase>(restored.phase);
   const [scenarios, setScenarios] = useState<ScenarioSummary[]>([]);
   const [format, setFormat] = useState<PackFormat>(draft?.format ?? 'markdown');
   const [openedId, setOpenedId] = useState<string | null>(null);
@@ -70,28 +128,62 @@ export function SolvePage(props: {
   const [packAttempt, setPackAttempt] = useState(0);
   const [copied, setCopied] = useState(false);
 
+  const requestRerank = useCallback((ready: SolveResult, text: string, searchToken: number) => {
+    if (!aiEnabledRef.current || ready.hits.length < 2) return;
+    const token = ++rerankSeq.current;
+    rerankUsefulRef.current = false;
+    setRerank(null);
+    setRerankPhase('loading');
+    const queryText = ready.query.trim() ? ready.query : text;
+    void solveRerankV2({
+      query: queryText,
+      candidateIds: ready.hits.slice(0, 12).map((item) => item.id),
+    }).then((next) => {
+      if (searchToken !== searchSeq.current || token !== rerankSeq.current) return;
+      const parsed = readRerank(next);
+      rerankUsefulRef.current = parsed.status === 'ok' || parsed.status === 'cached';
+      setRerank(parsed);
+      setRerankPhase('done');
+      if (!picksTouched.current) {
+        const picks = rerankPicks(parsed, ready.hits);
+        if (picks !== null) setPicked(picks);
+      }
+    }).catch(() => {
+      if (searchToken !== searchSeq.current || token !== rerankSeq.current) return;
+      rerankUsefulRef.current = false;
+      setRerank(failedRerank());
+      setRerankPhase('done');
+    });
+  }, []);
+
   const runSearch = useCallback((raw: string) => {
     const text = raw.trim();
     if (!text) return;
     const seq = ++searchSeq.current;
+    rerankSeq.current += 1;
+    picksTouched.current = false;
+    rerankUsefulRef.current = false;
     setActiveQuery(text);
     setPhase('loading');
     setError(null);
     setResult(null);
     setDirect(false);
     setPicked([]);
+    setRerank(null);
+    setRerankPhase('idle');
     void solveV2(text).then((next) => {
       if (seq !== searchSeq.current) return;
       const ready = readSolveResult(next);
       setResult(ready);
       setPicked(initialPicks(ready));
       setPhase('ready');
+      requestRerank(ready, text, seq);
     }).catch((reason) => {
       if (seq !== searchSeq.current) return;
       setError(describeInvokeError(reason));
       setPhase('error');
     });
-  }, []);
+  }, [requestRerank]);
 
   useEffect(() => {
     return () => {
@@ -130,8 +222,8 @@ export function SolvePage(props: {
   }, []);
 
   useEffect(() => {
-    if (result) saveSolveDraft({ query, activeQuery, result, picked, format, direct });
-  }, [query, activeQuery, result, picked, format, direct]);
+    if (result) saveSolveDraft({ query, activeQuery, result, picked, format, direct, rerank, rerankPhase });
+  }, [query, activeQuery, result, picked, format, direct, rerank, rerankPhase]);
 
   const selectedHits = result ? orderedPicks(result.hits, picked) : [];
   // direct 写进 key，免得「一个都没勾」和「直接交给 Codex」共用同一份预览
@@ -144,6 +236,8 @@ export function SolvePage(props: {
   // 重新生成时先留着同一模式下的上一份，别把预览整块清空；换模式不拿另一份来充数
   const pack = packView?.output ?? (awaitingPack && lastPack.current?.mode === packMode ? lastPack.current.output : null);
   const hasResult = result !== null;
+  const rerankStatus = rerankStatusText({ phase: rerankPhase, result: rerank, enabled: aiEnabled });
+  const showNoneFit = Boolean(rerank && (rerank.status === 'ok' || rerank.status === 'cached') && rerank.noneFit);
   const canCopy = direct ? Boolean(pack?.content) : selectedHits.length > 0 && Boolean(pack?.content);
 
   useEffect(() => {
@@ -197,8 +291,25 @@ export function SolvePage(props: {
   }
 
   function updatePicked(update: (current: string[]) => string[]) {
+    picksTouched.current = true;
     setDirect(false);
     setPicked(update);
+  }
+
+  function toggleAi() {
+    const next = !aiEnabledRef.current;
+    aiEnabledRef.current = next;
+    setAiEnabled(next);
+    writeAiEnabled(next);
+    if (!next) {
+      rerankSeq.current += 1;
+      rerankUsefulRef.current = false;
+      setRerank(null);
+      setRerankPhase('idle');
+      return;
+    }
+    if (!result || result.hits.length < 2 || rerankUsefulRef.current) return;
+    requestRerank(result, result.query.trim() || activeQuery || query, searchSeq.current);
   }
 
   function retryPack() {
@@ -272,14 +383,25 @@ export function SolvePage(props: {
               <span className="text-xs text-on-surface-variant">勾选的会放进参考包；点一行看详情</span>
             ) : undefined}
           />
+          <div className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-1 border-b border-muted px-4 py-1.5">
+            {rerankStatus ? <span className="text-xs text-on-surface-variant">{rerankStatus}</span> : null}
+            <Button variant="text" size="sm" aria-pressed={aiEnabled} onClick={toggleAi}>{RERANK_TOGGLE_LABEL(aiEnabled)}</Button>
+          </div>
           {result ? <GapBanner result={result} onOpenDiscover={openDiscover} /> : null}
           {result ? <NoIntentBanner result={result} /> : null}
+          {showNoneFit ? (
+            <div className="flex shrink-0 flex-wrap items-center gap-2.5 border-b border-muted px-4 py-2.5 text-sm text-foreground">
+              {rerank?.note ? <span className="min-w-0 flex-1">{rerank.note}</span> : <span className="flex-1" />}
+              <Button variant="text" onClick={() => setDirect(true)}>{DIRECT_LABEL}</Button>
+            </div>
+          ) : null}
           <div className="min-h-0 flex-1 overflow-auto">
             <ResultBody
               scenarios={scenarios}
               phase={phase}
               error={error}
               result={result}
+              rerank={rerank}
               picked={picked}
               onToggle={(id) => updatePicked((current) => togglePick(current, id))}
               onOpen={(id) => setOpenedId(id)}
@@ -450,6 +572,7 @@ function ResultBody(props: {
   phase: 'idle' | 'loading' | 'error' | 'ready';
   error: string | null;
   result: SolveResult | null;
+  rerank: RerankResult | null;
   picked: readonly string[];
   onToggle: (id: string) => void;
   onOpen: (id: string) => void;
@@ -494,9 +617,17 @@ function ResultBody(props: {
     );
   }
   const picked = new Set(props.picked);
+  const shown = applyRerank(props.result.hits, props.rerank);
+  const aiById = new Map<string, { fit: RerankFit; reason: string }>();
+  if (props.rerank && (props.rerank.status === 'ok' || props.rerank.status === 'cached')) {
+    for (const item of props.rerank.items) {
+      if (!isFit(item.fit)) continue;
+      aiById.set(item.repoId, { fit: item.fit, reason: item.reason });
+    }
+  }
   return (
     <>
-      {props.result.hits.map((hit) => (
+      {shown.map((hit) => (
         <SolveHitRow
           key={hit.id}
           hit={hit}
@@ -504,6 +635,7 @@ function ResultBody(props: {
           scenarios={props.scenarios}
           pressed={picked.has(hit.id)}
           isMain={props.picked[0] === hit.id}
+          ai={aiById.get(hit.id)}
           onToggle={() => props.onToggle(hit.id)}
           onOpen={() => props.onOpen(hit.id)}
           onMakeMain={() => props.onMakeMain(hit.id)}

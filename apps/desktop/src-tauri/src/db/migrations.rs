@@ -216,6 +216,14 @@ const MIGRATIONS: &[Migration] = &[
         name: "inbox_repos",
         sql: include_str!("../../../../../packages/storage/migrations/fox/034_inbox_repos.sql"),
     },
+    // 035 留给同时在做的卡 29（readme_basis）。本卡用 036，合并时由总控处理编号冲突。
+    Migration {
+        version: "036",
+        name: "solve_rerank_cache",
+        sql: include_str!(
+            "../../../../../packages/storage/migrations/fox/036_solve_rerank_cache.sql"
+        ),
+    },
 ];
 
 pub fn latest_migration() -> &'static Migration {
@@ -502,9 +510,9 @@ mod tests {
         let path = temp_db("web-content");
         let report = migrate_database(&path).expect("空库应能迁到 031");
         assert_eq!(report.applied.len(), MIGRATIONS.len());
-        assert_eq!(MIGRATIONS.len(), 34);
-        assert_eq!(latest_migration().version, "034");
-        assert_eq!(latest_migration().name, "inbox_repos");
+        assert_eq!(MIGRATIONS.len(), 35);
+        assert_eq!(latest_migration().version, "036");
+        assert_eq!(latest_migration().name, "solve_rerank_cache");
         assert!(report.applied.iter().any(|item| item == "031 web_content"));
         assert!(report.applied.iter().any(|item| item == "032 repo_license"));
         assert!(report.applied.iter().any(|item| item == "033 inbox_fetch"));
@@ -745,8 +753,8 @@ INSERT INTO ai_task_items(id, run_id, repository_id, full_name, status, reason) 
         assert!(report.applied.iter().any(|item| item == "032 repo_license"));
         assert!(report.applied.iter().any(|item| item == "033 inbox_fetch"));
         assert!(report.applied.iter().any(|item| item == "034 inbox_repos"));
-        assert_eq!(latest_migration().version, "034");
-        assert_eq!(latest_migration().name, "inbox_repos");
+        assert_eq!(latest_migration().version, "036");
+        assert_eq!(latest_migration().name, "solve_rerank_cache");
         let columns = license_columns(&path);
         assert_eq!(columns.len(), 2);
         for name in ["license_spdx", "license_name"] {
@@ -798,6 +806,7 @@ INSERT INTO repositories(id, account_id, owner, name, full_name, topics_json, ht
                 "032 repo_license".to_owned(),
                 "033 inbox_fetch".to_owned(),
                 "034 inbox_repos".to_owned(),
+                "036 solve_rerank_cache".to_owned(),
             ]
         );
         assert_eq!(count_query(&path, "SELECT COUNT(*) FROM repositories"), 2);
@@ -858,10 +867,14 @@ INSERT INTO inbox_items(id, account_id, original_url, normalized_url, title, ite
         let report = migrate_database(&path).expect("032 库应能升到 034");
         assert_eq!(
             report.applied,
-            vec!["033 inbox_fetch".to_owned(), "034 inbox_repos".to_owned()]
+            vec![
+                "033 inbox_fetch".to_owned(),
+                "034 inbox_repos".to_owned(),
+                "036 solve_rerank_cache".to_owned(),
+            ]
         );
-        assert_eq!(latest_migration().version, "034");
-        assert_eq!(latest_migration().name, "inbox_repos");
+        assert_eq!(latest_migration().version, "036");
+        assert_eq!(latest_migration().name, "solve_rerank_cache");
         assert!(MIGRATIONS
             .iter()
             .any(|migration| migration.version == "033" && migration.name == "inbox_fetch"));
@@ -972,10 +985,16 @@ INSERT INTO inbox_items(id, account_id, original_url, normalized_url, title, ite
             );
         }
 
-        let report = migrate_database(&path).expect("033 库应能升到 034");
-        assert_eq!(report.applied, vec!["034 inbox_repos".to_owned()]);
-        assert_eq!(latest_migration().version, "034");
-        assert_eq!(latest_migration().name, "inbox_repos");
+        let report = migrate_database(&path).expect("033 库应能升到 036");
+        assert_eq!(
+            report.applied,
+            vec![
+                "034 inbox_repos".to_owned(),
+                "036 solve_rerank_cache".to_owned(),
+            ]
+        );
+        assert_eq!(latest_migration().version, "036");
+        assert_eq!(latest_migration().name, "solve_rerank_cache");
         assert!(MIGRATIONS
             .iter()
             .any(|migration| { migration.version == "034" && migration.name == "inbox_repos" }));
@@ -1045,6 +1064,100 @@ INSERT INTO inbox_items(id, account_id, original_url, normalized_url, title, ite
         let _ = fs::remove_file(format!("{}-shm", path.display()));
         if let Some(backup) = report.backup_path {
             let _ = fs::remove_file(backup);
+        }
+    }
+
+    #[test]
+    fn upgrade_from_034_or_035_adds_solve_rerank_cache() {
+        fn cache_table(path: &Path) -> i64 {
+            count_query(
+                path,
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'solve_rerank_cache'",
+            )
+        }
+
+        let from_034 = temp_db("rerank-from-034");
+        {
+            let mut connection = Connection::open(&from_034).expect("应能创建 034 夹具");
+            connection
+                .execute_batch("PRAGMA foreign_keys = ON;")
+                .expect("应能打开外键");
+            for migration in MIGRATIONS
+                .iter()
+                .filter(|migration| migration.version <= "034")
+            {
+                apply_one(&mut connection, migration).expect("夹具迁移应成功");
+            }
+            assert_eq!(cache_table(&from_034), 0, "034 的库还没有精选缓存");
+        }
+        let report_034 = migrate_database(&from_034).expect("034 库应能升到 036");
+        assert_eq!(
+            report_034.applied,
+            vec!["036 solve_rerank_cache".to_owned()]
+        );
+        assert_eq!(cache_table(&from_034), 1);
+        assert_eq!(latest_migration().version, "036");
+        assert_eq!(latest_migration().name, "solve_rerank_cache");
+        let connection = Connection::open(&from_034).expect("应能打开升级后的库");
+        connection
+            .execute(
+                "INSERT INTO solve_rerank_cache(cache_key, result_json) VALUES ('k', '{}')",
+                [],
+            )
+            .expect("应能写入精选缓存");
+        drop(connection);
+        let again = migrate_database(&from_034).expect("第二次迁移应幂等");
+        assert!(again.applied.is_empty());
+        assert_eq!(
+            count_query(&from_034, "SELECT COUNT(*) FROM solve_rerank_cache"),
+            1
+        );
+
+        // 卡 29 会占用 035。这里模拟「库里已经记了 035、本分支还没有那份 SQL」也能补上 036。
+        let from_035 = temp_db("rerank-from-035");
+        {
+            let mut connection = Connection::open(&from_035).expect("应能创建 035 夹具");
+            connection
+                .execute_batch("PRAGMA foreign_keys = ON;")
+                .expect("应能打开外键");
+            for migration in MIGRATIONS
+                .iter()
+                .filter(|migration| migration.version <= "034")
+            {
+                apply_one(&mut connection, migration).expect("夹具迁移应成功");
+            }
+            connection
+                .execute(
+                    "INSERT INTO schema_migrations(version, name) VALUES ('035', 'readme_basis')",
+                    [],
+                )
+                .expect("应能记上 035");
+        }
+        let report_035 = migrate_database(&from_035).expect("035 库应能升到 036");
+        assert_eq!(
+            report_035.applied,
+            vec!["036 solve_rerank_cache".to_owned()]
+        );
+        assert_eq!(cache_table(&from_035), 1);
+        let version: String = Connection::open(&from_035)
+            .expect("应能打开 035 升级后的库")
+            .query_row(
+                "SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .expect("应能读到最新迁移");
+        assert_eq!(version, "036");
+
+        for path in [&from_034, &from_035] {
+            let _ = fs::remove_file(path);
+            let _ = fs::remove_file(format!("{}-wal", path.display()));
+            let _ = fs::remove_file(format!("{}-shm", path.display()));
+        }
+        for report in [&report_034, &report_035] {
+            if let Some(backup) = &report.backup_path {
+                let _ = fs::remove_file(backup);
+            }
         }
     }
 

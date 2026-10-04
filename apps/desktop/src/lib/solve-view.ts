@@ -1,7 +1,7 @@
 /** 「找方案」页的纯视图规则：勾选、提示文案、参考包请求。不碰 React，方便在 node 里测。 */
 
 import type { LocalCapabilityInput, PackFormat, PackRequest } from '@/lib/api';
-import type { ScenarioSummary, SolveHit, SolveResult } from '@/lib/contracts';
+import type { RerankFit, RerankResult, ScenarioSummary, SolveHit, SolveResult } from '@/lib/contracts';
 
 export type MatchBadge = { tone: 'blue' | 'gray'; text: string };
 
@@ -279,6 +279,87 @@ export function packEmptyNote(result: Pick<SolveResult, 'hits' | 'preselected'> 
 export function packPlaceholder(format: PackFormat): string {
   void format;
   return '（还没有选中的工具）';
+}
+
+export const RERANK_FIT_LABEL: Record<RerankFit, string> = {
+  best: '最合适',
+  good: '合适',
+  maybe: '备选',
+  poor: '不太合适',
+};
+
+export function RERANK_TOGGLE_LABEL(on: boolean): string {
+  return on ? 'AI 精选：开' : 'AI 精选：关';
+}
+
+const RERANK_USABLE = new Set(['ok', 'cached']);
+
+/** 按 AI 的顺序排列表。用不上时返回原数组，不改入参。 */
+export function applyRerank(hits: SolveHit[], rerank: RerankResult | null): SolveHit[] {
+  if (!rerank || !RERANK_USABLE.has(rerank.status) || rerank.items.length === 0) return hits;
+  const byId = new Map(hits.map((item) => [item.id, item]));
+  const seen = new Set<string>();
+  const ordered: SolveHit[] = [];
+  for (const item of rerank.items) {
+    if (seen.has(item.repoId)) continue;
+    const hit = byId.get(item.repoId);
+    if (!hit) continue;
+    seen.add(item.repoId);
+    ordered.push(hit);
+  }
+  for (const hit of hits) {
+    if (!seen.has(hit.id)) ordered.push(hit);
+  }
+  return ordered;
+}
+
+/**
+ * ok / cached 时给出默认勾选：best 在前，然后 good，最多 3 个，且必须在命中里。
+ * 一个都不合适时返回空数组。精选不可用时返回 null，调用方不要改勾选。
+ */
+export function rerankPicks(rerank: RerankResult | null, hits: readonly SolveHit[]): string[] | null {
+  if (!rerank || !RERANK_USABLE.has(rerank.status)) return null;
+  if (rerank.noneFit) return [];
+  const known = new Set(hits.map((hit) => hit.id));
+  const picked: string[] = [];
+  const seen = new Set<string>();
+  const take = (fit: RerankFit) => {
+    for (const item of rerank.items) {
+      if (picked.length >= 3) return;
+      if (item.fit !== fit || !known.has(item.repoId) || seen.has(item.repoId)) continue;
+      seen.add(item.repoId);
+      picked.push(item.repoId);
+    }
+  };
+  take('best');
+  take('good');
+  return picked;
+}
+
+export function rerankStatusText(state: {
+  phase: 'idle' | 'loading' | 'done';
+  result: RerankResult | null;
+  enabled: boolean;
+}): string | null {
+  if (!state.enabled) return null;
+  if (state.phase === 'loading') return 'AI 正在帮你挑…';
+  if (state.phase !== 'done' || !state.result) return null;
+  const { result } = state;
+  if (result.status === 'ok') {
+    if (result.tokens == null || !Number.isFinite(result.tokens)) return 'AI 已挑过';
+    return `AI 已挑过 · 本次约 ${formatRerankTokens(result.tokens)} token`;
+  }
+  if (result.status === 'cached') return 'AI 已挑过 · 用的是上次的结果，没花 token';
+  if (result.status === 'skipped' || result.status === 'refused' || result.status === 'failed') {
+    const message = result.message?.trim() ?? '';
+    return message || null;
+  }
+  return null;
+}
+
+function formatRerankTokens(tokens: number): string {
+  if (tokens < 1000) return String(Math.trunc(tokens));
+  return `${(tokens / 1000).toFixed(1)} 千`;
 }
 
 function quoteIntentList(intents: readonly string[]): string {
