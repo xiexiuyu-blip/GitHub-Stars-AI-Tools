@@ -875,7 +875,8 @@ fn review_tasks_dump() {
     migrate_database(&work).expect("迁移");
     scenarios::ensure_initial_classification(&work).expect("首次归类");
 
-    let tasks = [
+    // 默认是 6 个真实任务；FSL_REVIEW_TASKS 指向一个文本文件（每行一句）时用它
+    let default_tasks = [
         "做小红书封面",
         "公众号文章配图",
         "给短视频加字幕",
@@ -883,14 +884,36 @@ fn review_tasks_dump() {
         "把群聊记录整理成日报",
         "批量改图尺寸和压缩",
     ];
+    let from_file: Option<Vec<String>> = std::env::var("FSL_REVIEW_TASKS").ok().map(|path| {
+        fs::read_to_string(path)
+            .expect("读任务文件")
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(str::to_owned)
+            .collect()
+    });
+    let tasks: Vec<&str> = match &from_file {
+        Some(lines) => lines.iter().map(String::as_str).collect(),
+        None => default_tasks.to_vec(),
+    };
     let connection = Connection::open(&work).expect("打开副本");
     let mut index = serde_json::Map::new();
     for (number, task) in tasks.iter().enumerate() {
         let result = solve::solve_query(&work, task).expect("找方案");
         let name = format!("task{}", number + 1);
         dump(&out, &format!("{name}_solve"), &result);
-        // 前 3 个有理解卡的命中：第 1 个主参考，其余备选
-        let picks: Vec<&solve::SolveHit> = result.hits.iter().filter(|hit| hit.has_card).take(3).collect();
+        // 界面默认勾选的（preselected）；一个都没有时才退回前 3 个有理解卡的命中，看「如果 Fox 自己勾了」会得到什么
+        let preselected: Vec<&solve::SolveHit> = result
+            .preselected
+            .iter()
+            .filter_map(|id| result.hits.iter().find(|hit| &hit.id == id))
+            .collect();
+        let picks: Vec<&solve::SolveHit> = if preselected.is_empty() {
+            result.hits.iter().filter(|hit| hit.has_card).take(3).collect()
+        } else {
+            preselected
+        };
         if picks.is_empty() {
             index.insert((*task).to_owned(), serde_json::json!({"files": [], "note": "没有命中"}));
             continue;
@@ -909,6 +932,7 @@ fn review_tasks_dump() {
                 })
                 .collect(),
             local_capabilities: vec![],
+            mode: packs::PackMode::UseTools,
         };
         let generated_on = packs::resolve_generated_on(None);
         let markdown = packs::build_pack(&connection, &request, packs::PackFormat::Markdown, &generated_on)
@@ -953,6 +977,9 @@ fn review_solve_batch() {
             "intents": result.intents,
             "extras": result.extras,
             "fullMatchCount": result.full_match_count,
+            "preselected": result.preselected.iter().map(|id| {
+                result.hits.iter().find(|hit| &hit.id == id).map(|hit| hit.full_name.clone()).unwrap_or_default()
+            }).collect::<Vec<_>>(),
             "gapIntents": result.gap_intents,
             "hits": result.hits.iter().map(|hit| serde_json::json!({
                 "name": hit.full_name,
@@ -966,4 +993,80 @@ fn review_solve_batch() {
     }
     dump(&out, "solve_batch", &rows);
     println!("[完成] {} 句 → {}", rows.len(), out.display());
+}
+
+/// 对全部有效仓库各出一份 JSON 参考包，统计每个项目被标了哪些「先问我」：看有没有标太多 / 太少。
+/// 只读副本，不花钱。输出到 FSL_REVIEW_OUT/cautions_stats.json（每类的数量和前几个例子）。
+#[test]
+#[ignore]
+fn review_cautions_stats() {
+    let source = PathBuf::from(std::env::var("FSL_REVIEW_DB").expect("需要 FSL_REVIEW_DB"));
+    let out = PathBuf::from(std::env::var("FSL_REVIEW_OUT").expect("需要 FSL_REVIEW_OUT"));
+    fs::create_dir_all(&out).expect("建输出目录");
+    let work = out.join("cautions.sqlite3");
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = fs::remove_file(format!("{}{suffix}", work.display()));
+    }
+    fs::copy(&source, &work).expect("复制副本");
+    migrate_database(&work).expect("迁移");
+    let connection = Connection::open(&work).expect("打开副本");
+    let ids: Vec<String> = connection
+        .prepare("SELECT id FROM repositories WHERE sync_status = 'active'")
+        .expect("查 id")
+        .query_map([], |row| row.get::<_, String>(0))
+        .expect("读 id")
+        .filter_map(Result::ok)
+        .collect();
+    let mut flagged = serde_json::Map::new();
+    let mut counts: std::collections::BTreeMap<String, usize> = Default::default();
+    let mut pipes = 0usize;
+    let mut any = 0usize;
+    for chunk in ids.chunks(50) {
+        let request = packs::PackRequest {
+            title: "x".to_owned(),
+            problem: "x".to_owned(),
+            architecture_notes: None,
+            items: chunk
+                .iter()
+                .map(|id| packs::PackItemInput {
+                    repo_id: id.clone(),
+                    role: packs::PackRole::Alternative,
+                    why: None,
+                })
+                .collect(),
+            local_capabilities: vec![],
+            mode: packs::PackMode::UseTools,
+        };
+        let json = packs::build_pack(&connection, &request, packs::PackFormat::Json, "2026-10-05")
+            .expect("JSON 参考包");
+        let parsed: serde_json::Value = serde_json::from_str(&json.content).expect("解析");
+        for item in parsed["items"].as_array().expect("items") {
+            let labels: Vec<String> = item["cautions"]
+                .as_array()
+                .expect("cautions")
+                .iter()
+                .filter_map(|value| value.as_str().map(str::to_owned))
+                .collect();
+            if labels.is_empty() {
+                continue;
+            }
+            any += 1;
+            for label in &labels {
+                let key: String = label.chars().take(12).collect();
+                *counts.entry(key).or_default() += 1;
+                if label.contains("curl") {
+                    pipes += 1;
+                }
+            }
+            flagged.insert(
+                item["fullName"].as_str().unwrap_or_default().to_owned(),
+                serde_json::json!({"labels": labels, "howToTry": item["howToTry"], "risks": item["risks"]}),
+            );
+        }
+    }
+    println!("[统计] 有效仓库 {}，被标的 {any}，其中一行安装 {pipes}", ids.len());
+    for (key, count) in &counts {
+        println!("[统计] {key}… × {count}");
+    }
+    dump(&out, "cautions_stats", &serde_json::json!({"total": ids.len(), "flagged": any, "counts": counts, "items": flagged}));
 }
