@@ -77,6 +77,59 @@ pub(crate) const BASE_LEXICON: &[&str] = &[
     "设计",
 ];
 
+/// 任务名词。只并进本文件的 `lexicon()`，不放进 `BASE_LEXICON`（资料库分词也在用那张表）。
+const TASK_LEXICON_EXTRA: &[&str] = &[
+    "日报",
+    "周报",
+    "月报",
+    "摘要",
+    "二维码",
+    "表情包",
+    "头像",
+    "水印",
+    "抠图",
+    "改图",
+    "修图",
+    "压缩",
+    "尺寸",
+    "缩放",
+    "裁剪",
+    "转写",
+    "录音",
+    "会议",
+    "会议纪要",
+    "文字稿",
+    "提示词",
+    "播客",
+    "分镜",
+    "剪映",
+    "数字人",
+    "旁白",
+    "录屏",
+    "快手",
+    "知乎",
+    "飞书",
+    "钉钉",
+    "短剧",
+    "剧本",
+    "动画",
+    "演示文稿",
+    "幻灯片",
+    "流程图",
+    "思维导图",
+    "架构图",
+    "看板",
+    "用户画像",
+    "聊天记录",
+    "草稿箱",
+    "社群",
+    "朋友圈",
+    "知识图谱",
+];
+
+/// 汉字动态规划里，跳过这些字不扣分：它们是连接词或虚词，本身不是要找的任务。
+const GLUE_CHARS: &str = "的了和与及或并把被给让从向在就也都还将帮请先再又吧呢吗啊呀成为以个这那一些想要做用来去到可能会是有对";
+
 const STOP_WORDS: &[&str] = &[
     "我想",
     "想做",
@@ -180,6 +233,136 @@ const SYNONYMS: &[(&str, &[&str])] = &[
     ("总结", &["summarize", "summary"]),
     ("知识库", &["knowledge base", "rag"]),
     ("自动化", &["automation", "workflow"]),
+    (
+        "压缩",
+        &[
+            "compress",
+            "compression",
+            "minify",
+            "tinypng",
+            "squoosh",
+            "imagemagick",
+        ],
+    ),
+    (
+        "尺寸",
+        &["resize", "resizing", "dimensions", "aspect ratio"],
+    ),
+    ("缩放", &["resize", "resizing", "scaling"]),
+    ("裁剪", &["crop", "cropping"]),
+    (
+        "改图",
+        &[
+            "image editing",
+            "edit image",
+            "photo editing",
+            "image editor",
+            "retouch",
+        ],
+    ),
+    ("修图", &["retouch", "photo editing", "image editing"]),
+    (
+        "抠图",
+        &[
+            "background removal",
+            "remove background",
+            "matting",
+            "rembg",
+        ],
+    ),
+    ("水印", &["watermark", "watermarks"]),
+    (
+        "日报",
+        &[
+            "daily report",
+            "daily digest",
+            "daily summary",
+            "daily brief",
+        ],
+    ),
+    (
+        "周报",
+        &["weekly report", "weekly digest", "weekly summary"],
+    ),
+    ("月报", &["monthly report", "monthly digest"]),
+    (
+        "转写",
+        &[
+            "transcribe",
+            "transcription",
+            "whisper",
+            "speech-to-text",
+            "asr",
+            "stt",
+        ],
+    ),
+    (
+        "录音",
+        &["voice memo", "audio recording", "sound recording"],
+    ),
+    ("会议", &["meeting", "meetings"]),
+    ("会议纪要", &["meeting notes", "meeting minutes"]),
+    ("文字稿", &["transcript", "transcripts"]),
+    ("排版", &["typesetting", "typography"]),
+    ("标题", &["headline", "headlines"]),
+    ("爆款", &["viral"]),
+    ("选题", &["topic ideas", "content ideas"]),
+    ("脚本", &["screenplay"]),
+    (
+        "直播",
+        &[
+            "live stream",
+            "livestream",
+            "live streaming",
+            "live commerce",
+        ],
+    ),
+    ("私信", &["direct message", "direct messages"]),
+    ("涨粉", &["audience growth", "growth hacking"]),
+    ("投放", &["ad campaign", "ad placement"]),
+    (
+        "竞品",
+        &["competitor", "competitors", "competitive analysis"],
+    ),
+    (
+        "群聊",
+        &["group chat", "group chats", "chat history", "wechat group"],
+    ),
+    (
+        "聊天记录",
+        &["chat history", "chat log", "chat logs", "chat records"],
+    ),
+    ("表格", &["spreadsheet", "xlsx"]),
+    ("简历", &["resume"]),
+    ("淘宝", &["taobao", "tmall"]),
+    ("亚马逊", &["amazon"]),
+    ("头像", &["avatar", "profile picture"]),
+    ("表情包", &["sticker", "stickers", "meme"]),
+    ("播客", &["podcast"]),
+    ("分镜", &["storyboard"]),
+    ("数字人", &["digital human", "talking avatar", "heygen"]),
+    ("录屏", &["screen recording", "screen recorder"]),
+    ("思维导图", &["mind map", "mindmap"]),
+    ("流程图", &["flowchart", "flow chart", "mermaid"]),
+    ("幻灯片", &["slides", "slideshow"]),
+    ("演示文稿", &["presentation", "slides", "pptx"]),
+    ("二维码", &["qr code", "qrcode"]),
+    (
+        "提示词",
+        &["prompt engineering", "prompt library", "prompt templates"],
+    ),
+    ("知识图谱", &["knowledge graph"]),
+    ("看板", &["kanban"]),
+    ("飞书", &["feishu"]),
+    ("钉钉", &["dingtalk"]),
+    ("知乎", &["zhihu"]),
+    ("快手", &["kuaishou"]),
+    ("剪映", &["capcut", "jianying"]),
+    ("旁白", &["narration", "voiceover"]),
+    ("短剧", &["short drama", "micro drama"]),
+    ("用户画像", &["user persona", "user profile"]),
+    ("架构图", &["architecture diagram"]),
+    ("朋友圈", &["wechat moments"]),
 ];
 
 #[derive(Debug, Clone, Serialize)]
@@ -255,6 +438,8 @@ struct CardBits {
     problems: Vec<String>,
     capabilities: Vec<String>,
     form: Option<String>,
+    use_when: Vec<String>,
+    what_it_is: String,
 }
 
 struct ScoreParts {
@@ -311,12 +496,13 @@ pub fn solve_query(db_path: &Path, query: &str) -> Result<SolveResult, String> {
     let connection = open_read(db_path)?;
     let scenarios = load_scenarios(&connection)?;
     let lexicon = lexicon(&scenarios);
-    let (main, extra) = concepts(query, &lexicon);
+    // 分词要看收藏里出现过哪些词，所以先读仓库。没有任何概念时不再去读 README。
+    let repos = load_repos(&connection, &scenarios)?;
+    let (main, extra) = concepts(query, &lexicon, &repos);
     if main.is_empty() && extra.is_empty() {
         return Ok(empty_result(query));
     }
 
-    let repos = load_repos(&connection, &scenarios)?;
     let readme = load_readme_stats(&connection, &main)?;
     let mut cache = HashMap::new();
     let mut scored = Vec::new();
@@ -594,11 +780,17 @@ fn load_repos(
             }
         }
         let has_card = !one_liner.trim().is_empty();
+        let mut problems = card.problems.clone();
+        for item in &card.use_when {
+            if !problems.iter().any(|existing| existing == item) {
+                problems.push(item.clone());
+            }
+        }
         repos.push(RepoRecord {
             id,
             html_url,
             stars,
-            problems: card.problems.clone(),
+            problems: problems.clone(),
             capabilities: card.capabilities.clone(),
             form: card
                 .form
@@ -614,10 +806,14 @@ fn load_repos(
                 name: full_name.to_lowercase(),
                 one_liner: shown.to_lowercase(),
                 capabilities: join_lower(&card.capabilities),
-                problems: join_lower(&card.problems),
+                problems: join_lower(&problems),
                 keywords: join_lower(&keywords),
                 scenarios: join_lower(&scenario_bits),
-                summary: summary.to_lowercase(),
+                summary: format!(
+                    "{} {}",
+                    summary.to_lowercase(),
+                    card.what_it_is.to_lowercase()
+                ),
                 description: description.to_lowercase(),
                 topics: join_lower(&topics),
             },
@@ -899,11 +1095,11 @@ fn is_latin_word_char(ch: char) -> bool {
 }
 
 fn lexicon(scenarios: &[ScenarioRecord]) -> Vec<String> {
-    let mut words = BASE_LEXICON
-        .iter()
-        .map(|word| (*word).to_owned())
-        .collect::<Vec<_>>();
-    let mut seen = words.iter().cloned().collect::<HashSet<_>>();
+    let mut words = Vec::new();
+    let mut seen = HashSet::new();
+    for word in BASE_LEXICON.iter().chain(TASK_LEXICON_EXTRA.iter()) {
+        push_lexicon_word(&mut words, &mut seen, word);
+    }
     let mut ordered = scenarios.iter().collect::<Vec<_>>();
     ordered.sort_by(|left, right| {
         left.sort_order
@@ -937,7 +1133,19 @@ fn push_lexicon_word(words: &mut Vec<String>, seen: &mut HashSet<String>, raw: &
     words.push(word);
 }
 
-fn concepts(query: &str, lexicon: &[String]) -> (Vec<String>, Vec<String>) {
+enum QueryPiece {
+    Latin(String),
+    Han(Vec<char>),
+}
+
+struct GramStat {
+    repos: usize,
+    total: usize,
+    left: HashMap<char, usize>,
+    right: HashMap<char, usize>,
+}
+
+fn concepts(query: &str, lexicon: &[String], repos: &[RepoRecord]) -> (Vec<String>, Vec<String>) {
     let mut rest = query.to_lowercase();
     let mut main = Vec::new();
     for word in lexicon {
@@ -949,41 +1157,77 @@ fn concepts(query: &str, lexicon: &[String]) -> (Vec<String>, Vec<String>) {
             rest = rest.replace(word, " ");
         }
     }
-    let extra = tokens(&rest)
-        .into_iter()
-        .filter(|token| token.chars().count() >= 2)
-        .collect();
+
+    let mut pieces = Vec::new();
+    for segment in split_token_segments(&rest) {
+        push_query_pieces(&segment, &mut pieces);
+    }
+    let han_runs = pieces
+        .iter()
+        .filter_map(|piece| match piece {
+            QueryPiece::Han(chars) => Some(chars.as_slice()),
+            QueryPiece::Latin(_) => None,
+        })
+        .collect::<Vec<_>>();
+    let weights = candidate_weights(&han_runs, repos);
+    let main_set = main.iter().map(String::as_str).collect::<HashSet<_>>();
+    let mut extra = Vec::new();
+    let mut seen = HashSet::new();
+    for piece in &pieces {
+        let words = match piece {
+            QueryPiece::Latin(text) => tokens(text),
+            QueryPiece::Han(chars) => segment_han(chars, &weights),
+        };
+        for word in words {
+            if word.chars().count() < 2 || is_stop(&word) || main_set.contains(word.as_str()) {
+                continue;
+            }
+            if seen.insert(word.clone()) {
+                extra.push(word);
+            }
+        }
+    }
     (main, extra)
 }
 
+fn push_query_pieces(segment: &str, pieces: &mut Vec<QueryPiece>) {
+    let mut latin = String::new();
+    let mut han = Vec::new();
+    for ch in segment.chars() {
+        if is_han(ch) {
+            if !latin.is_empty() {
+                pieces.push(QueryPiece::Latin(std::mem::take(&mut latin)));
+            }
+            han.push(ch);
+        } else {
+            if !han.is_empty() {
+                pieces.push(QueryPiece::Han(std::mem::take(&mut han)));
+            }
+            latin.push(ch);
+        }
+    }
+    if !latin.is_empty() {
+        pieces.push(QueryPiece::Latin(latin));
+    }
+    if !han.is_empty() {
+        pieces.push(QueryPiece::Han(han));
+    }
+}
+
+/// 只抽出英文和数字。汉字不再两两硬切，交给 `segment_han`。
 fn tokens(query: &str) -> Vec<String> {
     let mut raw = Vec::new();
     for segment in split_token_segments(&query.to_lowercase()) {
-        if segment.chars().any(is_han) {
-            let han = segment.chars().filter(|ch| is_han(*ch)).collect::<Vec<_>>();
-            if han.is_empty() {
-                continue;
-            }
-            if han.len() <= 2 {
-                raw.push(han.into_iter().collect::<String>());
+        let mut latin = String::new();
+        for ch in segment.chars() {
+            if is_han(ch) {
+                push_latin(&mut raw, &latin);
+                latin.clear();
             } else {
-                for index in 0..han.len() - 1 {
-                    raw.push(format!("{}{}", han[index], han[index + 1]));
-                }
+                latin.push(ch);
             }
-            let mut latin = String::new();
-            for ch in segment.chars() {
-                if is_han(ch) {
-                    push_latin(&mut raw, &latin);
-                    latin.clear();
-                } else {
-                    latin.push(ch);
-                }
-            }
-            push_latin(&mut raw, &latin);
-        } else if segment.chars().count() > 1 {
-            raw.push(segment);
         }
+        push_latin(&mut raw, &latin);
     }
     let mut seen = HashSet::new();
     raw.into_iter()
@@ -996,6 +1240,179 @@ fn push_latin(out: &mut Vec<String>, text: &str) {
     if text.chars().count() > 1 {
         out.push(text.to_owned());
     }
+}
+
+fn candidate_weights(runs: &[&[char]], repos: &[RepoRecord]) -> HashMap<String, f64> {
+    let mut grams = Vec::new();
+    for run in runs {
+        let len = run.len();
+        for width in [2usize, 3] {
+            if len < width {
+                continue;
+            }
+            for start in 0..=len - width {
+                let word: String = run[start..start + width].iter().collect();
+                if is_stop(&word) {
+                    continue;
+                }
+                grams.push(word);
+            }
+        }
+    }
+    grams.sort();
+    grams.dedup();
+    if grams.is_empty() || repos.is_empty() {
+        return HashMap::new();
+    }
+
+    let mut stats = grams
+        .iter()
+        .map(|_| GramStat {
+            repos: 0,
+            total: 0,
+            left: HashMap::new(),
+            right: HashMap::new(),
+        })
+        .collect::<Vec<_>>();
+    for repo in repos {
+        let fields = [
+            repo.blocks.name.as_str(),
+            repo.blocks.one_liner.as_str(),
+            repo.blocks.capabilities.as_str(),
+            repo.blocks.problems.as_str(),
+            repo.blocks.keywords.as_str(),
+            repo.blocks.summary.as_str(),
+            repo.blocks.description.as_str(),
+            repo.blocks.topics.as_str(),
+        ];
+        let mut hit = vec![false; grams.len()];
+        for field in fields {
+            if field.is_empty() {
+                continue;
+            }
+            for (index, word) in grams.iter().enumerate() {
+                if field.contains(word.as_str()) {
+                    hit[index] = true;
+                    add_occurrences(field, word, &mut stats[index]);
+                }
+            }
+        }
+        for (index, found) in hit.iter().enumerate() {
+            if *found {
+                stats[index].repos += 1;
+            }
+        }
+    }
+
+    let mut kept = HashMap::new();
+    for (word, stat) in grams.into_iter().zip(stats) {
+        if stat.repos == 0 || glued_into_longer_word(&stat) {
+            continue;
+        }
+        kept.insert(word, stat.repos as f64);
+    }
+    kept
+}
+
+fn add_occurrences(text: &str, word: &str, stat: &mut GramStat) {
+    if word.is_empty() {
+        return;
+    }
+    let mut start = 0;
+    while start < text.len() {
+        let Some(rel) = text[start..].find(word) else {
+            break;
+        };
+        let at = start + rel;
+        stat.total += 1;
+        if at > 0 {
+            if let Some(ch) = text[..at].chars().next_back() {
+                if is_han(ch) {
+                    *stat.left.entry(ch).or_insert(0) += 1;
+                }
+            }
+        }
+        let end = at + word.len();
+        if end < text.len() {
+            if let Some(ch) = text[end..].chars().next() {
+                if is_han(ch) {
+                    *stat.right.entry(ch).or_insert(0) += 1;
+                }
+            }
+        }
+        if end <= start {
+            break;
+        }
+        start = end;
+    }
+}
+
+/// 出现至少 3 次，且左边或右边最常见的那个汉字占了 75% 以上：这个词几乎总是更长词的一截。
+fn glued_into_longer_word(stat: &GramStat) -> bool {
+    if stat.total < 3 {
+        return false;
+    }
+    let limit = stat.total * 3;
+    let left = stat.left.values().copied().max().unwrap_or(0);
+    let right = stat.right.values().copied().max().unwrap_or(0);
+    left * 4 > limit || right * 4 > limit
+}
+
+fn segment_han(chars: &[char], weights: &HashMap<String, f64>) -> Vec<String> {
+    let len = chars.len();
+    if len == 0 {
+        return Vec::new();
+    }
+    let mut best = vec![0.0; len + 1];
+    let mut prev = vec![0usize; len + 1];
+    let mut took = vec![false; len + 1];
+    for index in 1..=len {
+        let penalty = if is_glue(chars[index - 1]) { 0.0 } else { -0.6 };
+        let mut score = best[index - 1] + penalty;
+        let mut from = index - 1;
+        let mut take = false;
+        for width in [2usize, 3] {
+            if index < width {
+                continue;
+            }
+            let word: String = chars[index - width..index].iter().collect();
+            let Some(df) = weights.get(&word) else {
+                continue;
+            };
+            let gained = best[index - width] + word_gain(*df);
+            if gained > score {
+                score = gained;
+                from = index - width;
+                take = true;
+            }
+        }
+        best[index] = score;
+        prev[index] = from;
+        took[index] = take;
+    }
+
+    let mut words = Vec::new();
+    let mut index = len;
+    while index > 0 {
+        if took[index] {
+            words.push(chars[prev[index]..index].iter().collect::<String>());
+        }
+        let next = prev[index];
+        if next >= index {
+            break;
+        }
+        index = next;
+    }
+    words.reverse();
+    words
+}
+
+fn word_gain(df: f64) -> f64 {
+    1.0 + 0.15 * (1.0 + df).ln().min(4.0)
+}
+
+fn is_glue(ch: char) -> bool {
+    GLUE_CHARS.contains(ch)
 }
 
 fn split_token_segments(input: &str) -> Vec<String> {
@@ -1315,6 +1732,8 @@ fn parse_card(value: &Value) -> CardBits {
             problems: Vec::new(),
             capabilities: Vec::new(),
             form: None,
+            use_when: Vec::new(),
+            what_it_is: String::new(),
         };
     };
     let capabilities = obj
@@ -1332,16 +1751,13 @@ fn parse_card(value: &Value) -> CardBits {
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    let problems = obj
-        .get("problems_solved")
-        .and_then(Value::as_array)
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(|item| item.as_str().map(str::to_owned))
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
+    let problems = string_list(obj, "problems_solved");
+    let use_when = string_list(obj, "use_when");
+    let what_it_is = obj
+        .get("what_it_is")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_owned();
     let form = obj
         .get("form")
         .and_then(Value::as_str)
@@ -1352,7 +1768,21 @@ fn parse_card(value: &Value) -> CardBits {
         problems,
         capabilities,
         form,
+        use_when,
+        what_it_is,
     }
+}
+
+fn string_list(obj: &serde_json::Map<String, Value>, key: &str) -> Vec<String> {
+    obj.get(key)
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.as_str().map(str::to_owned))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -1549,75 +1979,57 @@ mod tests {
 
     #[test]
     fn tokens_keeps_latin_inside_chinese() {
-        assert_eq!(
-            tokens("做PPT封面"),
-            vec!["做封".to_owned(), "封面".to_owned(), "ppt".to_owned()]
-        );
-        assert_eq!(
-            tokens("做 PPT 封面"),
-            vec!["做".to_owned(), "ppt".to_owned(), "封面".to_owned()]
-        );
-        assert_eq!(
-            tokens("hello世界"),
-            vec!["世界".to_owned(), "hello".to_owned()]
-        );
+        assert_eq!(tokens("做PPT封面"), vec!["ppt".to_owned()]);
+        assert_eq!(tokens("做 PPT 封面"), vec!["ppt".to_owned()]);
+        assert_eq!(tokens("hello世界"), vec!["hello".to_owned()]);
         assert_eq!(tokens("ab.cd"), vec!["ab.cd".to_owned()]);
+        assert!(
+            !tokens("做PPT封面").iter().any(|word| word == "做封"),
+            "汉字不再两两切"
+        );
     }
 
     #[test]
-    fn tokens_keeps_short_han_fragment() {
-        assert_eq!(tokens("做"), vec!["做".to_owned()]);
-        assert_eq!(tokens("中"), vec!["中".to_owned()]);
-        assert_eq!(tokens("封面"), vec!["封面".to_owned()]);
+    fn tokens_drops_han_instead_of_keeping_fragments() {
+        assert!(tokens("做").is_empty());
+        assert!(tokens("中").is_empty());
+        assert!(tokens("封面").is_empty());
     }
 
     #[test]
-    fn tokens_splits_long_han_into_bigrams() {
-        assert_eq!(tokens("小红书"), vec!["小红".to_owned(), "红书".to_owned()]);
-        assert_eq!(tokens("中文的"), vec!["中文".to_owned(), "文的".to_owned()]);
+    fn tokens_does_not_split_han_into_bigrams() {
+        assert!(tokens("小红书").is_empty());
+        assert!(tokens("中文的").is_empty());
+        assert!(!tokens("小红书")
+            .iter()
+            .any(|word| word == "小红" || word == "红书"));
     }
 
     #[test]
     fn tokens_removes_stopwords() {
-        assert_eq!(
-            tokens("我想做一个工具"),
-            vec!["做一".to_owned(), "个工".to_owned()]
-        );
+        assert!(tokens("我想做一个工具").is_empty());
         assert!(tokens("怎么").is_empty());
         assert!(tokens("工具").is_empty());
         assert!(tokens("帮我").is_empty());
     }
 
     #[test]
-    fn tokens_dedups_and_splits_punctuation() {
-        assert_eq!(
-            tokens("封面封面"),
-            vec!["封面".to_owned(), "面封".to_owned()]
-        );
-        assert_eq!(
-            tokens("封面,封面，海报。字幕;脚本；标题、笔记/海报"),
-            vec![
-                "封面".to_owned(),
-                "海报".to_owned(),
-                "字幕".to_owned(),
-                "脚本".to_owned(),
-                "标题".to_owned(),
-                "笔记".to_owned(),
-            ]
-        );
+    fn tokens_dedups_latin_and_ignores_han_punctuation() {
+        assert!(tokens("封面封面").is_empty());
+        assert!(tokens("封面,封面，海报。字幕;脚本；标题、笔记/海报").is_empty());
         assert_eq!(tokens("ppt/ppt"), vec!["ppt".to_owned()]);
     }
 
     #[test]
     fn concepts_splits_xiaohongshu_cover() {
-        let (main, extra) = concepts("做小红书封面", &base_lexicon());
+        let (main, extra) = concepts("做小红书封面", &base_lexicon(), &[]);
         assert_eq!(main, vec!["小红书".to_owned(), "封面".to_owned()]);
         assert!(extra.is_empty());
     }
 
     #[test]
     fn concepts_short_video_subtitle_drops_video() {
-        let (main, extra) = concepts("短视频加字幕", &base_lexicon());
+        let (main, extra) = concepts("短视频加字幕", &base_lexicon(), &[]);
         assert_eq!(main, vec!["短视频".to_owned(), "字幕".to_owned()]);
         assert!(!main.iter().any(|word| word == "视频"));
         assert!(extra.is_empty());
@@ -1627,23 +2039,37 @@ mod tests {
     fn concepts_prefers_longest_scenario_keyword() {
         let scenarios = vec![scenario("s", "别名", &["小红书封面"], 1, false)];
         let lex = lexicon(&scenarios);
-        let (main, extra) = concepts("做小红书封面", &lex);
+        let (main, extra) = concepts("做小红书封面", &lex, &[]);
         assert_eq!(main, vec!["小红书封面".to_owned()]);
         assert!(extra.is_empty());
     }
 
     #[test]
     fn concepts_drops_extra_shorter_than_two() {
-        let (main, extra) = concepts("封面 ab c 做", &base_lexicon());
+        let (main, extra) = concepts("封面 ab c 做", &base_lexicon(), &[]);
         assert_eq!(main, vec!["封面".to_owned()]);
         assert_eq!(extra, vec!["ab".to_owned()]);
     }
 
     #[test]
     fn concepts_ppt_document_is_case_insensitive() {
-        let (main, extra) = concepts("做 PPT 和文档", &base_lexicon());
+        let (main, extra) = concepts("做 PPT 和文档", &base_lexicon(), &[]);
         assert_eq!(main, vec!["ppt".to_owned(), "文档".to_owned()]);
         assert!(extra.is_empty());
+    }
+
+    #[test]
+    fn concepts_punctuation_still_keeps_lexicon_words() {
+        let (main, extra) = concepts(
+            "封面,封面，海报。字幕;脚本；标题、笔记/海报",
+            &base_lexicon(),
+            &[],
+        );
+        for word in ["封面", "海报", "字幕", "脚本", "标题", "笔记"] {
+            assert!(main.iter().any(|item| item == word), "{word} {main:?}");
+        }
+        assert!(extra.is_empty(), "{extra:?}");
+        assert!(!extra.iter().any(|word| word == "面封"));
     }
 
     #[test]
@@ -3945,5 +4371,704 @@ mod tests {
         assert!(stats.is_empty());
         let none = load_readme_stats(&connection, &[]).unwrap();
         assert!(none.is_empty());
+    }
+
+    fn text_repo(id: &str, text: &str) -> RepoRecord {
+        RepoRecord {
+            id: id.to_owned(),
+            full_name: format!("lab/{id}"),
+            html_url: String::new(),
+            stars: 1,
+            one_liner: String::new(),
+            problems: Vec::new(),
+            capabilities: Vec::new(),
+            form: None,
+            scenario_ids: Vec::new(),
+            blocks: TextBlocks {
+                name: String::new(),
+                one_liner: String::new(),
+                capabilities: String::new(),
+                problems: String::new(),
+                keywords: String::new(),
+                scenarios: String::new(),
+                summary: String::new(),
+                description: text.to_lowercase(),
+                topics: String::new(),
+            },
+            has_card: false,
+            github_description: text.to_owned(),
+        }
+    }
+
+    fn sample_corpus() -> Vec<RepoRecord> {
+        let mut repos = vec![
+            text_repo("rec", "保存记录"),
+            text_repo("tidy", "请你整理"),
+            text_repo("batch", "支持批量"),
+            text_repo("boss", "老板来了"),
+            text_repo("quarter", "季度计划"),
+            text_repo("brief", "书面汇报"),
+            text_repo("stops", "我想 想做 一个 工具 帮我"),
+        ];
+        for index in 0..4 {
+            repos.push(text_repo(&format!("bot{index}"), "对话机器人"));
+        }
+        repos
+    }
+
+    fn has_term(words: &[String], expected: &str) -> bool {
+        words.iter().any(|word| word == expected)
+    }
+
+    fn rich_card(
+        form: &str,
+        caps: &[&str],
+        problems: &[&str],
+        use_when: &[&str],
+        what_it_is: &str,
+    ) -> String {
+        let capabilities = caps
+            .iter()
+            .map(|name| json!({"name_zh": name}))
+            .collect::<Vec<_>>();
+        json!({
+            "form": form,
+            "capabilities": capabilities,
+            "problems_solved": problems,
+            "use_when": use_when,
+            "what_it_is": what_it_is,
+        })
+        .to_string()
+    }
+
+    fn assert_english_synonym(label: &str, intent: &str, english: &str) {
+        let db = prepare(label, |conn| {
+            insert_repo(
+                conn,
+                &NewRepo {
+                    id: "en",
+                    full_name: "lab/en-only",
+                    description: english,
+                    stars: 1,
+                    status: "active",
+                    one_liner: Some("有理解卡"),
+                    summary: "",
+                    keywords_json: "[]",
+                    card_json: None,
+                },
+            );
+        });
+        let result = run(&db, intent);
+        assert!(
+            has_term(&result.intents, intent),
+            "{intent} 应是意图词：{:?}",
+            result.intents
+        );
+        assert!(
+            result
+                .hits
+                .iter()
+                .any(|hit| { hit.id == "en" && has_term(&hit.matched, intent) }),
+            "{intent} 应靠 {english} 对上：{:?}",
+            result.hits
+        );
+    }
+
+    #[test]
+    fn concepts_group_chat_daily_keeps_real_words() {
+        let (main, extra) = concepts("把群聊记录整理成日报", &base_lexicon(), &sample_corpus());
+        assert!(has_term(&main, "群聊"), "{main:?}");
+        assert!(has_term(&main, "日报"), "{main:?}");
+        assert_eq!(
+            extra,
+            vec!["记录".to_owned(), "整理".to_owned()],
+            "{extra:?}"
+        );
+        for broken in ["录整", "理成", "成日", "把群"] {
+            assert!(!has_term(&extra, broken), "{broken} 仍在 {extra:?}");
+        }
+    }
+
+    #[test]
+    fn concepts_resize_compress_keeps_batch_not_fragments() {
+        let (main, extra) = concepts("批量改图尺寸和压缩", &base_lexicon(), &sample_corpus());
+        for word in ["压缩", "尺寸", "改图"] {
+            assert!(has_term(&main, word), "{word} 不在 {main:?}");
+        }
+        assert_eq!(extra, vec!["批量".to_owned()], "{extra:?}");
+        for broken in ["量改", "图尺", "寸和", "和压"] {
+            assert!(!has_term(&extra, broken), "{broken} 仍在 {extra:?}");
+        }
+    }
+
+    #[test]
+    fn concepts_cohesion_drops_inner_slices() {
+        let (main, extra) = concepts("对话机器人", &base_lexicon(), &sample_corpus());
+        assert!(main.is_empty(), "{main:?}");
+        assert!(!has_term(&extra, "话机"), "{extra:?}");
+        assert!(!has_term(&extra, "器人"), "{extra:?}");
+    }
+
+    #[test]
+    fn concepts_cohesion_threshold_is_strictly_above_three_quarters() {
+        let mut dominant = HashMap::new();
+        dominant.insert('对', 4usize);
+        assert!(glued_into_longer_word(&GramStat {
+            repos: 4,
+            total: 4,
+            left: dominant,
+            right: HashMap::new(),
+        }));
+        let mut exact = HashMap::new();
+        exact.insert('对', 3usize);
+        assert!(
+            !glued_into_longer_word(&GramStat {
+                repos: 4,
+                total: 4,
+                left: exact,
+                right: HashMap::new(),
+            }),
+            "刚好 75% 还不算「以上」"
+        );
+        let mut few = HashMap::new();
+        few.insert('对', 2usize);
+        assert!(!glued_into_longer_word(&GramStat {
+            repos: 2,
+            total: 2,
+            left: few,
+            right: HashMap::new(),
+        }));
+    }
+
+    #[test]
+    fn concepts_dp_skips_glue_characters() {
+        let (_main, extra) = concepts("给老板做一份季度汇报", &base_lexicon(), &sample_corpus());
+        assert!(has_term(&extra, "老板"), "{extra:?}");
+        assert!(has_term(&extra, "季度"), "{extra:?}");
+        assert!(has_term(&extra, "汇报"), "{extra:?}");
+        for word in &extra {
+            assert!(!word.contains('给'), "{word}");
+            assert!(!word.contains('做'), "{word}");
+            assert!(!word.contains('份'), "{word}");
+        }
+    }
+
+    #[test]
+    fn concepts_drops_zero_df_and_single_characters() {
+        let (main, extra) = concepts("甲乙丙丁", &base_lexicon(), &sample_corpus());
+        assert!(main.is_empty());
+        assert!(extra.is_empty(), "df 为 0 的词不该出现：{extra:?}");
+        let (main, extra) = concepts("做", &base_lexicon(), &sample_corpus());
+        assert!(main.is_empty());
+        assert!(extra.is_empty());
+        assert!(extra.iter().all(|word| word.chars().count() != 1));
+        let (_main, extra) = concepts("给老板做一份季度汇报", &base_lexicon(), &sample_corpus());
+        assert!(!has_term(&extra, "度汇"));
+        assert!(!has_term(&extra, "一份"));
+        assert!(extra.iter().all(|word| word.chars().count() != 1));
+    }
+
+    #[test]
+    fn concepts_stopwords_stay_out_of_extras() {
+        let (_main, extra) = concepts("我想做一个工具", &base_lexicon(), &sample_corpus());
+        for word in &extra {
+            assert!(!is_stop(word), "停用词 {word} 进了 extras：{extra:?}");
+        }
+        for stop in ["我想", "想做", "一个", "工具", "帮我"] {
+            assert!(!has_term(&extra, stop), "{stop} {extra:?}");
+        }
+    }
+
+    #[test]
+    fn concepts_main_words_stay_out_of_extras() {
+        let (main, extra) = concepts("日报记录", &base_lexicon(), &sample_corpus());
+        assert!(has_term(&main, "日报"), "{main:?}");
+        assert!(has_term(&extra, "记录"), "{extra:?}");
+        for word in &main {
+            assert!(!has_term(&extra, word), "{word} 同时在 extras：{extra:?}");
+        }
+    }
+
+    #[test]
+    fn concepts_latin_fragment_goes_to_extras() {
+        let (main, extra) = concepts("做 sora 视频", &base_lexicon(), &[]);
+        assert!(has_term(&main, "视频"), "{main:?}");
+        assert_eq!(extra, vec!["sora".to_owned()], "{extra:?}");
+    }
+
+    #[test]
+    fn empty_concepts_do_not_match_readme() {
+        let db = prepare("no-concept", |conn| {
+            insert_repo(conn, &readme_repo("aside", "lab/aside", "一个通用工具集"));
+            insert_readme(conn, "aside", &"封面。".repeat(8));
+        });
+        let result = run(&db, "啊");
+        assert!(result.intents.is_empty());
+        assert!(result.extras.is_empty());
+        assert!(
+            result.hits.is_empty(),
+            "没有概念时不该靠 README 凑出结果：{:?}",
+            result.hits
+        );
+    }
+
+    #[test]
+    fn base_lexicon_excludes_new_task_words() {
+        assert_eq!(BASE_LEXICON.len(), 62);
+        assert!(!BASE_LEXICON.contains(&"日报"));
+        assert!(!BASE_LEXICON.contains(&"压缩"));
+        assert!(!BASE_LEXICON.contains(&"尺寸"));
+        assert!(BASE_LEXICON.contains(&"小红书"));
+        assert!(BASE_LEXICON.contains(&"封面"));
+        let lex = base_lexicon();
+        assert!(lex.contains(&"日报".to_owned()));
+        assert!(lex.contains(&"压缩".to_owned()));
+        assert!(lex.contains(&"尺寸".to_owned()));
+    }
+
+    #[test]
+    fn task_lexicon_makes_daily_compress_size_intents() {
+        let (main, extra) = concepts("日报", &base_lexicon(), &[]);
+        assert_eq!(main, vec!["日报".to_owned()]);
+        assert!(extra.is_empty());
+        let (main, extra) = concepts("压缩和尺寸", &base_lexicon(), &[]);
+        assert!(has_term(&main, "压缩"), "{main:?}");
+        assert!(has_term(&main, "尺寸"), "{main:?}");
+        assert!(!has_term(&extra, "压缩"));
+        assert!(!has_term(&extra, "尺寸"));
+    }
+
+    #[test]
+    fn synonym_compress_matches_compress() {
+        assert_english_synonym("syn-compress", "压缩", "compress png files");
+    }
+
+    #[test]
+    fn synonym_size_matches_resize() {
+        assert_english_synonym("syn-resize", "尺寸", "resize the canvas");
+    }
+
+    #[test]
+    fn synonym_daily_matches_daily_report() {
+        assert_english_synonym("syn-daily", "日报", "write a daily report");
+    }
+
+    #[test]
+    fn synonym_transcribe_matches_transcribe() {
+        assert_english_synonym("syn-asr", "转写", "transcribe the audio");
+    }
+
+    #[test]
+    fn synonym_cutout_matches_background_removal() {
+        assert_english_synonym("syn-matting", "抠图", "background removal toolkit");
+    }
+
+    #[test]
+    fn synonym_watermark_matches_watermark() {
+        assert_english_synonym("syn-watermark", "水印", "add a watermark");
+    }
+
+    #[test]
+    fn synonym_podcast_matches_podcast() {
+        assert_english_synonym("syn-podcast", "播客", "edit a podcast");
+    }
+
+    #[test]
+    fn synonym_flowchart_matches_flowchart() {
+        assert_english_synonym("syn-flow", "流程图", "draw a flowchart");
+    }
+
+    #[test]
+    fn synonym_qrcode_matches_qrcode() {
+        assert_english_synonym("syn-qr", "二维码", "generate a qr code");
+    }
+
+    #[test]
+    fn synonym_feishu_matches_feishu() {
+        assert_english_synonym("syn-feishu", "飞书", "export to feishu");
+    }
+
+    #[test]
+    fn synonym_jianying_matches_capcut() {
+        assert_english_synonym("syn-capcut", "剪映", "open in capcut");
+    }
+
+    #[test]
+    fn synonym_digital_human_matches_digital_human() {
+        assert_english_synonym("syn-human", "数字人", "build a digital human");
+    }
+
+    #[test]
+    fn synonym_asr_does_not_match_inside_ceasr() {
+        let db = prepare("syn-boundary", |conn| {
+            insert_repo(
+                conn,
+                &NewRepo {
+                    id: "inside",
+                    full_name: "lab/ceasr",
+                    description: "the ceasr engine",
+                    stars: 9,
+                    status: "active",
+                    one_liner: Some("有理解卡"),
+                    summary: "",
+                    keywords_json: "[]",
+                    card_json: None,
+                },
+            );
+            insert_repo(
+                conn,
+                &NewRepo {
+                    id: "whole",
+                    full_name: "lab/asr",
+                    description: "run asr locally",
+                    stars: 1,
+                    status: "active",
+                    one_liner: Some("有理解卡"),
+                    summary: "",
+                    keywords_json: "[]",
+                    card_json: None,
+                },
+            );
+        });
+        let result = run(&db, "转写");
+        let ids = result
+            .hits
+            .iter()
+            .map(|hit| hit.id.as_str())
+            .collect::<Vec<_>>();
+        assert!(ids.contains(&"whole"), "{ids:?}");
+        assert!(!ids.contains(&"inside"), "ceasr 不该命中 asr：{ids:?}");
+    }
+
+    #[test]
+    fn readme_compress_counts_as_evidence() {
+        let db = prepare("readme-compress", |conn| {
+            insert_repo(
+                conn,
+                &readme_repo("min", "lab/image-minifier", "a general image utility"),
+            );
+            insert_readme(
+                conn,
+                "min",
+                "Please compress this file. Then compress it again. Finally compress the backup.",
+            );
+        });
+        let result = run(&db, "压缩");
+        assert_eq!(result.hits.len(), 1, "{:?}", result.hits);
+        assert!(has_term(&result.hits[0].matched, "压缩"));
+        assert!(result.hits[0].full_match);
+        assert!(
+            result.hits[0].why.contains("项目说明里提到"),
+            "{}",
+            result.hits[0].why
+        );
+    }
+
+    #[test]
+    fn use_when_alone_matches_subtitle() {
+        let card = rich_card(
+            "cli",
+            &["剪切视频"],
+            &["视频太长"],
+            &["需要给视频添加字幕时"],
+            "一个剪辑小工具",
+        );
+        let db = prepare("use-when", |conn| {
+            insert_repo(
+                conn,
+                &NewRepo {
+                    id: "sub",
+                    full_name: "lab/editor",
+                    description: "editor",
+                    stars: 3,
+                    status: "active",
+                    one_liner: Some("剪辑小工具"),
+                    summary: "简介",
+                    keywords_json: "[]",
+                    card_json: Some(&card),
+                },
+            );
+        });
+        let result = run(&db, "字幕");
+        assert_eq!(result.hits.len(), 1, "{:?}", result.hits);
+        assert!(has_term(&result.hits[0].matched, "字幕"));
+        assert!(
+            result.hits[0].why.contains("问题"),
+            "何时用应算进问题：{}",
+            result.hits[0].why
+        );
+        assert!(
+            result.hits[0].why.contains("需要给视频添加字幕时"),
+            "{}",
+            result.hits[0].why
+        );
+    }
+
+    #[test]
+    fn what_it_is_scores_summary_tier() {
+        let card = rich_card(
+            "app",
+            &["处理文件"],
+            &["文件太乱"],
+            &["想整理文件时"],
+            "这个工具专门做封面",
+        );
+        let db = prepare("what-it-is", |conn| {
+            insert_repo(
+                conn,
+                &NewRepo {
+                    id: "cover",
+                    full_name: "lab/files",
+                    description: "files",
+                    stars: 2,
+                    status: "active",
+                    one_liner: Some("文件工具"),
+                    summary: "",
+                    keywords_json: "[]",
+                    card_json: Some(&card),
+                },
+            );
+        });
+        let result = run(&db, "封面");
+        assert_eq!(result.hits.len(), 1);
+        assert_eq!(result.hits[0].matched, vec!["封面".to_owned()]);
+        let weight = (1.0_f64 + 1.0 / 2.0).ln();
+        approx(result.hits[0].score, 1.5 * weight);
+        assert!(
+            result.hits[0].why.contains("摘要"),
+            "what_it_is 应落在摘要档：{}",
+            result.hits[0].why
+        );
+    }
+
+    #[test]
+    fn placeholder_boilerplate_does_not_match() {
+        let card = json!({
+            "one_liner_zh": "这是一个模板集合。",
+            "what_it_is": "这是一个模板集合。",
+            "form": "other",
+            "primary_category": "dev-infra",
+            "capabilities": [{"name_zh": "查看项目说明"}],
+            "problems_solved": ["想知道这个收藏是做什么的"],
+            "how_to_try": "打开仓库 README",
+            "maturity": "usable",
+            "zh_friendly": true,
+            "confidence": 0.4
+        })
+        .to_string();
+        let db = prepare("placeholder-vocab", |conn| {
+            insert_repo(
+                conn,
+                &NewRepo {
+                    id: "legacy",
+                    full_name: "lab/legacy-template",
+                    description: "",
+                    stars: 4,
+                    status: "active",
+                    one_liner: Some("占位"),
+                    summary: "",
+                    keywords_json: "[]",
+                    card_json: Some(&card),
+                },
+            );
+        });
+        let useful = run(&db, "模板");
+        assert_eq!(useful.hits.len(), 1);
+        assert_eq!(useful.hits[0].id, "legacy");
+        assert!(!useful.hits[0].full_match);
+        let boilerplate = run(&db, "想知道");
+        assert!(
+            boilerplate.hits.is_empty(),
+            "占位卡的套话不该再被拿来匹配：{:?}",
+            boilerplate.hits
+        );
+        assert!(boilerplate.extras.is_empty(), "{:?}", boilerplate.extras);
+    }
+
+    #[test]
+    fn vocabulary_queries_rank_group_daily() {
+        let subtitle = rich_card(
+            "cli",
+            &["剪切视频"],
+            &["视频太长"],
+            &["需要给视频添加字幕时"],
+            "一个视频小工具",
+        );
+        let db = prepare("vocab-rank", |conn| {
+            insert_repo(
+                conn,
+                &NewRepo {
+                    id: "daily",
+                    full_name: "fox/wechat-group-daily-群聊日报",
+                    description: "group daily",
+                    stars: 100,
+                    status: "active",
+                    one_liner: Some("把微信群聊整理成日报"),
+                    summary: "群聊日报",
+                    keywords_json: "[]",
+                    card_json: None,
+                },
+            );
+            insert_repo(
+                conn,
+                &NewRepo {
+                    id: "hub",
+                    full_name: "fox/wechat-intelligence-hub",
+                    description: "intelligence",
+                    stars: 80,
+                    status: "active",
+                    one_liner: Some("群聊和日报都能看"),
+                    summary: "",
+                    keywords_json: "[]",
+                    card_json: None,
+                },
+            );
+            insert_repo(
+                conn,
+                &NewRepo {
+                    id: "chat-only",
+                    full_name: "fox/only-群聊",
+                    description: "chat",
+                    stars: 90,
+                    status: "active",
+                    one_liner: Some("只有群聊"),
+                    summary: "",
+                    keywords_json: "[]",
+                    card_json: None,
+                },
+            );
+            insert_repo(
+                conn,
+                &NewRepo {
+                    id: "daily-only",
+                    full_name: "fox/only-日报",
+                    description: "report",
+                    stars: 90,
+                    status: "active",
+                    one_liner: Some("只有日报"),
+                    summary: "",
+                    keywords_json: "[]",
+                    card_json: None,
+                },
+            );
+            insert_repo(
+                conn,
+                &NewRepo {
+                    id: "notes",
+                    full_name: "lab/notes",
+                    description: "保存记录",
+                    stars: 1,
+                    status: "active",
+                    one_liner: None,
+                    summary: "",
+                    keywords_json: "[]",
+                    card_json: None,
+                },
+            );
+            insert_repo(
+                conn,
+                &NewRepo {
+                    id: "batch",
+                    full_name: "lab/batch",
+                    description: "支持批量",
+                    stars: 1,
+                    status: "active",
+                    one_liner: None,
+                    summary: "",
+                    keywords_json: "[]",
+                    card_json: None,
+                },
+            );
+            insert_repo(
+                conn,
+                &NewRepo {
+                    id: "subtitle",
+                    full_name: "lab/subtitle-tool",
+                    description: "video tool",
+                    stars: 5,
+                    status: "active",
+                    one_liner: Some("视频工具"),
+                    summary: "简介",
+                    keywords_json: "[]",
+                    card_json: Some(&subtitle),
+                },
+            );
+            insert_repo(
+                conn,
+                &readme_repo("min", "lab/image-minifier", "a general image utility"),
+            );
+            insert_readme(
+                conn,
+                "min",
+                "Please compress this file. Then compress it again. Finally compress the backup.",
+            );
+        });
+
+        let cases = [
+            (
+                "做小红书封面",
+                vec!["小红书".to_owned(), "封面".to_owned()],
+                Vec::<String>::new(),
+            ),
+            (
+                "公众号文章配图",
+                vec!["公众号".to_owned(), "配图".to_owned(), "文章".to_owned()],
+                Vec::new(),
+            ),
+            (
+                "给短视频加字幕",
+                vec!["短视频".to_owned(), "字幕".to_owned()],
+                Vec::new(),
+            ),
+            (
+                "做电商商品详情页",
+                vec!["详情页".to_owned(), "电商".to_owned()],
+                Vec::new(),
+            ),
+            (
+                "把群聊记录整理成日报",
+                vec!["群聊".to_owned(), "日报".to_owned()],
+                vec!["记录".to_owned(), "整理".to_owned()],
+            ),
+            (
+                "批量改图尺寸和压缩",
+                vec!["改图".to_owned(), "压缩".to_owned(), "尺寸".to_owned()],
+                vec!["批量".to_owned()],
+            ),
+        ];
+        let mut report = String::new();
+        for (query, intents, extras) in &cases {
+            let result = run(&db, query);
+            report.push_str(&format!(
+                "Q {query}\nintents={:?}\nextras={:?}\n",
+                result.intents, result.extras
+            ));
+            assert_eq!(result.intents, *intents, "{query}");
+            assert_eq!(result.extras, *extras, "{query}");
+            for (index, hit) in result.hits.iter().take(3).enumerate() {
+                report.push_str(&format!(
+                    "  {}. {} matched={:?} full={} score={:.6}\n",
+                    index + 1,
+                    hit.full_name,
+                    hit.matched,
+                    hit.full_match,
+                    hit.score
+                ));
+            }
+        }
+        let ranked = run(&db, "把群聊记录整理成日报");
+        assert!(ranked.hits.len() >= 3, "{:?}", ranked.hits);
+        assert_eq!(ranked.hits[0].id, "daily");
+        assert_eq!(ranked.hits[1].id, "hub");
+        assert!(ranked.hits[0].full_match);
+        assert!(ranked.hits[1].full_match);
+        assert!(has_term(&ranked.hits[0].matched, "群聊"));
+        assert!(has_term(&ranked.hits[0].matched, "日报"));
+        assert!(has_term(&ranked.hits[1].matched, "群聊"));
+        assert!(has_term(&ranked.hits[1].matched, "日报"));
+        assert!(ranked.hits[0].score > ranked.hits[1].score);
+        assert!(!ranked.hits[2].full_match, "{:?}", ranked.hits[2]);
+        assert!(ranked.hits[1].score > ranked.hits[2].score);
+        fs::write("/tmp/fsl-27-vocab.txt", report).expect("应能写下词表对照");
     }
 }
