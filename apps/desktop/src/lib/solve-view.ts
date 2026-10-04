@@ -294,6 +294,44 @@ export function RERANK_TOGGLE_LABEL(on: boolean): string {
 
 const RERANK_USABLE = new Set(['ok', 'cached']);
 
+/** 一次精选最多把多少个候选交给 AI（和后端 `MAX_CANDIDATES` 一致）。 */
+export const RERANK_CANDIDATE_LIMIT = 16;
+
+/**
+ * 交给 AI 精选的候选 id：本地排名前 8 的命中，加上后备的 9–16 名（`moreHits`，界面默认不显示）。去重，最多 16 个。
+ * 后备候选让 AI 能把本地排在后面的、真正对口的工具捞上来。
+ */
+export function rerankCandidateIds(result: Pick<SolveResult, 'hits' | 'moreHits'>): string[] {
+  const seen = new Set<string>();
+  const ids: string[] = [];
+  for (const hit of [...(result.hits ?? []), ...(result.moreHits ?? [])]) {
+    if (!hit || typeof hit.id !== 'string' || !hit.id || seen.has(hit.id)) continue;
+    seen.add(hit.id);
+    ids.push(hit.id);
+    if (ids.length >= RERANK_CANDIDATE_LIMIT) break;
+  }
+  return ids;
+}
+
+/**
+ * AI 从后备候选里点名的「最合适 / 合适」的工具：本地排在 9–16 名、默认不显示，AI 觉得对口就拿出来放进列表。
+ * 按 AI 给的顺序；已经在 `hits` 里的不重复；精选不可用时没有。
+ */
+export function promotedHits(result: Pick<SolveResult, 'hits' | 'moreHits'>, rerank: RerankResult | null): SolveHit[] {
+  if (!rerank || !RERANK_USABLE.has(rerank.status)) return [];
+  const known = new Set((result.hits ?? []).map((hit) => hit.id));
+  const extras = new Map((result.moreHits ?? []).map((hit) => [hit.id, hit]));
+  const promoted: SolveHit[] = [];
+  for (const item of rerank.items) {
+    if (item.fit !== 'best' && item.fit !== 'good') continue;
+    const hit = extras.get(item.repoId);
+    if (!hit || known.has(hit.id)) continue;
+    known.add(hit.id);
+    promoted.push(hit);
+  }
+  return promoted;
+}
+
 /** 按 AI 的顺序排列表。用不上时返回原数组，不改入参。 */
 export function applyRerank(hits: SolveHit[], rerank: RerankResult | null): SolveHit[] {
   if (!rerank || !RERANK_USABLE.has(rerank.status) || rerank.items.length === 0) return hits;

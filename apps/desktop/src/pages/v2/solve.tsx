@@ -4,6 +4,7 @@ import { buildReferencePack, describeInvokeError, listScenarios, scanLocalCapabi
 import type { RerankFit, RerankResult, ScenarioSummary, SolveResult } from '@/lib/contracts';
 import {
   applyRerank,
+  promotedHits,
   BACK_TO_PICK_LABEL,
   buildPackRequest,
   crossNote,
@@ -20,6 +21,7 @@ import {
   packPlaceholder,
   pendingNote,
   RERANK_TOGGLE_LABEL,
+  rerankCandidateIds,
   rerankPicks,
   rerankStatusText,
   todayLocalDate,
@@ -137,15 +139,20 @@ export function SolvePage(props: {
     const queryText = ready.query.trim() ? ready.query : text;
     void solveRerankV2({
       query: queryText,
-      candidateIds: ready.hits.slice(0, 12).map((item) => item.id),
+      candidateIds: rerankCandidateIds(ready),
     }).then((next) => {
       if (searchToken !== searchSeq.current || token !== rerankSeq.current) return;
       const parsed = readRerank(next);
       rerankUsefulRef.current = parsed.status === 'ok' || parsed.status === 'cached';
+      // AI 从后备候选（本地 9–16 名）里点名的，拿出来放进列表
+      const extras = promotedHits(ready, parsed);
+      if (extras.length > 0) {
+        setResult((current) => (current && current.query === ready.query ? { ...current, hits: [...current.hits, ...extras] } : current));
+      }
       setRerank(parsed);
       setRerankPhase('done');
       if (!picksTouched.current) {
-        const picks = rerankPicks(parsed, ready.hits);
+        const picks = rerankPicks(parsed, [...ready.hits, ...extras]);
         if (picks !== null) setPicked(picks);
       }
     }).catch(() => {
@@ -657,17 +664,23 @@ function readSolveResult(value: SolveResult): SolveResult {
     suggestedScenarioId: value.suggestedScenarioId ?? null,
     suggestedScenarioCount: typeof value.suggestedScenarioCount === 'number' ? value.suggestedScenarioCount : null,
     pendingMatches: Number.isFinite(value.pendingMatches) ? value.pendingMatches : 0,
-    hits: value.hits.filter((hit) => hit && typeof hit.id === 'string' && hit.id).map((hit) => ({
-      ...hit,
-      matched: Array.isArray(hit.matched) ? hit.matched : [],
-      missing: Array.isArray(hit.missing) ? hit.missing : [],
-      why: hit.why ?? '',
-      fullName: hit.fullName ?? hit.id,
-      htmlUrl: hit.htmlUrl ?? '',
-      starsCount: Number.isFinite(hit.starsCount) ? hit.starsCount : 0,
-      fullMatch: Boolean(hit.fullMatch),
-    })),
+    hits: readHits(value.hits),
+    // 旧后端没有这一项：当作没有后备候选
+    moreHits: readHits(Array.isArray(value.moreHits) ? value.moreHits : []),
   };
+}
+
+function readHits(hits: SolveResult['hits']): SolveResult['hits'] {
+  return hits.filter((hit) => hit && typeof hit.id === 'string' && hit.id).map((hit) => ({
+    ...hit,
+    matched: Array.isArray(hit.matched) ? hit.matched : [],
+    missing: Array.isArray(hit.missing) ? hit.missing : [],
+    why: hit.why ?? '',
+    fullName: hit.fullName ?? hit.id,
+    htmlUrl: hit.htmlUrl ?? '',
+    starsCount: Number.isFinite(hit.starsCount) ? hit.starsCount : 0,
+    fullMatch: Boolean(hit.fullMatch),
+  }));
 }
 
 function readPack(output: PackOutput): PackOutput {

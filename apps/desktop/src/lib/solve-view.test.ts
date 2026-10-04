@@ -2,6 +2,9 @@ import { describe, expect, it } from 'vitest';
 import type { RerankResult, ScenarioSummary, SolveHit, SolveResult } from '@/lib/contracts';
 import {
   applyRerank,
+  promotedHits,
+  RERANK_CANDIDATE_LIMIT,
+  rerankCandidateIds,
   BACK_TO_PICK_LABEL,
   buildPackRequest,
   crossNote,
@@ -314,6 +317,67 @@ describe('buildPackRequest', () => {
 
   it('改回挑工具的按钮文案', () => {
     expect(BACK_TO_PICK_LABEL).toBe('改回挑工具');
+  });
+});
+
+describe('后备候选（本地排名 9–16）', () => {
+  const ok = (items: Array<{ repoId: string; fit: 'best' | 'good' | 'maybe' | 'poor' }>): RerankResult => ({
+    status: 'ok',
+    items: items.map((item) => ({ ...item, reason: '理由' })),
+    noneFit: false,
+    note: null,
+    message: null,
+    tokens: 5000,
+  });
+
+  it('交给 AI 的候选 = 前 8 + 后备，去重，最多 16 个', () => {
+    const hits = Array.from({ length: 8 }, (_, index) => hit({ id: `h${index}` }));
+    const more = Array.from({ length: 12 }, (_, index) => hit({ id: `m${index}` }));
+    const ids = rerankCandidateIds({ hits, moreHits: more });
+    expect(ids).toHaveLength(RERANK_CANDIDATE_LIMIT);
+    expect(ids.slice(0, 8)).toEqual(hits.map((item) => item.id));
+    expect(ids[8]).toBe('m0');
+    expect(ids[15]).toBe('m7');
+    expect(rerankCandidateIds({ hits: [hit({ id: 'a' }), hit({ id: 'a' })], moreHits: [hit({ id: 'a' }), hit({ id: 'b' })] })).toEqual(['a', 'b']);
+  });
+
+  it('旧后端没有 moreHits：只用命中', () => {
+    expect(rerankCandidateIds({ hits: [hit({ id: 'a' }), hit({ id: 'b' })], moreHits: undefined })).toEqual(['a', 'b']);
+    expect(rerankCandidateIds({ hits: [], moreHits: [] })).toEqual([]);
+  });
+
+  it('AI 点名的后备工具（最合适 / 合适）拿出来，按 AI 的顺序', () => {
+    const result = { hits: [hit({ id: 'a' }), hit({ id: 'b' })], moreHits: [hit({ id: 'm1' }), hit({ id: 'm2' }), hit({ id: 'm3' })] };
+    const rerank = ok([
+      { repoId: 'm2', fit: 'best' },
+      { repoId: 'a', fit: 'good' },
+      { repoId: 'm1', fit: 'good' },
+      { repoId: 'm3', fit: 'maybe' },
+    ]);
+    expect(promotedHits(result, rerank).map((item) => item.id)).toEqual(['m2', 'm1']);
+  });
+
+  it('备选 / 不太合适的后备工具不拿出来，已经在列表里的不重复', () => {
+    const result = { hits: [hit({ id: 'a' })], moreHits: [hit({ id: 'm1' }), hit({ id: 'a' })] };
+    const rerank = ok([
+      { repoId: 'm1', fit: 'maybe' },
+      { repoId: 'a', fit: 'best' },
+    ]);
+    expect(promotedHits(result, rerank)).toEqual([]);
+  });
+
+  it('精选没成功 / 没有精选 / 没有后备候选时什么也不拿', () => {
+    const result = { hits: [hit({ id: 'a' })], moreHits: [hit({ id: 'm1' })] };
+    const failed: RerankResult = { status: 'failed', items: [], noneFit: false, note: null, message: '失败', tokens: null };
+    expect(promotedHits(result, null)).toEqual([]);
+    expect(promotedHits(result, failed)).toEqual([]);
+    expect(promotedHits({ hits: result.hits, moreHits: undefined }, ok([{ repoId: 'm1', fit: 'best' }]))).toEqual([]);
+  });
+
+  it('cached 的结果也一样拿', () => {
+    const result = { hits: [hit({ id: 'a' })], moreHits: [hit({ id: 'm1' })] };
+    const cached: RerankResult = { ...ok([{ repoId: 'm1', fit: 'best' }]), status: 'cached' };
+    expect(promotedHits(result, cached).map((item) => item.id)).toEqual(['m1']);
   });
 });
 
