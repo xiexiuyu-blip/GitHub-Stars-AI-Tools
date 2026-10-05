@@ -40,6 +40,15 @@ describe('自动整理页：确认入口和纯函数接线', () => {
     expect(SOURCE).toContain('<Metric {...dailyBudgetMetric(automation)} />');
   });
 
+  it('收藏分项行显示 countsLine，位于状态说明之后、整理面板之前', () => {
+    expect(SOURCE).toContain('{state.detail ? <p');
+    expect(SOURCE).toContain('{countsLine ? <p');
+    expect(SOURCE).toMatch(/\{countsLine \? <p[^>]*>\{countsLine\}<\/p> : null\}/);
+    expect(SOURCE).toContain('<FullScanPanelView');
+    expect(SOURCE.indexOf('{state.detail ? <p')).toBeLessThan(SOURCE.indexOf('{countsLine ? <p'));
+    expect(SOURCE.indexOf('{countsLine ? <p')).toBeLessThan(SOURCE.indexOf('<FullScanPanelView'));
+  });
+
   it('两个排队按钮默认收起，说明在按钮前，暂停留在折叠区外', () => {
     const details = SOURCE.slice(SOURCE.indexOf('<details className="min-w-0 flex-1">'), SOURCE.indexOf('</details>') + '</details>'.length);
     expect(details).toContain('<summary');
