@@ -5737,8 +5737,8 @@ VALUES
         let _ = remove_sqlite_database_files(&database_path);
     }
 
-    fn legacy_ai_document_storage() -> (AppStorage, PathBuf) {
-        let (storage, database_path) = temp_storage("legacy-ai-document");
+    fn legacy_ai_document_storage(name: &str) -> (AppStorage, PathBuf) {
+        let (storage, database_path) = temp_storage(name);
         storage
             .execute_sql(
                 r#"
@@ -5774,7 +5774,7 @@ VALUES
 
     #[test]
     fn ai_document_candidates_exclude_nonempty_card_documents() {
-        let (storage, database_path) = legacy_ai_document_storage();
+        let (storage, database_path) = legacy_ai_document_storage("legacy-ai-candidates");
         let candidates = storage
             .list_repositories_requiring_ai_document("1001")
             .expect("读取旧版 AI 候选");
@@ -5791,7 +5791,7 @@ VALUES
 
     #[test]
     fn has_card_document_requires_nonempty_card_json() {
-        let (storage, database_path) = legacy_ai_document_storage();
+        let (storage, database_path) = legacy_ai_document_storage("legacy-ai-has-card");
 
         assert!(storage.has_card_document("1001:A").expect("检查新版说明"));
         assert!(storage
@@ -5809,7 +5809,7 @@ VALUES
 
     #[test]
     fn legacy_ai_document_save_preserves_cards_and_updates_legacy_documents() {
-        let (storage, database_path) = legacy_ai_document_storage();
+        let (storage, database_path) = legacy_ai_document_storage("legacy-ai-save-guard");
         let read_document = |repo_id: &str| {
             let sql = format!(
                 r#"
