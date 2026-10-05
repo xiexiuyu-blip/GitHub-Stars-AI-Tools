@@ -437,6 +437,13 @@ how_to_try 只许写材料里出现过的命令或入口；材料里没有就写
     }
 }
 
+/// 必填、而且不许是空的正文字段（`how_to_try` 也是必填，但没有 README 时它就该是空字符串，所以不在这里）。
+const REQUIRED_TEXT_FIELDS: &[&str] = &["one_liner_zh", "what_it_is"];
+
+fn is_blank_text(value: &Value) -> bool {
+    value.as_str().is_some_and(|text| text.trim().is_empty())
+}
+
 pub fn validate_card(
     value: &Value,
     allowed_categories: &[(&str, &str)],
@@ -470,6 +477,11 @@ pub fn validate_card(
             continue;
         };
         if raw.is_null() && name != "license" {
+            continue;
+        }
+        // 必填的正文写成 "" 或只有空白：当没写。下面会报「缺少必填字段」，走修复调用；
+        // 不拦的话会写出一张一句话和说明都是空的卡
+        if REQUIRED_TEXT_FIELDS.contains(&name.as_str()) && is_blank_text(raw) {
             continue;
         }
         match normalize_field(
@@ -805,9 +817,17 @@ fn squash(text: &str) -> String {
         .collect()
 }
 
+/// 场景依据的原话，去掉所有空白（含全角空格、换行）后至少要有这么多个字符（按字符数，不是字节数）。
+/// 再短的（「的」「a」「ok」）在任何材料里都找得到，等于没核；种子里没写证据词的场景（图片、视频、PPT、写作……）全靠这一关。
+const MIN_EVIDENCE_QUOTE_CHARS: usize = 4;
+
+fn quote_is_long_enough(quote: &str) -> bool {
+    quote.chars().filter(|ch| !ch.is_whitespace()).count() >= MIN_EVIDENCE_QUOTE_CHARS
+}
+
 /// 模型写完之后再核一遍（不花 token）：
-/// - 场景标签必须有依据：`scenario_evidence` 里的原话要真的出现在材料里（仓库名 / 描述 / topics / README 摘录）；
-///   原话对不上（改写、翻译）时，场景自己的关键词在材料里字面出现也行（`scenarios::keyword_support`）；
+/// - 场景标签必须有依据：`scenario_evidence` 里的原话（去掉空白后至少 4 个字符）要真的出现在材料里（仓库名 / 描述 / topics / README 摘录）；
+///   原话对不上（改写、翻译、太短）时，场景自己的关键词在材料里字面出现也行（`scenarios::keyword_support`）；
 ///   平台类、自动化、SEO 还要字面出现证据词（`scenarios::has_evidence`）；不过关的标签去掉。
 /// - 项目已停更（maturity=stale）：场景标签整个去掉。
 /// - `audience` 是 developer、又只剩「自动化」一个标签：整个去掉（开发者工具不是运营自动化）。
@@ -857,8 +877,9 @@ fn refine_card(card: &mut ValidCard, input: &CardInput, warnings: &mut Vec<Strin
                 .and_then(Value::as_str)
                 .map(str::trim)
                 .unwrap_or("");
-            // 依据：模型给的原话真的在材料里；原话对不上（改写、翻译）时，场景自己的关键词在材料里字面出现也行
-            let basis = if !quote.is_empty() && haystack.contains(&squash(quote)) {
+            // 依据：模型给的原话真的在材料里（而且够长：太短的什么材料里都有，不算）；
+            // 原话对不上（改写、翻译、太短）时，场景自己的关键词在材料里字面出现也行
+            let basis = if quote_is_long_enough(quote) && haystack.contains(&squash(quote)) {
                 Some(quote.to_owned())
             } else {
                 crate::scenarios::keyword_support(slug, &meta, &readme)
@@ -1115,10 +1136,12 @@ fn string_list(card: &ValidCard, key: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// 必填的字符串：没有、不是字符串、或者 trim 之后是空的，都算缺（空的会写出一张什么都没有的卡）。
 fn required_card_str(card: &ValidCard, key: &str) -> Result<String, CardRunError> {
     card.value
         .get(key)
         .and_then(Value::as_str)
+        .filter(|text| !text.trim().is_empty())
         .map(str::to_owned)
         .ok_or_else(|| card_error(CardRunErrorKind::Schema, &format!("理解卡缺少 {key}"), None))
 }
@@ -1616,9 +1639,10 @@ fn strip_tags_named(input: &str, names: &[&str]) -> String {
     let chars: Vec<char> = input.chars().collect();
     let mut out = String::new();
     let mut index = 0;
+    let mut ends = None;
     while index < chars.len() {
         if chars[index] == '<' {
-            if let Some(end) = named_tag_end(&chars, index, names) {
+            if let Some(end) = named_tag_end(&chars, index, names, &mut ends) {
                 index = end;
                 continue;
             }
@@ -1629,7 +1653,50 @@ fn strip_tags_named(input: &str, names: &[&str]) -> String {
     out
 }
 
-fn named_tag_end(chars: &[char], start: usize, names: &[&str]) -> Option<usize> {
+/// 「找不到」。
+const NOT_FOUND: usize = usize::MAX;
+
+/// 每个位置往后数、第一个不在引号里的 `>` 的下一位（没有就是 `NOT_FOUND`），整行只倒着算一遍。
+/// 一行里有很多个没写完的 `<span`（压缩成一行的页面里常见）时，每个都从自己这里往后扫到行尾，
+/// 就是「行长 × 个数」；这样每个标签的结尾都是 O(1) 查表，结果和逐个往后扫完全一样。
+struct TagEnds(Vec<usize>);
+
+impl TagEnds {
+    fn new(chars: &[char]) -> Self {
+        let mut ends = vec![NOT_FOUND; chars.len() + 1];
+        // 下一位（i + 1）在「不在引号里 / 在双引号里 / 在单引号里」三种状态下的答案
+        let (mut plain, mut double, mut single) = (NOT_FOUND, NOT_FOUND, NOT_FOUND);
+        for index in (0..chars.len()).rev() {
+            let ch = chars[index];
+            let here_plain = match ch {
+                '"' => double,
+                '\'' => single,
+                '>' => index + 1,
+                _ => plain,
+            };
+            let here_double = if ch == '"' { plain } else { double };
+            let here_single = if ch == '\'' { plain } else { single };
+            ends[index] = here_plain;
+            (plain, double, single) = (here_plain, here_double, here_single);
+        }
+        Self(ends)
+    }
+
+    /// 从 `index` 起（不在引号里）到标签结束的下一位。
+    fn after(&self, index: usize) -> Option<usize> {
+        match self.0.get(index) {
+            Some(&end) if end != NOT_FOUND => Some(end),
+            _ => None,
+        }
+    }
+}
+
+fn named_tag_end(
+    chars: &[char],
+    start: usize,
+    names: &[&str],
+    ends: &mut Option<TagEnds>,
+) -> Option<usize> {
     if chars.get(start) != Some(&'<') {
         return None;
     }
@@ -1651,30 +1718,56 @@ fn named_tag_end(chars: &[char], start: usize, names: &[&str]) -> Option<usize> 
     if !names.iter().any(|candidate| *candidate == name) {
         return None;
     }
-    let mut quoted = None;
-    while index < chars.len() {
-        let ch = chars[index];
-        if let Some(quote) = quoted {
-            if ch == quote {
-                quoted = None;
-            }
-        } else if ch == '"' || ch == '\'' {
-            quoted = Some(ch);
-        } else if ch == '>' {
-            return Some(index + 1);
+    ends.get_or_insert_with(|| TagEnds::new(chars)).after(index)
+}
+
+/// 「从 `from` 起第一个等于 `target` 的位置」（没有就是 `chars.len()`）。`from` 只会越来越大：
+/// 上一次扫出来的位置还在 `from` 后面时直接用，不再从头扫。一行里有很多个没写完的 `![` / `[](`（压缩成一行的页面里常见）时，
+/// 每个都从自己这里扫到行尾，就是「行长 × 个数」；这样整行每个字符最多被扫一次，结果和逐个往后扫完全一样。
+struct NextChar<'a> {
+    chars: &'a [char],
+    target: char,
+    /// 上一次扫描的起点和结果。
+    scanned_from: usize,
+    found_at: usize,
+    scanned: bool,
+}
+
+impl<'a> NextChar<'a> {
+    fn new(chars: &'a [char], target: char) -> Self {
+        Self {
+            chars,
+            target,
+            scanned_from: 0,
+            found_at: 0,
+            scanned: false,
         }
-        index += 1;
     }
-    None
+
+    fn find(&mut self, from: usize) -> usize {
+        if self.scanned && self.scanned_from <= from && from <= self.found_at {
+            return self.found_at;
+        }
+        let mut index = from;
+        while index < self.chars.len() && self.chars[index] != self.target {
+            index += 1;
+        }
+        self.scanned = true;
+        self.scanned_from = from;
+        self.found_at = index;
+        index
+    }
 }
 
 fn strip_markdown_images(input: &str) -> String {
     let chars: Vec<char> = input.chars().collect();
     let mut out = String::new();
     let mut index = 0;
+    let mut bracket = NextChar::new(&chars, ']');
+    let mut paren = NextChar::new(&chars, ')');
     while index < chars.len() {
         if chars[index] == '!' && chars.get(index + 1) == Some(&'[') {
-            if let Some(end) = end_of_markdown_image(&chars, index) {
+            if let Some(end) = end_of_markdown_image(&chars, index, &mut bracket, &mut paren) {
                 index = end;
                 continue;
             }
@@ -1685,22 +1778,21 @@ fn strip_markdown_images(input: &str) -> String {
     out
 }
 
-fn end_of_markdown_image(chars: &[char], start: usize) -> Option<usize> {
-    let mut index = start + 2;
-    while index < chars.len() && chars[index] != ']' {
-        index += 1;
-    }
-    if index + 1 >= chars.len() || chars[index] != ']' || chars[index + 1] != '(' {
+fn end_of_markdown_image(
+    chars: &[char],
+    start: usize,
+    bracket: &mut NextChar,
+    paren: &mut NextChar,
+) -> Option<usize> {
+    let close = bracket.find(start + 2);
+    if close + 1 >= chars.len() || chars[close] != ']' || chars[close + 1] != '(' {
         return None;
     }
-    index += 2;
-    while index < chars.len() && chars[index] != ')' {
-        index += 1;
-    }
-    if index >= chars.len() {
+    let end = paren.find(close + 2);
+    if end >= chars.len() {
         None
     } else {
-        Some(index + 1)
+        Some(end + 1)
     }
 }
 
@@ -1708,13 +1800,15 @@ fn strip_empty_markdown_links(input: &str) -> String {
     let chars: Vec<char> = input.chars().collect();
     let mut out = String::new();
     let mut index = 0;
+    let mut paren = NextChar::new(&chars, ')');
     while index < chars.len() {
         if chars[index] == '['
             && chars.get(index + 1) == Some(&']')
             && chars.get(index + 2) == Some(&'(')
         {
-            if let Some(end) = close_paren(&chars, index + 3) {
-                index = end;
+            let close = paren.find(index + 3);
+            if close < chars.len() {
+                index = close + 1;
                 continue;
             }
         }
@@ -1724,26 +1818,26 @@ fn strip_empty_markdown_links(input: &str) -> String {
     out
 }
 
-fn close_paren(chars: &[char], start: usize) -> Option<usize> {
-    let mut index = start;
-    while index < chars.len() {
-        if chars[index] == ')' {
-            return Some(index + 1);
-        }
-        index += 1;
-    }
-    None
-}
-
 fn strip_shields_urls(input: &str) -> String {
     let chars: Vec<char> = input.chars().collect();
     let mut out = String::new();
     let mut index = 0;
+    // 一段连续的网址文字（中间没有空白和 `)]>"'`）里，每个 http:// 起点的网址都在同一处结束：
+    // 这一段的结尾、以及里面有没有 shields.io 只算一次，不要给每个起点都重扫、重新拼一遍字符串。
+    // （第一个起点的网址含 shields.io 就整段跳过；不含的话，它的后缀——后面的起点的网址——当然也不含。）
+    let mut run: Option<(usize, bool)> = None;
     while index < chars.len() {
         if starts_with_http(&chars, index) {
-            let end = url_end(&chars, index);
-            let url: String = chars[index..end].iter().collect();
-            if url.to_ascii_lowercase().contains("shields.io") {
+            let (end, shields) = match run {
+                Some((end, shields)) if index < end => (end, shields),
+                _ => {
+                    let end = url_end(&chars, index);
+                    let shields = contains_shields(&chars, index, end);
+                    run = Some((end, shields));
+                    (end, shields)
+                }
+            };
+            if shields {
                 index = end;
                 continue;
             }
@@ -1769,6 +1863,19 @@ fn url_end(chars: &[char], start: usize) -> usize {
         index += 1;
     }
     index
+}
+
+/// `chars[from..end]` 里有没有 `shields.io`（不分英文大小写）。
+fn contains_shields(chars: &[char], from: usize, end: usize) -> bool {
+    const NEEDLE: &[u8] = b"shields.io";
+    if end < from + NEEDLE.len() {
+        return false;
+    }
+    (from..=end - NEEDLE.len()).any(|at| {
+        NEEDLE.iter().enumerate().all(|(offset, expected)| {
+            chars[at + offset].to_ascii_lowercase() == char::from(*expected)
+        })
+    })
 }
 
 fn opening_fence_marker(line: &str) -> Option<char> {
@@ -2530,8 +2637,13 @@ fn truncate_chars(value: &str, max_chars: usize) -> String {
     }
 }
 
+/// 截断后不许留下没关的括号用的括号对。
+const BRACKET_PAIRS: [(char, char); 4] = [('（', '）'), ('(', ')'), ('「', '」'), ('《', '》')];
+
 /// 给人读的文字超长时的截法：尽量断在句末（。！？；），其次断在逗号 / 顿号，再不行才硬截并补「…」；
 /// 不留下半个括号。（硬截会得到「…国产模」这种半截话。）
+/// 输入有内容时，结果一定有内容：整句话都在没关的括号里（比如以「「」开头的超限句）时，去掉括号会把整句话去空，
+/// 这时退回按字符硬截到上限、再把没关的括号补上。
 fn truncate_text(value: &str, max_chars: usize) -> String {
     let chars: Vec<char> = value.chars().collect();
     if chars.len() <= max_chars {
@@ -2558,19 +2670,54 @@ fn truncate_text(value: &str, max_chars: usize) -> String {
         hard.push('…');
         hard
     };
-    // 不留下没关的括号
-    for (open, close) in [('（', '）'), ('(', ')'), ('「', '」'), ('《', '》')] {
-        let opens = out.chars().filter(|ch| *ch == open).count();
-        let closes = out.chars().filter(|ch| *ch == close).count();
-        if opens > closes {
-            if let Some(position) = out.rfind(open) {
-                out.truncate(position);
-                out = out
-                    .trim_end_matches(|ch: char| ch.is_whitespace() || "，、,".contains(ch))
-                    .to_owned();
+    // 不留下没关的括号：每一轮把每种括号里「最后一个没关的开头」连同后面的都去掉，反复到所有括号都成对为止
+    // （一种括号去掉之后别的括号可能又不成对；每一轮至少去掉一个开头，所以一定会停）
+    loop {
+        let mut changed = false;
+        for (open, close) in BRACKET_PAIRS {
+            let opens = out.chars().filter(|ch| *ch == open).count();
+            let closes = out.chars().filter(|ch| *ch == close).count();
+            if opens > closes {
+                if let Some(position) = out.rfind(open) {
+                    out.truncate(position);
+                    out = out
+                        .trim_end_matches(|ch: char| ch.is_whitespace() || "，、,".contains(ch))
+                        .to_owned();
+                    changed = true;
+                }
             }
         }
+        if !changed {
+            break;
+        }
     }
+    if out.trim().is_empty() {
+        out = hard_cut_with_closed_brackets(&chars, max_chars);
+    }
+    out
+}
+
+/// 按字符硬截：保留尽量多的开头，末尾补「…」，再把保留部分里没关的括号补上（先关最里面的）；总长不超过 `max_chars`（至少是一个「…」）。
+fn hard_cut_with_closed_brackets(chars: &[char], max_chars: usize) -> String {
+    // 一边往后数一边记着「还没关的括号要补什么」（栈：最里面的在最后）；遇到右括号就消掉最近的同一种
+    let mut pending: Vec<char> = Vec::new();
+    // 前 n 个字符 + 「…」 + 要补的括号，总长不超过上限的最大 n（n = 0 时只剩「…」，一定放得下）
+    let mut best: Option<(usize, Vec<char>)> = None;
+    for n in 1..max_chars.min(chars.len() + 1) {
+        let ch = chars[n - 1];
+        if let Some((_, close)) = BRACKET_PAIRS.iter().find(|(open, _)| *open == ch) {
+            pending.push(*close);
+        } else if let Some(position) = pending.iter().rposition(|close| *close == ch) {
+            pending.remove(position);
+        }
+        if n + 1 + pending.len() <= max_chars {
+            best = Some((n, pending.iter().rev().copied().collect()));
+        }
+    }
+    let (keep, closers) = best.unwrap_or((0, Vec::new()));
+    let mut out: String = chars[..keep].iter().collect();
+    out.push('…');
+    out.extend(closers);
     out
 }
 
@@ -4891,5 +5038,919 @@ INSERT INTO scenarios(slug, name_zh, account_id, archived) VALUES
         let short = load_card_input(&conn, "r1").expect("短 README 也应能读");
         assert!(short.readme.is_none());
         assert!(short.readme_hash.is_none());
+    }
+
+    // —— 清洗函数要线性：没写完的标记再多，也不能把一整行反复扫（AGENTS.md「解析不可信内容」）——
+
+    /// 旧的逐个往后扫的版本，原样留作参照：新的线性版本必须和它在任何输入上逐字相同
+    /// （清洗结果是理解卡 `source_hash` 的一部分，哪怕只差一个字，已经整理好的卡都会被当成「内容变了」白花钱重做）。
+    fn legacy_strip_tags_named(input: &str, names: &[&str]) -> String {
+        fn tag_end(chars: &[char], start: usize, names: &[&str]) -> Option<usize> {
+            if chars.get(start) != Some(&'<') {
+                return None;
+            }
+            let mut index = start + 1;
+            if chars.get(index) == Some(&'/') {
+                index += 1;
+            }
+            let name_start = index;
+            while index < chars.len() && chars[index].is_ascii_alphanumeric() {
+                index += 1;
+            }
+            if index == name_start {
+                return None;
+            }
+            let name = chars[name_start..index]
+                .iter()
+                .collect::<String>()
+                .to_ascii_lowercase();
+            if !names.iter().any(|candidate| *candidate == name) {
+                return None;
+            }
+            let mut quoted = None;
+            while index < chars.len() {
+                let ch = chars[index];
+                if let Some(quote) = quoted {
+                    if ch == quote {
+                        quoted = None;
+                    }
+                } else if ch == '"' || ch == '\'' {
+                    quoted = Some(ch);
+                } else if ch == '>' {
+                    return Some(index + 1);
+                }
+                index += 1;
+            }
+            None
+        }
+        let chars: Vec<char> = input.chars().collect();
+        let mut out = String::new();
+        let mut index = 0;
+        while index < chars.len() {
+            if chars[index] == '<' {
+                if let Some(end) = tag_end(&chars, index, names) {
+                    index = end;
+                    continue;
+                }
+            }
+            out.push(chars[index]);
+            index += 1;
+        }
+        out
+    }
+
+    fn legacy_strip_markdown_images(input: &str) -> String {
+        fn image_end(chars: &[char], start: usize) -> Option<usize> {
+            let mut index = start + 2;
+            while index < chars.len() && chars[index] != ']' {
+                index += 1;
+            }
+            if index + 1 >= chars.len() || chars[index] != ']' || chars[index + 1] != '(' {
+                return None;
+            }
+            index += 2;
+            while index < chars.len() && chars[index] != ')' {
+                index += 1;
+            }
+            if index >= chars.len() {
+                None
+            } else {
+                Some(index + 1)
+            }
+        }
+        let chars: Vec<char> = input.chars().collect();
+        let mut out = String::new();
+        let mut index = 0;
+        while index < chars.len() {
+            if chars[index] == '!' && chars.get(index + 1) == Some(&'[') {
+                if let Some(end) = image_end(&chars, index) {
+                    index = end;
+                    continue;
+                }
+            }
+            out.push(chars[index]);
+            index += 1;
+        }
+        out
+    }
+
+    fn legacy_strip_empty_markdown_links(input: &str) -> String {
+        fn close_paren(chars: &[char], start: usize) -> Option<usize> {
+            let mut index = start;
+            while index < chars.len() {
+                if chars[index] == ')' {
+                    return Some(index + 1);
+                }
+                index += 1;
+            }
+            None
+        }
+        let chars: Vec<char> = input.chars().collect();
+        let mut out = String::new();
+        let mut index = 0;
+        while index < chars.len() {
+            if chars[index] == '['
+                && chars.get(index + 1) == Some(&']')
+                && chars.get(index + 2) == Some(&'(')
+            {
+                if let Some(end) = close_paren(&chars, index + 3) {
+                    index = end;
+                    continue;
+                }
+            }
+            out.push(chars[index]);
+            index += 1;
+        }
+        out
+    }
+
+    fn legacy_strip_shields_urls(input: &str) -> String {
+        let chars: Vec<char> = input.chars().collect();
+        let mut out = String::new();
+        let mut index = 0;
+        while index < chars.len() {
+            if starts_with_http(&chars, index) {
+                let end = url_end(&chars, index);
+                let url: String = chars[index..end].iter().collect();
+                if url.to_ascii_lowercase().contains("shields.io") {
+                    index = end;
+                    continue;
+                }
+            }
+            out.push(chars[index]);
+            index += 1;
+        }
+        out
+    }
+
+    fn legacy_clean_prose_line(line: &str) -> String {
+        let text = legacy_strip_empty_markdown_links(&legacy_strip_tags_named(
+            &legacy_strip_shields_urls(&legacy_strip_markdown_images(&legacy_strip_tags_named(
+                line,
+                &["img", "image"],
+            ))),
+            &[
+                "p", "div", "center", "span", "br", "picture", "source", "font",
+            ],
+        ));
+        if text.trim().is_empty()
+            || legacy_strip_tags_named(text.trim(), &["a"])
+                .trim()
+                .is_empty()
+        {
+            String::new()
+        } else {
+            text.trim().to_owned()
+        }
+    }
+
+    struct XorShift(u64);
+
+    impl XorShift {
+        fn below(&mut self, limit: usize) -> usize {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            (self.0 % limit as u64) as usize
+        }
+    }
+
+    const CLEANER_TOKENS: &[&str] = &[
+        "!",
+        "[",
+        "]",
+        "(",
+        ")",
+        "<",
+        ">",
+        "\"",
+        "'",
+        "/",
+        "a",
+        "A",
+        "p",
+        "br",
+        "span",
+        "SPAN",
+        "img",
+        "image",
+        " ",
+        "\t",
+        "\u{3000}",
+        "x",
+        "字",
+        "http://",
+        "https://",
+        "HTTPS://",
+        "shields.io",
+        "Shields.IO",
+        "https://img.shields.io/badge/a-b",
+        "[]",
+        "![",
+        "](",
+        "[](",
+        "![x](",
+        "<a ",
+        "</a>",
+        "<span ",
+        "<img src=\"",
+        "<p align='center'>",
+    ];
+
+    fn random_cleaner_input(rng: &mut XorShift) -> String {
+        (0..rng.below(26))
+            .map(|_| CLEANER_TOKENS[rng.below(CLEANER_TOKENS.len())])
+            .collect()
+    }
+
+    #[test]
+    fn the_linear_cleaners_give_exactly_the_same_text_as_the_old_scanning_ones() {
+        let mut rng = XorShift(0x9E37_79B9_7F4A_7C15);
+        for _ in 0..40_000 {
+            let text = random_cleaner_input(&mut rng);
+            for names in [
+                &["a"][..],
+                &["img", "image"][..],
+                &[
+                    "p", "div", "center", "span", "br", "picture", "source", "font",
+                ][..],
+            ] {
+                assert_eq!(
+                    strip_tags_named(&text, names),
+                    legacy_strip_tags_named(&text, names),
+                    "标签 {names:?}：{text:?}"
+                );
+            }
+            assert_eq!(
+                strip_markdown_images(&text),
+                legacy_strip_markdown_images(&text),
+                "图片：{text:?}"
+            );
+            assert_eq!(
+                strip_empty_markdown_links(&text),
+                legacy_strip_empty_markdown_links(&text),
+                "空链接：{text:?}"
+            );
+            assert_eq!(
+                strip_shields_urls(&text),
+                legacy_strip_shields_urls(&text),
+                "徽章网址：{text:?}"
+            );
+            assert_eq!(
+                clean_prose_line(&text),
+                legacy_clean_prose_line(&text),
+                "整行：{text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_cleaners_keep_their_documented_behaviour_on_hand_written_cases() {
+        // 每一条都同时对照新的线性版本和旧的逐个往后扫的版本：期望值是旧版本一直以来的行为
+        let images = |input: &str, expected: &str| {
+            assert_eq!(strip_markdown_images(input), expected, "{input:?}");
+            assert_eq!(legacy_strip_markdown_images(input), expected, "{input:?}");
+        };
+        // 没写完的图片（后面一个右括号都没有）原样留下；第一个 `)` 在哪里，图片就在哪里结束
+        images("![a](没关 ![b] 后面", "![a](没关 ![b] 后面");
+        images("![a](没关 ![b](x) 后面", " 后面");
+        images("![a] ![b](x)尾", "![a] 尾");
+        images("![a](x)![b](y)", "");
+        images("![![![a](x)", "");
+        images("![![![a] x", "![![![a] x");
+        images("![", "![");
+        images("!", "!");
+        let links = |input: &str, expected: &str| {
+            assert_eq!(strip_empty_markdown_links(input), expected, "{input:?}");
+            assert_eq!(
+                legacy_strip_empty_markdown_links(input),
+                expected,
+                "{input:?}"
+            );
+        };
+        // 空链接：没有右括号就原样留下
+        links("前[](x)后[](没关", "前后[](没关");
+        links("[](a)[](b)[](", "[](");
+        links("[]", "[]");
+        let tags = |input: &str, names: &[&str], expected: &str| {
+            assert_eq!(strip_tags_named(input, names), expected, "{input:?}");
+            assert_eq!(legacy_strip_tags_named(input, names), expected, "{input:?}");
+        };
+        // 标签：引号里的 > 不算结束；后面一个 > 都没有的标签原样留下；第一个 > 在哪里，标签就在哪里结束
+        tags("<span title=\"a>b\">字</span>", &["span"], "字");
+        tags("<span 没关 字", &["span"], "<span 没关 字");
+        tags("<span 没关 <span>字", &["span"], "字");
+        tags("<SPAN>大小写</Span>", &["span"], "大小写");
+        tags("<span title='没关>字", &["span"], "<span title='没关>字");
+        tags("<span a=\"x\" b='y'>字", &["span"], "字");
+        tags(
+            "<spanx>字<a href=x>链</a>",
+            &["span"],
+            "<spanx>字<a href=x>链</a>",
+        );
+        tags("<a href=x>链</a>", &["a"], "链");
+        tags("<", &["a"], "<");
+        tags("</", &["a"], "</");
+        let shields = |input: &str, expected: &str| {
+            assert_eq!(strip_shields_urls(input), expected, "{input:?}");
+            assert_eq!(legacy_strip_shields_urls(input), expected, "{input:?}");
+        };
+        // 徽章网址：整段到空白或右括号为止，不分大小写
+        shields("看 https://img.shields.io/badge/a-b 完", "看  完");
+        shields("(https://IMG.Shields.IO/x)留", "()留");
+        // 协议头要小写才算网址的起点（旧版本一直如此）
+        shields("(HTTP://IMG.Shields.IO/x)留", "(HTTP://IMG.Shields.IO/x)留");
+        shields(
+            "https://example.com/a 和 http://x.io/shields.io/y",
+            "https://example.com/a 和 ",
+        );
+        // 一段网址文字里有好几个 http://：每个从自己的起点算起，后面不含 shields.io 的才留下
+        shields("http://a/shields.iohttp://b/c 尾", " 尾");
+        shields("http://a/http://shields.io/b 尾", " 尾");
+        shields("http://shields.io/a?x=http://b/c 尾", " 尾");
+        shields("http://a/b/http://c/d 尾", "http://a/b/http://c/d 尾");
+    }
+
+    #[test]
+    fn the_scan_cache_gives_the_same_answer_as_scanning_from_scratch_in_any_order() {
+        // 线性版本靠「上一次扫出来的位置还在后面就直接用」：调用方总是从小往大问，
+        // 但不能因此把任意顺序的提问答错（旧位置在前面、起点退回去、起点越过了结尾……）
+        let mut rng = XorShift(0x0BAD_CAFE_1234_5678);
+        let pieces = ["a", ")", "(", "]", "字", " "];
+        for _ in 0..3_000 {
+            let text: String = (0..rng.below(24))
+                .map(|_| pieces[rng.below(pieces.len())])
+                .collect();
+            let chars: Vec<char> = text.chars().collect();
+            let mut finder = NextChar::new(&chars, ')');
+            for _ in 0..40 {
+                let from = rng.below(chars.len() + 3);
+                let mut expected = from;
+                while expected < chars.len() && chars[expected] != ')' {
+                    expected += 1;
+                }
+                assert_eq!(finder.find(from), expected, "{text:?} 从 {from} 起");
+            }
+        }
+    }
+
+    #[test]
+    fn a_run_of_urls_is_judged_once_but_each_url_from_its_own_start() {
+        // 一段连续的网址文字里：含 shields.io 的整段跳过；不含的，后面每个起点都不含，原样留下
+        let plain = "http://a/b/http://c/d/https://e/f";
+        assert_eq!(strip_shields_urls(plain), plain);
+        assert_eq!(
+            strip_shields_urls(&format!("前 {plain}x 后")),
+            format!("前 {plain}x 后")
+        );
+        // shields.io 夹在中间：从第一个起点算起含，整段去掉；紧接着的下一段（隔着空白）单独判断
+        assert_eq!(
+            strip_shields_urls("http://a/http://shields.io/x/http://c 留 http://d/e"),
+            " 留 http://d/e"
+        );
+        // 大小写、被截断的 shields.i
+        assert_eq!(strip_shields_urls("https://SHIELDS.IO/a 尾"), " 尾");
+        assert_eq!(
+            strip_shields_urls("https://shields.i/a 尾"),
+            "https://shields.i/a 尾"
+        );
+    }
+
+    /// 压缩成一整行的恶意页面：每种没写完的标记都塞满 1 MB。旧的写法每个标记都从自己扫到行尾（行长 × 个数），
+    /// 200 KB 就要 5 到 60 秒（开发版构建）。
+    fn hostile_one_liner(pattern: &str, bytes: usize) -> String {
+        pattern.repeat(bytes / pattern.len() + 1)
+    }
+
+    const HOSTILE_PATTERNS: &[&str] = &[
+        "![",
+        "[](",
+        "<span",
+        "&lt;span",
+        "http://",
+        "https://x/",
+        "<a",
+        "![a](",
+        "![a]",
+        "<img src=\"",
+        "<p title='",
+        "[",
+        "<",
+        "![x] (",
+        // 多字节字符紧挨着标记（按字符而不是按字节扫，不能因此出错或变慢）
+        "字![",
+        "字[](",
+        "字<span ",
+        "字http://",
+        "😀<a ",
+    ];
+
+    #[test]
+    fn a_one_megabyte_line_of_unfinished_markup_is_cleaned_in_a_blink() {
+        for pattern in HOSTILE_PATTERNS {
+            let raw = hostile_one_liner(pattern, 1_000_000);
+            let started = std::time::Instant::now();
+            let excerpt = build_readme_excerpt(&raw);
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(4),
+                "{pattern}：1 MB 一行扫了 {:?}",
+                started.elapsed()
+            );
+            assert_eq!(excerpt.original_chars, raw.chars().count(), "{pattern}");
+            assert!(excerpt.text.chars().count() <= TOTAL_CHARS, "{pattern}");
+        }
+    }
+
+    #[test]
+    fn a_readme_of_half_a_million_bytes_made_of_hostile_lines_is_also_cleaned_in_a_blink() {
+        // 不是一整行，而是几万行：每行一个没写完的标记 / 标题 / 代码围栏 / 注释
+        for pattern in [
+            "# install\n",
+            "## 使用\n### FAQ\n",
+            "```\n",
+            "[a](\n",
+            "![\n",
+            "<span\n",
+            "<!--\n",
+            "-->\n",
+            "\n",
+        ] {
+            let raw = hostile_one_liner(pattern, 500_000);
+            let started = std::time::Instant::now();
+            let excerpt = build_readme_excerpt(&raw);
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(4),
+                "{pattern:?}：50 万字节扫了 {:?}",
+                started.elapsed()
+            );
+            assert!(excerpt.text.chars().count() <= TOTAL_CHARS, "{pattern:?}");
+        }
+    }
+
+    #[test]
+    fn hostile_lines_mixed_with_normal_text_still_keep_the_normal_text() {
+        let mut raw = String::from("# 项目\n\n这是正文，说明它能做什么。\n\n");
+        raw.push_str(&hostile_one_liner("![a](", 300_000));
+        raw.push_str("\n\n## 使用\n\n用法说明在这里。\n");
+        let started = std::time::Instant::now();
+        let excerpt = build_readme_excerpt(&raw);
+        assert!(started.elapsed() < std::time::Duration::from_secs(4));
+        assert!(excerpt.text.contains("这是正文，说明它能做什么。"));
+        assert!(excerpt.text.contains("用法说明在这里。"));
+    }
+
+    // —— 场景依据的原话至少 4 个字符（去掉空白后，按字符数）——
+
+    fn scenario_slugs_after_refine(
+        slug: &str,
+        quote: &str,
+        readme: &str,
+        description: &str,
+    ) -> (Vec<String>, Value, Vec<String>) {
+        let input = refine_input(Some(readme), description);
+        let mut card = refinable(&[slug], json!({ slug: quote }), "business", "app");
+        let mut warnings = Vec::new();
+        refine_card(&mut card, &input, &mut warnings);
+        let tags = card.value["scenario_tags"]
+            .as_array()
+            .expect("标签应是数组")
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_owned)
+            .collect();
+        (tags, card.value["scenario_evidence"].clone(), warnings)
+    }
+
+    const NO_ECOMMERCE_README: &str =
+        "# 工具\n\n这是一个好用的小工具，ok 的 a 都能找到。做封面也行。";
+
+    #[test]
+    fn a_quote_of_one_to_three_characters_is_no_evidence_even_though_it_is_in_the_material() {
+        // ec（电商）、wr（写作）种子里没写证据词：以前一句「的」「a」「ok」就能让标签过关。材料里没有它们自己的关键词
+        for slug in ["ec", "wr", "res", "kb", "data", "ppt"] {
+            for quote in ["的", "a", "ok", "OK", " 的 ", "做封面", "ok 的", "。。。"] {
+                let (tags, evidence, warnings) =
+                    scenario_slugs_after_refine(slug, quote, NO_ECOMMERCE_README, "封面工具");
+                if quote == "ok 的" {
+                    // 去掉空白后是 3 个字符（o k 的）：还是太短
+                    assert!(tags.is_empty(), "{slug} {quote:?}");
+                }
+                assert!(
+                    tags.is_empty(),
+                    "{slug} 的原话 {quote:?} 太短，标签该被去掉：{tags:?}"
+                );
+                assert_eq!(evidence, json!({}), "{slug} {quote:?}");
+                assert_eq!(warnings.len(), 1, "{warnings:?}");
+                assert!(warnings[0].contains(slug), "{warnings:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_quote_of_four_or_more_characters_that_really_is_in_the_material_still_counts() {
+        for (slug, quote) in [
+            ("ec", "好用的小工具"),
+            ("wr", "好用的小"),
+            ("ppt", "做 封 面 也"),
+            // 4 个字符：正好够
+            ("kb", "ok的a"),
+        ] {
+            let (tags, evidence, warnings) =
+                scenario_slugs_after_refine(slug, quote, NO_ECOMMERCE_README, "封面工具");
+            assert_eq!(tags, vec![slug.to_owned()], "{slug} {quote:?}");
+            assert_eq!(evidence[slug], quote, "原话原样当依据");
+            assert!(warnings.is_empty(), "{warnings:?}");
+        }
+        // 够长但材料里没有：照旧去掉
+        let (tags, _, warnings) = scenario_slugs_after_refine(
+            "ec",
+            "支持一键上架到淘宝",
+            NO_ECOMMERCE_README,
+            "封面工具",
+        );
+        assert!(tags.is_empty());
+        assert_eq!(warnings.len(), 1);
+    }
+
+    #[test]
+    fn a_short_quote_falls_back_to_the_scenarios_own_keywords_when_they_are_literally_there() {
+        // img 的关键词「封面」在描述里字面出现：3 个字符的原话不算数，但标签靠关键词保留，依据换成命中的关键词
+        let (tags, evidence, warnings) =
+            scenario_slugs_after_refine("img", "封面工", "# 工具\n\n用来做封面工具。", "封面工具");
+        assert_eq!(tags, vec!["img".to_owned()]);
+        assert_eq!(evidence["img"], "封面");
+        assert!(warnings.is_empty(), "{warnings:?}");
+        // 一个字的原话「的」同理
+        let (tags, evidence, _) =
+            scenario_slugs_after_refine("img", "的", "# 工具\n\n的的的的。", "海报设计工具");
+        assert_eq!(tags, vec!["img".to_owned()]);
+        assert_eq!(evidence["img"], "海报");
+        // README 里关键词出现两次也算（只在描述 / 名称 / topics 里出现一次就够，README 要两次）
+        let (tags, evidence, _) = scenario_slugs_after_refine(
+            "ec",
+            "a",
+            "# 工具\n\n做电商详情页，也做电商主图。",
+            "图片工具",
+        );
+        assert_eq!(tags, vec!["ec".to_owned()]);
+        assert_eq!(evidence["ec"], "电商");
+        // README 里只出现一次：不够
+        let (tags, _, _) =
+            scenario_slugs_after_refine("ec", "a", "# 工具\n\n也能做电商图。", "图片工具");
+        assert!(tags.is_empty());
+    }
+
+    #[test]
+    fn whitespace_does_not_count_towards_the_quote_length() {
+        // 全角空格、换行、制表符都不算字符：「做　封　面」只有 3 个字符
+        for quote in [
+            "做\u{3000}封\u{3000}面",
+            "做\n封\n面",
+            "做 \t封 面",
+            " \u{3000}做封面\n ",
+        ] {
+            let (tags, _, _) =
+                scenario_slugs_after_refine("wr", quote, NO_ECOMMERCE_README, "封面工具");
+            assert!(tags.is_empty(), "{quote:?} 去掉空白后只有 3 个字符");
+        }
+        // 去掉空白后正好 4 个：算
+        for quote in [
+            "做\u{3000}封\u{3000}面\u{3000}也",
+            "做封\n面也",
+            "  做封面也  ",
+        ] {
+            let (tags, _, _) =
+                scenario_slugs_after_refine("wr", quote, NO_ECOMMERCE_README, "封面工具");
+            assert_eq!(tags, vec!["wr".to_owned()], "{quote:?}");
+        }
+    }
+
+    #[test]
+    fn the_quote_length_counts_characters_not_bytes() {
+        // 3 个汉字是 9 个字节，4 个汉字是 12 个字节：按字节数算会让「做封面」过关
+        assert!(!quote_is_long_enough("做封面"));
+        assert!(quote_is_long_enough("做封面也"));
+        assert!(!quote_is_long_enough("😀😀😀"));
+        assert!(quote_is_long_enough("😀😀😀😀"));
+        assert!(!quote_is_long_enough("abc"));
+        assert!(quote_is_long_enough("abcd"));
+        assert!(!quote_is_long_enough(""));
+        assert!(!quote_is_long_enough(
+            "\u{3000}\u{3000}\u{3000}\u{3000}\n\n"
+        ));
+        assert_eq!(MIN_EVIDENCE_QUOTE_CHARS, 4);
+    }
+
+    #[test]
+    fn a_missing_or_empty_quote_still_works_through_the_keywords_as_before() {
+        let input = refine_input(
+            Some("# 工具\n\n用来做小红书封面，小红书图文也行。"),
+            "封面工具",
+        );
+        let mut card = refinable(
+            &["xhs", "img"],
+            json!({"xhs": "", "img": "   "}),
+            "business",
+            "app",
+        );
+        refine_card(&mut card, &input, &mut Vec::new());
+        assert_eq!(card.value["scenario_tags"], json!(["xhs", "img"]));
+        assert_eq!(card.value["scenario_evidence"]["xhs"], "小红书");
+        assert_eq!(card.value["scenario_evidence"]["img"], "封面");
+    }
+
+    // —— 必填的一句话和说明不许是空的 ——
+
+    #[test]
+    fn blank_required_text_is_a_missing_field_for_the_repair_path() {
+        for field in ["one_liner_zh", "what_it_is"] {
+            for blank in ["", " ", "  \n\t", "\u{3000}\u{3000}"] {
+                let mut value = valid_card("content-creation", None);
+                value[field] = json!(blank);
+                let errors = validate_card(&value, &categories(), &scenarios())
+                    .expect_err(&format!("{field} 写成 {blank:?} 应校验失败"));
+                assert!(
+                    errors
+                        .iter()
+                        .any(|error| error.contains("缺少必填字段") && error.contains(field)),
+                    "{field} {blank:?}：{errors:?}"
+                );
+                assert_eq!(errors.len(), 1, "只有这一项有问题：{errors:?}");
+            }
+            // 没写、写成 null：和以前一样算缺
+            for gone in [None, Some(Value::Null)] {
+                let mut value = valid_card("content-creation", None);
+                match gone {
+                    None => {
+                        value.as_object_mut().unwrap().remove(field);
+                    }
+                    Some(null) => value[field] = null,
+                }
+                let errors = validate_card(&value, &categories(), &scenarios())
+                    .expect_err("缺字段应校验失败");
+                assert!(
+                    errors.iter().any(|error| error.contains(field)),
+                    "{errors:?}"
+                );
+            }
+        }
+        // 一大片空白不能靠截断变成「……」混过去
+        let mut value = valid_card("content-creation", None);
+        value["what_it_is"] = json!(" ".repeat(500));
+        value["one_liner_zh"] = json!("\n".repeat(100));
+        let errors = validate_card(&value, &categories(), &scenarios()).expect_err("应失败");
+        assert_eq!(errors.len(), 2, "{errors:?}");
+    }
+
+    #[test]
+    fn real_text_and_the_empty_how_to_try_are_still_accepted() {
+        let mut value = valid_card("content-creation", None);
+        value["how_to_try"] = json!("");
+        value["one_liner_zh"] = json!("  给小红书做封面  ");
+        let card = validate_card(&value, &categories(), &scenarios()).expect("应通过");
+        assert_eq!(card.value["how_to_try"], "");
+        assert_eq!(
+            card.value["one_liner_zh"], "  给小红书做封面  ",
+            "不改写模型写的字"
+        );
+    }
+
+    #[test]
+    fn required_card_str_rejects_empty_whitespace_missing_and_non_strings() {
+        let card = ValidCard {
+            value: json!({
+                "ok": "有内容", "padded": "  有内容  ", "empty": "", "space": " \n\t\u{3000}",
+                "number": 3, "null": null
+            }),
+        };
+        assert_eq!(required_card_str(&card, "ok").unwrap(), "有内容");
+        assert_eq!(
+            required_card_str(&card, "padded").unwrap(),
+            "  有内容  ",
+            "只判断是不是空的，不改写"
+        );
+        for key in ["empty", "space", "number", "null", "absent"] {
+            let error = required_card_str(&card, key).expect_err(key);
+            assert_eq!(error.kind, CardRunErrorKind::Schema, "{key}");
+            assert!(error.message.contains(key), "{}", error.message);
+        }
+    }
+
+    #[test]
+    fn an_empty_one_liner_is_repaired_with_one_more_call_and_written_once_fixed() {
+        let db = TempDb::new();
+        let mut conn = db.open();
+        seed_repo(&conn, Some(&usable_readme()));
+        let mut empty = valid_card("content-creation", None);
+        empty["one_liner_zh"] = json!("");
+        empty["what_it_is"] = json!("   ");
+        let client = ScriptedClient::new(vec![
+            ok_reply(&serde_json::to_string(&empty).unwrap(), "m1", 10, 4),
+            ok_reply(&valid_json(), "m2", 20, 6),
+        ]);
+        let report = run_repo_card(
+            &mut conn,
+            &client,
+            "r1",
+            &options(false, "2026-10-03T00:00:00Z"),
+        )
+        .expect("修复后应写库");
+        assert_eq!(report.outcome, CardRunOutcome::Generated);
+        let calls = client.calls();
+        assert_eq!(calls.len(), 2, "空的必填项走一次修复调用");
+        assert!(
+            calls[1].user.contains("缺少必填字段 one_liner_zh"),
+            "{}",
+            calls[1].user
+        );
+        assert!(
+            calls[1].user.contains("缺少必填字段 what_it_is"),
+            "{}",
+            calls[1].user
+        );
+        assert_eq!(
+            cell_string(
+                &conn,
+                "SELECT one_liner_zh FROM repo_ai_documents WHERE repo_id = 'r1'"
+            ),
+            "给小红书做封面的命令行"
+        );
+    }
+
+    #[test]
+    fn a_card_that_is_still_empty_after_the_repair_fails_and_writes_nothing() {
+        let db = TempDb::new();
+        let mut conn = db.open();
+        seed_repo(&conn, Some(&usable_readme()));
+        let mut first = valid_card("content-creation", None);
+        first["one_liner_zh"] = json!("");
+        let mut second = valid_card("content-creation", None);
+        second["what_it_is"] = json!(" \u{3000} ");
+        let client = ScriptedClient::new(vec![
+            ok_reply(&serde_json::to_string(&first).unwrap(), "m1", 20_000, 3_000),
+            ok_reply(
+                &serde_json::to_string(&second).unwrap(),
+                "m2",
+                21_000,
+                3_000,
+            ),
+        ]);
+        let error = run_repo_card(
+            &mut conn,
+            &client,
+            "r1",
+            &options(false, "2026-10-03T00:00:00Z"),
+        )
+        .expect_err("修不好就失败");
+        assert_eq!(error.kind, CardRunErrorKind::Schema);
+        assert!(
+            error.message.contains("理解卡未通过校验"),
+            "{}",
+            error.message
+        );
+        assert!(error.message.contains("what_it_is"), "{}", error.message);
+        assert_eq!(client.calls().len(), 2, "只修一次");
+        // 两次调用都计费：和别的校验失败一样，把真实用量比估计多出来的部分带出去
+        assert_eq!(
+            error.spent_tokens,
+            47_000 - crate::jobs::REPAIRED_FAILURE_TOKEN_ESTIMATE as u64,
+            "{error:?}"
+        );
+        assert_eq!(cell_i64(&conn, "SELECT COUNT(*) FROM repo_ai_documents"), 0);
+        assert_eq!(cell_i64(&conn, "SELECT COUNT(*) FROM entity_categories"), 0);
+    }
+
+    // —— 截断不许把非空文字截成空 ——
+
+    fn unclosed_brackets(text: &str) -> usize {
+        BRACKET_PAIRS
+            .iter()
+            .map(|(open, close)| {
+                let opens = text.chars().filter(|ch| ch == open).count();
+                let closes = text.chars().filter(|ch| ch == close).count();
+                opens.saturating_sub(closes)
+            })
+            .sum()
+    }
+
+    #[test]
+    fn a_long_sentence_that_opens_with_a_bracket_is_hard_cut_and_closed_not_emptied() {
+        for (open, close) in [('「', '」'), ('（', '）'), ('(', ')'), ('《', '》')] {
+            let text = format!("{open}{}", "字".repeat(80));
+            let cut = truncate_text(&text, 40);
+            assert!(!cut.trim().is_empty(), "{open}：{cut:?}");
+            assert_eq!(
+                cut.chars().count(),
+                40,
+                "{open}：硬截到上限，括号补在里面：{cut:?}"
+            );
+            assert!(cut.starts_with(open), "{cut:?}");
+            assert!(cut.ends_with(close), "{cut:?}");
+            assert!(cut.contains('…'), "{cut:?}");
+            assert_eq!(unclosed_brackets(&cut), 0, "{cut:?}");
+        }
+        // 前面有空白也一样
+        let cut = truncate_text(&format!("  「{}", "字".repeat(80)), 40);
+        assert!(!cut.trim().is_empty(), "{cut:?}");
+        assert_eq!(unclosed_brackets(&cut), 0);
+        // 两层没关的括号：每一层都补上
+        let cut = truncate_text(&format!("「「{}", "字".repeat(80)), 40);
+        assert_eq!(cut.chars().count(), 40);
+        assert!(cut.ends_with("」」"), "{cut:?}");
+        assert_eq!(unclosed_brackets(&cut), 0);
+        // 括号开在句子里面（前面有话）：还是去掉括号和后面的，前面的话留着，不走退路
+        let cut = truncate_text(&format!("它的口号是「{}", "字".repeat(80)), 25);
+        assert_eq!(cut, "它的口号是");
+    }
+
+    #[test]
+    fn the_brackets_added_back_close_the_innermost_one_first() {
+        let tail = "字".repeat(80);
+        let cut = truncate_text(&format!("（说明「{tail}"), 20);
+        assert!(cut.ends_with("」）"), "{cut}");
+        assert_eq!(cut.chars().count(), 20, "{cut}");
+        let cut = truncate_text(&format!("《书「(a{tail}"), 20);
+        assert!(cut.ends_with(")」》"), "{cut}");
+        assert_eq!(cut.chars().count(), 20, "{cut}");
+        assert_eq!(unclosed_brackets(&cut), 0);
+        // 前面已经关上的不再补，只补还开着的
+        let cut = truncate_text(&format!("「（说明）{tail}"), 20);
+        assert!(cut.starts_with("「（说明）"), "{cut}");
+        assert!(cut.ends_with("…」"), "{cut}");
+        assert_eq!(cut.chars().count(), 20, "{cut}");
+        assert_eq!(unclosed_brackets(&cut), 0, "{cut}");
+    }
+
+    #[test]
+    fn brackets_that_are_already_closed_inside_the_kept_text_are_left_alone() {
+        let text = "它支持（多种模型）而且还能切换服务商和密钥以及很多很多更多的设置选项";
+        let cut = truncate_text(text, 20);
+        assert_eq!(cut, "它支持（多种模型）而且还能切换服务商和…");
+        assert_eq!(cut.chars().count(), 20);
+        // 英文括号、书名号、引号也一样
+        for (open, close) in [('(', ')'), ('「', '」'), ('《', '》')] {
+            let text = format!(
+                "它支持{open}多种模型{close}而且还能切换服务商和密钥以及很多很多更多的设置选项"
+            );
+            let cut = truncate_text(&text, 20);
+            assert!(cut.contains(open) && cut.contains(close), "{cut}");
+            assert!(cut.chars().count() <= 20, "{cut}");
+        }
+    }
+
+    #[test]
+    fn truncate_text_with_an_opening_bracket_inside_a_sentence_end_cut_keeps_something() {
+        // 句末断点在括号里面：断出来的整段都在没关的括号里，去掉括号后是空的
+        let text = format!("（{}。{}", "说明".repeat(8), "字".repeat(60));
+        let cut = truncate_text(&text, 30);
+        assert!(!cut.trim().is_empty(), "{cut:?}");
+        assert!(cut.chars().count() <= 30, "{cut:?}");
+        assert_eq!(unclosed_brackets(&cut), 0, "{cut:?}");
+    }
+
+    #[test]
+    fn truncate_text_always_returns_something_within_the_limit_with_closed_brackets() {
+        let mut rng = XorShift(0xDEAD_BEEF_CAFE_F00D);
+        let pieces = [
+            "字", "说", "明", "。", "，", "、", "；", "！", " ", "\u{3000}", "（", "）", "(", ")",
+            "「", "」", "《", "》", "a", "b", ",", ".", "…",
+        ];
+        for _ in 0..30_000 {
+            let text: String = (0..rng.below(90))
+                .map(|_| pieces[rng.below(pieces.len())])
+                .collect();
+            let limit = 1 + rng.below(60);
+            let cut = truncate_text(&text, limit);
+            let input_chars = text.chars().count();
+            if input_chars <= limit {
+                assert_eq!(cut, text, "没超长就原样：{text:?} / {limit}");
+                continue;
+            }
+            assert!(!cut.is_empty(), "{text:?} / {limit} 被截成了空");
+            assert!(
+                cut.chars().count() <= limit,
+                "{text:?} / {limit} → {cut:?} 超过上限"
+            );
+            assert_eq!(unclosed_brackets(&cut), 0, "{text:?} / {limit} → {cut:?}");
+        }
+        // 上限很小也不 panic、不空
+        assert_eq!(truncate_text("「很长很长", 1), "…");
+        assert_eq!(truncate_text("「「「「「", 2), "…");
+        assert_eq!(truncate_text("，很长很长", 1), "…");
+        assert_eq!(truncate_text("很长很长", 0), "");
+    }
+
+    #[test]
+    fn a_one_liner_that_is_one_long_quote_is_not_emptied_by_validation() {
+        let mut value = valid_card("content-creation", None);
+        value["one_liner_zh"] = json!(format!("「{}", "字".repeat(80)));
+        let card = validate_card(&value, &categories(), &scenarios()).expect("应通过");
+        let one_liner = card.value["one_liner_zh"].as_str().unwrap();
+        assert!(!one_liner.trim().is_empty());
+        assert_eq!(one_liner.chars().count(), 40);
+        assert!(
+            one_liner.starts_with('「') && one_liner.ends_with('」'),
+            "{one_liner}"
+        );
     }
 }
