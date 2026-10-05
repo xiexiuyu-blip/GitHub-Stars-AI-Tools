@@ -4,6 +4,14 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import {
   approxRepos,
+  AUTO_ORGANIZE_DEFINITION,
+  DAILY_ORGANIZE_TITLE,
+  DAILY_ORGANIZE_DESCRIPTION,
+  DAILY_ORGANIZE_DURING_SCAN,
+  SLOW_ORGANIZE_COPY,
+  dailyBudgetMetric,
+  enqueueCardsNote,
+  organizeCountsLine,
   autoSyncDescription,
   automationHint,
   automationState,
@@ -166,14 +174,26 @@ describe('automationState', () => {
   it('额度是 0（未开启）：明确说不会花钱', () => {
     const state = automationState(status({ enabled: false, dailyBudgetTokens: 0, budgetRemaining: 0, queued: 401 }));
     expect(state.label).toBe('未开启');
-    expect(state.detail).toContain('不会花钱');
+    expect(state.detail).toBe('还没开启每天自动整理时，应用不会自动调用 AI，也不会花钱；你手动点「现在整理」时才会花钱（会先让你确认）。');
   });
 
-  it('开了但今天额度用完：黄色，说明明天继续', () => {
+  it('开了但每天额度用完：黄色，说明滚动额度和手动入口', () => {
     const state = automationState(status({ budgetRemaining: 0, queued: 10 }));
-    expect(state.label).toBe('今天的额度用完了');
+    expect(state.label).toBe('每天额度用完了');
     expect(state.hue).toBe(36);
-    expect(state.detail).toContain('明天');
+    expect(state.detail).toBe('每天自动整理的额度用完了（按最近 24 小时累计），过一阵额度恢复会自动继续；现在有 10 个在排队。想现在就整理，点下面的「现在整理」，不受额度限制；也可以在下面调高每天额度。');
+    expect(`${state.label}${state.detail}`).not.toMatch(/今天|明天/);
+    expect(state.detail).toContain('现在整理');
+  });
+
+  it.each([0, -1])('没有排队时不加数量，额度剩余 %s 也按用完显示', (budgetRemaining) => {
+    const state = automationState(status({ budgetRemaining, queued: 0 }));
+    expect(state).toEqual({
+      label: '每天额度用完了',
+      hue: 36,
+      detail: '每天自动整理的额度用完了（按最近 24 小时累计），过一阵额度恢复会自动继续。想现在就整理，点下面的「现在整理」，不受额度限制；也可以在下面调高每天额度。',
+    });
+    expect(`${state.label}${state.detail}`).not.toMatch(/今天|明天/);
   });
 
   it('开了、有额度、有等待或进行中：绿色「整理中」', () => {
@@ -215,7 +235,7 @@ describe('automationHint', () => {
     expect(automationHint(status({ providerConfigured: false, paused: true, enabled: false }), 5)?.icon).toBe('key');
     expect(automationHint(status({ paused: true, enabled: false }), 5)?.title).toBe('自动整理被暂停了');
     expect(automationHint(status({ enabled: false, budgetRemaining: 0 }), 5)?.actionLabel).toBe('开启自动整理');
-    expect(automationHint(status({ budgetRemaining: 0, queued: 3 }), 5)?.title).toBe('今天的整理额度用完了');
+    expect(automationHint(status({ budgetRemaining: 0, queued: 3 }), 5)?.title).toBe('每天自动整理的额度用完了');
     expect(automationHint(status({ queued: 3 }), 5)?.title).toBe('正在后台整理，还剩 5 个');
     expect(automationHint(status(), 5)?.actionLabel).toBe('加入整理');
   });
@@ -248,7 +268,7 @@ describe('itemPendingNote', () => {
     expect(itemPendingNote(status({ providerConfigured: false })).actionLabel).toBe('去设置 AI');
     expect(itemPendingNote(status({ paused: true })).text).toContain('暂停');
     expect(itemPendingNote(status({ enabled: false })).text).toContain('还没开启');
-    expect(itemPendingNote(status({ budgetRemaining: 0 })).text).toContain('明天');
+    expect(itemPendingNote(status({ budgetRemaining: 0 })).text).toContain('过一阵');
     expect(itemPendingNote(status({ queued: 1 })).text).toContain('整理队列');
   });
 
@@ -279,7 +299,7 @@ describe('regenerateNote', () => {
   it('没配置服务 / 暂停 / 额度用完 / 在跑，各说各的', () => {
     expect(regenerateNote(status({ providerConfigured: false })).actionLabel).toBe('去设置 AI');
     expect(regenerateNote(status({ paused: true })).sub).toContain('暂停');
-    expect(regenerateNote(status({ budgetRemaining: 0 })).sub).toContain('明天');
+    expect(regenerateNote(status({ budgetRemaining: 0 })).sub).toContain('过一阵');
     const running = regenerateNote(status({ queued: 2 }));
     expect(running.sub).toContain('后台重新整理');
     expect(running.actionLabel).toBeNull();
@@ -342,6 +362,14 @@ describe('roundedEstimate', () => {
 });
 
 describe('fullScanPending', () => {
+  it('优先 awaiting，0 也是有效值；null 才回退旧字段', () => {
+    expect(fullScanPending(status({ awaiting: 3, needsOrganizing: 0, queued: 1 }))).toBe(3);
+    expect(fullScanPending(status({ awaiting: 0, needsOrganizing: 388, queued: 9 }))).toBe(0);
+    expect(fullScanPending(status({ awaiting: null, needsOrganizing: 388 }))).toBe(388);
+    expect(fullScanPending(status({ awaiting: null, needsOrganizing: null, queued: 2, running: 1 }))).toBe(3);
+    expect(fullScanPending(status({ awaiting: -1, needsOrganizing: 388 }))).toBe(0);
+    expect(fullScanPending(status({ awaiting: Number.NaN, needsOrganizing: 388 }))).toBe(0);
+  });
   it('有 needsOrganizing 就用它，0 也不退回等待数', () => {
     expect(fullScanPending(status({ needsOrganizing: 388, queued: 1, running: 1 }))).toBe(388);
     expect(fullScanPending(status({ needsOrganizing: 0, queued: 9, running: 2 }))).toBe(0);
@@ -377,12 +405,14 @@ describe('fullScanProgress', () => {
 
 describe('fullScanPanel', () => {
   it('还没读到状态是 loading', () => {
-    expect(fullScanPanel(null)).toEqual({ kind: 'loading' });
+    expect(fullScanPanel(null)).toEqual({ kind: 'loading', title: '整理现有收藏', description: null });
   });
 
   it('没配置 AI 服务是 unavailable，原因让人去设置里保存密钥', () => {
     expect(fullScanPanel(status({ providerConfigured: false }))).toEqual({
       kind: 'unavailable',
+      title: '整理现有收藏',
+      description: null,
       reason: '先到「设置 → AI 设置」里选好服务商和模型、保存密钥，才能整理。',
     });
   });
@@ -405,7 +435,7 @@ describe('fullScanPanel', () => {
     });
   });
 
-  it('正在一次性全部整理是 running，带上进度、花费和暂停原因', () => {
+  it('「现在整理」进行中是 running，带上进度、花费和暂停原因', () => {
     const panel = fullScanPanel(status({
       unlimited: true,
       paused: true,
@@ -414,6 +444,8 @@ describe('fullScanPanel', () => {
     }));
     expect(panel).toEqual({
       kind: 'running',
+      title: '正在整理（不受每天额度限制）',
+      description: '第一次用、想一口气把全部收藏整理完，就用它。这一轮不受每天额度限制，整理完自动回到每天自动整理。',
       done: 120,
       total: 388,
       percent: 30,
@@ -470,6 +502,99 @@ describe('fullScanPanel', () => {
       fullScan: fullScan(),
     }));
     expect(panel.kind).toBe('unavailable');
+  });
+
+  it('额度用完但有重新排队的收藏，仍可手动整理；没有待整理才显示完成', () => {
+    const pending = status({ budgetRemaining: 0, awaiting: 3, needsOrganizing: 0, queued: 3, lastFullScan: lastScan() });
+    expect(fullScanPanel(pending)).toEqual({
+      kind: 'ready',
+      title: '现在就整理 3 个',
+      description: '不想等每天自动整理的时候用：这一轮不受每天额度限制，整理完自动回到每天自动整理。',
+      body: '有 3 个收藏在等整理，预计约 2 万 token（具体花多少钱以你服务商的账单为准）。',
+      buttonLabel: '现在整理 3 个',
+      pending: 3,
+      estimate: '2 万',
+      last: '上次一次性全部整理：10 月 4 日 12:30 被停止，已整理 120 / 388 个，用了约 62 万 token。',
+    });
+    expect(fullScanPanel({ ...pending, awaiting: 0 })).toEqual({
+      kind: 'nothing',
+      title: '现有收藏都整理好了',
+      description: '以后新收藏、README 有实质更新的，会交给下面的「每天自动整理」。',
+      last: lastFullScanText(pending.lastFullScan),
+    });
+  });
+
+  it.each([
+    { activeRepos: 12, needsOrganizingMissing: 2, needsOrganizingOutdated: 10, lastFullScan: lastScan() },
+    { activeRepos: 12, needsOrganizingMissing: 10, needsOrganizingOutdated: 10, lastFullScan: lastScan() },
+    { lastFullScan: undefined },
+    { lastFullScan: null },
+  ])('分项中新版说明为 0，或旧后台没有上次记录，显示第一步：%j', (overrides) => {
+    const panel = fullScanPanel(status({ ...overrides, awaiting: 12, budgetRemaining: 0 }));
+    expect(panel).toEqual({
+      kind: 'ready',
+      title: '第一步：把现有收藏整理一遍',
+      description: '只在第一次用、或说明的格式升级之后做一次：一口气把现有收藏整理完，不受每天额度限制。整理完，以后就只剩下面的「每天自动整理」。',
+      body: '需要整理 12 个，预计约 8 万 token（具体花多少钱以你服务商的账单为准）。',
+      buttonLabel: '开始整理全部 12 个',
+      pending: 12,
+      estimate: '8 万',
+      last: lastFullScanText(overrides.lastFullScan),
+    });
+  });
+
+  it.each([
+    { activeRepos: 12, needsOrganizingMissing: 2, needsOrganizingOutdated: 9, lastFullScan: null },
+    { lastFullScan: lastScan() },
+    { activeRepos: 12, needsOrganizingMissing: 12, lastFullScan: lastScan() },
+  ])('有新版说明，或分项缺失但有上次记录，显示后续手动整理：%j', (overrides) => {
+    expect(fullScanPanel(status({ ...overrides, awaiting: 12 }))).toEqual({
+      kind: 'ready',
+      title: '现在就整理 12 个',
+      description: '不想等每天自动整理的时候用：这一轮不受每天额度限制，整理完自动回到每天自动整理。',
+      body: '有 12 个收藏在等整理，预计约 8 万 token（具体花多少钱以你服务商的账单为准）。',
+      buttonLabel: '现在整理 12 个',
+      pending: 12,
+      estimate: '8 万',
+      last: lastFullScanText(overrides.lastFullScan),
+    });
+  });
+
+  it.each([
+    { enabled: false, dailyBudgetTokens: 0, budgetRemaining: 0 },
+    { paused: true, budgetRemaining: 0 },
+    { budgetRemaining: -1 },
+  ])('手动入口不由每天额度、开关或暂停状态禁用：%j', (overrides) => {
+    expect(fullScanPanel(status({ ...overrides, awaiting: 1 })).kind).toBe('ready');
+  });
+});
+
+describe('organizeCountsLine', () => {
+  it('三个分项齐全时给出新版 / 旧版 / 缺失数量，旧版有值才解释升级', () => {
+    expect(organizeCountsLine(status({ activeRepos: 500, needsOrganizingMissing: 39, needsOrganizingOutdated: 461 }))).toBe(
+      '现有 500 个收藏：新版说明 0 个 · 旧版说明 461 个 · 还没有说明 39 个。旧版说明是用旧格式写的，还能看，但建议按新格式重写，「找方案」和资料库筛选才更准。',
+    );
+    expect(organizeCountsLine(status({ activeRepos: 500, needsOrganizingMissing: 39, needsOrganizingOutdated: 0 }))).toBe(
+      '现有 500 个收藏：新版说明 461 个 · 旧版说明 0 个 · 还没有说明 39 个。',
+    );
+  });
+
+  it('分项合计超过总数时，新版个数不出现负数', () => {
+    expect(organizeCountsLine(status({ activeRepos: 2, needsOrganizingMissing: 2, needsOrganizingOutdated: 1 }))).toBe(
+      '现有 2 个收藏：新版说明 0 个 · 旧版说明 1 个 · 还没有说明 2 个。旧版说明是用旧格式写的，还能看，但建议按新格式重写，「找方案」和资料库筛选才更准。',
+    );
+  });
+
+  it.each(['activeRepos', 'needsOrganizingMissing', 'needsOrganizingOutdated'] as const)('%s 缺失或 null 就隐藏整行', (field) => {
+    const complete = status({ activeRepos: 12, needsOrganizingMissing: 2, needsOrganizingOutdated: 3 });
+    expect(organizeCountsLine({ ...complete, [field]: undefined })).toBeNull();
+    expect(organizeCountsLine({ ...complete, [field]: null })).toBeNull();
+  });
+
+  it('旧后台、未读到状态、收藏总数为 0 都隐藏整行', () => {
+    expect(organizeCountsLine(status())).toBeNull();
+    expect(organizeCountsLine(null)).toBeNull();
+    expect(organizeCountsLine(status({ activeRepos: 0, needsOrganizingMissing: 0, needsOrganizingOutdated: 0 }))).toBeNull();
   });
 });
 
@@ -546,7 +671,7 @@ describe('一次性全部整理期间不说额度用完', () => {
     expect(hint).toEqual({
       hue: 148,
       icon: 'autorenew',
-      title: '正在一次性全部整理，还剩 5 个',
+      title: '「现在整理」进行中，还剩 5 个',
       detail: '不受每天额度限制，这一轮已整理 120 个（已用约 62 万 token）。整理完会自动回到每天自动整理。',
       actionLabel: '看整理进度',
     });
@@ -559,7 +684,7 @@ describe('一次性全部整理期间不说额度用完', () => {
     expect(hint).toEqual({
       hue: 148,
       icon: 'autorenew',
-      title: '正在一次性全部整理',
+      title: '「现在整理」进行中',
       detail: '这一批已经做完，整理完会自动回到每天自动整理。这一轮已整理 120 个（已用约 200 万 token）。',
       actionLabel: '看整理进度',
     });
@@ -571,10 +696,10 @@ describe('一次性全部整理期间不说额度用完', () => {
     expect(hint?.detail).toBe('不受每天额度限制，已用约 4 万 token。整理完会自动回到每天自动整理。');
   });
 
-  it('详情不说额度用完，改说正在一次性全部整理', () => {
+  it('详情不说额度用完，改说「现在整理」进行中', () => {
     const note = itemPendingNote(during());
     expect(note).toEqual({
-      text: '正在一次性全部整理，整理好会自动出现在这里。先看 GitHub 上的原文：',
+      text: '「现在整理」进行中，整理好会自动出现在这里。先看 GitHub 上的原文：',
       actionLabel: null,
     });
     expect(note.text).not.toContain('额度');
@@ -583,7 +708,7 @@ describe('一次性全部整理期间不说额度用完', () => {
   it('队列是 0、额度也是 0 时，只要 unlimited，详情和顶上提示都不说额度用完', () => {
     const pausedBudget = status({ unlimited: true, budgetRemaining: 0, queued: 0, running: 0 });
     const note = itemPendingNote(pausedBudget);
-    expect(note.text).toContain('正在一次性全部整理');
+    expect(note.text).toContain('「现在整理」进行中');
     expect(note.text).not.toContain('额度用完');
     const hint = automationHint(pausedBudget, 3);
     expect(hint?.title ?? '').not.toContain('额度用完');
@@ -596,7 +721,7 @@ describe('一次性全部整理期间不说额度用完', () => {
     const note = regenerateNote(during());
     expect(note).toEqual({
       title: '已加入整理队列',
-      sub: '正在一次性全部整理，会在后台重新整理，好了会自动更新',
+      sub: '「现在整理」进行中，会在后台重新整理，好了会自动更新',
       actionLabel: null,
     });
     expect(note.sub).not.toContain('额度');
@@ -612,25 +737,101 @@ describe('一次性全部整理期间不说额度用完', () => {
   });
 });
 
-describe('额度用完时指出可以开一次性全部整理', () => {
-  it('不是一次性全部整理时，提示去调整每天额度，并说明可以一次整理完', () => {
+describe('额度用完时指出可以现在整理', () => {
+  it('不是一次性全部整理时，提示去整理，并说明可以现在整理', () => {
     const hint = automationHint(status({ budgetRemaining: 0, queued: 3 }), 5);
-    expect(hint?.title).toBe('今天的整理额度用完了');
-    expect(hint?.actionLabel).toBe('调整每天额度');
-    expect(hint?.detail).toBe('还有 5 个没整理，明天会自动接着做；想现在就整理完，可以到「设置 → 自动整理与备份」开启「一次性全部整理」。');
+    expect(hint?.title).toBe('每天自动整理的额度用完了');
+    expect(hint?.actionLabel).toBe('去整理');
+    expect(hint?.detail).toBe('还有 5 个没整理，过一阵额度恢复会自动接着做；想现在就整理，到「设置 → 自动整理与备份」点「现在整理」。');
+    expect(`${hint?.title}${hint?.detail}`).not.toMatch(/今天|明天/);
   });
 
-  it('详情和重新整理的「额度用完」都补上一句可以开一次性全部整理', () => {
-    expect(itemPendingNote(status({ budgetRemaining: 0 })).text).toContain('也可以到「设置 → 自动整理与备份」开启一次性全部整理');
-    expect(regenerateNote(status({ budgetRemaining: 0 })).sub).toContain('也可以到「设置 → 自动整理与备份」开启一次性全部整理');
+  it('详情和重新整理的「额度用完」都给现在整理入口，文案逐字一致', () => {
+    const item = itemPendingNote(status({ budgetRemaining: 0 }));
+    const regenerate = regenerateNote(status({ budgetRemaining: 0 }));
+    expect(item).toEqual({
+      text: '每天自动整理的额度用完了，过一阵会接着整理；也可以到「设置 → 自动整理与备份」点「现在整理」。先看 GitHub 上的原文：',
+      actionLabel: '去整理',
+    });
+    expect(regenerate).toEqual({
+      title: '已加入整理队列',
+      sub: '每天自动整理的额度用完了，过一阵会接着整理，也可以到「设置 → 自动整理与备份」点「现在整理」',
+      actionLabel: null,
+    });
+    expect(`${item.text}${regenerate.sub}`).not.toMatch(/今天|明天/);
   });
 
-  it('unlimited 字段缺失时，仍走原来的「额度用完」，不说正在一次性全部整理', () => {
-    expect(automationState(status({ budgetRemaining: 0, queued: 10 })).label).toBe('今天的额度用完了');
-    expect(automationHint(status({ budgetRemaining: 0, queued: 3 }), 5)?.title).toBe('今天的整理额度用完了');
-    expect(itemPendingNote(status({ budgetRemaining: 0 })).text).toContain('明天');
+  it('unlimited 字段缺失时，仍走原来的「额度用完」，不说「现在整理」进行中', () => {
+    expect(automationState(status({ budgetRemaining: 0, queued: 10 })).label).toBe('每天额度用完了');
+    expect(automationHint(status({ budgetRemaining: 0, queued: 3 }), 5)?.title).toBe('每天自动整理的额度用完了');
+    expect(itemPendingNote(status({ budgetRemaining: 0 })).text).toContain('过一阵');
     expect(itemPendingNote(status({ queued: 1 })).text).toContain('整理队列');
-    expect(regenerateNote(status({ budgetRemaining: 0 })).sub).toContain('明天');
+    expect(regenerateNote(status({ budgetRemaining: 0 })).sub).toContain('过一阵');
+  });
+});
+
+describe('自动整理定义、每日档位和慢慢整理说明', () => {
+  it('页面定义和每天整理说明逐字匹配任务卡', () => {
+    expect(AUTO_ORGANIZE_DEFINITION).toBe('自动整理：应用在后台给「新收藏」和「README 有实质更新的收藏」写（或重写）中文说明——它能做什么、适合解决什么、怎么试。没变化的不会重复整理，也不会重复花钱。整理好的会出现在「今日」和「资料库」里。用的是你自己配置的 AI 服务，具体花多少钱以服务商的账单为准。');
+    expect(DAILY_ORGANIZE_TITLE).toBe('每天自动整理（后台自动做，只处理新增和变化的）');
+    expect(DAILY_ORGANIZE_DESCRIPTION).toBe('第一步做完以后，平时不用管：每次同步到新收藏、或某个收藏的 README 有实质更新，应用会在后台自动整理它。每天最多花你设定的额度；用完这一天的自动整理就先歇着，不影响你随时手动「现在整理」。');
+    expect(DAILY_ORGANIZE_DURING_SCAN).toBe('整理正在进行，这一轮不受每天额度限制；整理完才按下面的额度。');
+  });
+
+  it('只改每日档位文案，不改已保存的 token 数值', () => {
+    expect(BUDGET_PRESETS.map((preset) => preset.tokens)).toEqual([0, 100000, 200000, 600000]);
+    expect(BUDGET_PRESETS).toEqual([
+      { tokens: 0, title: '关闭', hint: '不自动整理，一分钱不花（你仍然可以手动整理）' },
+      { tokens: 100000, title: '试跑', hint: '每天最多约 16 个，先看看效果' },
+      { tokens: 200000, title: '日常', hint: '每天最多约 33 个' },
+      { tokens: 600000, title: '多整理些', hint: '每天最多约 100 个，新收藏很多时用' },
+    ]);
+    expect(BUDGET_PRESETS.map((preset) => preset.title)).toContain('多整理些');
+    expect(BUDGET_PRESETS.map((preset) => preset.title)).not.toContain('集中补齐');
+  });
+
+  it('慢慢整理先说明只排队，再给两个按钮', () => {
+    expect(SLOW_ORGANIZE_COPY).toEqual({
+      title: '只想慢慢整理（可选）',
+      description: '这两个只是把它们排进队列，按每天额度慢慢做，不会马上花钱；想马上做完，用上面的「现在整理」。',
+      missingLabel: '把还没有说明的排进队列',
+      outdatedLabel: '把旧版说明排进队列重写',
+    });
+    expect(enqueueCardsNote(3, false)).toBe('已排进队列 3 个，按每天额度慢慢整理；想马上做完，点上面的「现在整理」。');
+    expect(enqueueCardsNote(3, true)).toBe('已排进队列 3 个，整理正在进行，会一起处理。');
+    expect(enqueueCardsNote(0, false)).toBe('没有还要整理的了。');
+    expect(enqueueCardsNote(0, true)).toBe('没有还要整理的了。');
+  });
+});
+
+describe('dailyBudgetMetric', () => {
+  it('只用每天额度口径，新后台排除手动整理用量；旧后台回退 tokens24h', () => {
+    expect(dailyBudgetMetric(status({ dailyTokensUsed: 40000, tokens24h: 2000000, budgetRemaining: 60000 }))).toEqual({
+      label: '自动整理额度还剩',
+      value: '6 万 token',
+      sub: '约还能整理 10 个 · 已用 4 万 / 额度 10 万（整理现有收藏用的不算）',
+    });
+    for (const dailyTokensUsed of [undefined, null]) {
+      expect(dailyBudgetMetric(status({ dailyTokensUsed, tokens24h: 40000, budgetRemaining: 60000 }))).toEqual({
+        label: '自动整理额度还剩',
+        value: '6 万 token',
+        sub: '约还能整理 10 个 · 已用 4 万 / 额度 10 万（整理现有收藏用的不算）',
+      });
+    }
+    expect(dailyBudgetMetric(status({ dailyTokensUsed: 0, tokens24h: 2000000 })).sub).toBe('约还能整理 16 个 · 已用 0 / 额度 10 万（整理现有收藏用的不算）');
+  });
+
+  it('手动整理时无每天限制；未开启时隐藏数字，即使配置过每天额度', () => {
+    expect(dailyBudgetMetric(status({ unlimited: true, enabled: false, budgetRemaining: 0 }))).toEqual({
+      label: '自动整理额度还剩', value: '不受每天额度限制', sub: '正在整理中',
+    });
+    expect(dailyBudgetMetric(status({ enabled: false }))).toEqual({
+      label: '自动整理额度还剩', value: '—', sub: '没有开启每天自动整理',
+    });
+    expect(dailyBudgetMetric(status({ budgetRemaining: 0, dailyTokensUsed: 100000 }))).toEqual({
+      label: '自动整理额度还剩', value: '0 token',
+      sub: '约还能整理 0 个 · 已用 10 万 / 额度 10 万（整理现有收藏用的不算）',
+    });
   });
 });
 
@@ -726,7 +927,7 @@ describe('formatSyncComplete', () => {
 describe('fullScanConfirmLines', () => {
   it('确认框固定三句：个数、不受每天额度限制、什么时候自动停', () => {
     expect(fullScanConfirmLines(12, '8 万')).toEqual([
-      '还有 12 个收藏没有中文说明，预计整理约 12 个（约 8 万 token，具体花多少钱以你服务商的账单为准）。',
+      '需要整理 12 个，预计约 8 万 token（具体花多少钱以你服务商的账单为准）。',
       '点确认后，应用在后台一直整理，不受每天额度限制，最多跑 48 小时，你随时可以点「停止」。',
       '服务商拒绝请求、失败太多，或花费超过预计的 4 倍时会自动停下。',
     ]);
@@ -952,11 +1153,11 @@ describe('各状态按钮文案', () => {
     expect(automationHint(status({ providerConfigured: false }), 3)?.actionLabel).toBe('去设置 AI');
     expect(automationHint(status({ paused: true }), 3)?.actionLabel).toBe('继续整理');
     expect(automationHint(status({ unlimited: true, fullScan: fullScan() }), 3)?.actionLabel).toBe('看整理进度');
-    expect(automationHint(status({ budgetRemaining: 0 }), 3)?.actionLabel).toBe('调整每天额度');
+    expect(automationHint(status({ budgetRemaining: 0 }), 3)?.actionLabel).toBe('去整理');
     expect(automationHint(status(), 3)?.actionLabel).toBe('加入整理');
     expect(itemPendingNote(status({ providerConfigured: false })).actionLabel).toBe('去设置 AI');
     expect(itemPendingNote(status({ paused: true })).actionLabel).toBe('继续整理');
-    expect(itemPendingNote(status({ budgetRemaining: 0 })).actionLabel).toBe('调整每天额度');
+    expect(itemPendingNote(status({ budgetRemaining: 0 })).actionLabel).toBe('去整理');
     expect(regenerateNote(status({ providerConfigured: false })).actionLabel).toBe('去设置 AI');
     expect(regenerateNote(status({ paused: true })).actionLabel).toBe('继续整理');
   });
