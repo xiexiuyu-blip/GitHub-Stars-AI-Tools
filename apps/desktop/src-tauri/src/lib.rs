@@ -3961,6 +3961,27 @@ async fn sync_github_stars(app_handle: tauri::AppHandle) -> Result<StarSyncSumma
 struct ReadmeRefresh {
     refreshed: usize,
     listed: bool,
+    /// 这一步实际发出过抓取的仓库（不论成败）。同步第二步抓过的，第四步不再抓。
+    attempted: Vec<String>,
+}
+
+impl ReadmeRefresh {
+    /// 什么都没抓（没有要抓的，或这一步被跳过）。
+    fn nothing() -> Self {
+        Self {
+            refreshed: 0,
+            listed: true,
+            attempted: Vec::new(),
+        }
+    }
+
+    /// 两次抓取合起来给收尾用：更新数相加；「有没有列出仓库」看后一次（第四步列的是全部仓库）；抓过的并在一起。
+    fn then(mut self, later: ReadmeRefresh) -> Self {
+        self.refreshed += later.refreshed;
+        self.listed = later.listed;
+        self.attempted.extend(later.attempted);
+        self
+    }
 }
 
 fn usize_to_i64(value: usize) -> i64 {
@@ -3992,172 +4013,223 @@ fn follow_name_label(names: &[String]) -> String {
     }
 }
 
-/// 同步里的 README 跟进：先发出开始和进行中，再按批次抓取。失败只记数，不让同步失败。
-fn refresh_stale_readmes(
-    app_handle: &tauri::AppHandle,
-    storage: &AppStorage,
-    account_id: &str,
-    token: &str,
-) -> ReadmeRefresh {
-    emit_task_progress(
-        app_handle,
-        TaskProgressEvent::running(
+/// 这一次要抓哪些 README。
+enum ReadmeScope<'a> {
+    /// 这次新收藏里还没有 README 的（同步第二步）：最近收藏的在前，最多 `MAX_REFRESH_PER_RUN` 个。
+    NewStars(&'a [String]),
+    /// 其余需要更新的老 README（同步第四步）：没缓存的在前，再按抓取时间从旧到新，去掉 `skip` 里已经抓过的，最多 `MAX_REFRESH_PER_RUN` 个。
+    Stale { skip: &'a HashSet<String> },
+}
+
+/// 进度事件的出口：线上发给界面，测试收进列表。
+type ProgressSink<'a> = &'a (dyn Fn(TaskProgressEvent) + Sync);
+/// 抓一个仓库的 README（仓库 id、全名）：线上是 GitHub，测试是假的，不联网。
+type ReadmeFetcher<'a> =
+    &'a (dyn Fn(&str, &str) -> Result<Option<github::ReadmeDocument>, String> + Sync);
+/// 单调时钟：线上是 `Instant::now`，测试是假的。
+type Clock<'a> = &'a (dyn Fn() -> std::time::Instant + Sync);
+
+/// 抓 README 的外部动作：抓取、时钟、进度事件都从外面注入；落库走本地库（`AppStorage`）。
+struct ReadmeFetchIo<'a> {
+    storage: &'a AppStorage,
+    emit: ProgressSink<'a>,
+    fetch: ReadmeFetcher<'a>,
+    now: Clock<'a>,
+    /// 进度条上这一步叫什么（「正在抓取 README」「正在抓取新收藏的 README」）。
+    activity: &'static str,
+}
+
+impl readme_follow::ReadmeIo for ReadmeFetchIo<'_> {
+    fn fetch(
+        &self,
+        repo_id: &str,
+        full_name: &str,
+    ) -> Result<Option<github::ReadmeDocument>, String> {
+        (self.fetch)(repo_id, full_name)
+    }
+
+    /// 内容没变只拨检查时间（免得每次同步都重抓），变了才整份存。
+    fn store(&self, readme: &github::ReadmeDocument) -> Result<(), String> {
+        match self.storage.get_readme_hash(&readme.repo_id)? {
+            Some(existing) if existing == readme.content_hash => self
+                .storage
+                .touch_readme_fetched(&readme.repo_id, &readme.fetched_at),
+            _ => self.storage.save_readme(readme),
+        }
+    }
+
+    fn now(&self) -> std::time::Instant {
+        (self.now)()
+    }
+
+    fn progress(&self, done: usize, total: usize, batch_names: &[String]) {
+        (self.emit)(TaskProgressEvent::running(
             "readme-follow",
             "readme",
             "fetch",
-            0,
-            0,
-            "开始检查哪些 README 需要更新",
+            done,
+            total,
+            format!("{}：{}", self.activity, follow_name_label(batch_names)),
             None,
-        ),
-    );
-    let states = match storage.list_readme_states(account_id) {
-        Ok(states) => states,
-        Err(error) => {
-            eprintln!("README 跟进：列出仓库失败：{error}");
-            emit_task_progress(
-                app_handle,
-                TaskProgressEvent::running(
+        ));
+    }
+}
+
+/// 同步完成之后要做的事用到的东西。线上：GitHub、真的时钟、发给界面的进度事件；测试：假的。
+struct PostSyncFlow<'a> {
+    storage: &'a AppStorage,
+    account_id: &'a str,
+    emit: ProgressSink<'a>,
+    fetch: ReadmeFetcher<'a>,
+    now: Clock<'a>,
+    /// 第二步（新收藏的 README）的保护：时限很短，排队在等它。
+    new_star_limits: readme_follow::FetchLimits,
+    /// 第四步（其余老 README）的保护。
+    limits: readme_follow::FetchLimits,
+}
+
+impl PostSyncFlow<'_> {
+    /// 同步里的 README 抓取：先发出开始和进行中，再按批次抓取（`readme_follow::fetch_in_batches`：总时限、连续失败就停）。
+    /// 失败只记数，不让同步失败。同步里调用两次：第二步抓新收藏的（`new_star_limits`），第四步抓其余老的（`limits`）。
+    fn refresh_stale_readmes(&self, scope: ReadmeScope<'_>) -> ReadmeRefresh {
+        let limits = match scope {
+            ReadmeScope::NewStars(_) => self.new_star_limits,
+            ReadmeScope::Stale { .. } => self.limits,
+        };
+        let (targets, activity) = match scope {
+            ReadmeScope::NewStars(created_ids) => {
+                let targets = match self
+                    .storage
+                    .list_repositories_without_readme(self.account_id, created_ids)
+                {
+                    Ok(found) => found
+                        .into_iter()
+                        .take(readme_follow::MAX_REFRESH_PER_RUN)
+                        .collect::<Vec<_>>(),
+                    Err(error) => {
+                        eprintln!("README 跟进：列出新收藏里还没有 README 的仓库失败：{error}");
+                        return ReadmeRefresh::nothing();
+                    }
+                };
+                if targets.is_empty() {
+                    return ReadmeRefresh::nothing();
+                }
+                (self.emit)(TaskProgressEvent::running(
+                    "readme-follow",
+                    "readme",
+                    "fetch",
+                    0,
+                    targets.len(),
+                    format!("正在抓取新收藏的 README，共 {} 个", targets.len()),
+                    None,
+                ));
+                (targets, "正在抓取新收藏的 README")
+            }
+            ReadmeScope::Stale { skip } => {
+                (self.emit)(TaskProgressEvent::running(
                     "readme-follow",
                     "readme",
                     "fetch",
                     0,
                     0,
-                    "README 跟进没能列出要检查的仓库",
+                    "开始检查哪些 README 需要更新",
                     None,
-                ),
-            );
-            return ReadmeRefresh {
-                refreshed: 0,
-                listed: false,
-            };
-        }
-    };
-    let ids = readme_follow::refresh_targets(&states);
-    let names = states
-        .iter()
-        .map(|state| (state.id.as_str(), state.full_name.as_str()))
-        .collect::<HashMap<_, _>>();
-    let targets = ids
-        .iter()
-        .filter_map(|id| {
-            names
-                .get(id.as_str())
-                .map(|full_name| ((*id).clone(), (*full_name).to_owned()))
-        })
-        .collect::<Vec<_>>();
-    let total = targets.len();
-    emit_task_progress(
-        app_handle,
-        TaskProgressEvent::running(
-            "readme-follow",
-            "readme",
-            "fetch",
-            0,
-            total,
-            format!("正在检查 README，这次要重新抓取 {total} 个"),
-            None,
-        ),
-    );
-    if targets.is_empty() {
-        return ReadmeRefresh {
-            refreshed: 0,
-            listed: true,
-        };
-    }
-
-    let mut refreshed = 0usize;
-    let mut missed = 0usize;
-    let mut failed = 0usize;
-    let mut processed = 0usize;
-    let mut pending = targets.into_iter();
-    loop {
-        let batch = pending
-            .by_ref()
-            .take(README_FETCH_CONCURRENCY)
-            .collect::<Vec<_>>();
-        if batch.is_empty() {
-            break;
-        }
-        let label = follow_name_label(
-            &batch
-                .iter()
-                .map(|(_, full_name)| full_name.clone())
-                .collect::<Vec<_>>(),
-        );
-        emit_task_progress(
-            app_handle,
-            TaskProgressEvent::running(
-                "readme-follow",
-                "readme",
-                "fetch",
-                processed,
-                total,
-                format!("正在抓取 README：{label}"),
-                None,
-            ),
-        );
-        let handles = batch
-            .into_iter()
-            .map(|(id, full_name)| {
-                let token = token.to_owned();
-                thread::spawn(move || {
-                    let result = github::fetch_readme(&token, &id, &full_name);
-                    (id, result)
-                })
-            })
-            .collect::<Vec<_>>();
-        for handle in handles {
-            processed += 1;
-            let (id, result) = match handle.join() {
-                Ok(output) => output,
-                Err(_) => {
-                    failed += 1;
-                    continue;
-                }
-            };
-            match result {
-                Ok(Some(readme)) => match storage.get_readme_hash(&id) {
-                    Ok(existing) if existing.as_deref() == Some(readme.content_hash.as_str()) => {
-                        match storage.touch_readme_fetched(&id, &readme.fetched_at) {
-                            Ok(()) => refreshed += 1,
-                            Err(_) => failed += 1,
-                        }
+                ));
+                let states = match self.storage.list_readme_states(self.account_id) {
+                    Ok(states) => states,
+                    Err(error) => {
+                        eprintln!("README 跟进：列出仓库失败：{error}");
+                        (self.emit)(TaskProgressEvent::running(
+                            "readme-follow",
+                            "readme",
+                            "fetch",
+                            0,
+                            0,
+                            "README 跟进没能列出要检查的仓库",
+                            None,
+                        ));
+                        return ReadmeRefresh {
+                            refreshed: 0,
+                            listed: false,
+                            attempted: Vec::new(),
+                        };
                     }
-                    Ok(_) => match storage.save_readme(&readme) {
-                        Ok(()) => refreshed += 1,
-                        Err(_) => failed += 1,
-                    },
-                    Err(_) => failed += 1,
-                },
-                Ok(None) => missed += 1,
-                Err(_) => failed += 1,
+                };
+                let ids = readme_follow::refresh_targets_excluding(&states, skip);
+                let names = states
+                    .iter()
+                    .map(|state| (state.id.as_str(), state.full_name.as_str()))
+                    .collect::<HashMap<_, _>>();
+                let targets = ids
+                    .iter()
+                    .filter_map(|id| {
+                        names
+                            .get(id.as_str())
+                            .map(|full_name| ((*id).clone(), (*full_name).to_owned()))
+                    })
+                    .collect::<Vec<_>>();
+                (self.emit)(TaskProgressEvent::running(
+                    "readme-follow",
+                    "readme",
+                    "fetch",
+                    0,
+                    targets.len(),
+                    format!("正在检查 README，这次要重新抓取 {} 个", targets.len()),
+                    None,
+                ));
+                if targets.is_empty() {
+                    return ReadmeRefresh::nothing();
+                }
+                (targets, "正在抓取 README")
             }
+        };
+
+        let io = ReadmeFetchIo {
+            storage: self.storage,
+            emit: self.emit,
+            fetch: self.fetch,
+            now: self.now,
+            activity,
+        };
+        let fetched =
+            readme_follow::fetch_in_batches(targets, README_FETCH_CONCURRENCY, limits, &io);
+        if fetched.missed > 0 || fetched.failed > 0 {
+            eprintln!(
+                "README 跟进：{} 个仓库没有 README，{} 个抓取失败",
+                fetched.missed, fetched.failed
+            );
         }
-    }
-    if missed > 0 || failed > 0 {
-        eprintln!("README 跟进：{missed} 个仓库没有 README，{failed} 个抓取失败");
-    }
-    ReadmeRefresh {
-        refreshed,
-        listed: true,
+        match fetched.stopped {
+            Some(readme_follow::StopReason::TimeBudget) => eprintln!(
+                "README 跟进：抓取超过 {} 秒，先停下，剩下的留给下一次同步",
+                limits.time_budget.as_secs()
+            ),
+            Some(readme_follow::StopReason::Failures) => eprintln!(
+                "README 跟进：连续 {} 个抓取失败（网络断了或被限流），先停下，剩下的留给下一次同步",
+                limits.stop_after_failures
+            ),
+            None => {}
+        }
+        ReadmeRefresh {
+            refreshed: fetched.refreshed,
+            listed: true,
+            attempted: fetched.attempted,
+        }
     }
 }
 
-fn finish_readme_follow(
-    app_handle: &tauri::AppHandle,
-    storage: &AppStorage,
-    refresh: ReadmeRefresh,
-) {
+fn finish_readme_follow(emit: ProgressSink<'_>, storage: &AppStorage, refresh: ReadmeRefresh) {
     if !refresh.listed {
-        emit_task_progress(
-            app_handle,
-            TaskProgressEvent::failed("readme-follow", "readme", "README 跟进：这次检查没完成"),
-        );
+        emit(TaskProgressEvent::failed(
+            "readme-follow",
+            "readme",
+            "README 跟进：这次检查没完成",
+        ));
         return;
     }
     match readme_follow::enqueue_changed(storage.database_path()) {
         Ok(report) => {
+            log_held_back(&report);
             let check = jobs::LastReadmeCheck {
                 checked_at: jobs::now_db_time(),
                 checked: usize_to_i64(report.checked),
@@ -4170,30 +4242,45 @@ fn finish_readme_follow(
             {
                 eprintln!("README 跟进：检查结果没能记下：{error}");
             }
-            emit_task_progress(
-                app_handle,
-                TaskProgressEvent::succeeded(
-                    "readme-follow",
-                    "readme",
-                    report.checked,
-                    report.checked,
-                    readme_follow_message(report.checked, refresh.refreshed, report.material),
-                ),
-            );
+            emit(TaskProgressEvent::succeeded(
+                "readme-follow",
+                "readme",
+                report.checked,
+                report.checked,
+                readme_follow_message(report.checked, refresh.refreshed, report.material),
+            ));
         }
         Err(error) => {
             eprintln!("README 跟进：评估失败：{error}");
-            emit_task_progress(
-                app_handle,
-                TaskProgressEvent::failed("readme-follow", "readme", "README 跟进：这次检查没完成"),
-            );
+            emit(TaskProgressEvent::failed(
+                "readme-follow",
+                "readme",
+                "README 跟进：这次检查没完成",
+            ));
         }
+    }
+}
+
+/// 明显改动、但这个仓库最近 24 小时内整理失败或被取消过的：这次没排，记一笔日志（`lastReadmeCheck` 的键和文案不变）。
+fn held_back_log_line(report: &readme_follow::FollowReport) -> Option<String> {
+    (report.held_back > 0).then(|| {
+        format!(
+            "README 跟进：{} 个仓库最近 24 小时内整理失败或被取消过，这次先不重新排队",
+            report.held_back
+        )
+    })
+}
+
+fn log_held_back(report: &readme_follow::FollowReport) {
+    if let Some(line) = held_back_log_line(report) {
+        eprintln!("{line}");
     }
 }
 
 fn record_manual_readme_follow(storage: &AppStorage, refreshed: usize) {
     match readme_follow::enqueue_changed(storage.database_path()) {
         Ok(report) => {
+            log_held_back(&report);
             let check = jobs::LastReadmeCheck {
                 checked_at: jobs::now_db_time(),
                 checked: usize_to_i64(report.checked),
@@ -4208,6 +4295,78 @@ fn record_manual_readme_follow(storage: &AppStorage, refreshed: usize) {
             }
         }
         Err(error) => eprintln!("README 跟进：评估失败：{error}"),
+    }
+}
+
+/// 同步完成之后的几步（「同步完成」事件已经先发出去了，界面不用等）。**顺序就是目的**：
+/// ① 「同步完成」→ ② 先抓这次新收藏、还没有 README 的 README（数量小；它们的理解卡能带着 README 生成，
+/// 不会先出一张「只有简介」的卡、README 抓到后又被当成「以前没有、现在有了」再排一次白花钱；时限只有 30 秒，抓不完的先排队）
+/// → ③ 新收藏排队、规则归类（失败只记日志）→ ④ 再刷新其余老 README（总时限 120 秒、连续失败熔断，抓不完留给下一次）→ ⑤ 收尾（对比哈希、给明显改动的排队、记 `lastReadmeCheck`）。
+/// 抓 README 要联网：慢、会断网、用户还可能中途关掉应用。新收藏的 id（`created_ids`）只在内存里，
+/// 排队必须在这些之前做完，不然关一下应用它们就永远排不上队（下次同步时它们已经不算「新」了）。
+trait PostSyncSteps {
+    /// ② 抓新收藏里还没有 README 的。
+    fn fetch_new_star_readmes(&mut self, created_ids: &[String]) -> ReadmeRefresh;
+    /// ③ 给新收藏排队。
+    fn enqueue_new_stars(&mut self, created_ids: &[String]);
+    /// ③ 给新收藏做规则归类。
+    fn classify_new_stars(&mut self, created_ids: &[String]);
+    /// ④ 刷新其余老 README（`already_fetched` 是第二步抓过的，不再抓）。
+    fn refresh_other_readmes(&mut self, already_fetched: &HashSet<String>) -> ReadmeRefresh;
+    /// ⑤ 收尾。
+    fn finish(&mut self, refresh: ReadmeRefresh);
+}
+
+fn run_post_sync_steps(steps: &mut dyn PostSyncSteps, created_ids: &[String]) {
+    // ② 抓新收藏的 README。哪怕这一步出了意外（panic）也要接着排队：排队不能依赖它
+    let new_stars = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        steps.fetch_new_star_readmes(created_ids)
+    }))
+    .unwrap_or_else(|_| {
+        eprintln!("README 跟进：抓新收藏的 README 时出了意外，先给新收藏排队");
+        ReadmeRefresh::nothing()
+    });
+    // ③ 排队、归类
+    steps.enqueue_new_stars(created_ids);
+    steps.classify_new_stars(created_ids);
+    // ④ 老 README 的批量刷新放最后
+    let already_fetched = new_stars.attempted.iter().cloned().collect::<HashSet<_>>();
+    let others = steps.refresh_other_readmes(&already_fetched);
+    // ⑤ 两次抓取合起来收尾
+    steps.finish(new_stars.then(others));
+}
+
+impl PostSyncSteps for PostSyncFlow<'_> {
+    fn fetch_new_star_readmes(&mut self, created_ids: &[String]) -> ReadmeRefresh {
+        self.refresh_stale_readmes(ReadmeScope::NewStars(created_ids))
+    }
+
+    fn enqueue_new_stars(&mut self, created_ids: &[String]) {
+        // 只给这次新出现的仓库排队。失败只记日志，同步结果照常返回。
+        if let Err(error) =
+            card_handler::enqueue_new_stars(self.storage.database_path(), created_ids)
+        {
+            eprintln!("新收藏的仓库入队失败：{error}");
+        }
+    }
+
+    fn classify_new_stars(&mut self, created_ids: &[String]) {
+        // 同样只给新增的仓库做规则归类（补种子 + 归类），失败只记日志。
+        if let Err(error) =
+            scenarios::classify_new_repositories(self.storage.database_path(), created_ids)
+        {
+            eprintln!("新收藏的场景归类失败：{error}");
+        }
+    }
+
+    fn refresh_other_readmes(&mut self, already_fetched: &HashSet<String>) -> ReadmeRefresh {
+        self.refresh_stale_readmes(ReadmeScope::Stale {
+            skip: already_fetched,
+        })
+    }
+
+    fn finish(&mut self, refresh: ReadmeRefresh) {
+        finish_readme_follow(self.emit, self.storage, refresh);
     }
 }
 
@@ -4301,18 +4460,20 @@ fn sync_github_stars_worker(app_handle: tauri::AppHandle) -> Result<StarSyncSumm
             ),
         ),
     );
-    // 先把该更新的 README 抓下来，再给新收藏排队。失败只记日志，同步结果照常返回。
-    let refresh = refresh_stale_readmes(&app_handle, &storage, &account_id, &token);
-    // 只给这次新出现的仓库排队。失败只记日志，同步结果照常返回。
-    if let Err(error) = card_handler::enqueue_new_stars(storage.database_path(), &created_ids) {
-        eprintln!("新收藏的仓库入队失败：{error}");
-    }
-    // 同样只给新增的仓库做规则归类（补种子 + 归类），失败只记日志。
-    if let Err(error) = scenarios::classify_new_repositories(storage.database_path(), &created_ids)
-    {
-        eprintln!("新收藏的场景归类失败：{error}");
-    }
-    finish_readme_follow(&app_handle, &storage, refresh);
+    // 后面这些都联网、都慢：顺序见 `run_post_sync_steps`（新收藏先抓 README、先排队，老 README 的批量刷新放最后）。
+    // 失败只记日志，同步结果照常返回。
+    run_post_sync_steps(
+        &mut PostSyncFlow {
+            storage: &storage,
+            account_id: &account_id,
+            emit: &|event| emit_task_progress(&app_handle, event),
+            fetch: &|repo_id, full_name| github::fetch_readme(&token, repo_id, full_name),
+            now: &std::time::Instant::now,
+            new_star_limits: readme_follow::FetchLimits::for_new_stars(),
+            limits: readme_follow::FetchLimits::for_sync(),
+        },
+        &created_ids,
+    );
 
     Ok(StarSyncSummary {
         account_login: user.login,
@@ -8554,5 +8715,871 @@ mod tests {
         assert_eq!(progress.current, 2);
         assert_eq!(progress.total, 2);
         assert!(progress.message.contains("18 条仓库关联"));
+    }
+
+    // ———————— 同步完成之后的几步：顺序、去重、收尾（假的抓取、假的时钟，不联网；本地库是真的）————————
+
+    struct SyncDb {
+        dir: std::path::PathBuf,
+        path: std::path::PathBuf,
+    }
+
+    impl SyncDb {
+        fn new() -> Self {
+            static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("系统时间应晚于纪元")
+                .as_nanos();
+            // 每个测试一个自己的目录：队列控制文件（lastReadmeCheck）和库放在一起，不能让测试之间串
+            let dir = std::env::temp_dir().join(format!(
+                "fsl-sync-{nanos}-{}",
+                NEXT.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            ));
+            fs::create_dir_all(&dir).expect("应能建临时目录");
+            let path = dir.join("fox-stars-lab.sqlite3");
+            crate::db::migrations::migrate_database(&path).expect("测试库应能完成迁移");
+            let db = Self { dir, path };
+            db.open()
+                .execute(
+                    "INSERT INTO github_accounts(id, login, token_ref) VALUES ('acct', 'fox', 'test')",
+                    [],
+                )
+                .expect("测试账号应能写入");
+            db
+        }
+
+        fn open(&self) -> rusqlite::Connection {
+            let conn = rusqlite::Connection::open(&self.path).expect("应能打开测试库");
+            conn.execute_batch("PRAGMA foreign_keys = ON;")
+                .expect("应能打开外键");
+            conn
+        }
+
+        fn storage(&self) -> AppStorage {
+            AppStorage::for_test(self.path.clone())
+        }
+
+        /// 一个还在收藏里的仓库；`day` 是收藏的日子（越大越新）。
+        fn repo(&self, id: &str, day: u32, pushed_at: &str, readme: Option<(&str, &str, &str)>) {
+            let conn = self.open();
+            conn.execute(
+                "INSERT INTO repositories(id, account_id, owner, name, full_name, html_url, starred_at, pushed_at, sync_status, topics_json)
+                 VALUES (?1, 'acct', 'fox', ?1, 'fox/' || ?1, 'https://github.com/fox/' || ?1, ?2, ?3, 'active', '[]')",
+                rusqlite::params![id, format!("2026-10-{day:02}T00:00:00Z"), pushed_at],
+            )
+            .expect("仓库应能写入");
+            if let Some((raw, hash, fetched_at)) = readme {
+                conn.execute(
+                    "INSERT INTO repo_readmes(repo_id, raw_markdown, content_hash, source_path, fetched_at)
+                     VALUES (?1, ?2, ?3, 'README.md', ?4)",
+                    rusqlite::params![id, raw, hash, fetched_at],
+                )
+                .expect("README 应能写入");
+            }
+        }
+
+        fn cached_readmes(&self) -> Vec<String> {
+            let conn = self.open();
+            let mut statement = conn
+                .prepare("SELECT repo_id FROM repo_readmes ORDER BY repo_id")
+                .expect("应能准备");
+            statement
+                .query_map([], |row| row.get(0))
+                .expect("应能查")
+                .collect::<Result<Vec<String>, _>>()
+                .expect("应能读")
+        }
+
+        fn queued_cards(&self) -> Vec<(String, i64)> {
+            let conn = self.open();
+            let mut statement = conn
+                .prepare(
+                    "SELECT target_id, priority FROM ai_jobs WHERE job_type = 'repo_card' AND status = 'queued' ORDER BY target_id",
+                )
+                .expect("应能准备");
+            statement
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                .expect("应能查")
+                .collect::<Result<Vec<(String, i64)>, _>>()
+                .expect("应能读")
+        }
+
+        fn text(&self, sql: &str) -> Option<String> {
+            self.open()
+                .query_row(sql, [], |row| row.get(0))
+                .expect("应能读")
+        }
+    }
+
+    impl Drop for SyncDb {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum FetchReply {
+        Readme,
+        Missing,
+        Failure,
+    }
+
+    /// 假的 GitHub、假的时钟、收进列表的进度事件，加上一份按顺序记下来的时间线。
+    struct SyncHarness {
+        db: SyncDb,
+        timeline: std::sync::Mutex<Vec<String>>,
+        events: std::sync::Mutex<Vec<TaskProgressEvent>>,
+        replies: HashMap<String, FetchReply>,
+        /// 每抓一个，假时钟往前走这么多毫秒。
+        fetch_cost_ms: u64,
+        clock_ms: std::sync::atomic::AtomicU64,
+        base: std::time::Instant,
+    }
+
+    impl SyncHarness {
+        fn new() -> Self {
+            Self {
+                db: SyncDb::new(),
+                timeline: std::sync::Mutex::new(Vec::new()),
+                events: std::sync::Mutex::new(Vec::new()),
+                replies: HashMap::new(),
+                fetch_cost_ms: 0,
+                clock_ms: std::sync::atomic::AtomicU64::new(0),
+                base: std::time::Instant::now(),
+            }
+        }
+
+        fn reply(mut self, id: &str, reply: FetchReply) -> Self {
+            self.replies.insert(id.to_owned(), reply);
+            self
+        }
+
+        fn mark(&self, text: impl Into<String>) {
+            self.timeline.lock().unwrap().push(text.into());
+        }
+
+        fn timeline(&self) -> Vec<String> {
+            self.timeline.lock().unwrap().clone()
+        }
+
+        fn position(&self, entry: &str) -> usize {
+            self.timeline()
+                .iter()
+                .position(|line| line == entry)
+                .unwrap_or_else(|| panic!("时间线里没有 {entry}：{:?}", self.timeline()))
+        }
+
+        /// 时间线里第一条以 `prefix` 开头的是哪一行（整行内容）。
+        fn entry_starting_with(&self, prefix: &str) -> String {
+            self.timeline()
+                .into_iter()
+                .find(|line| line.starts_with(prefix))
+                .unwrap_or_else(|| panic!("时间线里没有以 {prefix} 开头的：{:?}", self.timeline()))
+        }
+
+        fn fetch(
+            &self,
+            repo_id: &str,
+            _full_name: &str,
+        ) -> Result<Option<github::ReadmeDocument>, String> {
+            self.mark(format!("fetch:{repo_id}"));
+            self.clock_ms
+                .fetch_add(self.fetch_cost_ms, std::sync::atomic::Ordering::SeqCst);
+            match self
+                .replies
+                .get(repo_id)
+                .copied()
+                .unwrap_or(FetchReply::Readme)
+            {
+                FetchReply::Readme => Ok(Some(github::ReadmeDocument {
+                    repo_id: repo_id.to_owned(),
+                    raw_markdown: format!("# {repo_id} 的新 README"),
+                    content_hash: format!("hash-{repo_id}"),
+                    source_path: "README.md".to_owned(),
+                    fetched_at: "2026-10-05T08:00:00Z".to_owned(),
+                })),
+                FetchReply::Missing => Ok(None),
+                FetchReply::Failure => Err("GitHub API 请求超时".to_owned()),
+            }
+        }
+
+        fn now(&self) -> std::time::Instant {
+            self.base
+                + std::time::Duration::from_millis(
+                    self.clock_ms.load(std::sync::atomic::Ordering::SeqCst),
+                )
+        }
+
+        fn messages(&self) -> Vec<String> {
+            self.events
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|event| format!("{}|{}", event.status, event.message))
+                .collect()
+        }
+
+        /// 真的 `PostSyncFlow`（线上用的那个），只是抓取、时钟、进度事件是假的。
+        /// `limits` 是第四步（老 README）的保护；第二步（新收藏）用线上的 `FetchLimits::for_new_stars()`。
+        fn with_flow<R>(
+            &self,
+            limits: readme_follow::FetchLimits,
+            run: impl FnOnce(&mut PostSyncFlow<'_>) -> R,
+        ) -> R {
+            self.with_flow_limits(readme_follow::FetchLimits::for_new_stars(), limits, run)
+        }
+
+        fn with_flow_limits<R>(
+            &self,
+            new_star_limits: readme_follow::FetchLimits,
+            limits: readme_follow::FetchLimits,
+            run: impl FnOnce(&mut PostSyncFlow<'_>) -> R,
+        ) -> R {
+            let storage = self.db.storage();
+            let emit = |event: TaskProgressEvent| self.events.lock().unwrap().push(event);
+            let fetch = |repo_id: &str, full_name: &str| self.fetch(repo_id, full_name);
+            let now = || self.now();
+            let mut flow = PostSyncFlow {
+                storage: &storage,
+                account_id: "acct",
+                emit: &emit,
+                fetch: &fetch,
+                now: &now,
+                new_star_limits,
+                limits,
+            };
+            run(&mut flow)
+        }
+    }
+
+    /// 把真的步骤包一层：每一步先在时间线上记一笔（排队那一步还记下此刻库里有哪些 README）。
+    struct Recorder<'a, 'b> {
+        harness: &'a SyncHarness,
+        inner: &'a mut PostSyncFlow<'b>,
+        /// 让第四步（老 README 的批量刷新）出意外：panic，或者提前返回「没完成」。
+        old_refresh: OldRefresh,
+        /// 让第二步（抓新收藏的 README）panic。
+        new_fetch_panics: bool,
+        finished: Option<(usize, bool)>,
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum OldRefresh {
+        Normal,
+        Panics,
+        ReturnsIncomplete,
+    }
+
+    impl PostSyncSteps for Recorder<'_, '_> {
+        fn fetch_new_star_readmes(&mut self, created_ids: &[String]) -> ReadmeRefresh {
+            self.harness.mark("step2:fetch-new-star-readmes");
+            if self.new_fetch_panics {
+                panic!("测试用：抓新收藏的 README 时出意外");
+            }
+            self.inner.fetch_new_star_readmes(created_ids)
+        }
+
+        fn enqueue_new_stars(&mut self, created_ids: &[String]) {
+            self.harness.mark(format!(
+                "step3:enqueue (README 已在库里：{})",
+                self.harness.db.cached_readmes().join(",")
+            ));
+            self.inner.enqueue_new_stars(created_ids);
+        }
+
+        fn classify_new_stars(&mut self, created_ids: &[String]) {
+            self.harness.mark("step3:classify");
+            self.inner.classify_new_stars(created_ids);
+        }
+
+        fn refresh_other_readmes(&mut self, already_fetched: &HashSet<String>) -> ReadmeRefresh {
+            let mut skipped: Vec<&String> = already_fetched.iter().collect();
+            skipped.sort();
+            self.harness
+                .mark(format!("step4:refresh-old (跳过 {skipped:?})"));
+            match self.old_refresh {
+                OldRefresh::Normal => self.inner.refresh_other_readmes(already_fetched),
+                OldRefresh::Panics => panic!("测试用：刷新老 README 时出意外"),
+                OldRefresh::ReturnsIncomplete => ReadmeRefresh {
+                    refreshed: 0,
+                    listed: false,
+                    attempted: Vec::new(),
+                },
+            }
+        }
+
+        fn finish(&mut self, refresh: ReadmeRefresh) {
+            self.harness.mark("step5:finish");
+            self.finished = Some((refresh.refreshed, refresh.listed));
+            self.inner.finish(refresh);
+        }
+    }
+
+    fn run_recorded(
+        harness: &SyncHarness,
+        created_ids: &[&str],
+        old_refresh: OldRefresh,
+        new_fetch_panics: bool,
+    ) -> (std::thread::Result<()>, Option<(usize, bool)>) {
+        let created: Vec<String> = created_ids.iter().map(|id| (*id).to_owned()).collect();
+        let mut finished = None;
+        let outcome = harness.with_flow(readme_follow::FetchLimits::for_sync(), |flow| {
+            let mut recorder = Recorder {
+                harness,
+                inner: flow,
+                old_refresh,
+                new_fetch_panics,
+                finished: None,
+            };
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                run_post_sync_steps(&mut recorder, &created)
+            }));
+            finished = recorder.finished;
+            outcome
+        });
+        (outcome, finished)
+    }
+
+    /// 两个新收藏（没有 README）、两个老仓库（一个有缓存但已过期、一个没缓存）、一个新鲜的。
+    fn standard_library(harness: &SyncHarness) {
+        let db = &harness.db;
+        db.repo("new1", 5, "2026-10-04T00:00:00Z", None);
+        db.repo("new2", 4, "2026-10-03T00:00:00Z", None);
+        db.repo(
+            "old-stale",
+            3,
+            "2026-10-01T00:00:00Z",
+            Some(("旧的内容", "hash-old-stale", "2026-01-01T00:00:00Z")),
+        );
+        db.repo("old-nocache", 2, "2026-01-01T00:00:00Z", None);
+        db.repo(
+            "fresh",
+            1,
+            "2026-01-01T00:00:00Z",
+            Some(("很新", "hash-fresh", "2026-09-30T00:00:00Z")),
+        );
+    }
+
+    #[test]
+    fn new_stars_get_their_readme_first_then_are_queued_and_the_old_readmes_are_refreshed_last() {
+        let harness = SyncHarness::new();
+        standard_library(&harness);
+        let (outcome, finished) =
+            run_recorded(&harness, &["new1", "new2"], OldRefresh::Normal, false);
+        assert!(outcome.is_ok());
+        let step2 = harness.position("step2:fetch-new-star-readmes");
+        // 排队的那一刻库里有：原来就缓存着的（fresh、old-stale）和刚抓到的 new1、new2；还没抓的 old-nocache 不在
+        let enqueue =
+            harness.position("step3:enqueue (README 已在库里：fresh,new1,new2,old-stale)");
+        let classify = harness.position("step3:classify");
+        let step4 = harness.position("step4:refresh-old (跳过 [\"new1\", \"new2\"])");
+        let finish = harness.position("step5:finish");
+        // 五步的顺序
+        assert!(step2 < enqueue && enqueue < classify && classify < step4 && step4 < finish);
+        assert_eq!(finish, harness.timeline().len() - 1, "收尾最后做");
+        // 新收藏的 README 在入队之前抓到、存进了库（排队那一步看到它们已经在库里）
+        for id in ["new1", "new2"] {
+            let at = harness.position(&format!("fetch:{id}"));
+            assert!(step2 < at && at < enqueue, "{id} 的 README 要在入队之前抓");
+        }
+        // 老 README 的刷新在入队、归类之后；老的抓的是过期的和没缓存的，不含新鲜的和已经抓过的新收藏
+        for id in ["old-stale", "old-nocache"] {
+            assert!(harness.position(&format!("fetch:{id}")) > classify, "{id}");
+        }
+        let fetched: Vec<String> = harness
+            .timeline()
+            .into_iter()
+            .filter(|line| line.starts_with("fetch:"))
+            .collect();
+        assert_eq!(fetched.len(), 4, "{fetched:?}：每个只抓一次，新鲜的不抓");
+        assert!(!fetched.contains(&"fetch:fresh".to_owned()));
+        // 新收藏已经排了队（优先级 3），而且是带着 README 排的
+        assert_eq!(
+            harness.db.queued_cards(),
+            vec![("new1".to_owned(), 3), ("new2".to_owned(), 3)]
+        );
+        // 两次抓取的更新数合起来给收尾：2 个新的 + 2 个老的
+        assert_eq!(finished, Some((4, true)));
+        let check = jobs::read_control(&jobs::queue_control_path(&harness.db.path))
+            .last_readme_check
+            .expect("收尾要记下这次检查");
+        assert_eq!(check.refreshed, 4);
+    }
+
+    #[test]
+    fn what_the_new_star_step_already_tried_is_not_fetched_again_even_when_github_had_no_readme() {
+        // new2 在 GitHub 上没有 README（404）：它仍然「没有缓存」，不排除的话第四步会把它排在最前面再抓一遍
+        let harness = SyncHarness::new().reply("new2", FetchReply::Missing);
+        standard_library(&harness);
+        let (outcome, finished) =
+            run_recorded(&harness, &["new1", "new2"], OldRefresh::Normal, false);
+        assert!(outcome.is_ok());
+        let fetched = harness.timeline();
+        assert_eq!(
+            fetched.iter().filter(|line| *line == "fetch:new2").count(),
+            1,
+            "{fetched:?}"
+        );
+        assert_eq!(
+            fetched.iter().filter(|line| *line == "fetch:new1").count(),
+            1
+        );
+        assert_eq!(
+            harness.db.cached_readmes(),
+            vec!["fresh", "new1", "old-nocache", "old-stale"]
+        );
+        assert_eq!(finished, Some((3, true)), "new2 没有 README，不算更新");
+        // 没有 README 的新收藏照样排了队
+        assert_eq!(harness.db.queued_cards().len(), 2);
+    }
+
+    #[test]
+    fn a_failure_while_fetching_new_readmes_does_not_keep_the_new_stars_out_of_the_queue() {
+        // 新收藏的 README 全抓不到（断网）：照样排队、归类，之后老 README 的刷新也因为连续失败很快停下
+        let mut harness = SyncHarness::new();
+        for id in ["new1", "new2", "old-stale", "old-nocache"] {
+            harness = harness.reply(id, FetchReply::Failure);
+        }
+        standard_library(&harness);
+        let (outcome, finished) =
+            run_recorded(&harness, &["new1", "new2"], OldRefresh::Normal, false);
+        assert!(outcome.is_ok());
+        assert_eq!(
+            harness.db.queued_cards(),
+            vec![("new1".to_owned(), 3), ("new2".to_owned(), 3)]
+        );
+        assert_eq!(finished, Some((0, true)));
+        assert!(
+            harness.position("step5:finish")
+                > harness.position("step4:refresh-old (跳过 [\"new1\", \"new2\"])")
+        );
+    }
+
+    #[test]
+    fn if_refreshing_the_old_readmes_blows_up_the_new_stars_are_already_queued() {
+        let harness = SyncHarness::new();
+        standard_library(&harness);
+        let (outcome, finished) =
+            run_recorded(&harness, &["new1", "new2"], OldRefresh::Panics, false);
+        // 第四步 panic 一路传出来（不吞），但新收藏已经排上队了，规则归类也做完了
+        assert!(outcome.is_err());
+        assert_eq!(finished, None);
+        assert_eq!(
+            harness.db.queued_cards(),
+            vec![("new1".to_owned(), 3), ("new2".to_owned(), 3)],
+            "同步到一半出事，新收藏也不会丢"
+        );
+        assert!(harness.timeline().contains(&"step3:classify".to_owned()));
+        assert!(!harness.timeline().contains(&"step5:finish".to_owned()));
+    }
+
+    #[test]
+    fn if_the_old_refresh_returns_early_the_new_stars_are_queued_and_the_check_is_reported_unfinished(
+    ) {
+        let harness = SyncHarness::new();
+        standard_library(&harness);
+        let (outcome, finished) = run_recorded(
+            &harness,
+            &["new1", "new2"],
+            OldRefresh::ReturnsIncomplete,
+            false,
+        );
+        assert!(outcome.is_ok());
+        assert_eq!(harness.db.queued_cards().len(), 2);
+        // 两次抓取合起来：更新数是新收藏那一步的 2 个，「有没有列出」看后一步
+        assert_eq!(finished, Some((2, false)));
+        assert_eq!(
+            harness.messages().last().map(String::as_str),
+            Some("failed|README 跟进：这次检查没完成")
+        );
+    }
+
+    #[test]
+    fn a_panic_while_fetching_new_readmes_does_not_stop_the_queueing_or_the_rest() {
+        let harness = SyncHarness::new();
+        standard_library(&harness);
+        let (outcome, finished) =
+            run_recorded(&harness, &["new1", "new2"], OldRefresh::Normal, true);
+        assert!(outcome.is_ok(), "第二步的意外被拦在里面，不影响后面");
+        assert_eq!(
+            harness.db.queued_cards(),
+            vec![("new1".to_owned(), 3), ("new2".to_owned(), 3)]
+        );
+        assert!(harness.timeline().contains(&"step3:classify".to_owned()));
+        // 第二步没抓成，第四步不知道它们抓过没有（没有排除名单）：新收藏当「没有缓存」的老仓库一起抓
+        assert_eq!(finished.map(|(_, listed)| listed), Some(true));
+        assert!(harness.db.cached_readmes().contains(&"new1".to_owned()));
+    }
+
+    #[test]
+    fn with_no_new_stars_only_the_old_readmes_are_refreshed() {
+        let harness = SyncHarness::new();
+        standard_library(&harness);
+        let (outcome, finished) = run_recorded(&harness, &[], OldRefresh::Normal, false);
+        assert!(outcome.is_ok());
+        assert_eq!(
+            finished,
+            Some((4, true)),
+            "过期的、没缓存的，加上没有被排除的 new1 / new2（它们这次不算新收藏）"
+        );
+        let fetched: Vec<String> = harness
+            .timeline()
+            .into_iter()
+            .filter(|line| line.starts_with("fetch:"))
+            .collect();
+        assert_eq!(fetched.len(), 4);
+        assert!(
+            harness.db.queued_cards().is_empty(),
+            "没有新收藏就什么也不排"
+        );
+        // 第二步没有任何事件，第四步的事件和以前一模一样
+        let messages = harness.messages();
+        assert!(
+            !messages.iter().any(|text| text.contains("新收藏")),
+            "{messages:?}"
+        );
+        assert_eq!(messages[0], "running|开始检查哪些 README 需要更新");
+        assert_eq!(messages[1], "running|正在检查 README，这次要重新抓取 4 个");
+    }
+
+    #[test]
+    fn the_new_star_step_reports_its_own_progress_and_the_old_step_keeps_the_old_events() {
+        let harness = SyncHarness::new();
+        standard_library(&harness);
+        let (outcome, _) = run_recorded(&harness, &["new1", "new2"], OldRefresh::Normal, false);
+        assert!(outcome.is_ok());
+        let messages = harness.messages();
+        assert_eq!(messages[0], "running|正在抓取新收藏的 README，共 2 个");
+        assert!(
+            messages[1].starts_with("running|正在抓取新收藏的 README：fox/new"),
+            "{messages:?}"
+        );
+        let old_start = messages
+            .iter()
+            .position(|text| text == "running|开始检查哪些 README 需要更新")
+            .expect("老 README 那一步照旧先报开始");
+        assert_eq!(
+            messages[old_start + 1],
+            "running|正在检查 README，这次要重新抓取 2 个"
+        );
+        assert!(messages[old_start + 2].starts_with("running|正在抓取 README：fox/old"));
+        assert!(
+            messages
+                .last()
+                .unwrap()
+                .starts_with("succeeded|README 跟进：看了 "),
+            "{messages:?}"
+        );
+    }
+
+    #[test]
+    fn the_new_star_step_fetches_at_most_150_of_the_most_recently_starred_first() {
+        let harness = SyncHarness::new();
+        let mut created = Vec::new();
+        for index in 0..200u32 {
+            let id = format!("n{index:03}");
+            // 收藏的日子随编号变大（最大 28 日 + 时分用不到：用 index 当分钟拆开）
+            let conn = harness.db.open();
+            conn.execute(
+                "INSERT INTO repositories(id, account_id, owner, name, full_name, html_url, starred_at, sync_status, topics_json)
+                 VALUES (?1, 'acct', 'fox', ?1, 'fox/' || ?1, 'https://github.com/fox/' || ?1, ?2, 'active', '[]')",
+                rusqlite::params![id, format!("2026-10-05T{:02}:{:02}:00Z", index / 60, index % 60)],
+            )
+            .expect("仓库应能写入");
+            created.push(id);
+        }
+        let attempted = harness.with_flow(readme_follow::FetchLimits::for_sync(), |flow| {
+            flow.fetch_new_star_readmes(&created).attempted
+        });
+        assert_eq!(attempted.len(), 150);
+        let mut sorted = attempted.clone();
+        sorted.sort();
+        assert_eq!(sorted.first().map(String::as_str), Some("n050"));
+        assert_eq!(sorted.last().map(String::as_str), Some("n199"));
+        assert_eq!(attempted[0], "n199", "最近收藏的最先抓");
+    }
+
+    #[test]
+    fn the_new_star_step_stops_after_its_own_short_budget_and_the_rest_are_queued_anyway() {
+        // 每抓一个假时钟走 10 秒、一批 6 个：第一批做完已经 60 秒，超过新收藏那一步自己的 30 秒时限，不开第二批——
+        // 排队不能等：剩下的 6 个没抓 README 就先排了队，README 由第四步补上
+        let mut harness = SyncHarness::new();
+        harness.fetch_cost_ms = 10_000;
+        let ids: Vec<String> = (0..12).map(|index| format!("n{index:02}")).collect();
+        for (index, id) in ids.iter().enumerate() {
+            harness
+                .db
+                .repo(id, 1 + index as u32, "2026-10-01T00:00:00Z", None);
+        }
+        let created: Vec<&str> = ids.iter().map(String::as_str).collect();
+        let (outcome, finished) = run_recorded(&harness, &created, OldRefresh::Normal, false);
+        assert!(outcome.is_ok());
+        // 收藏得最近的 6 个（n06–n11）在排队之前抓到了；别的还没有 README
+        assert_eq!(
+            harness.entry_starting_with("step3:enqueue"),
+            "step3:enqueue (README 已在库里：n06,n07,n08,n09,n10,n11)"
+        );
+        assert_eq!(harness.db.queued_cards().len(), 12, "12 个新收藏都排上了队");
+        // 第四步（老 README 的时限是新的 120 秒）把剩下的 6 个补上：两步合起来更新了 12 个
+        assert_eq!(finished, Some((12, true)));
+        assert_eq!(harness.db.cached_readmes().len(), 12);
+        let step4 = harness.entry_starting_with("step4:refresh-old");
+        assert!(
+            step4.contains("n06") && step4.contains("n11") && !step4.contains("n05"),
+            "第二步抓过的不再抓：{step4}"
+        );
+    }
+
+    #[test]
+    fn the_old_refresh_stops_after_the_real_time_budget_and_leaves_the_rest_for_next_time() {
+        // 一批 6 个，每个让假时钟走 50 秒：第一批做完已经 300 秒，超过 120 秒的总时限，不开第二批
+        let mut harness = SyncHarness::new();
+        harness.fetch_cost_ms = 50_000;
+        for index in 0..12 {
+            harness
+                .db
+                .repo(&format!("s{index:02}"), 1, "2026-10-01T00:00:00Z", None);
+        }
+        let refresh = harness.with_flow(readme_follow::FetchLimits::for_sync(), |flow| {
+            flow.refresh_other_readmes(&HashSet::new())
+        });
+        assert_eq!(refresh.attempted.len(), 6);
+        assert_eq!(refresh.refreshed, 6);
+        assert!(refresh.listed);
+        assert_eq!(
+            harness.db.cached_readmes().len(),
+            6,
+            "剩下 6 个留给下一次同步"
+        );
+        // 下一次同步（时钟重新开始）接着抓剩下的
+        harness
+            .clock_ms
+            .store(0, std::sync::atomic::Ordering::SeqCst);
+        let refresh = harness.with_flow(readme_follow::FetchLimits::for_sync(), |flow| {
+            flow.refresh_other_readmes(&HashSet::new())
+        });
+        assert_eq!(refresh.attempted.len(), 6);
+        assert_eq!(harness.db.cached_readmes().len(), 12);
+    }
+
+    #[test]
+    fn the_old_step_keeps_its_own_longer_budget_of_two_minutes() {
+        // 每抓一个假时钟走 10 秒、一批 6 个：第一批做完是 60 秒——超过新收藏那一步的 30 秒，但没到老 README 的 120 秒：
+        // 老 README 这一步还要接着开第二批（要是误用了新收藏的时限，这里就会在 6 个处停下）
+        let mut harness = SyncHarness::new();
+        harness.fetch_cost_ms = 10_000;
+        for index in 0..12 {
+            harness
+                .db
+                .repo(&format!("s{index:02}"), 1, "2026-10-01T00:00:00Z", None);
+        }
+        let refresh = harness.with_flow(readme_follow::FetchLimits::for_sync(), |flow| {
+            flow.refresh_other_readmes(&HashSet::new())
+        });
+        assert_eq!(refresh.attempted.len(), 12);
+        assert_eq!(refresh.refreshed, 12);
+        assert_eq!(harness.db.cached_readmes().len(), 12);
+    }
+
+    #[test]
+    fn the_old_refresh_stops_after_five_failures_in_a_row() {
+        let mut harness = SyncHarness::new();
+        for index in 0..30 {
+            let id = format!("s{index:02}");
+            harness.db.repo(&id, 1, "2026-10-01T00:00:00Z", None);
+            harness.replies.insert(id, FetchReply::Failure);
+        }
+        let refresh = harness.with_flow(readme_follow::FetchLimits::for_sync(), |flow| {
+            flow.refresh_other_readmes(&HashSet::new())
+        });
+        assert_eq!(
+            refresh.attempted.len(),
+            6,
+            "第一批 6 个都失败：连续失败够 5 个，不开第二批"
+        );
+        assert_eq!(refresh.refreshed, 0);
+        assert!(refresh.listed);
+        assert!(harness.db.cached_readmes().is_empty());
+    }
+
+    #[test]
+    fn a_fetched_readme_with_the_same_hash_only_moves_the_check_time_and_a_changed_one_is_saved() {
+        let harness = SyncHarness::new();
+        harness.db.repo(
+            "same",
+            1,
+            "2026-10-01T00:00:00Z",
+            Some(("原来的内容", "hash-same", "2026-01-01T00:00:00Z")),
+        );
+        harness.db.repo(
+            "changed",
+            1,
+            "2026-10-01T00:00:00Z",
+            Some(("原来的内容", "hash-before", "2026-01-01T00:00:00Z")),
+        );
+        let refresh = harness.with_flow(readme_follow::FetchLimits::for_sync(), |flow| {
+            flow.refresh_other_readmes(&HashSet::new())
+        });
+        assert_eq!(refresh.refreshed, 2);
+        let raw = |id: &str| {
+            harness.db.text(&format!(
+                "SELECT raw_markdown FROM repo_readmes WHERE repo_id = '{id}'"
+            ))
+        };
+        let fetched_at = |id: &str| {
+            harness.db.text(&format!(
+                "SELECT fetched_at FROM repo_readmes WHERE repo_id = '{id}'"
+            ))
+        };
+        assert_eq!(
+            raw("same").as_deref(),
+            Some("原来的内容"),
+            "内容没变：不整份重写"
+        );
+        assert_eq!(fetched_at("same").as_deref(), Some("2026-10-05T08:00:00Z"));
+        assert_eq!(raw("changed").as_deref(), Some("# changed 的新 README"));
+        assert_eq!(
+            harness
+                .db
+                .text("SELECT content_hash FROM repo_readmes WHERE repo_id = 'changed'")
+                .as_deref(),
+            Some("hash-changed")
+        );
+    }
+
+    #[test]
+    fn if_the_repositories_cannot_be_listed_the_old_step_reports_it_and_asks_for_no_follow_up() {
+        let harness = SyncHarness::new();
+        let storage = AppStorage::for_test(harness.db.dir.join("no-such-dir").join("x.sqlite3"));
+        let emit = |event: TaskProgressEvent| harness.events.lock().unwrap().push(event);
+        let fetch = |repo_id: &str, full_name: &str| harness.fetch(repo_id, full_name);
+        let now = || harness.now();
+        let flow = PostSyncFlow {
+            storage: &storage,
+            account_id: "acct",
+            emit: &emit,
+            fetch: &fetch,
+            now: &now,
+            new_star_limits: readme_follow::FetchLimits::for_new_stars(),
+            limits: readme_follow::FetchLimits::for_sync(),
+        };
+        let refresh = flow.refresh_stale_readmes(ReadmeScope::Stale {
+            skip: &HashSet::new(),
+        });
+        assert!(!refresh.listed);
+        assert_eq!(refresh.refreshed, 0);
+        assert_eq!(
+            harness.messages(),
+            vec![
+                "running|开始检查哪些 README 需要更新".to_owned(),
+                "running|README 跟进没能列出要检查的仓库".to_owned()
+            ]
+        );
+        // 新收藏那一步列不出来：当作没有要抓的，不报错、不发事件（排队不受影响）
+        let refresh = flow.refresh_stale_readmes(ReadmeScope::NewStars(&["x".to_owned()]));
+        assert!(refresh.attempted.is_empty() && refresh.listed);
+        assert_eq!(harness.messages().len(), 2);
+    }
+
+    #[test]
+    fn two_refreshes_are_merged_for_the_follow_up() {
+        let merged = ReadmeRefresh {
+            refreshed: 2,
+            listed: true,
+            attempted: vec!["a".to_owned(), "b".to_owned()],
+        }
+        .then(ReadmeRefresh {
+            refreshed: 3,
+            listed: false,
+            attempted: vec!["c".to_owned()],
+        });
+        assert_eq!(merged.refreshed, 5);
+        assert!(
+            !merged.listed,
+            "有没有列出仓库看后一次（第四步列的是全部仓库）"
+        );
+        assert_eq!(merged.attempted, vec!["a", "b", "c"]);
+        let nothing = ReadmeRefresh::nothing();
+        assert!(nothing.listed && nothing.refreshed == 0 && nothing.attempted.is_empty());
+    }
+
+    #[test]
+    fn held_back_repos_are_mentioned_in_the_log_and_nothing_is_said_when_there_are_none() {
+        let mut report = readme_follow::FollowReport::default();
+        assert_eq!(held_back_log_line(&report), None);
+        report.held_back = 3;
+        let line = held_back_log_line(&report).expect("有被拦下的就该说一声");
+        assert!(line.contains('3') && line.contains("24 小时"), "{line}");
+    }
+
+    /// 只记调用顺序的假步骤：看 `run_post_sync_steps` 本身的编排。
+    #[derive(Default)]
+    struct OrderOnly {
+        calls: Vec<String>,
+        skip_seen: Vec<String>,
+        finished_with: Option<(usize, bool, Vec<String>)>,
+    }
+
+    impl PostSyncSteps for OrderOnly {
+        fn fetch_new_star_readmes(&mut self, created_ids: &[String]) -> ReadmeRefresh {
+            self.calls.push(format!("fetch-new {created_ids:?}"));
+            ReadmeRefresh {
+                refreshed: 2,
+                listed: true,
+                attempted: vec!["x".to_owned(), "y".to_owned()],
+            }
+        }
+
+        fn enqueue_new_stars(&mut self, created_ids: &[String]) {
+            self.calls.push(format!("enqueue {created_ids:?}"));
+        }
+
+        fn classify_new_stars(&mut self, created_ids: &[String]) {
+            self.calls.push(format!("classify {created_ids:?}"));
+        }
+
+        fn refresh_other_readmes(&mut self, already_fetched: &HashSet<String>) -> ReadmeRefresh {
+            self.calls.push("refresh-old".to_owned());
+            let mut seen: Vec<String> = already_fetched.iter().cloned().collect();
+            seen.sort();
+            self.skip_seen = seen;
+            ReadmeRefresh {
+                refreshed: 5,
+                listed: true,
+                attempted: vec!["z".to_owned()],
+            }
+        }
+
+        fn finish(&mut self, refresh: ReadmeRefresh) {
+            self.calls.push("finish".to_owned());
+            self.finished_with = Some((refresh.refreshed, refresh.listed, refresh.attempted));
+        }
+    }
+
+    #[test]
+    fn the_orchestration_is_fetch_new_then_enqueue_then_classify_then_refresh_old_then_finish() {
+        let mut steps = OrderOnly::default();
+        run_post_sync_steps(&mut steps, &["a".to_owned(), "b".to_owned()]);
+        assert_eq!(
+            steps.calls,
+            vec![
+                r#"fetch-new ["a", "b"]"#,
+                r#"enqueue ["a", "b"]"#,
+                r#"classify ["a", "b"]"#,
+                "refresh-old",
+                "finish"
+            ]
+        );
+        assert_eq!(steps.skip_seen, vec!["x", "y"], "第二步抓过的传给第四步");
+        assert_eq!(
+            steps.finished_with,
+            Some((
+                7,
+                true,
+                vec!["x".to_owned(), "y".to_owned(), "z".to_owned()]
+            )),
+            "两次抓取合起来给收尾"
+        );
     }
 }

@@ -1,7 +1,7 @@
 use crate::auth::GitHubUser;
 use crate::github::{GitHubRepositoryRecommendation, ReadmeDocument, StarredRepository};
 use crate::ranking_query::personal_ranking_order_clause;
-use rusqlite::{params, types::ValueRef, Connection};
+use rusqlite::{params, params_from_iter, types::ValueRef, Connection};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
@@ -160,6 +160,14 @@ const REQUIRED_SCHEMA_COLUMNS: &[(&str, &[&str])] = &[
 
 pub struct AppStorage {
     database_path: PathBuf,
+}
+
+#[cfg(test)]
+impl AppStorage {
+    /// 测试里直接指定库文件：不经过 Tauri 的数据目录，也不做迁移（调用方自己先建好库）。
+    pub(crate) fn for_test(database_path: PathBuf) -> Self {
+        Self { database_path }
+    }
 }
 
 #[derive(Clone, Deserialize)]
@@ -1040,6 +1048,46 @@ ON CONFLICT(repo_id) DO UPDATE SET
             states.push(row.map_err(|error| format!("README 跟进列表读取失败：{error}"))?);
         }
         Ok(states)
+    }
+
+    /// `repo_ids` 里（限这个账号、还在收藏里）还没有缓存 README 的仓库：`(id, 全名)`，最近收藏的在前。
+    /// 同步里先给这次的新收藏抓 README 用：它们的理解卡能带着 README 生成。
+    pub fn list_repositories_without_readme(
+        &self,
+        account_id: &str,
+        repo_ids: &[String],
+    ) -> Result<Vec<(String, String)>, String> {
+        let connection = self.open_follow_connection()?;
+        let mut found: Vec<(String, String, String)> = Vec::new();
+        for chunk in repo_ids.chunks(400) {
+            let placeholders = vec!["?"; chunk.len()].join(", ");
+            let sql = format!(
+                "SELECT r.id, r.full_name, r.starred_at
+                 FROM repositories r
+                 LEFT JOIN repo_readmes rr ON rr.repo_id = r.id
+                 WHERE r.sync_status = 'active' AND r.account_id = ? AND rr.repo_id IS NULL
+                   AND r.id IN ({placeholders})"
+            );
+            let mut statement = connection
+                .prepare(&sql)
+                .map_err(|error| format!("新收藏 README 列表读取失败：{error}"))?;
+            let rows = statement
+                .query_map(
+                    params_from_iter(
+                        std::iter::once(account_id).chain(chunk.iter().map(String::as_str)),
+                    ),
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .map_err(|error| format!("新收藏 README 列表读取失败：{error}"))?;
+            for row in rows {
+                found.push(row.map_err(|error| format!("新收藏 README 列表读取失败：{error}"))?);
+            }
+        }
+        found.sort_by(|left, right| right.2.cmp(&left.2).then_with(|| left.0.cmp(&right.0)));
+        Ok(found
+            .into_iter()
+            .map(|(id, full_name, _)| (id, full_name))
+            .collect())
     }
 
     fn open_follow_connection(&self) -> Result<Connection, String> {
@@ -8217,6 +8265,64 @@ INSERT INTO repo_readmes(repo_id, raw_markdown, content_hash, source_path, fetch
             .list_readme_states("other")
             .expect("别的账号应是空的");
         assert!(bare.is_empty());
+        let _ = std::fs::remove_file(database_path);
+    }
+
+    #[test]
+    fn list_repositories_without_readme_only_returns_cache_less_active_repos_of_the_account() {
+        let (storage, database_path) = temp_storage("readme-follow-new-stars");
+        storage
+            .execute_sql(
+                "
+INSERT INTO github_accounts(id, login, token_ref) VALUES ('acct', 'fox', 'test'), ('other', 'bar', 'test');
+INSERT INTO repositories(id, account_id, owner, name, full_name, html_url, starred_at, sync_status) VALUES
+  ('old', 'acct', 'fox', 'old', 'fox/old', 'https://github.com/fox/old', '2026-01-01T00:00:00Z', 'active'),
+  ('new', 'acct', 'fox', 'new', 'fox/new', 'https://github.com/fox/new', '2026-10-05T00:00:00Z', 'active'),
+  ('mid', 'acct', 'fox', 'mid', 'fox/mid', 'https://github.com/fox/mid', '2026-06-01T00:00:00Z', 'active'),
+  ('cached', 'acct', 'fox', 'cached', 'fox/cached', 'https://github.com/fox/cached', '2026-10-04T00:00:00Z', 'active'),
+  ('gone', 'acct', 'fox', 'gone', 'fox/gone', 'https://github.com/fox/gone', '2026-10-03T00:00:00Z', 'removed'),
+  ('elsewhere', 'other', 'bar', 'x', 'bar/x', 'https://github.com/bar/x', '2026-10-02T00:00:00Z', 'active'),
+  ('unlisted', 'acct', 'fox', 'unlisted', 'fox/unlisted', 'https://github.com/fox/unlisted', '2026-10-01T00:00:00Z', 'active');
+INSERT INTO repo_readmes(repo_id, raw_markdown, content_hash, source_path, fetched_at) VALUES
+  ('cached', 'hello', 'h1', 'README.md', '2026-09-01T00:00:00Z');
+",
+            )
+            .expect("夹具应能写入");
+        let ids = |values: &[&str]| values.iter().map(|id| (*id).to_owned()).collect::<Vec<_>>();
+        let found = storage
+            .list_repositories_without_readme(
+                "acct",
+                &ids(&[
+                    "old",
+                    "new",
+                    "mid",
+                    "cached",
+                    "gone",
+                    "elsewhere",
+                    "missing",
+                ]),
+            )
+            .expect("应能列出");
+        assert_eq!(
+            found,
+            vec![
+                ("new".to_owned(), "fox/new".to_owned()),
+                ("mid".to_owned(), "fox/mid".to_owned()),
+                ("old".to_owned(), "fox/old".to_owned()),
+            ],
+            "没有缓存的、还在收藏里的、这个账号的、在名单里的；最近收藏的在前"
+        );
+        assert!(storage
+            .list_repositories_without_readme("acct", &[])
+            .expect("空名单")
+            .is_empty());
+        // 名单超过 400 个也不出错（分批查）
+        let mut many = ids(&["new"]);
+        many.extend((0..900).map(|index| format!("nobody-{index}")));
+        let found = storage
+            .list_repositories_without_readme("acct", &many)
+            .expect("长名单应能分批查");
+        assert_eq!(found, vec![("new".to_owned(), "fox/new".to_owned())]);
         let _ = std::fs::remove_file(database_path);
     }
 }
