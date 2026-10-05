@@ -620,7 +620,11 @@ struct RuntimeReadinessCheckResult {
     stars: RuntimeReadinessCheckItem,
     readme: RuntimeReadinessCheckItem,
     ai: RuntimeReadinessCheckItem,
+    /// 已经不检查了：对应的功能在新界面里没有入口，检查它只会白花 AI 费用，所以不再调用 AI，固定是「没检查」。
+    /// 字段还留着，是因为设置页（`pages/settings.tsx`）和 `types.ts` 还按这两个键取值；
+    /// 那两处去掉这两项之后，这两个字段（和 `readiness_retired`）可以一起删。
     tag_network: RuntimeReadinessCheckItem,
+    /// 同上。
     recommendation: RuntimeReadinessCheckItem,
 }
 
@@ -3441,7 +3445,7 @@ async fn check_runtime_readiness(
     app_handle: tauri::AppHandle,
     request: RuntimeReadinessCheckRequest,
 ) -> Result<RuntimeReadinessCheckResult, String> {
-    run_background_task("真实链路自检", move || {
+    run_background_task("运行检查", move || {
         check_runtime_readiness_worker(app_handle, request)
     })
     .await
@@ -3456,14 +3460,7 @@ fn check_runtime_readiness_worker(
             let storage_check = check_runtime_storage(&storage);
             (Some(storage), storage_check)
         }
-        Err(error) => (
-            None,
-            runtime_check_failed_with_action(
-                "本地数据库初始化失败".to_owned(),
-                Some(error),
-                "在通用设置中清空本机数据后重新打开应用；如果仍失败，请检查应用数据目录权限。",
-            ),
-        ),
+        Err(error) => (None, readiness_storage_unopenable(error)),
     };
     let settings = check_runtime_settings_storage(&app_handle);
     let token_result = auth::require_github_token();
@@ -3473,84 +3470,42 @@ fn check_runtime_readiness_worker(
         Ok(token) => match auth::verify_github_token(&token) {
             Ok(user) => {
                 let account_id = user.id.to_string();
-                let github = runtime_check_passed(
-                    format!("GitHub Token 已验证，当前账号 @{}", user.login),
-                    Some(format!("账号 ID：{account_id}")),
-                );
+                let github = readiness_github_ready(&user.login);
                 let stars = match github::fetch_starred_repositories_page(&token, &account_id, 1) {
-                    Ok(repositories) => runtime_check_passed(
-                        format!(
-                            "GitHub Stars API 可用，已读取首页 {} 个仓库",
-                            repositories.len()
-                        ),
-                        Some("真实请求：GET /user/starred?per_page=100&page=1".to_owned()),
-                    ),
-                    Err(error) => runtime_check_failed_with_action(
-                        "GitHub Stars API 请求失败".to_owned(),
-                        Some(error),
-                        "检查网络、代理或 GitHub API 限流状态，稍后重新运行同步。",
-                    ),
+                    Ok(repositories) => readiness_stars_ready(repositories.len()),
+                    Err(error) => readiness_stars_failed(error),
                 };
                 verified_token = Some(token);
                 verified_account_id = Some(account_id);
                 (github, stars)
             }
             Err(error) => (
-                runtime_check_failed_with_action(
-                    "GitHub Token 验证失败".to_owned(),
-                    Some(error.clone()),
-                    "重新生成可读取 Stars 的 GitHub Token，并在 GitHub 设置区保存。",
-                ),
-                runtime_check_skipped_with_action(
-                    "Stars API 未检测".to_owned(),
-                    Some(format!("需要先修复 GitHub Token：{error}")),
-                    "先修复 GitHub Token，再重新运行真实链路自检。",
-                ),
+                readiness_github_rejected(error),
+                readiness_stars_skipped_token(),
             ),
         },
         Err(error) => (
-            runtime_check_failed_with_action(
-                "尚未连接 GitHub 账号".to_owned(),
-                Some(error.clone()),
-                "在 GitHub 设置区粘贴 Token 并连接账号。",
-            ),
-            runtime_check_skipped_with_action(
-                "Stars API 未检测".to_owned(),
-                Some(format!("需要先连接 GitHub 账号：{error}")),
-                "先连接 GitHub 账号，再同步 Stars。",
-            ),
+            readiness_github_missing(error),
+            readiness_stars_skipped_account(),
         ),
     };
 
     let readme = match (verified_token.as_deref(), verified_account_id.as_deref()) {
         (Some(token), Some(account_id)) => match storage.as_ref() {
             Some(storage) => check_runtime_readme(storage, token, account_id),
-            None => runtime_check_skipped_with_action(
-                "README 抓取未检测".to_owned(),
-                Some("需要先修复本地数据库。".to_owned()),
-                "先清空本机数据或修复数据库权限，再重新运行自检。",
-            ),
+            None => readiness_readme_skipped_storage(),
         },
-        _ => runtime_check_skipped_with_action(
-            "README 抓取未检测".to_owned(),
-            Some("需要先完成 GitHub Token 验证。".to_owned()),
-            "先连接 GitHub 账号并同步 Stars。",
-        ),
+        _ => readiness_readme_skipped_github(),
     };
 
-    let (ai, hydrated_ai_config) = if request
+    // 整个「运行检查」只在这里调用一次 AI（连接测试，包在 `spend_guard::probe` 里：不看额度，用量照样记账）。
+    // 以前还有「相似推荐」「标签网络」两次探测，对应的功能在新界面里没有入口，每点一次检查就白花一次 token，已经去掉。
+    let ai = if request
         .ai_config
         .as_ref()
         .is_some_and(|config| config.provider.trim().eq_ignore_ascii_case("none"))
     {
-        (
-            runtime_check_skipped_with_action(
-                "AI 功能未开启".to_owned(),
-                Some("可在 AI 引擎配置中选择 OpenAI、OpenAI 兼容接口或 Anthropic。".to_owned()),
-                "在 AI 引擎配置中选择服务、填写请求地址、密钥和模型 ID 后测试连接。",
-            ),
-            None,
-        )
+        readiness_ai_off()
     } else {
         match hydrate_ai_request_config(&app_handle, request.ai_config) {
             Ok(config) => match run_ai_connection_probe(
@@ -3558,82 +3513,11 @@ fn check_runtime_readiness_worker(
                 &format!("runtime-ai-check-{}", current_event_timestamp()),
                 &config,
             ) {
-                Ok(document) => (
-                    runtime_check_passed(
-                        format!("AI 服务已响应，模型 {}", document.model),
-                        Some("真实请求：使用当前设置生成一次项目摘要自检。".to_owned()),
-                    ),
-                    Some(config),
-                ),
-                Err(error) => (
-                    runtime_check_failed_with_action(
-                        "AI 服务请求失败".to_owned(),
-                        Some(error),
-                        "检查请求地址、模型 ID、API Key、额度和网络代理后重试。",
-                    ),
-                    None,
-                ),
+                Ok(document) => readiness_ai_ready(&document.model),
+                Err(error) => readiness_ai_failed(error),
             },
-            Err(error) => (
-                runtime_check_failed_with_action(
-                    "AI 服务配置读取失败".to_owned(),
-                    Some(error),
-                    "重新保存 AI 设置；如果使用本机兼容服务，请确认请求地址可访问。",
-                ),
-                None,
-            ),
+            Err(error) => readiness_ai_config_unreadable(error),
         }
-    };
-
-    let recommendation = match (
-        verified_token.as_deref(),
-        verified_account_id.as_deref(),
-        hydrated_ai_config.as_ref(),
-    ) {
-        (Some(token), Some(account_id), Some(ai_config)) => match storage.as_ref() {
-            Some(storage) => spend_guard::probe(|| {
-                check_runtime_recommendation(storage, token, account_id, ai_config)
-            }),
-            None => runtime_check_skipped_with_action(
-                "相似推荐未检测".to_owned(),
-                Some("需要先修复本地数据库。".to_owned()),
-                "先修复本地数据库，再重新运行自检。",
-            ),
-        },
-        (_, _, None) => runtime_check_skipped_with_action(
-            "相似推荐未检测".to_owned(),
-            Some("需要先通过 AI 服务自检。".to_owned()),
-            "先通过 AI 服务自检，再运行相似推荐。",
-        ),
-        _ => runtime_check_skipped_with_action(
-            "相似推荐未检测".to_owned(),
-            Some("需要先完成 GitHub Token 验证。".to_owned()),
-            "先完成 GitHub Token 验证，再运行相似推荐。",
-        ),
-    };
-
-    let tag_network = match (verified_account_id.as_deref(), hydrated_ai_config.as_ref()) {
-        (Some(account_id), Some(ai_config)) => match storage.as_ref() {
-            // 和上面的连接测试、相似推荐一样是一次很小的探测：不看额度，但用量照样记账
-            Some(storage) => {
-                spend_guard::probe(|| check_runtime_tag_network(storage, account_id, ai_config))
-            }
-            None => runtime_check_skipped_with_action(
-                "AI 标签网络未检测".to_owned(),
-                Some("需要先修复本地数据库。".to_owned()),
-                "先修复本地数据库，再重新运行自检。",
-            ),
-        },
-        (_, None) => runtime_check_skipped_with_action(
-            "AI 标签网络未检测".to_owned(),
-            Some("需要先通过 AI 服务自检。".to_owned()),
-            "先通过 AI 服务自检，再生成标签网络。",
-        ),
-        _ => runtime_check_skipped_with_action(
-            "AI 标签网络未检测".to_owned(),
-            Some("需要先完成 GitHub Token 验证。".to_owned()),
-            "先完成 GitHub Token 验证，再生成标签网络。",
-        ),
     };
 
     Ok(RuntimeReadinessCheckResult {
@@ -3643,8 +3527,8 @@ fn check_runtime_readiness_worker(
         stars,
         readme,
         ai,
-        tag_network,
-        recommendation,
+        tag_network: readiness_retired(),
+        recommendation: readiness_retired(),
     })
 }
 
@@ -3660,70 +3544,37 @@ fn check_runtime_storage(storage: &AppStorage) -> RuntimeReadinessCheckItem {
             reading_status: None,
         },
     ) {
-        Ok(page) => runtime_check_passed(
-            "本地数据库可读，SQLite 初始化已完成".to_owned(),
-            Some(format!(
-                "真实查询：读取本地仓库索引，总计 {} 条记录。",
-                page.total_count
-            )),
-        ),
-        Err(error) => runtime_check_failed_with_action(
-            "本地数据库读取失败".to_owned(),
-            Some(error),
-            "在通用设置中清空本机数据后重新打开应用；如果仍失败，请检查应用数据目录权限。",
-        ),
+        Ok(page) => readiness_storage_ready(page.total_count),
+        Err(error) => readiness_storage_unreadable(error),
     }
 }
 
 fn check_runtime_settings_storage(app_handle: &tauri::AppHandle) -> RuntimeReadinessCheckItem {
     let settings_path = match app_settings_path(app_handle) {
         Ok(path) => path,
-        Err(error) => {
-            return runtime_check_failed_with_action(
-                "应用设置目录不可用".to_owned(),
-                Some(error),
-                "检查应用设置目录权限，或在通用设置中清空本机数据后重新打开应用。",
-            );
-        }
+        Err(error) => return readiness_settings_dir_unavailable(Some(error)),
     };
     let Some(settings_dir) = settings_path.parent() else {
-        return runtime_check_failed_with_action(
-            "应用设置目录不可用".to_owned(),
-            Some("无法解析应用设置目录。".to_owned()),
-            "检查系统应用数据目录是否可写，然后重新打开应用。",
-        );
+        return readiness_settings_dir_unavailable(None);
     };
+    check_runtime_settings_dir(settings_dir)
+}
+
+/// 真的往设置文件夹里写一个临时文件再删掉，确认设置存得下来。
+fn check_runtime_settings_dir(settings_dir: &Path) -> RuntimeReadinessCheckItem {
     if let Err(error) = fs::create_dir_all(settings_dir) {
-        return runtime_check_failed_with_action(
-            "应用设置目录创建失败".to_owned(),
-            Some(error.to_string()),
-            "检查应用设置目录权限，或手动删除损坏目录后重新打开应用。",
-        );
+        return readiness_settings_dir_not_created(error.to_string());
     }
 
     let probe_path = settings_dir.join(".fox-stars-lab-settings-write-check.tmp");
     if let Err(error) = fs::write(&probe_path, b"ok") {
-        return runtime_check_failed_with_action(
-            "应用设置写入失败".to_owned(),
-            Some(error.to_string()),
-            "授予应用设置目录写入权限后重新运行自检。",
-        );
+        return readiness_settings_not_saved(error.to_string());
     }
     if let Err(error) = fs::remove_file(&probe_path) {
-        return runtime_check_failed_with_action(
-            "应用设置清理失败".to_owned(),
-            Some(error.to_string()),
-            "检查应用设置目录权限，清理残留临时文件后重新运行自检。",
-        );
+        return readiness_settings_leftover(error.to_string());
     }
 
-    runtime_check_passed(
-        "应用设置可保存".to_owned(),
-        Some(format!(
-            "真实写入：已验证设置目录 {} 可写。",
-            settings_dir.display()
-        )),
-    )
+    readiness_settings_ready(settings_dir)
 }
 
 fn check_runtime_readme(
@@ -3743,159 +3594,247 @@ fn check_runtime_readme(
         },
     ) {
         Ok(page) => page,
-        Err(error) => {
-            return runtime_check_failed_with_action(
-                "本地 Stars 读取失败".to_owned(),
-                Some(error),
-                "重新同步 Stars；如果仍失败，请清空本机数据后重新连接 GitHub。",
-            );
-        }
+        Err(error) => return readiness_readme_library_unreadable(error),
     };
     let Some(repository) = page.items.into_iter().next() else {
-        return runtime_check_skipped_with_action(
-            "README 抓取未检测".to_owned(),
-            Some("本地还没有 Stars 数据，请先同步 Stars。".to_owned()),
-            "先点击同步 Stars，完成后重新运行自检。",
-        );
+        return readiness_readme_library_empty();
     };
 
     match github::fetch_readme(token, &repository.id, &repository.full_name) {
-        Ok(Some(readme)) => runtime_check_passed(
-            format!("README 抓取可用，已读取 {}", repository.full_name),
-            Some(format!(
-                "真实请求：GitHub README Raw，来源 {}，{} 个字符。",
-                readme.source_path,
-                readme.raw_markdown.chars().count()
-            )),
+        Ok(Some(_)) => readiness_readme_ready(&repository.full_name),
+        Ok(None) => readiness_readme_missing(&repository.full_name),
+        Err(error) => readiness_readme_failed(error),
+    }
+}
+
+// ───────────── 「运行检查」里每一项的话（卡 37） ─────────────
+// 写给不懂技术的人：先说结论，再说怎么办；服务商或系统返回的原话放进 detail（「原因：…」）。
+// 每一项在界面上的名字在前端 `RUNTIME_CHECK_TITLES`（`lib/automation-view.ts`）。
+// 下面都是纯函数（拿不到应用句柄、不联网、不碰钥匙串），测试逐字断言。
+
+const READINESS_STORAGE_FIX: &str = "先到「设置 → 自动整理与备份」看看有没有可以恢复的备份。没有的话，到「设置 → 通用」点「清空本机数据」后重新打开应用（会清空这台电脑上的资料，GitHub 上的收藏不受影响）。还是不行，请检查应用的数据文件夹能不能读写。";
+
+fn readiness_reason(error: String) -> Option<String> {
+    Some(format!("原因：{error}"))
+}
+
+// 资料库文件
+
+fn readiness_storage_ready(total_count: usize) -> RuntimeReadinessCheckItem {
+    runtime_check_passed(
+        format!("能正常读取，资料库里有 {total_count} 个收藏。"),
+        None,
+    )
+}
+
+fn readiness_storage_unreadable(error: String) -> RuntimeReadinessCheckItem {
+    runtime_check_failed_with_action(
+        "资料库文件读不出来。".to_owned(),
+        readiness_reason(error),
+        READINESS_STORAGE_FIX,
+    )
+}
+
+fn readiness_storage_unopenable(error: String) -> RuntimeReadinessCheckItem {
+    runtime_check_failed_with_action(
+        "打不开资料库文件。".to_owned(),
+        readiness_reason(error),
+        READINESS_STORAGE_FIX,
+    )
+}
+
+// 应用设置
+
+fn readiness_settings_ready(settings_dir: &Path) -> RuntimeReadinessCheckItem {
+    runtime_check_passed(
+        "设置能正常保存。".to_owned(),
+        Some(format!("设置文件夹：{}", settings_dir.display())),
+    )
+}
+
+/// `error` 是 `None` 表示连设置文件夹在哪都没能确定。
+fn readiness_settings_dir_unavailable(error: Option<String>) -> RuntimeReadinessCheckItem {
+    match error {
+        Some(error) => runtime_check_failed_with_action(
+            "找不到保存设置的文件夹。".to_owned(),
+            readiness_reason(error),
+            "请检查应用的数据文件夹有没有读写权限，再重新打开应用；还不行，到「设置 → 通用」点「清空本机数据」后重新打开（会清空这台电脑上的资料，GitHub 上的收藏不受影响）。",
         ),
-        Ok(None) => runtime_check_skipped_with_action(
-            "README 抓取已请求，示例仓库未提供 README".to_owned(),
-            Some(format!("真实请求仓库：{}", repository.full_name)),
-            "可以继续使用；也可以同步更多 Stars 后重新运行自检。",
-        ),
-        Err(error) => runtime_check_failed_with_action(
-            "README 抓取失败".to_owned(),
-            Some(error),
-            "检查网络、GitHub 权限和仓库 README 是否可访问后重试。",
+        None => runtime_check_failed_with_action(
+            "找不到保存设置的文件夹。".to_owned(),
+            readiness_reason("没能确定设置文件夹的位置。".to_owned()),
+            "请检查 Mac 上应用的数据文件夹能不能写入，然后重新打开应用。",
         ),
     }
 }
 
-fn check_runtime_recommendation(
-    storage: &AppStorage,
-    token: &str,
-    account_id: &str,
-    ai_config: &ai::AiRequestConfig,
-) -> RuntimeReadinessCheckItem {
-    let briefs = match load_runtime_tag_repository_briefs(storage, account_id, "相似推荐") {
-        Ok(briefs) => briefs,
-        Err(error) => {
-            return error;
-        }
-    };
-    if briefs.is_empty() {
-        return runtime_check_skipped_with_action(
-            "相似推荐未检测".to_owned(),
-            Some("本地还没有 Stars 数据，请先同步 Stars。".to_owned()),
-            "先同步 Stars，再选择几个仓库生成相似推荐。",
-        );
-    }
-
-    let plan = match ai::plan_github_recommendations(ai_config, &briefs) {
-        Ok(plan) => plan,
-        Err(error) => {
-            return runtime_check_failed_with_action(
-                "相似推荐 AI 规划失败".to_owned(),
-                Some(error),
-                "检查 AI 模型是否支持结构化 JSON 输出，并重新测试 AI 连接。",
-            );
-        }
-    };
-    let Some(query) = plan.queries.first() else {
-        return runtime_check_failed_with_action(
-            "相似推荐 AI 规划失败".to_owned(),
-            Some("AI 未返回可执行的 GitHub 搜索式。".to_owned()),
-            "换用更稳定的模型或调整模型 ID 后重新运行自检。",
-        );
-    };
-
-    match github::search_repositories(token, query, 3) {
-        Ok(results) => runtime_check_passed(
-            format!(
-                "相似推荐链路可用，GitHub Search 返回 {} 个候选",
-                results.len()
-            ),
-            Some(format!(
-                "真实请求：AI 生成搜索式 `{query}` 后调用 GitHub Search API。"
-            )),
-        ),
-        Err(error) => runtime_check_failed_with_action(
-            "相似推荐 GitHub Search 失败".to_owned(),
-            Some(error),
-            "检查 GitHub Token 权限、网络和 Search API 限流后重试。",
-        ),
-    }
+fn readiness_settings_dir_not_created(error: String) -> RuntimeReadinessCheckItem {
+    runtime_check_failed_with_action(
+        "没能建好保存设置的文件夹。".to_owned(),
+        readiness_reason(error),
+        "请检查应用的数据文件夹有没有读写权限；如果里面有损坏的文件夹，手动删掉它再重新打开应用。",
+    )
 }
 
-fn check_runtime_tag_network(
-    storage: &AppStorage,
-    account_id: &str,
-    ai_config: &ai::AiRequestConfig,
-) -> RuntimeReadinessCheckItem {
-    let briefs = match load_runtime_tag_repository_briefs(storage, account_id, "AI 标签网络") {
-        Ok(briefs) => briefs,
-        Err(error) => {
-            return error;
-        }
-    };
-    if briefs.is_empty() {
-        return runtime_check_skipped_with_action(
-            "AI 标签网络未检测".to_owned(),
-            Some("本地还没有 Stars 数据，请先同步 Stars。".to_owned()),
-            "先同步 Stars，再生成 AI 标签网络。",
-        );
-    }
-
-    match ai::generate_tag_network(ai_config, &briefs) {
-        Ok(suggestions) => runtime_check_passed(
-            format!("AI 标签网络可用，模型返回 {} 个标签建议", suggestions.len()),
-            Some("真实请求：读取本地 Star 简略信息后调用当前 AI 服务生成标签图谱。".to_owned()),
-        ),
-        Err(error) => runtime_check_failed_with_action(
-            "AI 标签网络生成失败".to_owned(),
-            Some(error),
-            "检查 AI 模型是否支持结构化 JSON 输出，并重新测试 AI 连接。",
-        ),
-    }
+fn readiness_settings_not_saved(error: String) -> RuntimeReadinessCheckItem {
+    runtime_check_failed_with_action(
+        "设置没能保存。".to_owned(),
+        readiness_reason(error),
+        "请给应用的数据文件夹开放读写权限，然后再点一次「开始检查」。",
+    )
 }
 
-fn load_runtime_tag_repository_briefs(
-    storage: &AppStorage,
-    account_id: &str,
-    feature_name: &str,
-) -> Result<Vec<ai::AiTagRepositoryBrief>, RuntimeReadinessCheckItem> {
-    let sources = storage
-        .list_repository_tagging_sources(account_id, Some(1))
-        .map_err(|error| {
-            runtime_check_failed_with_action(
-                format!("{feature_name}本地数据读取失败"),
-                Some(error),
-                "重新同步 Stars；如果仍失败，请清空本机数据后重新连接 GitHub。",
-            )
-        })?;
+fn readiness_settings_leftover(error: String) -> RuntimeReadinessCheckItem {
+    runtime_check_failed_with_action(
+        "设置能保存，但检查用的临时文件没能删掉。".to_owned(),
+        readiness_reason(error),
+        "请检查设置文件夹的权限，删掉里面残留的临时文件后再点一次「开始检查」。",
+    )
+}
 
-    Ok(sources
-        .into_iter()
-        .map(|source| ai::AiTagRepositoryBrief {
-            full_name: source.full_name,
-            description: source.description,
-            language: source.language,
-            topics: source.topics,
-            ai_summary: source.ai_summary,
-            suggested_tags: source.suggested_tags,
-            stars_count: source.stars_count,
-        })
-        .collect())
+// GitHub 令牌、读取我的收藏
+
+fn readiness_github_ready(login: &str) -> RuntimeReadinessCheckItem {
+    runtime_check_passed(format!("GitHub 连接正常，当前账号 @{login}。"), None)
+}
+
+fn readiness_github_rejected(error: String) -> RuntimeReadinessCheckItem {
+    runtime_check_failed_with_action(
+        "GitHub 令牌不能用。".to_owned(),
+        readiness_reason(error),
+        "到「设置 → GitHub」重新生成一个令牌，粘贴进去再连接。",
+    )
+}
+
+fn readiness_github_missing(error: String) -> RuntimeReadinessCheckItem {
+    runtime_check_failed_with_action(
+        "还没有连接 GitHub 账号。".to_owned(),
+        readiness_reason(error),
+        "到「设置 → GitHub」粘贴令牌，连接 GitHub 账号。",
+    )
+}
+
+fn readiness_stars_ready(read_count: usize) -> RuntimeReadinessCheckItem {
+    runtime_check_passed(
+        format!("能读到你在 GitHub 上的收藏，这次试读了 {read_count} 个。"),
+        None,
+    )
+}
+
+fn readiness_stars_failed(error: String) -> RuntimeReadinessCheckItem {
+    runtime_check_failed_with_action(
+        "读不到你在 GitHub 上的收藏。".to_owned(),
+        readiness_reason(error),
+        "请检查网络（或代理）是否正常。如果是 GitHub 限制了请求次数，过几分钟再点「开始检查」。",
+    )
+}
+
+fn readiness_stars_skipped_token() -> RuntimeReadinessCheckItem {
+    runtime_check_skipped_with_action(
+        "GitHub 令牌不能用，这一项没法检查。".to_owned(),
+        None,
+        "先到「设置 → GitHub」换一个能用的令牌，再点「开始检查」。",
+    )
+}
+
+fn readiness_stars_skipped_account() -> RuntimeReadinessCheckItem {
+    runtime_check_skipped_with_action(
+        "还没有连接 GitHub 账号，这一项没法检查。".to_owned(),
+        None,
+        "先到「设置 → GitHub」连接账号，再点「开始检查」。",
+    )
+}
+
+// 下载项目说明
+
+fn readiness_readme_skipped_storage() -> RuntimeReadinessCheckItem {
+    runtime_check_skipped_with_action(
+        "资料库文件有问题，这一项没法检查。".to_owned(),
+        None,
+        "先处理上面「资料库文件」的问题，再点「开始检查」。",
+    )
+}
+
+fn readiness_readme_skipped_github() -> RuntimeReadinessCheckItem {
+    runtime_check_skipped_with_action(
+        "GitHub 还没有连接好，这一项没法检查。".to_owned(),
+        None,
+        "先到「设置 → GitHub」连接好账号，再点「开始检查」。",
+    )
+}
+
+fn readiness_readme_library_unreadable(error: String) -> RuntimeReadinessCheckItem {
+    runtime_check_failed_with_action(
+        "读不到资料库里的收藏。".to_owned(),
+        readiness_reason(error),
+        "点顶栏的「同步」重新同步一次；还不行，到「设置 → 通用」点「清空本机数据」后重新连接 GitHub（会清空这台电脑上的资料，GitHub 上的收藏不受影响）。",
+    )
+}
+
+fn readiness_readme_library_empty() -> RuntimeReadinessCheckItem {
+    runtime_check_skipped_with_action(
+        "资料库里还没有收藏，这一项没法检查。".to_owned(),
+        None,
+        "先点顶栏的「同步」，同步完再点「开始检查」。",
+    )
+}
+
+fn readiness_readme_ready(full_name: &str) -> RuntimeReadinessCheckItem {
+    runtime_check_passed(format!("能下载项目说明，这次试了 {full_name}。"), None)
+}
+
+fn readiness_readme_missing(full_name: &str) -> RuntimeReadinessCheckItem {
+    runtime_check_skipped_with_action(
+        format!("试了 {full_name}，它没有项目说明，这一项没法确认。"),
+        None,
+        "不影响使用；想再确认一次，可以先同步更多收藏，再点「开始检查」。",
+    )
+}
+
+fn readiness_readme_failed(error: String) -> RuntimeReadinessCheckItem {
+    runtime_check_failed_with_action(
+        "下载项目说明失败。".to_owned(),
+        readiness_reason(error),
+        "请检查网络、GitHub 令牌的权限，以及这个工具的项目说明能不能打开，然后再点「开始检查」。",
+    )
+}
+
+// AI 服务（整个检查里唯一会调用 AI 的一项）
+
+fn readiness_ai_off() -> RuntimeReadinessCheckItem {
+    runtime_check_skipped_with_action(
+        "AI 还没有设置，这一项没法检查。".to_owned(),
+        None,
+        "到「设置 → AI 设置」选一个服务商，填好密钥和模型名，再点「测试连接」。",
+    )
+}
+
+fn readiness_ai_ready(model: &str) -> RuntimeReadinessCheckItem {
+    runtime_check_passed(format!("AI 服务连接正常，用的模型是 {model}。"), None)
+}
+
+fn readiness_ai_failed(error: String) -> RuntimeReadinessCheckItem {
+    runtime_check_failed_with_action(
+        "AI 服务没连上。".to_owned(),
+        readiness_reason(error),
+        "请检查「设置 → AI 设置」里的服务商、模型名和密钥有没有填对，账户里还有没有余额，网络（或代理）是否正常，然后再点「开始检查」。",
+    )
+}
+
+fn readiness_ai_config_unreadable(error: String) -> RuntimeReadinessCheckItem {
+    runtime_check_failed_with_action(
+        "没能读到 AI 设置。".to_owned(),
+        readiness_reason(error),
+        "到「设置 → AI 设置」重新保存一次；如果用的是本机上的 AI 服务，请确认它的请求地址能打开。",
+    )
+}
+
+/// 已经不检查的两项（见 `RuntimeReadinessCheckResult` 的 `tag_network` / `recommendation`）：什么都不调用，固定是「没检查」。
+fn readiness_retired() -> RuntimeReadinessCheckItem {
+    runtime_check_skipped(
+        "这一项已经不检查了。".to_owned(),
+        Some("对应的功能在新界面里没有入口，检查它只会白白花 AI 的费用。".to_owned()),
+    )
 }
 
 fn runtime_check_passed(message: String, detail: Option<String>) -> RuntimeReadinessCheckItem {
@@ -8184,47 +8123,533 @@ mod tests {
 
     #[test]
     fn runtime_check_items_use_stable_status_values() {
-        let passed = runtime_check_passed("本地数据库可读".to_owned(), None);
-        let failed =
-            runtime_check_failed("AI 服务请求失败".to_owned(), Some("请求超时".to_owned()));
+        // 卡 37：夹具里的句子换成现在「运行检查」里用的大白话；断言一条没少
+        let passed = runtime_check_passed("能正常读取，资料库里有 3 个收藏。".to_owned(), None);
+        let failed = runtime_check_failed(
+            "AI 服务没连上。".to_owned(),
+            Some("原因：请求超时".to_owned()),
+        );
         let skipped = runtime_check_skipped(
-            "README 抓取未检测".to_owned(),
-            Some("本地还没有 Stars 数据，请先同步 Stars。".to_owned()),
+            "资料库里还没有收藏，这一项没法检查。".to_owned(),
+            Some("先点顶栏的「同步」。".to_owned()),
         );
         let failed_with_action = runtime_check_failed_with_action(
-            "GitHub Token 验证失败".to_owned(),
-            Some("Token 无效或权限不足".to_owned()),
-            "重新生成可读取 Stars 的 GitHub Token，并在 GitHub 设置区保存。",
+            "GitHub 令牌不能用。".to_owned(),
+            Some("原因：令牌无效或权限不足".to_owned()),
+            "到「设置 → GitHub」重新生成一个令牌，粘贴进去再连接。",
         );
         let skipped_with_action = runtime_check_skipped_with_action(
-            "AI 标签网络未检测".to_owned(),
-            Some("需要先通过 AI 服务自检。".to_owned()),
-            "先通过 AI 服务自检，再生成标签网络。",
+            "AI 还没有设置，这一项没法检查。".to_owned(),
+            Some("还没有选服务商。".to_owned()),
+            "到「设置 → AI 设置」选一个服务商，填好密钥和模型名，再点「测试连接」。",
         );
 
         assert_eq!(passed.status, "passed");
-        assert_eq!(passed.message, "本地数据库可读");
+        assert_eq!(passed.message, "能正常读取，资料库里有 3 个收藏。");
         assert_eq!(passed.detail, None);
         assert_eq!(passed.action, None);
         assert_eq!(failed.status, "failed");
-        assert_eq!(failed.detail.as_deref(), Some("请求超时"));
+        assert_eq!(failed.detail.as_deref(), Some("原因：请求超时"));
         assert_eq!(failed.action, None);
         assert_eq!(skipped.status, "skipped");
-        assert_eq!(
-            skipped.detail.as_deref(),
-            Some("本地还没有 Stars 数据，请先同步 Stars。")
-        );
+        assert_eq!(skipped.detail.as_deref(), Some("先点顶栏的「同步」。"));
         assert_eq!(skipped.action, None);
         assert_eq!(failed_with_action.status, "failed");
         assert_eq!(
             failed_with_action.action.as_deref(),
-            Some("重新生成可读取 Stars 的 GitHub Token，并在 GitHub 设置区保存。")
+            Some("到「设置 → GitHub」重新生成一个令牌，粘贴进去再连接。")
         );
         assert_eq!(skipped_with_action.status, "skipped");
         assert_eq!(
             skipped_with_action.action.as_deref(),
-            Some("先通过 AI 服务自检，再生成标签网络。")
+            Some("到「设置 → AI 设置」选一个服务商，填好密钥和模型名，再点「测试连接」。")
         );
+    }
+
+    // ───────────── 卡 37：「运行检查」每一项的大白话 ─────────────
+
+    /// （状态，结论，原因，建议处理）：一项检查在界面上会读到的全部文字。
+    fn item_text(item: &RuntimeReadinessCheckItem) -> (&str, &str, Option<&str>, Option<&str>) {
+        (
+            item.status.as_str(),
+            item.message.as_str(),
+            item.detail.as_deref(),
+            item.action.as_deref(),
+        )
+    }
+
+    /// 开发口吻和旧叫法：「运行检查」的任何一项都不该再出现。
+    const READINESS_JARGON: [&str; 15] = [
+        "Token",
+        "Stars",
+        "API",
+        "README",
+        "SQLite",
+        "仓库",
+        "真实请求",
+        "真实查询",
+        "真实写入",
+        "自检",
+        "引擎",
+        "标签网络",
+        "相似推荐",
+        "GET /",
+        "JSON",
+    ];
+
+    fn assert_plain_words(item: &RuntimeReadinessCheckItem) {
+        let (_, message, detail, action) = item_text(item);
+        for text in [Some(message), detail, action].into_iter().flatten() {
+            for word in READINESS_JARGON {
+                assert!(!text.contains(word), "还在说「{word}」：{text}");
+            }
+        }
+    }
+
+    #[test]
+    fn readiness_storage_texts_are_plain() {
+        let ready = readiness_storage_ready(497);
+        assert_eq!(
+            item_text(&ready),
+            ("passed", "能正常读取，资料库里有 497 个收藏。", None, None)
+        );
+        let fix = "先到「设置 → 自动整理与备份」看看有没有可以恢复的备份。没有的话，到「设置 → 通用」点「清空本机数据」后重新打开应用（会清空这台电脑上的资料，GitHub 上的收藏不受影响）。还是不行，请检查应用的数据文件夹能不能读写。";
+        let unreadable = readiness_storage_unreadable("disk I/O error".to_owned());
+        assert_eq!(
+            item_text(&unreadable),
+            (
+                "failed",
+                "资料库文件读不出来。",
+                Some("原因：disk I/O error"),
+                Some(fix)
+            )
+        );
+        let unopenable = readiness_storage_unopenable("迁移失败".to_owned());
+        assert_eq!(
+            item_text(&unopenable),
+            (
+                "failed",
+                "打不开资料库文件。",
+                Some("原因：迁移失败"),
+                Some(fix)
+            )
+        );
+        for item in [&ready, &unreadable, &unopenable] {
+            assert_plain_words(item);
+        }
+    }
+
+    #[test]
+    fn readiness_settings_texts_are_plain() {
+        let ready = readiness_settings_ready(Path::new("/tmp/fox-settings"));
+        assert_eq!(
+            item_text(&ready),
+            (
+                "passed",
+                "设置能正常保存。",
+                Some("设置文件夹：/tmp/fox-settings"),
+                None
+            )
+        );
+        let no_path = readiness_settings_dir_unavailable(Some("找不到应用数据目录".to_owned()));
+        assert_eq!(
+            item_text(&no_path),
+            (
+                "failed",
+                "找不到保存设置的文件夹。",
+                Some("原因：找不到应用数据目录"),
+                Some("请检查应用的数据文件夹有没有读写权限，再重新打开应用；还不行，到「设置 → 通用」点「清空本机数据」后重新打开（会清空这台电脑上的资料，GitHub 上的收藏不受影响）。")
+            )
+        );
+        let no_parent = readiness_settings_dir_unavailable(None);
+        assert_eq!(
+            item_text(&no_parent),
+            (
+                "failed",
+                "找不到保存设置的文件夹。",
+                Some("原因：没能确定设置文件夹的位置。"),
+                Some("请检查 Mac 上应用的数据文件夹能不能写入，然后重新打开应用。")
+            )
+        );
+        let not_created = readiness_settings_dir_not_created("Permission denied".to_owned());
+        assert_eq!(
+            item_text(&not_created),
+            (
+                "failed",
+                "没能建好保存设置的文件夹。",
+                Some("原因：Permission denied"),
+                Some("请检查应用的数据文件夹有没有读写权限；如果里面有损坏的文件夹，手动删掉它再重新打开应用。")
+            )
+        );
+        let not_saved = readiness_settings_not_saved("Read-only file system".to_owned());
+        assert_eq!(
+            item_text(&not_saved),
+            (
+                "failed",
+                "设置没能保存。",
+                Some("原因：Read-only file system"),
+                Some("请给应用的数据文件夹开放读写权限，然后再点一次「开始检查」。")
+            )
+        );
+        let leftover = readiness_settings_leftover("Permission denied".to_owned());
+        assert_eq!(
+            item_text(&leftover),
+            (
+                "failed",
+                "设置能保存，但检查用的临时文件没能删掉。",
+                Some("原因：Permission denied"),
+                Some("请检查设置文件夹的权限，删掉里面残留的临时文件后再点一次「开始检查」。")
+            )
+        );
+        for item in [&no_path, &no_parent, &not_created, &not_saved, &leftover] {
+            assert_plain_words(item);
+        }
+    }
+
+    #[test]
+    fn the_settings_folder_check_really_writes_and_cleans_up() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("系统时间应晚于纪元")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "fsl-readiness-settings-{}-{nanos}",
+            std::process::id()
+        ));
+        // 文件夹还不存在：检查会把它建出来，写一个临时文件再删掉
+        let ready = check_runtime_settings_dir(&dir);
+        assert_eq!(ready.status, "passed", "{:?}", ready.detail);
+        assert_eq!(ready.message, "设置能正常保存。");
+        assert_eq!(
+            ready.detail.as_deref(),
+            Some(format!("设置文件夹：{}", dir.display()).as_str())
+        );
+        assert_eq!(
+            fs::read_dir(&dir).expect("文件夹应已建好").count(),
+            0,
+            "检查用的临时文件不能留下"
+        );
+        // 设置文件夹的位置被一个普通文件占着：建不出来，说人话，不 panic
+        let blocker = dir.join("被文件占着");
+        fs::write(&blocker, b"x").expect("应能写入占位文件");
+        let blocked = check_runtime_settings_dir(&blocker.join("设置"));
+        assert_eq!(
+            (blocked.status.as_str(), blocked.message.as_str()),
+            ("failed", "没能建好保存设置的文件夹。")
+        );
+        assert!(
+            blocked
+                .detail
+                .as_deref()
+                .is_some_and(|detail| detail.starts_with("原因：")),
+            "{:?}",
+            blocked.detail
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn readiness_github_texts_are_plain() {
+        let ready = readiness_github_ready("fox");
+        assert_eq!(
+            item_text(&ready),
+            ("passed", "GitHub 连接正常，当前账号 @fox。", None, None)
+        );
+        let rejected = readiness_github_rejected("GitHub 返回 401：Bad credentials".to_owned());
+        assert_eq!(
+            item_text(&rejected),
+            (
+                "failed",
+                "GitHub 令牌不能用。",
+                Some("原因：GitHub 返回 401：Bad credentials"),
+                Some("到「设置 → GitHub」重新生成一个令牌，粘贴进去再连接。")
+            )
+        );
+        let missing = readiness_github_missing("请先连接 GitHub 账号".to_owned());
+        assert_eq!(
+            item_text(&missing),
+            (
+                "failed",
+                "还没有连接 GitHub 账号。",
+                Some("原因：请先连接 GitHub 账号"),
+                Some("到「设置 → GitHub」粘贴令牌，连接 GitHub 账号。")
+            )
+        );
+        let read = readiness_stars_ready(100);
+        assert_eq!(
+            item_text(&read),
+            (
+                "passed",
+                "能读到你在 GitHub 上的收藏，这次试读了 100 个。",
+                None,
+                None
+            )
+        );
+        let unreadable = readiness_stars_failed("请求超时".to_owned());
+        assert_eq!(
+            item_text(&unreadable),
+            (
+                "failed",
+                "读不到你在 GitHub 上的收藏。",
+                Some("原因：请求超时"),
+                Some("请检查网络（或代理）是否正常。如果是 GitHub 限制了请求次数，过几分钟再点「开始检查」。")
+            )
+        );
+        let skipped_token = readiness_stars_skipped_token();
+        assert_eq!(
+            item_text(&skipped_token),
+            (
+                "skipped",
+                "GitHub 令牌不能用，这一项没法检查。",
+                None,
+                Some("先到「设置 → GitHub」换一个能用的令牌，再点「开始检查」。")
+            )
+        );
+        let skipped_account = readiness_stars_skipped_account();
+        assert_eq!(
+            item_text(&skipped_account),
+            (
+                "skipped",
+                "还没有连接 GitHub 账号，这一项没法检查。",
+                None,
+                Some("先到「设置 → GitHub」连接账号，再点「开始检查」。")
+            )
+        );
+        for item in [
+            &ready,
+            &rejected,
+            &missing,
+            &read,
+            &unreadable,
+            &skipped_token,
+            &skipped_account,
+        ] {
+            assert_plain_words(item);
+        }
+    }
+
+    #[test]
+    fn readiness_readme_texts_are_plain() {
+        let skipped_storage = readiness_readme_skipped_storage();
+        assert_eq!(
+            item_text(&skipped_storage),
+            (
+                "skipped",
+                "资料库文件有问题，这一项没法检查。",
+                None,
+                Some("先处理上面「资料库文件」的问题，再点「开始检查」。")
+            )
+        );
+        let skipped_github = readiness_readme_skipped_github();
+        assert_eq!(
+            item_text(&skipped_github),
+            (
+                "skipped",
+                "GitHub 还没有连接好，这一项没法检查。",
+                None,
+                Some("先到「设置 → GitHub」连接好账号，再点「开始检查」。")
+            )
+        );
+        let unreadable = readiness_readme_library_unreadable("no such table".to_owned());
+        assert_eq!(
+            item_text(&unreadable),
+            (
+                "failed",
+                "读不到资料库里的收藏。",
+                Some("原因：no such table"),
+                Some("点顶栏的「同步」重新同步一次；还不行，到「设置 → 通用」点「清空本机数据」后重新连接 GitHub（会清空这台电脑上的资料，GitHub 上的收藏不受影响）。")
+            )
+        );
+        let empty = readiness_readme_library_empty();
+        assert_eq!(
+            item_text(&empty),
+            (
+                "skipped",
+                "资料库里还没有收藏，这一项没法检查。",
+                None,
+                Some("先点顶栏的「同步」，同步完再点「开始检查」。")
+            )
+        );
+        let ready = readiness_readme_ready("fox/tool");
+        assert_eq!(
+            item_text(&ready),
+            ("passed", "能下载项目说明，这次试了 fox/tool。", None, None)
+        );
+        let missing = readiness_readme_missing("fox/tool");
+        assert_eq!(
+            item_text(&missing),
+            (
+                "skipped",
+                "试了 fox/tool，它没有项目说明，这一项没法确认。",
+                None,
+                Some("不影响使用；想再确认一次，可以先同步更多收藏，再点「开始检查」。")
+            )
+        );
+        let failed = readiness_readme_failed("GitHub 返回 403".to_owned());
+        assert_eq!(
+            item_text(&failed),
+            (
+                "failed",
+                "下载项目说明失败。",
+                Some("原因：GitHub 返回 403"),
+                Some("请检查网络、GitHub 令牌的权限，以及这个工具的项目说明能不能打开，然后再点「开始检查」。")
+            )
+        );
+        for item in [
+            &skipped_storage,
+            &skipped_github,
+            &unreadable,
+            &empty,
+            &ready,
+            &missing,
+            &failed,
+        ] {
+            assert_plain_words(item);
+        }
+    }
+
+    #[test]
+    fn readiness_ai_texts_are_plain() {
+        let off = readiness_ai_off();
+        assert_eq!(
+            item_text(&off),
+            (
+                "skipped",
+                "AI 还没有设置，这一项没法检查。",
+                None,
+                Some("到「设置 → AI 设置」选一个服务商，填好密钥和模型名，再点「测试连接」。")
+            )
+        );
+        let ready = readiness_ai_ready("deepseek-chat");
+        assert_eq!(
+            item_text(&ready),
+            (
+                "passed",
+                "AI 服务连接正常，用的模型是 deepseek-chat。",
+                None,
+                None
+            )
+        );
+        let failed = readiness_ai_failed("请求超时".to_owned());
+        assert_eq!(
+            item_text(&failed),
+            (
+                "failed",
+                "AI 服务没连上。",
+                Some("原因：请求超时"),
+                Some("请检查「设置 → AI 设置」里的服务商、模型名和密钥有没有填对，账户里还有没有余额，网络（或代理）是否正常，然后再点「开始检查」。")
+            )
+        );
+        let unreadable = readiness_ai_config_unreadable("还没有保存密钥".to_owned());
+        assert_eq!(
+            item_text(&unreadable),
+            (
+                "failed",
+                "没能读到 AI 设置。",
+                Some("原因：还没有保存密钥"),
+                Some("到「设置 → AI 设置」重新保存一次；如果用的是本机上的 AI 服务，请确认它的请求地址能打开。")
+            )
+        );
+        for item in [&off, &ready, &failed, &unreadable] {
+            assert_plain_words(item);
+        }
+    }
+
+    #[test]
+    fn the_two_retired_checks_are_fixed_skipped_items_that_call_nothing() {
+        let retired = readiness_retired();
+        assert_eq!(
+            item_text(&retired),
+            (
+                "skipped",
+                "这一项已经不检查了。",
+                Some("对应的功能在新界面里没有入口，检查它只会白白花 AI 的费用。"),
+                None
+            )
+        );
+        assert_plain_words(&retired);
+    }
+
+    #[test]
+    fn the_readiness_result_keeps_the_eight_keys_the_settings_page_reads() {
+        // 设置页（settings.tsx）和 types.ts 还按这 8 个键取值；两个已经不检查的键必须还在，不然设置页会读到 undefined 而崩掉
+        let result = RuntimeReadinessCheckResult {
+            storage: readiness_storage_ready(1),
+            settings: readiness_settings_ready(Path::new("/tmp")),
+            github: readiness_github_ready("fox"),
+            stars: readiness_stars_ready(1),
+            readme: readiness_readme_ready("fox/tool"),
+            ai: readiness_ai_ready("m"),
+            tag_network: readiness_retired(),
+            recommendation: readiness_retired(),
+        };
+        let value = serde_json::to_value(&result).expect("检查结果应能转成 JSON");
+        let object = value.as_object().expect("检查结果是对象");
+        let mut keys: Vec<&str> = object.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            [
+                "ai",
+                "github",
+                "readme",
+                "recommendation",
+                "settings",
+                "stars",
+                "storage",
+                "tagNetwork"
+            ]
+        );
+        for (key, item) in object {
+            let item = item.as_object().expect("每一项是对象");
+            let mut fields: Vec<&str> = item.keys().map(String::as_str).collect();
+            fields.sort_unstable();
+            assert_eq!(fields, ["action", "detail", "message", "status"], "{key}");
+        }
+        assert_eq!(value["tagNetwork"]["status"], "skipped");
+        assert_eq!(value["recommendation"]["status"], "skipped");
+    }
+
+    #[test]
+    fn the_readiness_check_calls_the_ai_exactly_once() {
+        // 「运行检查」只许有一次 AI 探测（连接测试）。读本文件的源码确认：检查函数里没有「相似推荐」「标签网络」那两次调用，
+        // 文件里也没有它们的检查函数。需要拼出来的名字都用 concat! 切开，免得这条测试自己把自己写进被检查的文字里。
+        let source = include_str!("lib.rs");
+        let start = source
+            .find(concat!("fn check_runtime_readiness_", "worker("))
+            .expect("找得到检查函数");
+        let rest = &source[start..];
+        let end = rest[1..]
+            .find("\nfn ")
+            .map_or(rest.len(), |offset| offset + 1);
+        let worker: String = rest[..end]
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(
+            worker
+                .matches(concat!("run_ai_connection_", "probe("))
+                .count(),
+            1,
+            "只留 AI 连接这一次探测"
+        );
+        for forbidden in [
+            concat!("generate_tag_", "network"),
+            concat!("plan_github_", "recommendations"),
+            concat!("search_", "repositories"),
+            concat!("spend_guard::", "probe"),
+            concat!("check_runtime_", "recommendation"),
+            concat!("check_runtime_", "tag_network"),
+        ] {
+            assert!(!worker.contains(forbidden), "检查里不该再调用：{forbidden}");
+        }
+        for retired in [
+            concat!("fn check_runtime_", "recommendation"),
+            concat!("fn check_runtime_", "tag_network"),
+        ] {
+            assert!(!source.contains(retired), "不该再有这个检查函数：{retired}");
+        }
     }
 
     #[test]

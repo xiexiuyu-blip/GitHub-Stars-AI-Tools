@@ -219,7 +219,7 @@ fn begin(database: Option<&Path>, prompt: &str) -> Result<SpendPermit, String> {
             return Ok(permit);
         }
         return Err(format!(
-            "{REFUSAL_PREFIX}额度闸门还没有准备好，旧版的 AI 功能先不能用。重新打开应用再试。"
+            "{REFUSAL_PREFIX}每天额度的检查还没有准备好，AI 功能先不能用。重新打开应用再试。"
         ));
     };
     if probing() {
@@ -448,7 +448,7 @@ fn refusal_for(
 ) -> Result<(), String> {
     if control.paused {
         return Err(format!(
-            "{REFUSAL_PREFIX}AI 整理现在是暂停状态，旧版的 AI 功能也一起停着。要继续请先在工具箱里点「继续整理」。"
+            "{REFUSAL_PREFIX}AI 整理现在是暂停状态，其它 AI 功能也一起停着。要继续请先到「设置 → 自动整理与备份」里点「继续整理」。"
         ));
     }
     if unlimited {
@@ -456,12 +456,12 @@ fn refusal_for(
     }
     if control.daily_budget_tokens == 0 {
         return Err(format!(
-            "{REFUSAL_PREFIX}每天的 AI 额度是 0，所有 AI 功能（包括旧版的整批解析、标签网络、AI 搜索）都还不能用。要用请先在工具箱的「AI 自动整理」里开启额度，或开启「全量整理」。"
+            "{REFUSAL_PREFIX}每天额度是 0，所有 AI 功能都还不能用。要用请先到「设置 → 自动整理与备份」的「每天自动整理」里开启每天额度，或开启「一次性全部整理」。"
         ));
     }
     if used.saturating_add(estimated) > control.daily_budget_tokens {
         return Err(format!(
-            "{REFUSAL_PREFIX}最近 24 小时已经用了约 {}，这一次预计还要约 {}，会超过每天 {} 的额度，所以没有发请求。过一阵额度恢复后再试，或在工具箱里调高额度；想一次性整理完，可以开启「全量整理」（不限额）。",
+            "{REFUSAL_PREFIX}最近 24 小时已经用了约 {}，这一次预计还要约 {}，会超过每天 {} 的额度，所以没有发请求。过一阵额度恢复后再试，或到「设置 → 自动整理与备份」里调高每天额度；想一次性整理完，可以开启「一次性全部整理」。",
             readable_tokens(used),
             readable_tokens(estimated),
             readable_tokens(control.daily_budget_tokens),
@@ -498,7 +498,7 @@ fn refusal_for_rerank(
     }
     if control.daily_budget_tokens == 0 && !scan_open {
         return Err(format!(
-            "{REFUSAL_PREFIX}每天的 AI 额度是 0，「找方案」的 AI 精选还不能用，这次按本地排序。"
+            "{REFUSAL_PREFIX}每天额度是 0，「找方案」的 AI 精选还不能用，这次按本地排序。"
         ));
     }
     let cap = rerank_cap(control, scan_open);
@@ -583,7 +583,7 @@ fn reserve_with(
         .map_err(|error| format!("{REFUSAL_PREFIX}额度预留失败：{error}"))?;
     if inserted == 0 {
         return Err(format!(
-            "{REFUSAL_PREFIX}还没有连接 GitHub 账号，用量没法记账，所以旧版的 AI 功能先不能用。"
+            "{REFUSAL_PREFIX}还没有连接 GitHub 账号，用量没法记账，所以 AI 功能先不能用。"
         ));
     }
     transaction
@@ -1335,7 +1335,7 @@ mod tests {
             .expect("每天额度模式下应拒绝");
         assert!(is_refusal(&error), "{error}");
         assert!(
-            error.contains("全量整理"),
+            error.contains("一次性全部整理"),
             "拒绝的话要告诉他还有这条路：{error}"
         );
         // 全量整理进行中：放行，预留照常写、用量照常记
@@ -1703,7 +1703,7 @@ mod tests {
         let zero = refusal_for_rerank(&control_of(0, false), 0, 1, false).unwrap_err();
         assert_eq!(
             zero,
-            format!("{REFUSAL_PREFIX}每天的 AI 额度是 0，「找方案」的 AI 精选还不能用，这次按本地排序。")
+            format!("{REFUSAL_PREFIX}每天额度是 0，「找方案」的 AI 精选还不能用，这次按本地排序。")
         );
         // 暂停照旧拒绝；全量整理也越不过暂停
         for scan_open in [false, true] {
@@ -1866,5 +1866,118 @@ mod tests {
         release_unbilled(); // 这一次被服务商直接拒绝：整笔退回，不能带着上一次补的 9000
         drop(permit);
         assert_eq!(dir.used(), 10_000);
+    }
+
+    // ───────────── 卡 37：提示正文换成现在的叫法（前缀和判断逻辑一个字没动） ─────────────
+
+    /// 旧叫法：卡 37 之后，每一条额度拒绝提示的正文里都不该再出现。
+    const OLD_WORDING: [&str; 10] = [
+        "工具箱",
+        "AI 自动整理",
+        "AI 额度",
+        "全量整理",
+        "不限额",
+        "标签网络",
+        "整批解析",
+        "AI 搜索",
+        "旧版",
+        "闸门",
+    ];
+
+    /// 是额度拒绝（前缀没换、`is_refusal` 认得），正文里没有旧叫法。
+    fn assert_refusal_with_current_names(message: &str) {
+        assert!(is_refusal(message), "{message}");
+        let body = message
+            .strip_prefix(REFUSAL_PREFIX)
+            .expect("前缀不能换，不然前端和找方案认不出额度拒绝");
+        for old in OLD_WORDING {
+            assert!(!body.contains(old), "还在说旧叫法「{old}」：{message}");
+        }
+    }
+
+    #[test]
+    fn the_prefix_stays_and_the_daily_refusals_use_the_current_names() {
+        assert_eq!(
+            REFUSAL_PREFIX, "AI 额度：",
+            "前缀不换：前端和「找方案」靠它认额度拒绝"
+        );
+        let paused = refusal_for(&control_of(100_000, true), 0, 1, false).unwrap_err();
+        assert_eq!(
+            paused,
+            format!("{REFUSAL_PREFIX}AI 整理现在是暂停状态，其它 AI 功能也一起停着。要继续请先到「设置 → 自动整理与备份」里点「继续整理」。")
+        );
+        let zero = refusal_for(&control_of(0, false), 0, 1, false).unwrap_err();
+        assert_eq!(
+            zero,
+            format!("{REFUSAL_PREFIX}每天额度是 0，所有 AI 功能都还不能用。要用请先到「设置 → 自动整理与备份」的「每天自动整理」里开启每天额度，或开启「一次性全部整理」。")
+        );
+        // 24 小时已经用了 13 万，这一次预计 4000，每天额度 10 万
+        let over = refusal_for(&control_of(100_000, false), 130_000, 4_000, false).unwrap_err();
+        assert_eq!(
+            over,
+            format!("{REFUSAL_PREFIX}最近 24 小时已经用了约 13.0 万 token，这一次预计还要约 4000 token，会超过每天 10.0 万 token 的额度，所以没有发请求。过一阵额度恢复后再试，或到「设置 → 自动整理与备份」里调高每天额度；想一次性整理完，可以开启「一次性全部整理」。")
+        );
+        for message in [&paused, &zero, &over] {
+            assert_refusal_with_current_names(message);
+        }
+        // 判断逻辑没动：一次性全部整理进行中放行额度，暂停照样拦
+        assert!(refusal_for(&control_of(0, false), 130_000, 4_000, true).is_ok());
+        assert!(refusal_for(&control_of(0, true), 0, 1, true).is_err());
+    }
+
+    #[test]
+    fn the_rerank_refusals_use_the_current_names_too() {
+        let zero = refusal_for_rerank(&control_of(0, false), 0, 1, false).unwrap_err();
+        assert_eq!(
+            zero,
+            format!("{REFUSAL_PREFIX}每天额度是 0，「找方案」的 AI 精选还不能用，这次按本地排序。")
+        );
+        let paused = refusal_for_rerank(&control_of(100_000, true), 0, 1, false).unwrap_err();
+        assert_eq!(
+            paused,
+            format!("{REFUSAL_PREFIX}AI 整理现在是暂停状态，「找方案」的 AI 精选也先停着，这次按本地排序。")
+        );
+        // 每天额度 10 万，AI 精选的有效上限 5 万，已经用了 4.5 万，这一次预计 1 万
+        let over =
+            refusal_for_rerank(&control_of(100_000, false), 45_000, 10_000, false).unwrap_err();
+        assert_eq!(
+            over,
+            format!("{REFUSAL_PREFIX}「找方案」的 AI 精选最近 24 小时已经用了约 4.5 万 token，这一次预计还要约 1.0 万 token，会超过它每天 5.0 万 token 的额度，所以没有发请求；这次按本地排序，过一阵额度恢复后再试。")
+        );
+        for message in [&zero, &paused, &over] {
+            assert_refusal_with_current_names(message);
+        }
+    }
+
+    #[test]
+    fn the_no_account_refusal_says_ai_features_not_old_version() {
+        let dir = Dir::new();
+        dir.control(BUDGET_100K);
+        Connection::open(dir.path())
+            .unwrap()
+            .execute("DELETE FROM github_accounts", [])
+            .unwrap();
+        let error = begin(Some(dir.path()), "提示词")
+            .err()
+            .expect("没有账号应拒绝");
+        assert_eq!(
+            error,
+            format!("{REFUSAL_PREFIX}还没有连接 GitHub 账号，用量没法记账，所以 AI 功能先不能用。")
+        );
+        assert_refusal_with_current_names(&error);
+    }
+
+    #[test]
+    fn the_guard_not_installed_refusal_wording_is_plain() {
+        // 正式运行时没装上额度检查会走到这一句，单元测试里 `begin` 对「没装」放行，所以读源码确认。
+        // 只看测试模块之前的正式代码；分隔符用 concat! 拼出来，免得这条测试自己把自己写进被检查的文字里。
+        let source = include_str!("spend_guard.rs");
+        let production = source
+            .split(concat!("#[cfg(test)]\n", "mod tests {"))
+            .next()
+            .unwrap_or(source);
+        assert!(production.contains(
+            "{REFUSAL_PREFIX}每天额度的检查还没有准备好，AI 功能先不能用。重新打开应用再试。"
+        ));
     }
 }
