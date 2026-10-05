@@ -924,7 +924,7 @@ ORDER BY starred_at DESC;
         parse_json_rows::<StoredRepository>(&self.query_sql(&sql)?, "SQLite 活跃仓库列表解析失败")
     }
 
-    /// 列出缺少 AI 文档、缺少 README 或 README 内容已变化的活跃仓库。
+    /// 列出需要旧版 AI 文档的活跃仓库，已有新版说明的收藏不再参与。
     pub fn list_repositories_requiring_ai_document(
         &self,
         account_id: &str,
@@ -938,6 +938,7 @@ LEFT JOIN repo_readmes rr ON rr.repo_id = r.id
 LEFT JOIN repo_ai_documents ai ON ai.repo_id = r.id
 WHERE r.sync_status = 'active'
   AND r.account_id = {account_id}
+  AND (ai.card_json IS NULL OR ai.card_json = '')
   AND (
     ai.repo_id IS NULL
     OR rr.repo_id IS NULL
@@ -982,6 +983,23 @@ LIMIT 1;
         let value = output.trim();
 
         Ok((!value.is_empty()).then(|| value.to_owned()))
+    }
+
+    /// 只根据非空 card_json 判断是否已有新版说明。
+    pub fn has_card_document(&self, repo_id: &str) -> Result<bool, String> {
+        let sql = format!(
+            r#"
+.mode list
+SELECT EXISTS (
+  SELECT 1 FROM repo_ai_documents
+  WHERE repo_id = {repo_id}
+    AND card_json IS NOT NULL
+    AND card_json != ''
+);
+"#,
+            repo_id = sql_text(repo_id),
+        );
+        Ok(self.query_sql(&sql)?.trim() == "1")
     }
 
     pub fn save_readme(&self, readme: &ReadmeDocument) -> Result<(), String> {
@@ -3421,7 +3439,7 @@ WHERE r.sync_status = 'active'{account_clause};
         ))
     }
 
-    /// 保存 AI 文档（摘要、关键词、建议标签）
+    /// 保存旧版 AI 文档（摘要、关键词、建议标签），不覆盖已有新版说明。
     pub(crate) fn save_repository_ai_document(
         &self,
         document: RepositoryAiDocumentInput<'_>,
@@ -3462,7 +3480,8 @@ ON CONFLICT(repo_id) DO UPDATE SET
   source_hash = excluded.source_hash,
   input_tokens = excluded.input_tokens,
   output_tokens = excluded.output_tokens,
-  generated_at = excluded.generated_at;
+  generated_at = excluded.generated_at
+WHERE repo_ai_documents.card_json IS NULL OR repo_ai_documents.card_json = '';
 "#,
             repo_id = sql_text(repository_id),
             summary = sql_text(summary_zh),
@@ -5716,6 +5735,166 @@ VALUES
             vec!["1001:2", "1001:3", "1001:4"]
         );
         let _ = remove_sqlite_database_files(&database_path);
+    }
+
+    fn legacy_ai_document_storage() -> (AppStorage, PathBuf) {
+        let (storage, database_path) = temp_storage("legacy-ai-document");
+        storage
+            .execute_sql(
+                r#"
+PRAGMA foreign_keys = ON;
+INSERT INTO github_accounts (id, login, token_ref) VALUES ('1001', 'alice', 'test');
+INSERT INTO repositories (id, account_id, owner, name, full_name, html_url, starred_at)
+VALUES
+  ('1001:A', '1001', 'owner', 'card-changed', 'owner/card-changed', 'https://github.com/owner/card-changed', '2026-01-06T00:00:00Z'),
+  ('1001:B', '1001', 'owner', 'card-no-readme', 'owner/card-no-readme', 'https://github.com/owner/card-no-readme', '2026-01-05T00:00:00Z'),
+  ('1001:C', '1001', 'owner', 'legacy-null', 'owner/legacy-null', 'https://github.com/owner/legacy-null', '2026-01-02T00:00:00Z'),
+  ('1001:D', '1001', 'owner', 'legacy-empty', 'owner/legacy-empty', 'https://github.com/owner/legacy-empty', '2026-01-04T00:00:00Z'),
+  ('1001:E', '1001', 'owner', 'missing-ai', 'owner/missing-ai', 'https://github.com/owner/missing-ai', '2026-01-03T00:00:00Z'),
+  ('1001:F', '1001', 'owner', 'legacy-current', 'owner/legacy-current', 'https://github.com/owner/legacy-current', '2026-01-01T00:00:00Z');
+INSERT INTO repo_readmes (repo_id, raw_markdown, content_hash, source_path, fetched_at)
+VALUES
+  ('1001:A', '# A', 'hash-new', 'README.md', '2026-01-01T00:00:00Z'),
+  ('1001:C', '# C', 'hash-new', 'README.md', '2026-01-01T00:00:00Z'),
+  ('1001:D', '# D', 'hash-new', 'README.md', '2026-01-01T00:00:00Z'),
+  ('1001:E', '# E', 'hash-new', 'README.md', '2026-01-01T00:00:00Z'),
+  ('1001:F', '# F', 'hash-current', 'README.md', '2026-01-01T00:00:00Z');
+INSERT INTO repo_ai_documents (repo_id, summary_zh, readme_zh, keywords_json, suggested_tags_json, model, prompt_version, source_hash, input_tokens, output_tokens, generated_at, card_json)
+VALUES
+  ('1001:A', '新版摘要', '新版中文说明', '["原关键词"]', '["原标签"]', 'card-model', 'card-v3', 'hash-old', 321, 45, '2026-01-01T00:00:00Z', '{"x":1}'),
+  ('1001:B', '没有 README 的卡', NULL, '[]', '[]', 'card-model', 'readme-summary-v1', 'hash-old', 1, 2, '2026-01-01T00:00:00Z', '{"x":2}'),
+  ('1001:C', '旧摘要', '旧中文说明', '["旧关键词"]', '["旧标签"]', 'old-model', 'card-v3', 'hash-old', 3, 4, '2026-01-01T00:00:00Z', NULL),
+  ('1001:D', '旧摘要', '旧中文说明', '["旧关键词"]', '["旧标签"]', 'old-model', 'v1', 'hash-old', 5, 6, '2026-01-01T00:00:00Z', ''),
+  ('1001:F', '已是最新', NULL, '[]', '[]', 'old-model', 'v1', 'hash-current', 7, 8, '2026-01-01T00:00:00Z', NULL);
+"#,
+            )
+            .expect("写入新版与旧版文档夹具");
+        (storage, database_path)
+    }
+
+    #[test]
+    fn ai_document_candidates_exclude_nonempty_card_documents() {
+        let (storage, database_path) = legacy_ai_document_storage();
+        let candidates = storage
+            .list_repositories_requiring_ai_document("1001")
+            .expect("读取旧版 AI 候选");
+
+        assert_eq!(
+            candidates
+                .iter()
+                .map(|repository| repository.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["1001:D", "1001:E", "1001:C"]
+        );
+        remove_sqlite_database_files(&database_path).expect("清理候选测试库");
+    }
+
+    #[test]
+    fn has_card_document_requires_nonempty_card_json() {
+        let (storage, database_path) = legacy_ai_document_storage();
+
+        assert!(storage.has_card_document("1001:A").expect("检查新版说明"));
+        assert!(storage
+            .has_card_document("1001:B")
+            .expect("检查无 README 的新版说明"));
+        assert!(!storage.has_card_document("1001:C").expect("检查 NULL 文档"));
+        assert!(!storage
+            .has_card_document("1001:D")
+            .expect("检查空字符串文档"));
+        assert!(!storage
+            .has_card_document("1001:E")
+            .expect("检查没有文档的收藏"));
+        remove_sqlite_database_files(&database_path).expect("清理判断测试库");
+    }
+
+    #[test]
+    fn legacy_ai_document_save_preserves_cards_and_updates_legacy_documents() {
+        let (storage, database_path) = legacy_ai_document_storage();
+        let read_document = |repo_id: &str| {
+            let sql = format!(
+                r#"
+.mode json
+SELECT summary_zh, readme_zh, keywords_json, suggested_tags_json, model,
+       prompt_version, source_hash, input_tokens, output_tokens, generated_at, card_json
+FROM repo_ai_documents WHERE repo_id = {repo_id};
+"#,
+                repo_id = sql_text(repo_id),
+            );
+            parse_json_rows::<serde_json::Value>(
+                &storage.query_sql(&sql).expect("读取文档原始列"),
+                "解析测试文档失败",
+            )
+            .expect("解析文档原始列")
+            .pop()
+            .expect("文档应存在")
+        };
+        let keywords = vec!["替换关键词".to_owned()];
+        let suggested_tags = vec!["替换标签".to_owned()];
+        let save_legacy_document = |repo_id: &str| {
+            storage.save_repository_ai_document(RepositoryAiDocumentInput {
+                repository_id: repo_id,
+                summary_zh: "替换摘要",
+                readme_zh: Some("替换中文说明"),
+                keywords: &keywords,
+                suggested_tags: &suggested_tags,
+                model: "legacy-model",
+                prompt_version: "readme-summary-v1",
+                source_hash: "replacement-hash",
+                input_tokens: 987,
+                output_tokens: 654,
+            })
+        };
+
+        let before = read_document("1001:A");
+        save_legacy_document("1001:A").expect("保护新版说明时也应返回 Ok");
+        let after = read_document("1001:A");
+        for column in [
+            "summary_zh",
+            "readme_zh",
+            "keywords_json",
+            "suggested_tags_json",
+            "model",
+            "prompt_version",
+            "source_hash",
+            "input_tokens",
+            "output_tokens",
+            "generated_at",
+            "card_json",
+        ] {
+            assert_eq!(
+                after[column], before[column],
+                "新版说明的 {column} 不得改变"
+            );
+        }
+
+        for repo_id in ["1001:C", "1001:D"] {
+            let before = read_document(repo_id);
+            save_legacy_document(repo_id).expect("旧文档应正常覆盖");
+            let after = read_document(repo_id);
+            assert_eq!(
+                after,
+                serde_json::json!({
+                    "summary_zh": "替换摘要",
+                    "readme_zh": "替换中文说明",
+                    "keywords_json": "[\"替换关键词\"]",
+                    "suggested_tags_json": "[\"替换标签\"]",
+                    "model": "legacy-model",
+                    "prompt_version": "readme-summary-v1",
+                    "source_hash": "replacement-hash",
+                    "input_tokens": 987,
+                    "output_tokens": 654,
+                    "generated_at": after["generated_at"],
+                    "card_json": before["card_json"],
+                }),
+                "{repo_id} 的旧字段应正常更新"
+            );
+            assert_ne!(after["generated_at"], before["generated_at"]);
+            assert!(!after["generated_at"]
+                .as_str()
+                .expect("生成时间应是文本")
+                .is_empty());
+        }
+        remove_sqlite_database_files(&database_path).expect("清理写入保护测试库");
     }
 
     #[test]

@@ -5289,6 +5289,9 @@ fn generate_repository_ai_document_worker(
     request: GenerateAiDocumentRequest,
 ) -> Result<storage::RepositoryDetailView, String> {
     let storage = AppStorage::from_app_handle(&app_handle)?;
+    if storage.has_card_document(&request.repository_id)? {
+        return Err("这个收藏已经有新版说明了，旧的「生成中文说明」不会再覆盖它，也不会花 token。（以后会提供「重新整理这一张」。）".to_owned());
+    }
     let request_id = request
         .request_id
         .unwrap_or_else(|| format!("repository-ai-{}", request.repository_id));
@@ -5546,6 +5549,9 @@ fn batch_generate_repository_ai_documents_worker(
             ),
         );
         let result = (|| -> Result<BatchItemOutcome, String> {
+            if storage.has_card_document(&repository.id)? {
+                return Ok(BatchItemOutcome::Skipped);
+            }
             let mut source = storage.get_repository_ai_source(&repository.id, Some(&account_id))?;
             if only_missing {
                 if let Some(readme) = source.readme.as_ref() {
@@ -5684,8 +5690,8 @@ fn batch_generate_repository_ai_documents_worker(
     }
     let completion_message = if let Some(reason) = stopped_by_budget.as_deref() {
         format!("已停止：已生成 {generated_count} 个，跳过 {skipped_count} 个。{reason}")
-    } else if only_missing && progress_total == 0 {
-        "AI 解析已是最新，无需重复处理。".to_owned()
+    } else if skipped_count == progress_total {
+        "中文说明已经是最新的，不用再整理。".to_owned()
     } else {
         format!(
             "增量 AI 完成：生成 {generated_count} 个，跳过 {skipped_count} 个，缺少 README {missing_readme_count} 个，失败 {} 个",
