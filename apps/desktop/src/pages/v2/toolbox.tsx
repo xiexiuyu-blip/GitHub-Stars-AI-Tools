@@ -7,11 +7,17 @@ import { Button, Card, PageHeader, Spinner, useToast } from '@/components/kit';
 import { Icon } from '@/components/ui/icon';
 import {
   approxRepos,
+  AUTO_ORGANIZE_DEFINITION,
   automationState,
   backupKindLabel,
   backupTimeLine,
   BUDGET_PRESETS,
+  dailyBudgetMetric,
   dailyBudgetConfirmLead,
+  DAILY_ORGANIZE_DESCRIPTION,
+  DAILY_ORGANIZE_DURING_SCAN,
+  DAILY_ORGANIZE_TITLE,
+  enqueueCardsNote,
   EXPORT_SECTION_HINT,
   exportSavedText,
   formatMinute,
@@ -19,10 +25,14 @@ import {
   formatTokens,
   fullScanConfirmLines,
   fullScanPanel,
+  FULL_SCAN_STARTED,
+  FULL_SCAN_STOPPED,
+  organizeCountsLine,
   parseDailyBudget,
   readmeCheckText,
   recentUsageMetric,
   runStatusText,
+  SLOW_ORGANIZE_COPY,
   type AutomationStatus,
   type FullScanPanel,
 } from '@/lib/automation-view';
@@ -125,7 +135,7 @@ function Notice(props: { tone?: 'info' | 'warn'; children: ReactNode }) {
   );
 }
 
-/** 「一次性全部整理」：按 fullScanPanel 的 kind 画。确认面板不调用命令，只有「确认开始」才开始。 */
+/** 「整理现有收藏」：按 fullScanPanel 的 kind 画。确认面板不调用命令，只有「确认开始」才开始。 */
 function FullScanPanelView(props: {
   panel: FullScanPanel;
   confirming: boolean;
@@ -139,6 +149,14 @@ function FullScanPanelView(props: {
   onStop: () => void;
 }) {
   const { panel } = props;
+  const confirmationRef = useRef<HTMLDivElement>(null);
+  const showingConfirmation = props.confirming && panel.kind === 'ready';
+  useEffect(() => {
+    if (!showingConfirmation) return;
+    const confirmation = confirmationRef.current;
+    confirmation?.scrollIntoView({ block: 'nearest' });
+    confirmation?.querySelector<HTMLButtonElement>('[data-confirm-full-scan]')?.focus({ preventScroll: true });
+  }, [showingConfirmation]);
   return (
     <div className="mb-4 rounded-lg border-2 border-primary bg-card p-4">
       <div className="mb-3 flex items-start gap-3">
@@ -147,16 +165,14 @@ function FullScanPanelView(props: {
         </span>
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-2">
-            <h3 className="m-0 text-base font-semibold text-foreground">一次性全部整理</h3>
+            <h3 className="m-0 text-base font-semibold text-foreground">{panel.title}</h3>
             {panel.kind === 'running' ? (
               <span className="hue-tile ml-auto inline-flex h-5 shrink-0 items-center rounded-full px-2 text-[11px] font-medium" style={{ '--h': panel.paused ? 4 : 148 } as CSSProperties}>
                 {panel.paused ? '已暂停' : '进行中'}
               </span>
             ) : null}
           </div>
-          <p className="mt-1 mb-0 text-[13px] leading-[1.6] text-on-surface-variant">
-            第一次用、想一口气把全部收藏整理完，就用它。这一轮不受每天额度限制，整理完自动回到每天自动整理。
-          </p>
+          {panel.description ? <p className="mt-1 mb-0 text-[13px] leading-[1.6] text-on-surface-variant">{panel.description}</p> : null}
         </div>
       </div>
 
@@ -170,7 +186,6 @@ function FullScanPanelView(props: {
 
       {panel.kind === 'nothing' ? (
         <>
-          <p className="m-0 text-sm leading-[1.7] text-foreground">全部收藏都整理好了。以后新收藏会在每天自动整理里处理。</p>
           {panel.last ? <p className="mt-2 mb-0 text-xs leading-[1.6] text-subtle">{panel.last}</p> : null}
         </>
       ) : null}
@@ -178,22 +193,22 @@ function FullScanPanelView(props: {
       {panel.kind === 'ready' ? (
         <>
           <p className="m-0 text-sm leading-[1.7] text-foreground">
-            {fullScanConfirmLines(panel.pending, panel.estimate)[0]}
+            {panel.body}
           </p>
           {panel.last ? <p className="mt-2 mb-0 text-xs leading-[1.6] text-subtle">{panel.last}</p> : null}
           {props.confirming ? (
-            <div className="mt-3 rounded-lg border border-primary/40 bg-accent p-4 text-sm leading-[1.7] text-foreground">
+            <div ref={confirmationRef} className="mt-3 rounded-lg border border-primary/40 bg-accent p-4 text-sm leading-[1.7] text-foreground">
               {fullScanConfirmLines(panel.pending, panel.estimate).map((line) => (
                 <p key={line} className="mt-2 mb-0 first:mt-0">{line}</p>
               ))}
               <div className="mt-3 flex flex-wrap gap-2">
-                <Button variant="primary" loading={props.starting} onClick={props.onStart}>确认开始</Button>
+                <Button data-confirm-full-scan variant="primary" loading={props.starting} onClick={props.onStart}>确认开始</Button>
                 <Button disabled={props.starting} onClick={props.onCancel}>取消</Button>
               </div>
             </div>
           ) : (
             <div className="mt-3">
-              <Button variant={props.startPrimary ? 'primary' : 'default'} onClick={props.onAsk}>开始一次性全部整理</Button>
+              <Button variant={props.startPrimary ? 'primary' : 'default'} onClick={props.onAsk}>{panel.buttonLabel}</Button>
             </div>
           )}
         </>
@@ -208,7 +223,7 @@ function FullScanPanelView(props: {
               aria-valuenow={panel.percent}
               aria-valuemin={0}
               aria-valuemax={100}
-              aria-label="一次性全部整理进度"
+              aria-label="现在整理进度"
               aria-valuetext={`已整理 ${panel.done} / ${panel.total} 个`}
               style={{ width: `${panel.percent}%` }}
             />
@@ -337,13 +352,7 @@ export function ToolboxPage() {
     const unlimited = automation?.unlimited === true;
     void invoke<number>('enqueue_cards_now', { scope })
       .then((count) => {
-        setEnqueueNote(
-          count > 0
-            ? unlimited
-              ? `已加入整理 ${count} 个，一次性全部整理正在处理。`
-              : `已加入整理 ${count} 个。是否开始整理，取决于上面的每天额度。`
-            : '没有还要整理的工具了。',
-        );
+        setEnqueueNote(enqueueCardsNote(count, unlimited));
         return refreshAutomation();
       })
       .catch((reason: unknown) => say(errorText(reason)));
@@ -363,7 +372,7 @@ export function ToolboxPage() {
       .then((next) => {
         applyAutomation(next);
         setPendingFullScan(false);
-        say('一次性全部整理已开始');
+        say(FULL_SCAN_STARTED);
       })
       .catch((reason: unknown) => say(errorText(reason)))
       .finally(() => {
@@ -379,7 +388,7 @@ export function ToolboxPage() {
     void invoke<AutomationStatus>('stop_full_scan')
       .then((next) => {
         applyAutomation(next);
-        say('已停止一次性全部整理，剩下的会按每天额度接着整理');
+        say(FULL_SCAN_STOPPED);
       })
       .catch((reason: unknown) => say(errorText(reason)))
       .finally(() => {
@@ -445,6 +454,7 @@ export function ToolboxPage() {
   const state = automationState(automation);
   const current = automation?.dailyBudgetTokens ?? 0;
   const scanPanel = fullScanPanel(automation);
+  const countsLine = organizeCountsLine(automation);
   const readmeLine = readmeCheckText(automation?.lastReadmeCheck);
   const confirmingFullScan = pendingFullScan && scanPanel.kind === 'ready';
 
@@ -465,7 +475,7 @@ export function ToolboxPage() {
         icon="auto_awesome"
         hue={222}
         title="自动整理"
-        hint="让 AI 帮你给收藏写中文说明（它能做什么、适合解决什么、怎么试），整理好的会出现在「今日」和「资料库」里。用的是你自己配置的 AI 服务，具体花多少钱以你服务商的账单为准。"
+        hint={AUTO_ORGANIZE_DEFINITION}
         actions={
           <span className="hue-tile inline-flex h-6 shrink-0 items-center gap-1.5 rounded-full px-2.5 text-xs font-medium" style={{ '--h': state.hue } as CSSProperties}>
             <span className="size-1.5 rounded-full" style={{ background: `hsl(${state.hue} 70% 45%)` }} />
@@ -474,6 +484,7 @@ export function ToolboxPage() {
         }
       >
         {state.detail ? <p className={cn('mt-0 mb-3 text-[13px] leading-[1.6]', automation?.paused ? 'text-error' : 'text-on-surface-variant')}>{state.detail}</p> : null}
+        {countsLine ? <p className="mt-0 mb-3 text-[13px] leading-[1.6] text-on-surface-variant">{countsLine}</p> : null}
 
         {automation?.paused ? (
           <div className="mb-3">
@@ -494,12 +505,12 @@ export function ToolboxPage() {
         />
         {readmeLine ? <p className="mt-0 mb-3 text-xs leading-[1.6] text-subtle">{readmeLine}</p> : null}
 
-        <b className="mb-1 block text-[13px] font-medium text-foreground">每天自动整理</b>
+        <b className="mb-1 block text-[13px] font-medium text-foreground">{DAILY_ORGANIZE_TITLE}</b>
         <p className="mt-0 mb-2 text-xs leading-[1.6] text-on-surface-variant">
-          一次性全部整理完以后用它：只整理新收藏的、还没有说明的，以及说明是用旧方法写的，没变的不会重复花钱。每天最多用你设定的额度，用完第二天自动继续。
+          {DAILY_ORGANIZE_DESCRIPTION}
         </p>
         {automation?.unlimited === true ? (
-          <p className="mt-0 mb-2 text-xs leading-[1.6] text-on-surface-variant">一次性全部整理进行中，这一轮不受每天额度限制；整理完才按下面的额度。</p>
+          <p className="mt-0 mb-2 text-xs leading-[1.6] text-on-surface-variant">{DAILY_ORGANIZE_DURING_SCAN}</p>
         ) : null}
         <div className="grid grid-cols-2 gap-2 min-[1000px]:grid-cols-4">
           {BUDGET_PRESETS.map((preset) => {
@@ -564,11 +575,7 @@ export function ToolboxPage() {
         {automation ? (
           <div className="mt-4 grid grid-cols-3 gap-2.5 max-[699px]:grid-cols-1">
             <Metric {...recentUsageMetric(automation)} />
-            <Metric
-              label="24 小时内还剩"
-              value={automation.unlimited === true ? '不受每天额度限制' : current > 0 ? `${formatTokens(automation.budgetRemaining)} token` : '—'}
-              sub={automation.unlimited === true ? '一次性全部整理中' : current > 0 ? `约还能整理 ${approxRepos(automation.budgetRemaining)} 个` : '没有开启每天额度'}
-            />
+            <Metric {...dailyBudgetMetric(automation)} />
             <Metric label="等待整理" value={`${automation.queued} 个`} sub={`进行中 ${automation.running} · 失败 ${automation.failed}${automation.model ? ` · 模型 ${automation.model}` : ''}`} />
           </div>
         ) : (
@@ -576,10 +583,17 @@ export function ToolboxPage() {
         )}
 
         <div className="mt-4 flex flex-wrap items-center gap-2 border-t border-border pt-3.5">
-          <Button onClick={() => enqueueCards('missing')}>给还没有说明的收藏写说明</Button>
-          <Button onClick={() => enqueueCards('outdated')}>重写旧的中文说明（会花钱）</Button>
+          {/* 只想慢慢整理（可选）：默认收起，暂停按钮留在折叠区外。 */}
+          <details className="min-w-0 flex-1">
+            <summary className="cursor-pointer text-[13px] font-medium text-foreground">{SLOW_ORGANIZE_COPY.title}</summary>
+            <p className="mt-2 mb-2 text-xs leading-[1.6] text-on-surface-variant">{SLOW_ORGANIZE_COPY.description}</p>
+            <div className="flex flex-wrap gap-2">
+              <Button onClick={() => enqueueCards('missing')}>{SLOW_ORGANIZE_COPY.missingLabel}</Button>
+              <Button onClick={() => enqueueCards('outdated')}>{SLOW_ORGANIZE_COPY.outdatedLabel}</Button>
+            </div>
+            {enqueueNote ? <p className="mt-2 mb-0 text-xs text-on-surface-variant">{enqueueNote}</p> : null}
+          </details>
           {automation && !automation.paused && automation.enabled ? <Button variant="text" onClick={pauseAutomation}>暂停</Button> : null}
-          {enqueueNote ? <span className="text-xs text-on-surface-variant">{enqueueNote}</span> : null}
         </div>
       </Section>
 
