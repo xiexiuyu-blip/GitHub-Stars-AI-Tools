@@ -502,10 +502,10 @@ describe('regenerateToast：点「不对，请 AI 重写」之后的提示', () 
     const paused = regenerateToast(status({ paused: true, enabled: false }));
     expect(paused.title).toBe('已加入整理队列');
     expect(paused.sub).toContain('暂停');
-    expect(paused.actionLabel).toBe('去处理');
+    expect(paused.actionLabel).toBe('继续整理');
     const fullScan = regenerateToast(status({ unlimited: true, enabled: false }));
     expect(fullScan.title).toBe('已加入整理队列');
-    expect(fullScan.sub).toContain('全量整理');
+    expect(fullScan.sub).toContain('一次性全部整理');
     expect(fullScan.actionLabel).toBeNull();
   });
 
