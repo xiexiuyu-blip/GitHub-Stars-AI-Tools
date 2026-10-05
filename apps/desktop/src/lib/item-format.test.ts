@@ -497,7 +497,7 @@ describe('regenerateToast：点「不对，请 AI 重写」之后的提示', () 
     expect(regenerateToast(status({ providerConfigured: false, enabled: false }))).toEqual({
       title: '已加入整理队列',
       sub: '还没配置 AI 服务，配置好才会重新整理',
-      actionLabel: '去看看',
+      actionLabel: '去设置 AI',
     });
     const paused = regenerateToast(status({ paused: true, enabled: false }));
     expect(paused.title).toBe('已加入整理队列');
