@@ -2,6 +2,7 @@
 
 import type { LocalCapabilityInput, PackFormat, PackRequest } from '@/lib/api';
 import type { RerankFit, RerankResult, ScenarioSummary, SolveHit, SolveResult } from '@/lib/contracts';
+import { formatStars, monthDay } from '@/lib/item-format';
 
 export type MatchBadge = { tone: 'blue' | 'gray'; text: string };
 
@@ -330,12 +331,46 @@ export function pickListNote(
   return defaultPickNote(orderedPicks(hits, picked).length, direct, edited);
 }
 
-/** 交接单大约多少字。不到一万字写具体的数，一万字以上写「约 1.2 万字」。 */
+/** 交接单大约多少字。不到一万字写具体的数（四位数也不加千分位：「约 3457 字」），一万字以上写「约 1.2 万字」。 */
 export function packSizeText(length: number): string {
   if (!Number.isFinite(length) || length < 0) return '';
   const count = Math.round(length);
-  if (count < 10000) return `约 ${String(count).replace(/\B(?=(\d{3})+(?!\d))/g, ',')} 字`;
+  if (count < 10000) return `约 ${count} 字`;
   return `约 ${Math.round(count / 1000) / 10} 万字`;
+}
+
+/** 交接单（Markdown）里每个工具的那一行：`- 链接：网址 · ★27.2k · 最近更新 2026-07-01`。后端写给 Codex 读的，k 和日期都是机器好读的写法。 */
+const PACK_LINK_LINE = /^(- 链接：)(\S+)( · ★)([0-9][0-9.]*k?)( · 最近更新 )(\d{4}-\d{2}-\d{2}|未知)$/gm;
+
+/** 「27.2k」「1k」「999」→ 个数。读不懂返回 null。 */
+function starsFromPackText(text: string): number | null {
+  const thousand = text.endsWith('k');
+  const value = Number(thousand ? text.slice(0, -1) : text);
+  if (!Number.isFinite(value) || value < 0) return null;
+  return Math.round(thousand ? value * 1000 : value);
+}
+
+/**
+ * 交接单排版预览里给人看的写法：`★27.2k` → `★2.7 万`（不到一万写原数字：`★1234`），
+ * `最近更新 2026-07-01` → `最近更新 7 月 1 日`（不是今年的带年份）。
+ * 只换工具那一行；复制出去的、「看 Markdown 原文」看到的永远是原文，不经过这里。
+ * 认得出是哪个勾选的工具（按网址对），星数就用它真实的个数，不从「27.2k」倒推；对不上的才按「k」推回个数。
+ */
+export function previewDisplayText(
+  markdown: string,
+  hits: readonly Pick<SolveHit, 'htmlUrl' | 'starsCount'>[],
+  now: Date | number | string = new Date(),
+): string {
+  const starsByUrl = new Map<string, number>();
+  for (const hit of hits) {
+    if (hit.htmlUrl && Number.isFinite(hit.starsCount)) starsByUrl.set(hit.htmlUrl, hit.starsCount);
+  }
+  return markdown.replace(PACK_LINK_LINE, (_line, head: string, url: string, mid: string, stars: string, tail: string, date: string) => {
+    const count = starsByUrl.get(url) ?? starsFromPackText(stars);
+    const starText = count == null ? stars : formatStars(count);
+    const dateText = date === '未知' ? date : monthDay(date, now);
+    return `${head}${url}${mid}${starText}${tail}${dateText}`;
+  });
 }
 
 /** 交接单里有工具已经不在资料库里（多半是你在 GitHub 上取消了收藏）。没有就不说。 */

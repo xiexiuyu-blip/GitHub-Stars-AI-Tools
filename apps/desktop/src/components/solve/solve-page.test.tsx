@@ -119,6 +119,25 @@ describe('SolvePage：整页接线', () => {
     expect(markup).toContain('不用这些工具，直接交给 Codex');
   });
 
+  it('列表顶上那句提示缩短了，不会在 900 宽的窗口里折成两行、留下孤零零的一个字', () => {
+    restoreDraft(found(['a', 'b']), ['a', 'b']);
+    const markup = renderPage();
+    const hint = '勾选的写进交接单，点一行看详情';
+    expect(markup).toContain(`>${hint}</span>`);
+    expect(markup).not.toContain('勾选的会写进交接单');
+    // 十五个字以内：之前十七个字，在 900 宽的窗口里放不下最后一个字
+    expect(Array.from(hint).length).toBeLessThanOrEqual(15);
+  });
+
+  it('预览标题栏的按钮叫「看 Markdown 原文」（点了变成「看排版效果」），不再是含糊的「看原文」「看排版」', () => {
+    restoreDraft(found(['a', 'b']), ['a', 'b']);
+    const markup = renderPage();
+    expect(markup).toContain('看 Markdown 原文');
+    expect(markup).not.toContain('>看原文<');
+    expect(markup).not.toContain('>看排版<');
+    expect(markup).not.toContain('看排版效果');
+  });
+
   it('从草稿回来、是直接交给 Codex：顶上不说勾了几个', () => {
     restoreDraft(found(['a']), ['a'], true);
     const markup = renderPage();

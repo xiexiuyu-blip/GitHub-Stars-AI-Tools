@@ -18,6 +18,7 @@ import {
   CONNECT_SLOW_WELCOME,
   dailyBudgetConfirmLead,
   estimateFullScanTokens,
+  EXPORT_SECTION_HINT,
   exportSavedText,
   formatMinute,
   formatSize,
@@ -36,6 +37,7 @@ import {
   GIST_SECTION_TITLE,
   gistImportHint,
   GITHUB_TOKEN_EXPLAINER,
+  GITHUB_TOKEN_EXTRA_SCOPES,
   GITHUB_TOKEN_SAVED_NOTE,
   GITHUB_TOKEN_SCOPES,
   GITHUB_TOKEN_WILL_SAVE_NOTE,
@@ -907,6 +909,22 @@ describe('exportSavedText', () => {
   });
 });
 
+describe('导出区块的说明（自动整理与备份页）', () => {
+  it('讲清文件存在「下载」文件夹、同名会被覆盖，并补一句「用 Excel 打开中文不会乱码」', () => {
+    expect(EXPORT_SECTION_HINT).toBe(
+      '把资料库导成文件，方便存档或给别的工具读。文件会保存在「下载」文件夹里，同名的会被覆盖。导出的表格用 Excel 打开中文不会乱码。',
+    );
+    expect(EXPORT_SECTION_HINT).toContain('用 Excel 打开中文不会乱码');
+  });
+
+  it('页面上这段说明就是它（区块的 hint），两个导出按钮都在：文档（Markdown）、表格（CSV，可用 Excel 打开）', () => {
+    const toolbox = withoutComments(sourceOf('../pages/v2/toolbox.tsx'));
+    expect(toolbox).toContain('title="导出成文档 / 表格" hint={EXPORT_SECTION_HINT}');
+    expect(toolbox).toContain('导出成文档（Markdown）');
+    expect(toolbox).toContain('导出成表格（CSV，可用 Excel 打开）');
+  });
+});
+
 describe('backupTimeLine', () => {
   it('有上次备份时写成月日时刻，并说明大约 20 小时', () => {
     expect(backupTimeLine('2026-10-03T18:17:00')).toBe(
@@ -1042,16 +1060,39 @@ describe('运行检查：说明、费用提示和各项名字', () => {
 
 describe('设置页文案：令牌、钥匙串、清空本机数据、GitHub 备份', () => {
   it('GitHub 的叫令牌，保存处叫钥匙串，不再说系统凭据管理器', () => {
-    expect(GITHUB_TOKEN_EXPLAINER).toBe('令牌（GitHub 给你的一串密码，应用用它读你的收藏）');
-    expect(GITHUB_TOKEN_SAVED_NOTE).toBe('令牌（GitHub 给你的一串密码，应用用它读你的收藏）已保存在 Mac 的钥匙串里，界面不会显示它。');
+    expect(GITHUB_TOKEN_EXPLAINER).toBe('令牌是 GitHub 给你的一串密码，应用用它读你的收藏。');
+    expect(GITHUB_TOKEN_SAVED_NOTE).toBe('令牌已保存在 Mac 的钥匙串里，界面不会显示它。');
     expect(GITHUB_TOKEN_WILL_SAVE_NOTE).toContain('只会保存在 Mac 的钥匙串里');
     for (const text of [GITHUB_TOKEN_SAVED_NOTE, GITHUB_TOKEN_WILL_SAVE_NOTE, GITHUB_TOKEN_SCOPES]) {
       expect(text).not.toMatch(/系统凭据管理器|Personal Access Token|Token/);
     }
   });
 
-  it('权限说明：只读公开收藏不用勾；私有收藏勾 repo；GitHub 备份勾 gist', () => {
-    expect(GITHUB_TOKEN_SCOPES).toBe('只读公开收藏：不用勾权限；想读私有收藏：勾「repo」；想用 GitHub 备份：勾「gist」。');
+  it('令牌是什么是一句完整的话（不是半截句）；连接之后令牌区域那一句不再重复它', () => {
+    expect(GITHUB_TOKEN_EXPLAINER.startsWith('令牌是')).toBe(true);
+    expect(GITHUB_TOKEN_EXPLAINER.endsWith('。')).toBe(true);
+    expect(GITHUB_TOKEN_EXPLAINER).not.toMatch(/^令牌（/);
+    // 设置 → GitHub 页：最上面说一遍（含权限），「访问配置」里只说保存在哪，不重复「一串密码」
+    const connectedPage = [GITHUB_TOKEN_EXPLAINER, GITHUB_TOKEN_SCOPES, GITHUB_TOKEN_SAVED_NOTE].join('');
+    expect(connectedPage.split('一串密码').length - 1).toBe(1);
+    expect(GITHUB_TOKEN_SAVED_NOTE).not.toContain('一串密码');
+    // 欢迎引导里是第一次提到令牌，保存那一句带着它是什么
+    expect(GITHUB_TOKEN_WILL_SAVE_NOTE.startsWith(GITHUB_TOKEN_EXPLAINER)).toBe(true);
+  });
+
+  it('权限说明：只读公开收藏一个都不用勾；还需要的话勾「repo」（读你的私有收藏）和「gist」（上传备份用）', () => {
+    expect(GITHUB_TOKEN_SCOPES).toBe('创建令牌时，只读公开收藏的话一个权限都不用勾；还需要的话再勾「repo」（读你的私有收藏）和「gist」（上传备份用）。');
+    // repo / gist 各带一句解释，同一件事只写一遍
+    expect(GITHUB_TOKEN_SCOPES.split('「repo」').length - 1).toBe(1);
+    expect(GITHUB_TOKEN_SCOPES.split('「gist」').length - 1).toBe(1);
+    expect(GITHUB_TOKEN_SCOPES).toContain('「repo」（读你的私有收藏）');
+    expect(GITHUB_TOKEN_SCOPES).toContain('「gist」（上传备份用）');
+  });
+
+  it('设置 → GitHub 页：令牌是什么那一句后面直接接权限，不再多一个句号（原来「令牌（…）。」是半截句）', () => {
+    const settings = withoutComments(sourceOf('../pages/settings.tsx'));
+    expect(settings).toContain('{GITHUB_TOKEN_EXPLAINER}{GITHUB_TOKEN_SCOPES}');
+    expect(settings).not.toContain('{GITHUB_TOKEN_EXPLAINER}。');
   });
 
   it('连接慢的提示：设置里一句、欢迎引导里多一句「先进入」', () => {
@@ -1118,6 +1159,14 @@ describe('欢迎引导文案', () => {
     expect(WELCOME_COPY.tokenSteps[2]).toBe('名字随便填');
     expect(WELCOME_COPY.tokenSteps[3]).toContain('权限一个都不用勾（只读公开收藏）');
     expect(WELCOME_COPY.tokenSteps[4]).toBe('复制');
+  });
+
+  it('怎么拿令牌里的权限一步：repo / gist 各带一句解释，和设置页是同一句话（只写一遍）', () => {
+    expect(WELCOME_COPY.tokenSteps[3]).toBe('权限一个都不用勾（只读公开收藏）；还需要的话再勾「repo」（读你的私有收藏）和「gist」（上传备份用）');
+    expect(WELCOME_COPY.tokenSteps[3]).toContain('「repo」（读你的私有收藏）');
+    expect(WELCOME_COPY.tokenSteps[3]).toContain('「gist」（上传备份用）');
+    expect(GITHUB_TOKEN_SCOPES).toContain(GITHUB_TOKEN_EXTRA_SCOPES);
+    expect(WELCOME_COPY.tokenSteps[3]).toContain(GITHUB_TOKEN_EXTRA_SCOPES);
   });
 
   it('不再提仓库页、标签网络页、语义检索、AI 解析，也不自称「我」', () => {
@@ -1222,8 +1271,9 @@ describe('文案守卫：欢迎引导、更新、侧栏里不再出现旧叫法'
 describe('文案守卫：页签名、关于页、导入警告', () => {
   const settings = withoutComments(sourceOf('../pages/settings.tsx'));
 
-  it('「工具箱」页签改叫「自动整理与备份」，页面标题同步', () => {
-    expect(withoutComments(sourceOf('../App.tsx'))).toContain("label: '自动整理与备份'");
+  it('「工具箱」页签改叫「自动整理与备份」，页面标题同步（页签名现在只在 lib/nav.ts 里定义，App.tsx 不再覆盖）', () => {
+    expect(withoutComments(sourceOf('./nav.ts'))).toContain("label: '自动整理与备份'");
+    expect(withoutComments(sourceOf('../App.tsx'))).not.toContain("label: '自动整理与备份'");
     expect(withoutComments(sourceOf('../pages/v2/toolbox.tsx'))).toContain('title="设置 · 自动整理与备份"');
   });
 

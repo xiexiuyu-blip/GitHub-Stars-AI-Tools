@@ -10,6 +10,15 @@ import {
   codexFallbackText,
   COPY_FAILED_NOTICE,
   copiedNotice,
+  COPY_INSTALL_BUTTON,
+  copyButtonLabel,
+  DROP_HINT,
+  DROP_HINT_LIBRARY,
+  INSTALL_NEEDS_README,
+  noInstallStepsNote,
+  noScreenshotsNote,
+  README_DOWNLOAD_HOW,
+  README_NOT_DOWNLOADED_TITLE,
   displayForYou,
   firstSentences,
   formatStars,
@@ -26,6 +35,8 @@ import {
   regenerateToast,
   relativeDays,
   splitRepoName,
+  todayEmptyCopy,
+  WEEK_NEW_LABEL,
 } from './item-format';
 
 describe('formatStars', () => {
@@ -94,12 +105,31 @@ describe('relativeDays', () => {
   });
 });
 
+/**
+ * 「本机日历上 年-月-日 时:分」那一刻，写成带 Z 的 UTC 串（GitHub 给的 `starredAt` 就是这种）。
+ * 用本机时间构造，所以不管测试在哪个时区跑，它在本机日历上都是同一天：不靠固定的 UTC 串。
+ */
+function utcStringAtLocal(year: number, month: number, day: number, hour: number, minute = 0): string {
+  return new Date(year, month - 1, day, hour, minute).toISOString();
+}
+
+/** 同一刻，写成别的时区的样子：`2026-10-03T18:17:00+08:00`。offsetMinutes 是比 UTC 快多少分钟。 */
+function isoAtOffset(instant: Date, offsetMinutes: number): string {
+  const shifted = new Date(instant.getTime() + offsetMinutes * 60_000);
+  const pad = (value: number) => String(value).padStart(2, '0');
+  const sign = offsetMinutes < 0 ? '-' : '+';
+  const abs = Math.abs(offsetMinutes);
+  return `${shifted.getUTCFullYear()}-${pad(shifted.getUTCMonth() + 1)}-${pad(shifted.getUTCDate())}`
+    + `T${pad(shifted.getUTCHours())}:${pad(shifted.getUTCMinutes())}:${pad(shifted.getUTCSeconds())}`
+    + `${sign}${pad(Math.floor(abs / 60))}:${pad(abs % 60)}`;
+}
+
 describe('monthDay', () => {
   const now = new Date(2026, 9, 5, 12, 0, 0);
 
   it('去掉前导零，坏值返回破折号', () => {
     expect(monthDay('2026-10-03', now)).toBe('10 月 3 日');
-    expect(monthDay('2026-01-09T00:00:00.000Z', now)).toBe('1 月 9 日');
+    expect(monthDay(utcStringAtLocal(2026, 1, 9, 12), now)).toBe('1 月 9 日');
     expect(monthDay('', now)).toBe('—');
     expect(monthDay(null, now)).toBe('—');
     expect(monthDay('10/03', now)).toBe('—');
@@ -107,17 +137,80 @@ describe('monthDay', () => {
   });
 
   it('只写日期、不写钟点：收藏时间是 GitHub 给的 UTC 时间，钟点和本机时间对不上', () => {
-    expect(monthDay('2026-10-03T18:17:00Z', now)).toBe('10 月 3 日');
-    expect(monthDay('2026-10-03T18:17:00Z', now)).not.toContain('18:17');
-    expect(monthDay('2026-10-03T18:17:00.000+08:00', now)).toBe('10 月 3 日');
+    const starred = utcStringAtLocal(2026, 10, 3, 18, 17);
+    expect(starred.endsWith('Z')).toBe(true);
+    expect(monthDay(starred, now)).toBe('10 月 3 日');
+    expect(monthDay(starred, now)).not.toContain(':');
+    expect(monthDay(isoAtOffset(new Date(2026, 9, 3, 18, 17), 8 * 60), now)).toBe('10 月 3 日');
+    // 不带时区的串本来就是本机时间，写的是哪天就是哪天
     expect(monthDay('2026-10-03 18:17:00', now)).toBe('10 月 3 日');
+    expect(monthDay('2026-10-03T18:17:00', now)).toBe('10 月 3 日');
   });
 
   it('不是今年的带年份，今年的不带', () => {
-    expect(monthDay('2025-10-03T18:17:00Z', now)).toBe('2025 年 10 月 3 日');
+    expect(monthDay(utcStringAtLocal(2025, 10, 3, 18, 17), now)).toBe('2025 年 10 月 3 日');
     expect(monthDay('2025-12-31', now)).toBe('2025 年 12 月 31 日');
     expect(monthDay('2026-01-01', now)).toBe('1 月 1 日');
     expect(monthDay('2027-01-01', now)).toBe('2027 年 1 月 1 日');
+  });
+
+  it('日期是本机日历上的那一天：本机凌晨收藏的，UTC 日期比本机早一天，不能写成前一天（北京时间 0–8 点）', () => {
+    // 本机 10 月 3 日 01:30：在东八区它的 UTC 串是 10 月 2 日 17:30Z，直接取串里的日期就会写成 10 月 2 日
+    expect(monthDay(utcStringAtLocal(2026, 10, 3, 1, 30), now)).toBe('10 月 3 日');
+    expect(monthDay(utcStringAtLocal(2026, 10, 3, 0, 0), now)).toBe('10 月 3 日');
+    expect(monthDay(utcStringAtLocal(2026, 10, 3, 7, 59), now)).toBe('10 月 3 日');
+  });
+
+  it('本机深夜收藏的，UTC 日期比本机晚一天（美国西海岸晚上），同样写本机的当天', () => {
+    expect(monthDay(utcStringAtLocal(2026, 10, 3, 23, 30), now)).toBe('10 月 3 日');
+    expect(monthDay(utcStringAtLocal(2026, 10, 3, 18, 0), now)).toBe('10 月 3 日');
+  });
+
+  it('同一刻写成哪个时区的样子都一样：+14:00、-12:00、+05:30、+00:00 都换回本机的日期', () => {
+    const instant = new Date(2026, 9, 3, 12, 0);
+    for (const offset of [14 * 60, -12 * 60, 5 * 60 + 30, 0, -3 * 60 - 30]) {
+      const written = isoAtOffset(instant, offset);
+      expect(monthDay(written, now), written).toBe('10 月 3 日');
+    }
+  });
+
+  it('跨年也按本机日历：本机 1 月 1 日凌晨是今年，本机 12 月 31 日深夜是去年（不管它的 UTC 年份是哪年）', () => {
+    expect(monthDay(utcStringAtLocal(2026, 1, 1, 1, 0), now)).toBe('1 月 1 日');
+    expect(monthDay(utcStringAtLocal(2025, 12, 31, 23, 30), now)).toBe('2025 年 12 月 31 日');
+  });
+
+  it('和 JS 自己按时区解析的结果一致：几种常见写法', () => {
+    const samples = [
+      '2026-10-03T18:17:00Z',
+      '2026-10-03T18:17:00.000Z',
+      '2026-10-03T18:17:00.123456Z',
+      '2026-10-03T18:17Z',
+      '2026-10-03T18:17:00+08:00',
+      '2026-10-03T18:17:00-07:00',
+      '2026-10-03T18:17:00+0530',
+      '2026-01-01T00:00:00Z',
+      '2026-12-31T23:59:59Z',
+    ];
+    for (const sample of samples) {
+      const moment = new Date(sample);
+      expect(Number.isNaN(moment.getTime()), sample).toBe(false);
+      const expected = moment.getFullYear() === now.getFullYear()
+        ? `${moment.getMonth() + 1} 月 ${moment.getDate()} 日`
+        : `${moment.getFullYear()} 年 ${moment.getMonth() + 1} 月 ${moment.getDate()} 日`;
+      expect(monthDay(sample, now), sample).toBe(expected);
+    }
+  });
+
+  it('不存在的日期或时间读不出来：写破折号，不猜', () => {
+    for (const bad of ['2026-02-31', '2026-04-31', '2026-00-10', '2026-10-00', '2026-10-03T25:00:00Z', '2026-10-03T18:61:00Z', '不是日期']) {
+      expect(monthDay(bad, now), bad).toBe('—');
+    }
+    expect(monthDay('2028-02-29', now)).toBe('2028 年 2 月 29 日');
+  });
+
+  it('日期后面跟着认不出的东西：照旧只取前面的日期（当作本机时间，不做时区换算）', () => {
+    expect(monthDay('2026-10-03 周六', now)).toBe('10 月 3 日');
+    expect(monthDay('2026-10-03T18:17:00 (UTC)', now)).toBe('10 月 3 日');
   });
 
   it('今年是哪一年看传进来的 now（Date、毫秒数、字符串都行）；读不出来就多写年份，不猜', () => {
@@ -185,14 +278,41 @@ describe('greetingFor', () => {
 
 describe('buildTodayLead', () => {
   it('有推荐、没有推荐，以及负数和非数字', () => {
-    expect(buildTodayLead(4, 3)).toBe('这周你收藏了 4 个新工具。先从下面 3 个你可能用得上的看起。');
-    expect(buildTodayLead(0, 0)).toBe('这周你收藏了 0 个新工具。AI 整理好之后，这里会从还没看过的收藏里，优先挑和你关心的场景有关的。');
-    expect(buildTodayLead(-3, -1)).toBe('这周你收藏了 0 个新工具。AI 整理好之后，这里会从还没看过的收藏里，优先挑和你关心的场景有关的。');
-    expect(buildTodayLead(Number.NaN, Number.NaN)).toBe('这周你收藏了 0 个新工具。AI 整理好之后，这里会从还没看过的收藏里，优先挑和你关心的场景有关的。');
+    expect(buildTodayLead(4, 3)).toBe('最近 7 天你收藏了 4 个新工具。先从下面 3 个你可能用得上的看起。');
+    expect(buildTodayLead(0, 0)).toBe('最近 7 天你收藏了 0 个新工具。AI 整理好之后，这里会从还没看过的收藏里，优先挑和你关心的场景有关的。');
+    expect(buildTodayLead(-3, -1)).toBe('最近 7 天你收藏了 0 个新工具。AI 整理好之后，这里会从还没看过的收藏里，优先挑和你关心的场景有关的。');
+    expect(buildTodayLead(Number.NaN, Number.NaN)).toBe('最近 7 天你收藏了 0 个新工具。AI 整理好之后，这里会从还没看过的收藏里，优先挑和你关心的场景有关的。');
   });
 
   it('不再提全库的「等 AI 整理」数量', () => {
     expect(buildTodayLead(8, 3)).not.toContain('整理');
+  });
+
+  it('数据是最近 7 天，不是自然周：写「最近 7 天」，不写「这周」「本周」', () => {
+    for (const lead of [buildTodayLead(4, 3), buildTodayLead(0, 0)]) {
+      expect(lead.startsWith('最近 7 天你收藏了 ')).toBe(true);
+      expect(lead).not.toContain('这周');
+      expect(lead).not.toContain('本周');
+    }
+  });
+});
+
+describe('今日页：最近 7 天新收藏', () => {
+  it('栏目名是「最近 7 天新收藏」，不叫「本周新收藏」', () => {
+    expect(WEEK_NEW_LABEL).toBe('最近 7 天新收藏');
+    expect(WEEK_NEW_LABEL).not.toContain('本周');
+  });
+
+  it('点进去是空的：说最近 7 天没有新收藏，并告诉怎么办；不说「这一周」', () => {
+    expect(todayEmptyCopy('week')).toEqual({ title: '最近 7 天没有新收藏。去 GitHub 点 Star，再回来点「同步」。' });
+    expect(todayEmptyCopy('week').title).not.toContain('这一周');
+  });
+
+  it('待 AI 整理、在用、想试各说各的（这些话原来就对，没动）', () => {
+    expect(todayEmptyCopy('pending').title).toBe('都整理好了，没有在等 AI 写说明的收藏。');
+    expect(todayEmptyCopy('in_use').title).toBe('还没有标成「在用」的工具。打开一个工具，点「我的状态 → 在用」，就会出现在这里。');
+    expect(todayEmptyCopy('want').title).toBe('还没有标成「想试」的工具');
+    expect(todayEmptyCopy('want').description).toContain('先回到「今天值得先看」');
   });
 });
 
@@ -517,5 +637,75 @@ describe('regenerateToast：点「不对，请 AI 重写」之后的提示', () 
       sub: '会在后台重新整理，好了会自动更新',
       actionLabel: null,
     });
+  });
+});
+
+describe('项目说明还没下载时：怎么试 / 预览 / 项目说明三处各说各的', () => {
+  const DOWNLOADED = { state: 'ready', readme: { rawMarkdown: '# tool', sourcePath: 'README.md' } } as const;
+  const NOT_DOWNLOADED = { state: 'ready', readme: null } as const;
+
+  it('概览「怎么试」：还没下载 → 「还没下载项目说明，暂时看不到安装步骤。」，后面接着说下一步', () => {
+    const note = noInstallStepsNote(NOT_DOWNLOADED);
+    expect(note.startsWith('还没下载项目说明，暂时看不到安装步骤。')).toBe(true);
+    expect(note).toContain('点「打开 GitHub」看发行版或文档');
+    expect(note).not.toContain('项目说明里没有');
+  });
+
+  it('概览「怎么试」：已经下载、里面确实没写 → 保留原来那句', () => {
+    const note = noInstallStepsNote(DOWNLOADED);
+    expect(note).toBe('项目说明里没有现成的安装步骤。点「打开 GitHub」看发行版或文档；也可以直接复制给 Codex，让它去读项目说明。');
+    expect(note).not.toContain('还没下载');
+  });
+
+  it('概览「怎么试」：还在读取 / 读出错，各说各的，不冒充「没写」也不冒充「没下载」', () => {
+    expect(noInstallStepsNote({ state: 'loading' })).toBe('正在读取项目说明…');
+    const failed = noInstallStepsNote({ state: 'error', message: '读不出来' });
+    expect(failed.startsWith('项目说明没读出来，暂时看不到安装步骤。')).toBe(true);
+    expect(failed).not.toContain('还没下载');
+    expect(failed).not.toContain('里面没有');
+  });
+
+  it('预览页：还没下载 → 「还没下载项目说明，暂时看不到截图。」；已经下载、里面没有图 → 保留原来那句', () => {
+    expect(noScreenshotsNote(false)).toEqual({
+      title: '还没下载项目说明，暂时看不到截图。',
+      description: '点顶栏的「同步」，或到「设置 → GitHub」点「下载项目说明」，就会补上。',
+    });
+    expect(noScreenshotsNote(true)).toEqual({
+      title: '项目说明里没有截图',
+      description: '这个工具没有放界面或效果图。可以去 GitHub 看看，或者切到「项目说明」读它的原文。',
+    });
+  });
+
+  it('项目说明页和怎么试页：指到真实存在的入口，不再指「设置 → 自动整理与备份」，也没有半截句', () => {
+    expect(README_NOT_DOWNLOADED_TITLE).toBe('还没下载这个工具的项目说明。');
+    expect(README_DOWNLOAD_HOW).toBe('点顶栏的「同步」，或到「设置 → GitHub」点「下载项目说明」，就会补上。');
+    expect(INSTALL_NEEDS_README).toBe('还没下载这个工具的项目说明，所以找不到安装命令。点顶栏的「同步」，或到「设置 → GitHub」点「下载项目说明」，就会补上。');
+    for (const text of [README_NOT_DOWNLOADED_TITLE, README_DOWNLOAD_HOW, INSTALL_NEEDS_README, noScreenshotsNote(false).description]) {
+      expect(text).not.toContain('自动整理与备份');
+      expect(text).not.toContain('自动下载');
+      expect(text.endsWith('。'), text).toBe(true);
+    }
+  });
+});
+
+describe('copyButtonLabel：详情底部「复制给 Codex」按钮上的字', () => {
+  it('合集（资源清单）也写「帮我装好并试用」：粘出去的话是「装好并试用」那一套，按钮不能和它说的不一样', () => {
+    expect(copyButtonLabel('collection')).toBe('复制「帮我装好并试用」给 Codex');
+    expect(copyButtonLabel(' collection ')).toBe(COPY_INSTALL_BUTTON);
+  });
+
+  it('其余类型、没填、不认识的都不变：帮我装好并试用', () => {
+    for (const form of ['skill', 'mcp', 'cli', 'app', 'library', 'api', 'service', 'other', '', '  ', null, undefined, 'template']) {
+      expect(copyButtonLabel(form), String(form)).toBe(COPY_INSTALL_BUTTON);
+    }
+    expect(COPY_INSTALL_BUTTON).toBe('复制「帮我装好并试用」给 Codex');
+  });
+});
+
+describe('「不要了」的悬停说明：资料库一句，今日页一句', () => {
+  it('资料库里不说「只是今日里不再出现」；今日页保持原句', () => {
+    expect(DROP_HINT_LIBRARY).toBe('标成「不要了」：不会取消 GitHub 上的收藏，可以在「我的状态 → 不要了」里找回。');
+    expect(DROP_HINT_LIBRARY).not.toContain('今日');
+    expect(DROP_HINT).toBe('标成「不要了」：只是今日里不再出现，不会取消 GitHub 收藏，可在资料库「我的状态 → 不要了」里找回');
   });
 });

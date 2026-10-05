@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { MapPage } from '@/pages/v2/map';
+import { MapBlocks, MapPage } from '@/pages/v2/map';
 import SOURCE from '@/pages/v2/map.tsx?raw';
 
 /** 资料库右边那个子页签（原来叫「地图」，现在叫「按类型看」）。它只是给人看的，不能改库。SOURCE 是页面源码原文，用来守住「不再引用合并命令」。 */
@@ -47,5 +47,54 @@ describe('按类型看（原地图页）', () => {
     expect(SOURCE).toContain('text-error');
     expect(SOURCE).not.toContain('text-red-700');
     expect(SOURCE).not.toContain('已把前两个分类合并成概念');
+  });
+});
+
+describe('按类型看：读取中、没有分类、有分类三种状态', () => {
+  const blocks = [
+    { slug: 'agent', nameZh: '智能助手', count: 12 },
+    { slug: 'design', nameZh: '设计素材', count: 3 },
+  ];
+
+  it('刚打开、还在读取：写「读取中…」，不先说「没有分类」', () => {
+    // 服务端渲染不跑 effect，页面就停在刚打开的样子
+    const text = textOf(renderToStaticMarkup(<MapPage />));
+    expect(text).toContain('读取中…');
+    expect(text).not.toContain('还没有分类');
+  });
+
+  it('读完了、一个分类都没有：写「还没有分类。同步并整理之后这里会出现。」，不再是一片空白', () => {
+    const text = textOf(renderToStaticMarkup(<MapBlocks loading={false} error={null} blocks={[]} />));
+    expect(text).toBe('还没有分类。同步并整理之后这里会出现。');
+    expect(text).not.toContain('读取中');
+  });
+
+  it('读取中的时候，哪怕手里有上一次的分类也先写「读取中…」', () => {
+    expect(textOf(renderToStaticMarkup(<MapBlocks loading error={null} blocks={blocks} />))).toBe('读取中…');
+  });
+
+  it('有分类：每个分类一张卡，个数和名字都在，没有「读取中」「还没有分类」', () => {
+    const html = renderToStaticMarkup(<MapBlocks loading={false} error={null} blocks={blocks} />);
+    const text = textOf(html);
+    expect(text).toContain('12');
+    expect(text).toContain('智能助手');
+    expect(text).toContain('3');
+    expect(text).toContain('设计素材');
+    expect(text).not.toContain('读取中');
+    expect(text).not.toContain('还没有分类');
+    expect(html).not.toContain('<button');
+  });
+
+  it('读出错：只显示错误（错误色），不说成「还没有分类」', () => {
+    const html = renderToStaticMarkup(<MapBlocks loading={false} error="读不出来" blocks={[]} />);
+    expect(textOf(html)).toBe('读不出来');
+    expect(html).toContain('text-error');
+    expect(textOf(html)).not.toContain('还没有分类');
+  });
+
+  it('页面接线：读完（成功或出错）都结束「读取中」，页面卸载后不再写状态', () => {
+    expect(SOURCE).toContain('setLoading(false)');
+    expect(SOURCE.match(/setLoading\(false\)/g)?.length).toBe(2);
+    expect(SOURCE).toContain('cancelled');
   });
 });

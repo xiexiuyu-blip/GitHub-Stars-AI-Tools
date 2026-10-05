@@ -3,7 +3,14 @@ import { createPortal } from 'react-dom';
 import type { LibraryDetail } from '@/lib/contracts';
 import { INSTALL_COPY_HINT, buildCommunityPrompt, buildInstallPrompt } from '@/lib/codex-prompts';
 import { communityNote, groupCommunity, itemMeta, stateLabel } from '@/lib/community-view';
-import { relativeDays, type CopyKind } from '@/lib/item-format';
+import {
+  INSTALL_NEEDS_README,
+  README_DOWNLOAD_HOW,
+  README_NOT_DOWNLOADED_TITLE,
+  noScreenshotsNote,
+  relativeDays,
+  type CopyKind,
+} from '@/lib/item-format';
 import { useRepoCommunity } from '@/hooks/use-repo-community';
 import {
   communityLinks,
@@ -76,7 +83,8 @@ export function InstallPanel(props: {
 }) {
   const { detail } = props;
   if (props.readme.state === 'loading') return <PanelSkeleton />;
-  const showReleases = props.hasDownload || props.steps.length === 0;
+  // 「下载安装包」那张卡只在项目说明里真的提到了安装包 / 发行版时才显示；没找到就不显示（不再没找到命令就一律放一张）
+  const showReleases = props.hasDownload;
   return (
     <div className="flex flex-col gap-3">
       {props.steps.map((step) => (
@@ -128,7 +136,7 @@ export function InstallPanel(props: {
       ) : null}
 
       {props.steps.length === 0 && !props.howFallback && props.readme.state === 'ready' && !props.readme.readme ? (
-        <p className="text-sm text-on-surface-variant">还没下载这个工具的项目说明，所以找不到安装命令。同步后或在「设置 → 自动整理与备份」里会自动下载</p>
+        <p className="text-sm text-on-surface-variant">{INSTALL_NEEDS_README}</p>
       ) : null}
 
       <SoftCard className="flex items-center gap-3">
@@ -158,11 +166,13 @@ export function PreviewPanel(props: { detail: LibraryDetail; readme: ReadmeState
   if (props.readme.state === 'loading') return <PanelSkeleton />;
   if (props.readme.state === 'error') return panelError(props.readme.message);
   if (images.length === 0) {
+    // 还没下载项目说明：不是「它没放图」，是还没看，不能说没有
+    const empty = noScreenshotsNote(props.readme.readme !== null);
     return (
       <EmptyState
         icon="hide_image"
-        title="项目说明里没有截图"
-        description="这个工具没有放界面或效果图。可以去 GitHub 看看，或者切到「项目说明」读它的原文。"
+        title={empty.title}
+        description={empty.description}
         action={props.detail.htmlUrl ? (
           <a className="text-sm text-accent-foreground hover:underline" href={props.detail.htmlUrl} target="_blank" rel="noopener noreferrer">打开 GitHub</a>
         ) : undefined}
@@ -259,8 +269,8 @@ export function ReadmePanel(props: { detail: LibraryDetail; readme: ReadmeState 
     return (
       <EmptyState
         icon="description"
-        title="还没下载这个工具的项目说明"
-        description="所以找不到安装命令。同步后或在「设置 → 自动整理与备份」里会自动下载"
+        title={README_NOT_DOWNLOADED_TITLE}
+        description={README_DOWNLOAD_HOW}
       />
     );
   }

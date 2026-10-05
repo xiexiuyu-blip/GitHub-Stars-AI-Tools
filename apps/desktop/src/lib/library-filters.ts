@@ -19,7 +19,10 @@ export type ScenarioFilterRow = {
 
 export type FormFilterRow = {
   id: string;
+  /** 筛选面板上显示的短名字（技能 / 命令行 / 应用…），和行内小标签是同一套：左栏只有 200px 宽，长写法会被截成半句。 */
   label: string;
+  /** 长解释，放进悬停提示（title）。没有解释、或和短名字一样（应用、其他）就是 null。 */
+  hint: string | null;
   count: number;
 };
 
@@ -41,9 +44,12 @@ const FORM_LABELS: Record<string, string> = {
   other: '其他',
 };
 
-/** 类型的长写法（带解释）：只给资料库的筛选面板和详情页的「类型」一行用，行内小标签别用。 */
+/**
+ * 类型的长写法（带解释）：筛选面板的悬停提示和详情页的「类型」一行用，行内小标签别用。
+ * 技能包不写「装进 Codex 用」：有的技能包是给 claude.ai 用的，会和「怎么试」里的步骤打架。
+ */
 const FORM_HINT_LABELS: Record<string, string> = {
-  skill: '技能包（装进 Codex 用）',
+  skill: '技能包（给 AI 助手装的扩展）',
   mcp: 'MCP 插件（给 AI 接外部工具）',
   cli: '命令行工具（要让 Codex 帮你装）',
   app: '应用',
@@ -173,13 +179,16 @@ export function visibleScenarios(
   }));
 }
 
-/** 类型按个数从多到少；个数相同按 id 的字符码排序。未知类型原样显示。筛选面板里写长写法（带解释）。 */
+/**
+ * 类型按个数从多到少；个数相同按 id 的字符码排序。未知类型原样显示。
+ * 筛选面板里显示短名字 + 个数（`label`），长解释放进悬停提示（`hint`）：200px 宽的左栏放不下长写法。
+ */
 export function formOptions(forms: Readonly<Record<string, number>> | null | undefined): FormFilterRow[] {
-  const rows = Object.entries(forms ?? {}).map(([id, count]) => ({
-    id,
-    label: FORM_HINT_LABELS[id] ?? id,
-    count: asCount(count),
-  }));
+  const rows = Object.entries(forms ?? {}).map(([id, count]) => {
+    const label = FORM_LABELS[id] ?? id;
+    const hint = FORM_HINT_LABELS[id] ?? null;
+    return { id, label, hint: hint && hint !== label ? hint : null, count: asCount(count) };
+  });
   rows.sort((a, b) => {
     if (a.count !== b.count) return b.count - a.count;
     if (a.id < b.id) return -1;
@@ -187,6 +196,42 @@ export function formOptions(forms: Readonly<Record<string, number>> | null | und
     return 0;
   });
   return rows;
+}
+
+/** 资料库列表一个都没有时，页面中间说什么。 */
+export type LibraryEmptyNote = {
+  title: string;
+  /** 只有搜索词没搜到时才有：换个说法，或者去「找方案」 */
+  description: string | null;
+  /** 只有搜索词没搜到时才给「去找方案」按钮：筛选筛空了，去找方案帮不上忙 */
+  offerSolve: boolean;
+};
+
+const SEARCH_EMPTY: LibraryEmptyNote = {
+  title: '没有找到',
+  description: '换个说法试试，或去「找方案」说说你想做什么',
+  offerSolve: true,
+};
+
+/**
+ * 一个都没有时说什么：
+ * - 搜了关键词：「没有找到，换个说法试试」，并给「去找方案」。
+ * - 没搜关键词，只点了「待 AI 整理」：「没有待 AI 整理的收藏，都整理好了。」——这是好消息，不是没搜到。
+ * - 没搜关键词，点了别的筛选（想试 / 试过 / 在用 / 不要了、场景、类型、AI 已整理，或几个叠在一起）：「这一类还没有。」
+ * - 什么都没筛、也没搜（资料库本身是空的）：保持原来那句。
+ */
+export function libraryEmptyNote(
+  state: Pick<LibraryUiState, 'scenario' | 'reading' | 'form' | 'cardState' | 'keyword'>,
+): LibraryEmptyNote {
+  if (state.keyword.trim()) return SEARCH_EMPTY;
+  const narrowed = Boolean(state.scenario || state.reading || state.form);
+  if (state.cardState === 'pending' && !narrowed) {
+    return { title: '没有待 AI 整理的收藏，都整理好了。', description: null, offerSolve: false };
+  }
+  if (narrowed || state.cardState !== 'all') {
+    return { title: '这一类还没有。', description: null, offerSolve: false };
+  }
+  return SEARCH_EMPTY;
 }
 
 /** 「全部」是 AI 已整理加待 AI 整理：这两个数本身已经按其他筛选联动过，不按卡片状态再筛一次。 */

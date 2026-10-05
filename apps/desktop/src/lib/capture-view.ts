@@ -185,14 +185,18 @@ export function inboxMeta(context: string, relativeTime: string): string {
   return context || when;
 }
 
+/**
+ * 当前页签里一条都没有时说什么，按页签说：待处理 / 失败 / 已归档各一句。
+ * 内部的 `ready` 状态界面上也叫「待处理」（没有单独的页签），跟待处理说同一句。
+ * 说「没有待处理的链接」而不是「收集箱是空的」：已归档、失败的里面可能还有，收集箱不一定是空的。
+ */
 export function emptyInboxCopy(filter: InboxFilter): { title: string; description?: string } {
-  if (filter === 'pending') {
-    return {
-      title: '收集箱是空的',
-      description: '上面粘贴后点「加入收集箱」，新链接会进来',
-    };
-  }
-  return { title: '这里没有内容' };
+  if (filter === 'failed') return { title: '没有失败的链接。' };
+  if (filter === 'archived') return { title: '还没有归档的链接。' };
+  return {
+    title: '没有待处理的链接。',
+    description: '上面粘贴后点「加入收集箱」，新链接会进来',
+  };
 }
 
 export function canOpenUrl(url: string): boolean {

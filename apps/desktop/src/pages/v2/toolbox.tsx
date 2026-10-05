@@ -12,6 +12,7 @@ import {
   backupTimeLine,
   BUDGET_PRESETS,
   dailyBudgetConfirmLead,
+  EXPORT_SECTION_HINT,
   exportSavedText,
   formatMinute,
   formatSize,
@@ -656,7 +657,7 @@ export function ToolboxPage() {
       </Section>
 
       {/* ───────── 导出 ───────── */}
-      <Section icon="ios_share" hue={28} title="导出成文档 / 表格" hint="把资料库导成文件，方便存档或给别的工具读。文件会保存在「下载」文件夹里，同名的会被覆盖。">
+      <Section icon="ios_share" hue={28} title="导出成文档 / 表格" hint={EXPORT_SECTION_HINT}>
         <div className="flex flex-wrap gap-2">
           <Button onClick={() => void exportLibrary('export_library_markdown', 'fox-stars-lab-library.md')}>导出成文档（Markdown）</Button>
           <Button onClick={() => void exportLibrary('export_library_csv', 'fox-stars-lab-library.csv')}>导出成表格（CSV，可用 Excel 打开）</Button>

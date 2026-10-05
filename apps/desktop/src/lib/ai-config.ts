@@ -143,14 +143,22 @@ export function getEmbeddingConfigMessage(embedding: EmbeddingSettings): string 
   return null;
 }
 
-export function getAiConfigMessage(ai: AISettings): string | null {
+/**
+ * AI 还没设置完整时说什么。别处（GitHub 页的运行检查、欢迎引导、各个按钮的悬停提示）读到它，要指路到「设置 → AI 设置」；
+ * 人已经在「设置 → AI 设置」这一页里时（`onAiSettingsPage`），再说「去设置 → AI 设置」就是在叫他去他正在的地方：
+ * 这时改成指这一页上面的输入框（提示显示在页面最下面的「测试连接」旁边，要填的都在它上面）。
+ */
+export function getAiConfigMessage(ai: AISettings, options: { onAiSettingsPage?: boolean } = {}): string | null {
+  const here = options.onAiSettingsPage === true;
   if (ai.provider === 'none') {
-    return '还没设置 AI。去「设置 → AI 设置」，选一个服务商（比如 DeepSeek、通义、OpenAI），填上它给你的密钥和模型名，再点「测试连接」。';
+    return here
+      ? '还没设置 AI。先在上面选一个服务商，填好密钥和模型名，再点「测试连接」。'
+      : '还没设置 AI。去「设置 → AI 设置」，选一个服务商（比如 DeepSeek、通义、OpenAI），填上它给你的密钥和模型名，再点「测试连接」。';
   }
 
   const baseUrl = ai.baseUrl.trim();
   if (ai.provider === 'openai-compatible' && !baseUrl) {
-    return '请先到「设置 → AI 设置 → 高级」里填写请求地址。';
+    return here ? '请先在上面的「高级」里填写请求地址。' : '请先到「设置 → AI 设置 → 高级」里填写请求地址。';
   }
 
   if (baseUrl && !isAllowedAiBaseUrl(baseUrl)) {
@@ -158,11 +166,11 @@ export function getAiConfigMessage(ai: AISettings): string | null {
   }
 
   if (!ai.model.trim()) {
-    return '请先在「设置 → AI 设置」里填写模型名。';
+    return here ? '请先在上面填写模型名。' : '请先在「设置 → AI 设置」里填写模型名。';
   }
 
   if (!hasUsableAiApiKey(ai.apiKey) && !canUseAiWithoutApiKey(ai, baseUrl)) {
-    return '请先在「设置 → AI 设置」里填写密钥。';
+    return here ? '请先在上面填写密钥。' : '请先在「设置 → AI 设置」里填写密钥。';
   }
 
   return null;

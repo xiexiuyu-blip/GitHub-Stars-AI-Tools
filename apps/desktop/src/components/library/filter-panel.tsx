@@ -65,6 +65,7 @@ export function FilterPanel(props: {
         <FilterButton
           key={row.id}
           label={row.label}
+          title={row.hint ?? undefined}
           count={row.count}
           countsKnown={props.countsKnown}
           selected={props.form === row.id}
@@ -85,6 +86,8 @@ function Hint(props: { children: string }) {
 
 function FilterButton(props: {
   label: string;
+  /** 鼠标悬停时的长解释（类型的长写法放这里，行里只显示短名字） */
+  title?: string;
   /** 场景前面的小圆点（色相），和列表里的场景标签同一种颜色 */
   dotHue?: number;
   count: number;
@@ -97,6 +100,7 @@ function FilterButton(props: {
     <button
       type="button"
       aria-pressed={props.selected}
+      title={props.title}
       onClick={props.onClick}
       className={cn(
         'mx-2 flex w-[calc(100%-16px)] items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm text-on-surface-variant',

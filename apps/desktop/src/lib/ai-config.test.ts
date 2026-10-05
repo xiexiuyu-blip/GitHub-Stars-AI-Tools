@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { DEFAULT_SETTINGS } from '@/types-settings';
+// 设置页源码原文：守住「哪一页用哪种说法」（Vite 的 ?raw，不用 node 的类型）
+import settingsSource from '../pages/settings.tsx?raw';
 import {
   AI_AUTO_ORGANIZE_POINTER,
   AI_PROVIDER_PRESETS,
@@ -121,6 +123,54 @@ describe('getAiConfigMessage', () => {
     expect(getAiConfigMessage({ ...DEFAULT_SETTINGS.ai, provider: 'none' })).toBe(
       '还没设置 AI。去「设置 → AI 设置」，选一个服务商（比如 DeepSeek、通义、OpenAI），填上它给你的密钥和模型名，再点「测试连接」。',
     );
+  });
+});
+
+describe('getAiConfigMessage：人已经在「AI 设置」这一页里', () => {
+  const onPage = { onAiSettingsPage: true };
+
+  it('还没选服务商：指这一页上面的服务商，不叫人「去设置 → AI 设置」（他就在那一页）', () => {
+    const message = getAiConfigMessage({ ...DEFAULT_SETTINGS.ai, provider: 'none' }, onPage);
+    expect(message).toBe('还没设置 AI。先在上面选一个服务商，填好密钥和模型名，再点「测试连接」。');
+    expect(message).not.toContain('设置 → AI 设置');
+    expect(message).not.toContain('去「设置');
+  });
+
+  it('其余几种没填完整的情况也指这一页上面，不再说「设置 → AI 设置」', () => {
+    const custom = {
+      ...DEFAULT_SETTINGS.ai,
+      provider: 'openai-compatible' as const,
+      providerPreset: 'custom-openai-compatible' as const,
+      baseUrl: '',
+      model: 'x',
+      apiKey: 'k',
+    };
+    expect(getAiConfigMessage(custom, onPage)).toBe('请先在上面的「高级」里填写请求地址。');
+    const ready = { ...DEFAULT_SETTINGS.ai, provider: 'openai' as const, baseUrl: 'https://api.openai.com/v1' };
+    expect(getAiConfigMessage({ ...ready, model: '', apiKey: 'k' }, onPage)).toBe('请先在上面填写模型名。');
+    expect(getAiConfigMessage({ ...ready, model: 'gpt-x', apiKey: '' }, onPage)).toBe('请先在上面填写密钥。');
+    for (const ai of [custom, { ...ready, model: '', apiKey: 'k' }, { ...ready, model: 'gpt-x', apiKey: '' }]) {
+      expect(getAiConfigMessage(ai, onPage), JSON.stringify(ai)).not.toContain('设置 → AI 设置');
+    }
+  });
+
+  it('设置完整就没有提示；地址写法不对的那句本来就不指路，两种说法一样', () => {
+    const ready = { ...DEFAULT_SETTINGS.ai, provider: 'openai' as const, baseUrl: 'https://api.openai.com/v1', model: 'gpt-x', apiKey: 'k' };
+    expect(getAiConfigMessage(ready, onPage)).toBeNull();
+    const badUrl = { ...ready, provider: 'openai-compatible' as const, baseUrl: 'http://example.com/v1' };
+    expect(getAiConfigMessage(badUrl, onPage)).toBe(getAiConfigMessage(badUrl));
+    expect(getAiConfigMessage({ ...ready, apiKey: '' }, { onAiSettingsPage: false })).toBe('请先在「设置 → AI 设置」里填写密钥。');
+  });
+
+  it('接线：AI 设置页自己用「这一页」的说法；GitHub 页的运行检查（人不在 AI 设置页）仍指路到「设置 → AI 设置」', () => {
+    const aiPage = settingsSource.slice(settingsSource.indexOf('function AISettings('), settingsSource.indexOf('function AIProviderOption('));
+    expect(aiPage.length).toBeGreaterThan(1000);
+    // AI 设置页里的两处（页面最下面的提示、点「测试连接」时的检查）都用「这一页」的说法
+    expect(aiPage.match(/getAiConfigMessage\(/g)?.length).toBe(2);
+    expect(aiPage.match(/onAiSettingsPage: true/g)?.length).toBe(2);
+    const githubPage = settingsSource.slice(settingsSource.indexOf('function GitHubSettings('), settingsSource.indexOf('function RuntimeReadinessPanel('));
+    expect(githubPage).not.toContain('onAiSettingsPage');
+    expect(githubPage).toContain('getAiConfigMessage(settingsHook.settings.ai)');
   });
 });
 

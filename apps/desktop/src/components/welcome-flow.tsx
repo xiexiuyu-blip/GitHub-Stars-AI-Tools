@@ -16,6 +16,7 @@ import {
   GITHUB_TOKEN_WILL_SAVE_NOTE,
   WELCOME_COPY,
 } from '@/lib/automation-view';
+import { taskDoingText, taskPercentText } from '@/lib/task-progress-view';
 import type { GitHubUser, TaskProgressEvent } from '@/types';
 
 type WelcomeFlowProps = {
@@ -464,7 +465,8 @@ function WelcomeTaskProgress(props: { progress: TaskProgressEvent }) {
   const isFailed = progress.status === 'failed';
   const isPartial = progress.status === 'partial';
   const isRunning = progress.status === 'running';
-  const stageLabel = getWelcomeTaskStageLabel(progress.stage);
+  // 「正在做：读取收藏…（第 3 步，共 12 步）」：和主界面的任务条同一种写法
+  const doingText = taskDoingText(progress);
 
   return (
     <div
@@ -482,11 +484,11 @@ function WelcomeTaskProgress(props: { progress: TaskProgressEvent }) {
             {isRunning ? '正在处理' : isFailed ? '任务失败' : isPartial ? '任务部分完成' : '任务完成'}
           </p>
           <p className="mt-1 min-h-[2.6em] break-words line-clamp-2 text-current/85">{progress.message}</p>
-          {(stageLabel || progress.repositoryName) && (
+          {(doingText || progress.repositoryName) && (
             <div className="mt-2 flex min-w-0 flex-wrap gap-1.5 text-xs text-current/80">
-              {stageLabel && (
+              {doingText && (
                 <span className="rounded-lg bg-background/60 px-2 py-1">
-                  阶段：{stageLabel}
+                  {doingText}
                 </span>
               )}
               {progress.repositoryName && (
@@ -508,50 +510,12 @@ function WelcomeTaskProgress(props: { progress: TaskProgressEvent }) {
             )}
           </div>
           <p className="mt-1 text-right text-xs text-current/75">
-            {hasKnownProgress ? `${safeCurrent}/${progress.total} · ${percentage}%` : '正在处理…'}
+            {taskPercentText(progress) ?? '正在处理…'}
           </p>
         </div>
       )}
     </div>
   );
-}
-
-function getWelcomeTaskStageLabel(stage: string) {
-  switch (stage) {
-    case 'auth':
-      return '验证账号';
-    case 'queue':
-      return '等待调度';
-    case 'prepare':
-      return '准备数据';
-    case 'batch':
-      return '批量处理';
-    case 'check':
-      return '检查收藏';
-    case 'plan':
-      return '生成计划';
-    case 'fetch':
-    case 'fetch-readme':
-    case 'github-search':
-      return '请求数据';
-    case 'parse':
-      return '读取数据';
-    case 'save':
-      return '写入本地';
-    case 'summarize':
-    case 'analyze':
-      return '整理说明';
-    case 'partial-failure':
-      return '部分失败';
-    case 'done':
-      return '已完成';
-    case 'error':
-      return '失败';
-    case 'request':
-      return '准备中';
-    default:
-      return stage ? stage : '';
-  }
 }
 
 function StepBadge(props: { index: number }) {
