@@ -1,14 +1,16 @@
 import { useEffect, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { downloadDir, join } from '@tauri-apps/api/path';
+import { exportSavedText } from '@/lib/automation-view';
 
 type Hit = { kind: string; id: string; title: string; subtitle: string };
 
 const COMMANDS = [
-  { id: 'retry', label: '重试失败', hint: '>重试失败' },
-  { id: 'sync', label: '同步 Stars', hint: '>同步' },
-  { id: 'export', label: '导出 Markdown', hint: '>导出 /tmp/fox-stars-lab-library.md' },
-  { id: 'pause', label: '暂停 AI 队列', hint: '>暂停' },
-  { id: 'resume', label: '继续 AI 队列', hint: '>继续' },
+  { id: 'sync', label: '同步我的收藏', hint: '>同步' },
+  { id: 'export', label: '导出成文档（存到「下载」文件夹）', hint: '>导出' },
+  { id: 'pause', label: '暂停自动整理', hint: '>暂停' },
+  { id: 'resume', label: '继续自动整理', hint: '>继续' },
+  { id: 'retry', label: '重新整理失败的', hint: '>重新整理失败的' },
 ];
 
 export function CommandPalette(props: {
@@ -40,9 +42,9 @@ export function CommandPalette(props: {
 
   async function runCommand() {
     const text = query.slice(1).trim();
-    if (text.startsWith('重试')) {
+    if (text.startsWith('重新整理') || text.startsWith('重试')) {
       const count = await invoke<number>('retry_failed_ai_jobs');
-      setMessage(`已把 ${count} 个失败任务放回队列`);
+      setMessage(`已把 ${count} 个失败的放回自动整理`);
       return;
     }
     if (text.startsWith('同步')) {
@@ -51,22 +53,23 @@ export function CommandPalette(props: {
       return;
     }
     if (text.startsWith('导出')) {
-      const destination = text.replace(/^导出\s*/, '') || '/tmp/fox-stars-lab-library.md';
+      const fileName = 'fox-stars-lab-library.md';
+      const destination = await join(await downloadDir(), fileName);
       const count = await invoke<number>('export_library_markdown', { destination });
-      setMessage(`已导出 ${count} 条到 ${destination}`);
+      setMessage(exportSavedText(count, fileName));
       return;
     }
     if (text.startsWith('暂停')) {
       await invoke('pause_ai_queue');
-      setMessage('AI 队列已暂停');
+      setMessage('自动整理已暂停');
       return;
     }
     if (text.startsWith('继续')) {
       await invoke('resume_ai_queue');
-      setMessage('AI 队列已继续');
+      setMessage('自动整理已继续');
       return;
     }
-    setMessage('可用命令：重试失败、同步、导出、暂停、继续');
+    setMessage('可用命令：同步我的收藏、导出成文档、暂停自动整理、继续自动整理、重新整理失败的');
   }
 
   return (
@@ -75,7 +78,7 @@ export function CommandPalette(props: {
         <input
           autoFocus
           className="w-full rounded-xl border px-3 py-2"
-          placeholder="搜索仓库和分类，? 找方案，> 同步 / 重试失败 / 导出"
+          placeholder="直接搜工具；输入 ? 加一句话去「找方案」；输入 > 执行操作"
           value={query}
           onChange={(event) => {
             setQuery(event.target.value);
@@ -107,11 +110,11 @@ export function CommandPalette(props: {
         ) : null}
         {message ? <p className="mt-3 text-sm text-on-surface-variant">{message}</p> : null}
         <ul className="mt-3 max-h-80 overflow-auto text-sm">
-          {hits.map((hit) => (
+          {hits.filter((hit) => hit.kind !== 'category').map((hit) => (
             <li key={`${hit.kind}-${hit.id}`}>
               <button className="w-full rounded-lg px-2 py-2 text-left hover:bg-surface-container" type="button" onClick={() => { props.onOpenLibrary(hit.title); props.onClose(); }}>
                 {hit.title}
-                <span className="ml-2 text-xs text-on-surface-variant">{hit.kind === 'category' ? '分类' : '仓库'} · {hit.subtitle}</span>
+                <span className="ml-2 text-xs text-on-surface-variant">工具 · {hit.subtitle}</span>
               </button>
             </li>
           ))}

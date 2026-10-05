@@ -9,6 +9,13 @@ import {
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { WelcomeShell, type WelcomeStepId } from '@/components/welcome/welcome-shell';
+import {
+  CONNECT_SAVING_KEYCHAIN,
+  CONNECT_SLOW_WELCOME,
+  CONNECT_VERIFYING,
+  GITHUB_TOKEN_WILL_SAVE_NOTE,
+  WELCOME_COPY,
+} from '@/lib/automation-view';
 import type { GitHubUser, TaskProgressEvent } from '@/types';
 
 type WelcomeFlowProps = {
@@ -55,8 +62,8 @@ export function WelcomeFlow(props: WelcomeFlowProps) {
     try {
       await props.onComplete();
       return true;
-    } catch (error) {
-      setErrorMessage(`进入工作台失败：${toErrorMessage(error)}`);
+    } catch {
+      setErrorMessage(WELCOME_COPY.enterFailed);
       setIsCompleting(false);
       return false;
     }
@@ -68,7 +75,7 @@ export function WelcomeFlow(props: WelcomeFlowProps) {
     }
     const trimmedToken = token.trim();
     if (!trimmedToken) {
-      setErrorMessage('请输入 GitHub Personal Access Token');
+      setErrorMessage('请输入 GitHub 令牌');
       setSuccessMessage(null);
       setWarningMessage(null);
       setConnectStatus(null);
@@ -80,7 +87,7 @@ export function WelcomeFlow(props: WelcomeFlowProps) {
     setErrorMessage(null);
     setSuccessMessage(null);
     setWarningMessage(null);
-    setConnectStatus('正在验证 GitHub Token...');
+    setConnectStatus(CONNECT_VERIFYING);
     setIsConnectionTakingLonger(false);
     let didLeaveWelcome = false;
     try {
@@ -88,14 +95,14 @@ export function WelcomeFlow(props: WelcomeFlowProps) {
         if (!isMountedRef.current) {
           return;
         }
-        setConnectStatus('正在保存本地凭据，如果系统弹出凭据管理授权，请选择允许。');
+        setConnectStatus(CONNECT_SAVING_KEYCHAIN);
       }, 1200));
       statusTimers.push(window.setTimeout(() => {
         if (!isMountedRef.current) {
           return;
         }
         setIsConnectionTakingLonger(true);
-        setConnectStatus('连接仍在进行中，可能是 GitHub 网络较慢。你可以先进入工作台，连接会在后台继续。');
+        setConnectStatus(`${CONNECT_SLOW_WELCOME}。`);
       }, 8000));
       const user = await props.onConnectGitHub(trimmedToken);
       if (!isMountedRef.current) {
@@ -107,7 +114,7 @@ export function WelcomeFlow(props: WelcomeFlowProps) {
       setConnectStatus(null);
       setIsConnectionTakingLonger(false);
       if (nextStep === 'workspace') {
-        didLeaveWelcome = await completeWelcome('连接成功，正在进入工作台...');
+        didLeaveWelcome = await completeWelcome('连接成功，正在进入工作台…');
         return;
       }
       setCurrentStep('sync');
@@ -133,11 +140,11 @@ export function WelcomeFlow(props: WelcomeFlowProps) {
     setWarningMessage(null);
     try {
       await props.onSyncStars();
-      setSuccessMessage('Stars 已同步，正在缓存 README，随后可生成中文定位和标签网络...');
+      setSuccessMessage(WELCOME_COPY.syncing);
       try {
         await props.onFetchReadmes();
-      } catch (error) {
-        setWarningMessage(`Stars 已同步，后续处理暂未全部完成：${toErrorMessage(error)}。进入工作台后可在仓库页重新抓取 README、生成 AI 解析，或在标签网络页生成项目标签。`);
+      } catch {
+        setWarningMessage(WELCOME_COPY.syncPartial);
       }
       setCurrentStep('complete');
     } catch (error) {
@@ -161,17 +168,17 @@ export function WelcomeFlow(props: WelcomeFlowProps) {
           <div className="welcome-hero-copy min-w-0">
             <StepBadge index={0} />
             <h1 className="welcome-hero-title mt-5 text-on-surface">
-              让每一颗 Star，
+              {WELCOME_COPY.titleLines[0]}
               <br className="hidden min-[520px]:block" />
-              都变成可检索的知识
+              {WELCOME_COPY.titleLines[1]}
             </h1>
             <p className="welcome-hero-subtitle mt-5 max-w-[520px] text-on-surface-variant">
-              Fox Stars Lab 将你的 GitHub Stars 安全同步到本地，并用 AI 自动生成中文摘要、标签与关联。
+              {WELCOME_COPY.subtitle}
             </p>
             <div className="mt-8 grid gap-4 min-[640px]:grid-cols-3">
-              <FeatureCard icon={Database} title="本地优先" description="数据只保存在你的设备" />
-              <FeatureCard icon={Search} title="智能检索" description="关键词、语义与组合筛选" />
-              <FeatureCard icon={Sparkles} title="AI 增强" description="中文摘要与标签网络" />
+              <FeatureCard icon={Database} title={WELCOME_COPY.features[0].title} description={WELCOME_COPY.features[0].description} />
+              <FeatureCard icon={Search} title={WELCOME_COPY.features[1].title} description={WELCOME_COPY.features[1].description} />
+              <FeatureCard icon={Sparkles} title={WELCOME_COPY.features[2].title} description={WELCOME_COPY.features[2].description} />
             </div>
             <div className="mt-8 flex flex-col gap-3 sm:flex-row">
               <Button
@@ -210,9 +217,9 @@ export function WelcomeFlow(props: WelcomeFlowProps) {
       {currentStep === 'github' && (
         <section className="welcome-step-panel mx-auto w-full max-w-2xl">
           <StepBadge index={1} />
-          <h2 className="welcome-step-title mt-4 text-on-surface">连接 GitHub</h2>
+          <h2 className="welcome-step-title mt-4 text-on-surface">{WELCOME_COPY.connectTitle}</h2>
           <p className="mt-3 text-on-surface-variant">
-            需要 Personal Access Token 才能同步你的 Stars
+            {WELCOME_COPY.connectIntro}
           </p>
           <form
             className="mt-7 grid gap-4 text-left"
@@ -225,12 +232,12 @@ export function WelcomeFlow(props: WelcomeFlowProps) {
             }}
           >
             <div className="rounded-xl border border-card-border bg-surface-container-low/60 p-4">
-              <p className="text-sm font-semibold text-on-surface">如何获取 Token？</p>
+              <p className="text-sm font-semibold text-on-surface">{WELCOME_COPY.tokenHowTo}</p>
               <ol className="mt-3 space-y-2 text-sm text-on-surface-variant">
-                <li>1. 访问 <a href="https://github.com/settings/tokens/new" target="_blank" rel="noreferrer" className="text-primary hover:underline">GitHub Token 设置</a></li>
-                <li>2. 同步公开 Stars 可使用只读 Token；如需读取私有仓库 Stars，再授予仓库读取权限</li>
-                <li>3. 如需使用 Gist 备份，再勾选 <code className="rounded bg-surface-container px-1 py-0.5">gist</code> 权限</li>
-                <li>4. 生成并复制 Token</li>
+                <li>1. 点<a href="https://github.com/settings/tokens/new" target="_blank" rel="noreferrer" className="text-primary hover:underline">这个链接</a></li>
+                {WELCOME_COPY.tokenSteps.slice(1).map((step, index) => (
+                  <li key={step}>{index + 2}. {step}</li>
+                ))}
               </ol>
             </div>
             <Input
@@ -240,13 +247,13 @@ export function WelcomeFlow(props: WelcomeFlowProps) {
               autoCorrect="off"
               spellCheck={false}
               inputMode="text"
-              placeholder="粘贴 GitHub Token"
+              placeholder={WELCOME_COPY.tokenPlaceholder}
               value={token}
               className="h-12 rounded-lg border-card-border bg-surface-container-lowest shadow-none transition-colors focus-visible:ring-2 focus-visible:ring-primary/30"
               onChange={(e) => setToken(e.target.value)}
             />
             <p className="text-xs text-on-surface-variant">
-              Token 仅保存在本机系统凭据管理器，不会上传到任何服务器
+              {GITHUB_TOKEN_WILL_SAVE_NOTE}
             </p>
             {errorMessage && (
               <p role="alert" className="welcome-message rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
@@ -260,7 +267,7 @@ export function WelcomeFlow(props: WelcomeFlowProps) {
             )}
             {isConnectionTakingLonger && (
               <p role="status" aria-live="polite" className="welcome-message rounded-lg border border-warning/30 bg-warning/10 px-3 py-2 text-sm text-warning">
-                连接没有卡住。你可以点击下方“先进入工作台，后台继续连接”，稍后在设置页查看连接结果。
+                想先进去看看？点下面的「先进入工作台，后台继续连接」，稍后到「设置 → GitHub」里看连接结果。
               </p>
             )}
             {successMessage && (
@@ -290,7 +297,7 @@ export function WelcomeFlow(props: WelcomeFlowProps) {
                 aria-describedby={connectStatus ? 'welcome-connect-status' : undefined}
                 disabled={!token.trim() || isLoading || isCompleting}
               >
-                {isCompleting ? '正在进入工作台…' : isLoading ? '正在验证 Token…' : '验证并进入工作台'}
+                {isCompleting ? '正在进入工作台…' : isLoading ? '正在验证令牌…' : '验证并进入工作台'}
                 <ChevronRight className="ml-1 size-5" />
               </Button>
               <Button
@@ -303,7 +310,7 @@ export function WelcomeFlow(props: WelcomeFlowProps) {
                 disabled={!token.trim() || isLoading || isCompleting}
                 onClick={() => void handleGitHubConnect('sync')}
               >
-                验证并同步 Stars
+                验证并同步收藏
               </Button>
               <Button
                 variant="ghost"
@@ -323,15 +330,14 @@ export function WelcomeFlow(props: WelcomeFlowProps) {
       {currentStep === 'sync' && (
         <section className="welcome-step-panel mx-auto w-full max-w-2xl">
           <StepBadge index={2} />
-          <h2 className="welcome-step-title mt-4 text-on-surface">同步 Stars</h2>
+          <h2 className="welcome-step-title mt-4 text-on-surface">{WELCOME_COPY.syncTitle}</h2>
           <p className="mt-3 text-on-surface-variant">
-            首次同步可能需要几分钟，请耐心等待
+            {WELCOME_COPY.syncIntro}
           </p>
           <div className="mt-7 rounded-xl border border-card-border bg-surface-container-low/60 p-5">
             <p className="text-sm leading-6 text-on-surface-variant">
               {connectedUser ? `已连接 @${connectedUser.login}。` : ''}
-              连接已完成，即将同步你的 GitHub Stars 到本地数据库，并缓存仓库 README。
-              README 是中文定位和标签网络的上下文；配置 AI 后可以继续生成中文解析和项目标签。
+              {WELCOME_COPY.syncBody}
             </p>
           </div>
           {errorMessage && (
@@ -380,14 +386,14 @@ export function WelcomeFlow(props: WelcomeFlowProps) {
       {currentStep === 'complete' && (
         <section className="welcome-step-panel mx-auto w-full max-w-2xl">
           <StepBadge index={3} />
-          <h2 className="welcome-step-title mt-4 text-on-surface">一切就绪</h2>
+          <h2 className="welcome-step-title mt-4 text-on-surface">{WELCOME_COPY.completeTitle}</h2>
           <p className="mt-3 text-on-surface-variant">
-            你的 Stars 已经同步完成，现在可以开始探索了
+            {WELCOME_COPY.completeIntro}
           </p>
           <div className="mt-7 grid gap-3 text-left">
-            <TipItem number="1" text="使用搜索框查找项目，支持名称、描述、Topics 和笔记" />
-            <TipItem number="2" text="为项目生成 AI 解析后，列表会显示更准确的中文定位" />
-            <TipItem number="3" text="在标签网络页生成项目标签，再按用途聚类和筛选" />
+            {WELCOME_COPY.tips.map((tip, index) => (
+              <TipItem key={tip} number={String(index + 1)} text={tip} />
+            ))}
           </div>
           {warningMessage && (
             <p role="status" aria-live="polite" className="mt-6 rounded-lg border border-warning/30 bg-warning/10 px-3 py-2 text-sm text-warning">
@@ -439,7 +445,7 @@ function getFallbackWelcomeProgress(step: Step, isLoading: boolean, connectStatu
     stage: 'auth',
     current: 0,
     total: 2,
-    message: connectStatus ?? '正在验证 GitHub Token...',
+    message: connectStatus ?? CONNECT_VERIFYING,
     repositoryName: null,
   };
 }
@@ -502,7 +508,7 @@ function WelcomeTaskProgress(props: { progress: TaskProgressEvent }) {
             )}
           </div>
           <p className="mt-1 text-right text-xs text-current/75">
-            {hasKnownProgress ? `${safeCurrent}/${progress.total} · ${percentage}%` : '正在处理...'}
+            {hasKnownProgress ? `${safeCurrent}/${progress.total} · ${percentage}%` : '正在处理…'}
           </p>
         </div>
       )}
@@ -521,7 +527,7 @@ function getWelcomeTaskStageLabel(stage: string) {
     case 'batch':
       return '批量处理';
     case 'check':
-      return '检查仓库';
+      return '检查收藏';
     case 'plan':
       return '生成计划';
     case 'fetch':
@@ -529,12 +535,12 @@ function getWelcomeTaskStageLabel(stage: string) {
     case 'github-search':
       return '请求数据';
     case 'parse':
-      return '解析数据';
+      return '读取数据';
     case 'save':
       return '写入本地';
     case 'summarize':
     case 'analyze':
-      return 'AI 分析';
+      return '整理说明';
     case 'partial-failure':
       return '部分失败';
     case 'done':
