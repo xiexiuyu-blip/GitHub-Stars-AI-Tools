@@ -6,7 +6,9 @@ import {
   clearFilters,
   createLibraryUiState,
   formLabel,
+  formLabelWithHint,
   formOptions,
+  formTagLabel,
   hasActiveFilters,
   nextPageOffset,
   removeIfFilteredOut,
@@ -56,7 +58,7 @@ describe('资料库筛选状态', () => {
     expect(invalid.limit).toBe(0);
   });
 
-  it('有筛选时带上场景、状态、形态，关键词去掉首尾空格', () => {
+  it('有筛选时带上场景、状态、类型，关键词去掉首尾空格', () => {
     const filters = toFilters(state({
       scenario: 'ec',
       reading: 'want',
@@ -94,7 +96,7 @@ describe('资料库筛选状态', () => {
     expect(toggleReading(picked, 'in_use').reading).toBe('in_use');
   });
 
-  it('形态再点同一项就取消，点另一项就替换', () => {
+  it('类型再点同一项就取消，点另一项就替换', () => {
     const picked = toggleForm(state(), 'skill');
     expect(picked.form).toBe('skill');
     expect(toggleForm(picked, 'skill').form).toBeNull();
@@ -120,7 +122,7 @@ describe('资料库筛选状态', () => {
     });
   });
 
-  it('有场景、状态、形态、关键词或非默认整理状态时才显示清除筛选', () => {
+  it('有场景、状态、类型、关键词或非默认整理状态时才显示清除筛选', () => {
     expect(hasActiveFilters(state())).toBe(false);
     expect(hasActiveFilters(state({ sort: 'stars' }))).toBe(false);
     expect(hasActiveFilters(state({ keyword: '   ' }))).toBe(false);
@@ -169,7 +171,7 @@ describe('筛选栏的联动计数', () => {
     ]);
   });
 
-  it('形态按个数从多到少，个数相同按字母，并换成中文名', () => {
+  it('类型按个数从多到少，个数相同按 id，并换成中文名', () => {
     const rows = formOptions({
       skill: 2,
       api: 2,
@@ -183,35 +185,35 @@ describe('筛选栏的联动计数', () => {
       other: 1,
     });
     expect(rows.map((row) => `${row.id}:${row.label}:${row.count}`)).toEqual([
-      'mcp:MCP:5',
+      'mcp:MCP 插件（给 AI 接外部工具）:5',
       'plugin:plugin:5',
-      'api:接口:2',
-      'cli:命令行:2',
-      'skill:技能:2',
-      'collection:合集:1',
-      'library:代码库:1',
+      'api:接口（程序之间对接）:2',
+      'cli:命令行工具（要让 Codex 帮你装）:2',
+      'skill:技能包（装进 Codex 用）:2',
+      'collection:资源清单:1',
+      'library:开发用代码库（一般用不上）:1',
       'other:其他:1',
-      'service:服务:1',
+      'service:在线服务:1',
       'app:应用:0',
     ]);
     expect(formOptions(null)).toEqual([]);
   });
 
-  it('整理状态三个选项，全部排最前，数量是已整理加待整理', () => {
+  it('整理状态三个选项，全部排最前，数量是 AI 已整理加待 AI 整理', () => {
     expect(cardStateOptions({ done: 3, pending: 2 })).toEqual([
       { value: 'all', label: '全部 5' },
-      { value: 'done', label: '已整理 3' },
-      { value: 'pending', label: '待整理 2' },
+      { value: 'done', label: 'AI 已整理 3' },
+      { value: 'pending', label: '待 AI 整理 2' },
     ]);
     expect(cardStateOptions(null)).toEqual([
       { value: 'all', label: '全部 0' },
-      { value: 'done', label: '已整理 0' },
-      { value: 'pending', label: '待整理 0' },
+      { value: 'done', label: 'AI 已整理 0' },
+      { value: 'pending', label: '待 AI 整理 0' },
     ]);
     expect(cardStateOptions({ done: Number.NaN, pending: Number.POSITIVE_INFINITY }).map((item) => item.label)).toEqual([
       '全部 0',
-      '已整理 0',
-      '待整理 0',
+      'AI 已整理 0',
+      '待 AI 整理 0',
     ]);
   });
 });
@@ -234,14 +236,14 @@ describe('加载更多和空白回退', () => {
     expect(nextPageOffset(50, 100, 80)).toBeNull();
   });
 
-  it('当前停在「已整理」、已整理为 0 且还有待整理、用户没动过时，改看全部（默认已经是全部，这条只在从「已整理」进来时用得到）', () => {
+  it('当前停在「AI 已整理」、已整理数为 0 且还有待 AI 整理、用户没动过时，改看全部', () => {
     const counts = { cardState: { done: 0, pending: 4 } };
     expect(shouldFallbackToAll(counts, state({ cardState: 'done' }), false)).toBe(true);
     expect(shouldFallbackToAll({ cardState: { done: 0, pending: 1 } }, state({ cardState: 'done' }), false)).toBe(true);
     expect(shouldFallbackToAll(counts, state(), false)).toBe(false);
   });
 
-  it('用户动过、已经不是默认、没有待整理、或已整理大于 0 时，不自动切换', () => {
+  it('用户动过、已经不是默认、没有待 AI 整理、或已整理数大于 0 时，不自动切换', () => {
     const counts = { cardState: { done: 0, pending: 4 } };
     expect(shouldFallbackToAll(counts, state(), true)).toBe(false);
     expect(shouldFallbackToAll(counts, state({ cardState: 'all' }), false)).toBe(false);
@@ -297,10 +299,22 @@ describe('改状态的乐观更新', () => {
 });
 
 describe('formLabel', () => {
-  it('常见形态写成中文', () => {
+  it('常见类型写成短名字（行内小标签、找方案的命中行、复制给 Codex 的正文都用这一套）', () => {
     expect(formLabel('skill')).toBe('技能');
     expect(formLabel(' app ')).toBe('应用');
     expect(formLabel('cli')).toBe('命令行');
+    expect(formLabel('mcp')).toBe('MCP');
+    expect(formLabel('library')).toBe('代码库');
+    expect(formLabel('api')).toBe('接口');
+    expect(formLabel('service')).toBe('服务');
+    expect(formLabel('collection')).toBe('合集');
+  });
+
+  it('短名字里不带括号和解释', () => {
+    for (const id of ['skill', 'mcp', 'cli', 'app', 'library', 'api', 'service', 'collection']) {
+      expect(formLabel(id), id).not.toMatch(/[（）]/);
+      expect(Array.from(formLabel(id) ?? '').length, id).toBeLessThanOrEqual(4);
+    }
   });
 
   it('没填、空白、「其他」都不显示标签；不认识的原样给', () => {
@@ -309,6 +323,32 @@ describe('formLabel', () => {
     expect(formLabel('  ')).toBeNull();
     expect(formLabel('other')).toBeNull();
     expect(formLabel('template')).toBe('template');
+  });
+
+  it('带解释的长写法只给筛选面板和详情页的「类型」一行用：和短名字是两套，没填 / 其他同样不显示，不认识的原样给', () => {
+    expect(formLabelWithHint('skill')).toBe('技能包（装进 Codex 用）');
+    expect(formLabelWithHint(' cli ')).toBe('命令行工具（要让 Codex 帮你装）');
+    expect(formLabelWithHint('mcp')).toBe('MCP 插件（给 AI 接外部工具）');
+    expect(formLabelWithHint('library')).toBe('开发用代码库（一般用不上）');
+    expect(formLabelWithHint('api')).toBe('接口（程序之间对接）');
+    expect(formLabelWithHint('service')).toBe('在线服务');
+    expect(formLabelWithHint('collection')).toBe('资源清单');
+    expect(formLabelWithHint('app')).toBe('应用');
+    expect(formLabelWithHint('other')).toBeNull();
+    expect(formLabelWithHint('  ')).toBeNull();
+    expect(formLabelWithHint(undefined)).toBeNull();
+    expect(formLabelWithHint('template')).toBe('template');
+    // 改长写法不能把短名字带长
+    expect(formLabel('cli')).not.toBe(formLabelWithHint('cli'));
+  });
+
+  it('详情小标签写成「类型：…」，用长写法；其他和空的不显示', () => {
+    expect(formTagLabel('app')).toBe('类型：应用');
+    expect(formTagLabel('skill')).toBe('类型：技能包（装进 Codex 用）');
+    expect(formTagLabel('cli')).toBe('类型：命令行工具（要让 Codex 帮你装）');
+    expect(formTagLabel('other')).toBeNull();
+    expect(formTagLabel(null)).toBeNull();
+    expect(formTagLabel('template')).toBe('类型：template');
   });
 });
 

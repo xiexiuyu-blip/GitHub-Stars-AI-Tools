@@ -1,7 +1,8 @@
 import { useCallback } from 'react';
 import { useToast } from '@/components/kit';
+import { COPY_FAILED_NOTICE } from '@/lib/item-format';
 
-/** 复制一段文字到剪贴板，并给一句提示。浏览器不让复制时告诉用户手动复制。返回是否复制成功。 */
+/** 复制一段文字到剪贴板，并给一句提示。复制失败时告诉用户手动复制。返回是否复制成功。 */
 export function useCopy(): (text: string, title: string, sub?: string) => Promise<boolean> {
   const toast = useToast();
   return useCallback(async (text, title, sub) => {
@@ -11,7 +12,7 @@ export function useCopy(): (text: string, title: string, sub?: string) => Promis
       toast.show({ title, sub });
       return true;
     } catch {
-      toast.show({ title: '浏览器不允许自动复制', sub: '请手动选中后按 ⌘C' });
+      toast.show({ title: COPY_FAILED_NOTICE });
       return false;
     }
   }, [toast]);

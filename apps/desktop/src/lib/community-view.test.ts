@@ -50,8 +50,8 @@ describe('itemMeta / stateLabel', () => {
   });
 
   it('只有 Issue 有状态标签', () => {
-    expect(stateLabel(item({ source: 'github_issue', state: 'open' }))).toBe('还开着');
-    expect(stateLabel(item({ source: 'github_issue', state: 'closed' }))).toBe('已关闭');
+    expect(stateLabel(item({ source: 'github_issue', state: 'open' }))).toBe('还没解决');
+    expect(stateLabel(item({ source: 'github_issue', state: 'closed' }))).toBe('已解决');
     expect(stateLabel(item({ source: 'github_issue', state: 'weird' }))).toBeNull();
     expect(stateLabel(item({ source: 'hn', state: 'open' }))).toBeNull();
   });
@@ -89,5 +89,14 @@ describe('communityNote', () => {
       now,
     );
     expect(none?.text).toBe('Hacker News、GitHub Issues 这次没连上，稍后再试。');
+  });
+});
+
+describe('卡 32 社区状态词', () => {
+  it('还开着改成还没解决，已关闭改成已解决', () => {
+    expect(stateLabel(item({ source: 'github_issue', state: 'open' }))).toBe('还没解决');
+    expect(stateLabel(item({ source: 'github_issue', state: 'closed' }))).toBe('已解决');
+    expect(stateLabel(item({ source: 'github_issue', state: 'open' }))).not.toBe('还开着');
+    expect(stateLabel(item({ source: 'github_issue', state: 'closed' }))).not.toBe('已关闭');
   });
 });

@@ -110,32 +110,32 @@ describe('describeCommit', () => {
       duplicateBatch: true,
       created: 4,
       alreadyStarred: 1,
-    }))).toBe('这段已经收过，没有重复写入。');
+    }))).toBe('这段已经放进过收集箱，没有重复写入。');
   });
 
-  it('只有新收时一句说完', () => {
-    expect(describeCommit(commit({ linksFound: 4, created: 4 }))).toBe('新收 4 条。');
+  it('只有新的时一句说完', () => {
+    expect(describeCommit(commit({ linksFound: 4, created: 4 }))).toBe('新的 4 条。');
   });
 
-  it('为 0 的部分省略，新收 0 仍保留', () => {
+  it('为 0 的部分省略，新的 0 仍保留', () => {
     expect(describeCommit(commit({
       linksFound: 7,
       created: 4,
       alreadyStarred: 2,
       alreadyInInbox: 0,
       blocked: 1,
-    }))).toBe('新收 4 条，2 条你已经收藏过了，1 条是本机或内网地址，没有收。');
-    expect(describeCommit(commit({ linksFound: 2, created: 0, alreadyInInbox: 2 }))).toBe('新收 0 条，2 条已在收集箱。');
+    }))).toBe('新的 4 条，2 条你已经收藏过了，1 条是本机或内网地址，没放进收集箱。');
+    expect(describeCommit(commit({ linksFound: 2, created: 0, alreadyInInbox: 2 }))).toBe('新的 0 条，2 条已在收集箱。');
   });
 
-  it('四项都有时按新收、Stars、收集箱、拦下的顺序', () => {
+  it('四项都有时按新的、已收藏、已在收集箱、拦下的顺序', () => {
     expect(describeCommit(commit({
       linksFound: 10,
       created: 4,
       alreadyStarred: 2,
       alreadyInInbox: 1,
       blocked: 3,
-    }))).toBe('新收 4 条，2 条你已经收藏过了，1 条已在收集箱，3 条是本机或内网地址，没有收。');
+    }))).toBe('新的 4 条，2 条你已经收藏过了，1 条已在收集箱，3 条是本机或内网地址，没放进收集箱。');
   });
 });
 
@@ -173,10 +173,10 @@ describe('previewSummary 与 canCommit', () => {
   it('按四类数字汇总，0 也写出来；一个都没有时返回 null', () => {
     expect(previewSummary(preview({ new: 0, starred: 0, inbox: 0, blocked: 0 }))).toBeNull();
     expect(previewSummary(preview({ new: 4, starred: 2, inbox: 0, blocked: 1 }))).toBe(
-      '识别到 7 个链接：新的 4 · 已收藏 2 · 已在收集箱 0 · 不会收 1',
+      '识别到 7 个链接：新的 4 · 已收藏 2 · 已在收集箱 0 · 不会放进收集箱 1',
     );
     expect(previewSummary(preview({ new: 1, starred: 0, inbox: 0, blocked: 0 }))).toBe(
-      '识别到 1 个链接：新的 1 · 已收藏 0 · 已在收集箱 0 · 不会收 0',
+      '识别到 1 个链接：新的 1 · 已收藏 0 · 已在收集箱 0 · 不会放进收集箱 0',
     );
   });
 
@@ -218,12 +218,12 @@ describe('rowLabel 与 rowStatusTag', () => {
     expect(rowStatusTag(row({ status: 'inbox' }))).toEqual({ tone: 'gray', text: '已在收集箱' });
     expect(rowStatusTag(row({ status: 'blocked', blockedReason: ' 内网地址 ' }))).toEqual({
       tone: 'red',
-      text: '不会收',
+      text: '不会放进收集箱',
       reason: '内网地址',
     });
     expect(rowStatusTag(row({ status: 'blocked', blockedReason: '   ' }))).toEqual({
       tone: 'red',
-      text: '不会收',
+      text: '不会放进收集箱',
     });
   });
 });
@@ -244,23 +244,22 @@ describe('kindIcon', () => {
 });
 
 describe('收集箱筛选、状态和归档', () => {
-  it('四个筛选项带上各自的个数', () => {
+  it('三个筛选项带上各自的个数，没有已整理页签', () => {
     expect(inboxFilterOptions({ pending: 4, ready: 2, failed: 1, archived: 0 })).toEqual([
       { value: 'pending', label: '待处理 4' },
-      { value: 'ready', label: '已整理 2' },
       { value: 'failed', label: '失败 1' },
       { value: 'archived', label: '已归档 0' },
     ]);
   });
 
-  it('待处理带转圈，已整理为蓝，失败为红，已归档为灰', () => {
+  it('待处理不转圈，失败为红，已归档为灰，内部 ready 也不再说已整理', () => {
     expect(inboxStatusTag('pending')).toEqual({ tone: 'gray', text: '待处理', spinning: false });
-    expect(inboxStatusTag('ready')).toEqual({ tone: 'blue', text: '已整理', spinning: false });
+    expect(inboxStatusTag('ready')).toEqual({ tone: 'gray', text: '待处理', spinning: false });
     expect(inboxStatusTag('failed')).toEqual({ tone: 'red', text: '失败', spinning: false });
     expect(inboxStatusTag('archived')).toEqual({ tone: 'gray', text: '已归档', spinning: false });
   });
 
-  it('归档与恢复两个方向', () => {
+  it('归档与恢复两种动作', () => {
     expect(archiveAction('pending')).toEqual({ label: '归档', target: 'archived' });
     expect(archiveAction('ready')).toEqual({ label: '归档', target: 'archived' });
     expect(archiveAction('failed')).toEqual({ label: '归档', target: 'archived' });
@@ -271,14 +270,25 @@ describe('收集箱筛选、状态和归档', () => {
     expect(undoTarget('failed')).toBeNull();
   });
 
-  it('空状态：待处理和其他分类文案不同', () => {
+  it('空状态：待处理和其他筛选项文案不同', () => {
     expect(emptyInboxCopy('pending')).toEqual({
       title: '收集箱是空的',
       description: '上面粘贴后点「加入收集箱」，新链接会进来',
     });
-    expect(emptyInboxCopy('ready').title).toBe('这个分类下没有内容');
+    expect(emptyInboxCopy('ready').title).toBe('这里没有内容');
     expect(emptyInboxCopy('failed').description).toBeUndefined();
-    expect(emptyInboxCopy('archived').title).toBe('这个分类下没有内容');
+    expect(emptyInboxCopy('archived').title).toBe('这里没有内容');
+  });
+
+  it('页签里没有 ready，文字里也没有已整理', () => {
+    const options = inboxFilterOptions({ pending: 1, ready: 9, failed: 0, archived: 0 });
+    expect(options.map((item) => item.value)).toEqual(['pending', 'failed', 'archived']);
+    expect(options.map((item) => item.label).join(' ')).not.toContain('已整理');
+    expect(inboxStatusTag('pending').text).toBe('待处理');
+    expect(inboxStatusTag('failed').text).toBe('失败');
+    expect(inboxStatusTag('archived').text).toBe('已归档');
+    expect(inboxStatusTag('ready').text).not.toBe('已整理');
+    expect(rowStatusTag({ status: 'starred', blockedReason: null }).text).toBe('你已经收藏了');
   });
 });
 
@@ -399,6 +409,7 @@ describe('plainBlockedReason', () => {
   it('本机、内网、云元数据地址换成人话', () => {
     expect(plainBlockedReason('本机、内网或云元数据地址，不收')).toContain('不是公开网页');
     expect(plainBlockedReason(' 内网地址 ')).toContain('不是公开网页');
+    expect(plainBlockedReason(' 内网地址 ')).toContain('不会放进收集箱');
   });
 
   it('别的原因原样给', () => {

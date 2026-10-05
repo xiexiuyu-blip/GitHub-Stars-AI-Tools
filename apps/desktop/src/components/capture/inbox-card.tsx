@@ -38,7 +38,7 @@ export function InboxCard(props: {
   savingNote: boolean;
   /** 后台正在联网读取收集箱里的链接（标题和摘要） */
   fetching: boolean;
-  /** 正在把某条文章里提到的新项目收进收集箱 */
+  /** 正在把某条文章里提到的新 GitHub 项目放进收集箱 */
   collectingId: string | null;
   onCollectRepos: (item: InboxItem) => void;
   onFilter: (value: InboxFilter) => void;
@@ -71,9 +71,11 @@ export function InboxCard(props: {
         )}
       />
       {props.filter === 'pending' && props.page && props.page.items.length > 0 ? (
-        <p className="m-0 border-b border-muted bg-surface-container-low px-4 py-2 text-xs leading-[1.6] text-on-surface-variant">
-          收进来的链接先放在这里，还没进你的资料库。GitHub 项目：想留的，在 GitHub 上点 Star，再点顶部「同步」，就会自动进资料库并整理。文章、帖子：里面提到的 GitHub 项目会列出来，可以一键收进来；没用的点「归档」。
-        </p>
+        <div className="m-0 border-b border-muted bg-surface-container-low px-4 py-2 text-xs leading-[1.6] text-on-surface-variant">
+          <p className="m-0">收集箱：链接先放这里，还没有进资料库。</p>
+          <p className="m-0">GitHub 项目：想留的，去 GitHub 上点 Star（收藏），再点顶部「同步」，就会进资料库。是否自动写中文说明，看「设置 → 自动整理与备份」里自动整理开没开。</p>
+          <p className="m-0">文章 / 帖子：里面提到的 GitHub 项目会列出来，可以一键放进收集箱；没用的点「归档」。</p>
+        </div>
       ) : null}
       {renderBody()}
       {hasMore ? (
@@ -209,7 +211,7 @@ function InboxRow(props: {
               </button>
               {mentions.fresh > 0 ? (
                 <Button size="sm" loading={props.collecting} onClick={() => props.onCollectRepos(props.item)}>
-                  把 {mentions.fresh} 个新的收进来
+                  把 {mentions.fresh} 个新的放进收集箱
                 </Button>
               ) : null}
             </div>

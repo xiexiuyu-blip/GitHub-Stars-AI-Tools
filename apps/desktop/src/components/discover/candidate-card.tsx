@@ -1,6 +1,6 @@
 import type { DiscoverCandidate } from '@/lib/contracts';
 import type { CandidateStatus } from '@/lib/discover-view';
-import { relativeDays, splitRepoName } from '@/lib/item-format';
+import { COPY_EVALUATE_BUTTON, relativeDays, splitRepoName } from '@/lib/item-format';
 import { Button, LangDot, RepoAvatar, StarCount, Tag } from '@/components/kit';
 import { Icon } from '@/components/ui/icon';
 
@@ -8,7 +8,7 @@ const MAX_TOPICS = 3;
 
 /**
  * 「发现」里的一个候选项目：还没收藏的 GitHub 项目。
- * 描述是 GitHub 上的原文（英文居多），所以按钮里有「复制给 Codex 评估」，让 Codex 读完用中文讲。
+ * 描述是 GitHub 上的原文（英文居多），所以按钮里有「复制「帮我评估」给 Codex」，让 Codex 读完用中文讲。
  */
 export function CandidateCard(props: {
   candidate: DiscoverCandidate;
@@ -54,14 +54,14 @@ export function CandidateCard(props: {
         {topics.map((topic) => (
           <Tag key={topic}>{topic}</Tag>
         ))}
-        {candidate.pushedAt ? <span className="ml-auto shrink-0">最近更新 {relativeDays(candidate.pushedAt, props.now)}</span> : null}
+        {candidate.pushedAt ? <span className="ml-auto shrink-0">项目最近更新：{relativeDays(candidate.pushedAt, props.now)}</span> : null}
       </div>
 
       <div className="mt-auto flex flex-wrap items-center gap-2 border-t border-muted pt-2.5">
         {status === 'mine' ? (
           <span className="inline-flex items-center gap-1 text-[13px] text-on-surface-variant">
             <Icon name="check_circle" size={16} fill className="text-[hsl(148_55%_42%)]" />
-            已在你的 Stars
+            你已经收藏了
           </span>
         ) : status === 'inbox' ? (
           <span className="inline-flex items-center gap-1 text-[13px] text-on-surface-variant">
@@ -74,11 +74,11 @@ export function CandidateCard(props: {
         ) : (
           <Button size="sm" loading={props.adding} onClick={props.onAdd}>
             <Icon name="add" size={16} />
-            收进收集箱
+            先放进收集箱
           </Button>
         )}
         <Button variant="text" size="sm" className="ml-auto" onClick={props.onCopyEvaluate}>
-          复制给 Codex 评估
+          {COPY_EVALUATE_BUTTON}
         </Button>
         <a
           href={candidate.htmlUrl}

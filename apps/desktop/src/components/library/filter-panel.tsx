@@ -3,8 +3,9 @@ import type { ReadingGroup } from '@/lib/contracts';
 import type { FormFilterRow, ScenarioFilterRow } from '@/lib/library-filters';
 import { readingGroupLabel } from '@/lib/item-format';
 import { scenarioHue } from '@/lib/repo-assets';
-import { Button, Tag } from '@/components/kit';
+import { Button } from '@/components/kit';
 import { cn } from '@/lib/utils';
+import { ThinTag } from './thin-tag';
 
 const READING_GROUPS: ReadingGroup[] = ['unseen', 'want', 'tried', 'in_use', 'dropped'];
 
@@ -41,7 +42,7 @@ export function FilterPanel(props: {
           count={row.count}
           countsKnown={props.countsKnown}
           selected={props.scenario === row.id}
-          extra={row.thin ? <Tag>偏少</Tag> : null}
+          extra={row.thin ? <ThinTag /> : null}
           onClick={() => props.onScenario(row.id)}
         />
       ))}
@@ -58,7 +59,7 @@ export function FilterPanel(props: {
         />
       ))}
 
-      <GroupTitle>形态</GroupTitle>
+      <GroupTitle>类型</GroupTitle>
       {props.countsKnown ? null : <Hint>…</Hint>}
       {props.forms.map((row) => (
         <FilterButton
