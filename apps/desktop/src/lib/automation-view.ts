@@ -393,6 +393,14 @@ export function automationState(status: AutomationStatus | null): AutomationStat
   if (status.queued + status.running > 0) {
     return { label: '整理中', hue: 148, detail: '在后台一个个整理，整理好的会出现在「今日」和「资料库」里。' };
   }
+  const pending = fullScanPending(status);
+  if (pending > 0) {
+    return {
+      label: '已开启，后台暂时没有排队的',
+      hue: 148,
+      detail: `现有收藏里还有 ${pending} 个说明要整理，点下面的「现在整理」一次做完；新收藏、或你点了「加入整理」的，会自动开始。`,
+    };
+  }
   return { label: '已开启，暂时没有要整理的', hue: 148, detail: '有新收藏，或者你点了「加入整理」，就会自动开始。' };
 }
 
