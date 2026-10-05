@@ -60,6 +60,14 @@ export type AutomationStatus = {
   lastReadmeCheck?: LastReadmeCheck | null;
   /** 还没整理好的收藏数。缺失或 null 时用 queued + running 代替。 */
   needsOrganizing?: number | null;
+  /** 有效收藏总数和说明分项。旧后台缺失时，不显示分项。 */
+  activeRepos?: number | null;
+  needsOrganizingMissing?: number | null;
+  needsOrganizingOutdated?: number | null;
+  /** 按收藏去重的待整理数（包含 README 变化后重新排队的）。 */
+  awaiting?: number | null;
+  /** 每天额度已用，不含「现在整理」；旧后台回退到 tokens24h。 */
+  dailyTokensUsed?: number | null;
   /**
    * 最近 24 小时整理成功的个数。**不是** get_ai_automation 的字段：来自现成命令 get_ai_queue_status 的 `succeeded24h`，
    * 由 `withRecentDone` 合进来。读不到就缺失或 null，界面把「整理了 N 个」整句去掉，不拿 token 除一除去估。
@@ -89,11 +97,24 @@ export const FULL_SCAN_TOKENS_PER_REPO = 6500;
 
 /** 额度档位：名字 + 每天约整理多少个。0 是关闭。 */
 export const BUDGET_PRESETS: ReadonlyArray<{ tokens: number; title: string; hint: string }> = [
-  { tokens: 0, title: '关闭', hint: '不自动整理，一分钱不花' },
-  { tokens: 100_000, title: '试跑', hint: '每天约 16 个，先看看效果' },
-  { tokens: 200_000, title: '日常', hint: '每天约 33 个' },
-  { tokens: 600_000, title: '集中补齐', hint: '每天约 100 个，尽快补完旧收藏' },
+  { tokens: 0, title: '关闭', hint: '不自动整理，一分钱不花（你仍然可以手动整理）' },
+  { tokens: 100_000, title: '试跑', hint: '每天最多约 16 个，先看看效果' },
+  { tokens: 200_000, title: '日常', hint: '每天最多约 33 个' },
+  { tokens: 600_000, title: '多整理些', hint: '每天最多约 100 个，新收藏很多时用' },
 ];
+
+export const AUTO_ORGANIZE_DEFINITION = '自动整理：应用在后台给「新收藏」和「README 有实质更新的收藏」写（或重写）中文说明——它能做什么、适合解决什么、怎么试。没变化的不会重复整理，也不会重复花钱。整理好的会出现在「今日」和「资料库」里。用的是你自己配置的 AI 服务，具体花多少钱以服务商的账单为准。';
+export const DAILY_ORGANIZE_TITLE = '每天自动整理（后台自动做，只处理新增和变化的）';
+export const DAILY_ORGANIZE_DESCRIPTION = '第一步做完以后，平时不用管：每次同步到新收藏、或某个收藏的 README 有实质更新，应用会在后台自动整理它。每天最多花你设定的额度；用完这一天的自动整理就先歇着，不影响你随时手动「现在整理」。';
+export const DAILY_ORGANIZE_DURING_SCAN = '整理正在进行，这一轮不受每天额度限制；整理完才按下面的额度。';
+export const SLOW_ORGANIZE_COPY = {
+  title: '只想慢慢整理（可选）',
+  description: '这两个只是把它们排进队列，按每天额度慢慢做，不会马上花钱；想马上做完，用上面的「现在整理」。',
+  missingLabel: '把还没有说明的排进队列',
+  outdatedLabel: '把旧版说明排进队列重写',
+};
+export const FULL_SCAN_STARTED = '现在整理已开始';
+export const FULL_SCAN_STOPPED = '已停止现在整理，剩下的会按每天额度接着整理';
 
 /** 开始整理一个工具前，先按「两次调用都用满」预留的量（Rust 的 `CLAIM_RESERVE_TOKENS`）。额度比它小，一个工具也领不到。 */
 export const MIN_DAILY_BUDGET = 12_000;
@@ -143,11 +164,34 @@ export function roundedEstimate(tokens: number): string {
   return formatTokens(rounded);
 }
 
-/** 现在还有多少个要整理。优先用后台给的 needsOrganizing；没给就用还在等的 + 进行中。 */
+/** 现在还有多少个要整理。依次用 awaiting、needsOrganizing、还在等的 + 进行中。 */
 export function fullScanPending(status: AutomationStatus): number {
-  const raw = status.needsOrganizing ?? status.queued + status.running;
+  const raw = status.awaiting ?? status.needsOrganizing ?? status.queued + status.running;
   if (!Number.isFinite(raw) || raw < 0) return 0;
   return raw;
+}
+
+function organizeCounts(status: AutomationStatus): { total: number; organized: number; outdated: number; missing: number } | null {
+  const { activeRepos: total, needsOrganizingMissing: missing, needsOrganizingOutdated: outdated } = status;
+  if (total == null || missing == null || outdated == null || !(total > 0)) return null;
+  return { total, missing, outdated, organized: Math.max(0, total - outdated - missing) };
+}
+
+/** 旧后台的三个分项不齐时，不猜个数。 */
+export function organizeCountsLine(status: AutomationStatus | null): string | null {
+  const counts = status ? organizeCounts(status) : null;
+  if (!counts) return null;
+  const { total, organized, outdated, missing } = counts;
+  const note = outdated > 0 ? '旧版说明是用旧格式写的，还能看，但建议按新格式重写，「找方案」和资料库筛选才更准。' : '';
+  return `现有 ${total} 个收藏：新版说明 ${organized} 个 · 旧版说明 ${outdated} 个 · 还没有说明 ${missing} 个。${note}`;
+}
+
+/** 只排队的结果；是否开始花钱仍由队列和授权决定。 */
+export function enqueueCardsNote(count: number, unlimited: boolean): string {
+  if (!(count > 0)) return '没有还要整理的了。';
+  return unlimited
+    ? `已排进队列 ${count} 个，整理正在进行，会一起处理。`
+    : `已排进队列 ${count} 个，按每天额度慢慢整理；想马上做完，点上面的「现在整理」。`;
 }
 
 /** 进度：done 夹在 0 和 total 之间；total ≤ 0 时百分比是 0；remaining 正好是 0 且 total > 0 时一定是 100。 */
@@ -192,20 +236,20 @@ export function lastFullScanText(last: LastFullScan | null | undefined): string 
   const ok = processed - failed;
   const failedNote = failed > 0 ? `，另有 ${failed} 个没整理成功` : '';
   if (last.reason === 'completed') {
-    const retry = failed > 0 ? '（可以再开一次一次性全部整理重试）' : '';
-    return `上次一次性全部整理：${when} 完成，整理了 ${ok} 个${failedNote}${retry}，用了约 ${used} token。`;
+    const retry = failed > 0 ? '（可以再点一次「现在整理」重试）' : '';
+    return `上次整理现有收藏：${when} 完成，整理了 ${ok} 个${failedNote}${retry}，用了约 ${used} token。`;
   }
   if (last.reason === 'stopped') {
-    return `上次一次性全部整理：${when} 被停止，已整理 ${ok} / ${total} 个${failedNote}，用了约 ${used} token。`;
+    return `上次整理现有收藏：${when} 被停止，已整理 ${ok} / ${total} 个${failedNote}，用了约 ${used} token。`;
   }
   if (last.reason === 'expired') {
-    return `上次一次性全部整理：${when} 到时间自动结束，已整理 ${ok} / ${total} 个${failedNote}，用了约 ${used} token。`;
+    return `上次整理现有收藏：${when} 到时间自动结束，已整理 ${ok} / ${total} 个${failedNote}，用了约 ${used} token。`;
   }
   if (last.reason === 'ceiling') {
-    return `上次一次性全部整理：${when} 因为花费远超预计，已自动停下（已整理 ${ok} / ${total} 个${failedNote}，用了约 ${used} token）。要继续可以再开一次。`;
+    return `上次整理现有收藏：${when} 因为花费远超预计，已自动停下（已整理 ${ok} / ${total} 个${failedNote}，用了约 ${used} token）。要继续可以再点一次「现在整理」。`;
   }
   if (last.reason === 'failures') {
-    return `上次一次性全部整理：${when} 因为失败太多，已自动停下（已整理 ${ok} / ${total} 个${failedNote}，用了约 ${used} token）。先到「设置 → AI 设置」检查模型，再重试。`;
+    return `上次整理现有收藏：${when} 因为失败太多，已自动停下（已整理 ${ok} / ${total} 个${failedNote}，用了约 ${used} token）。先到「设置 → AI 设置」检查模型，再重试。`;
   }
   return null;
 }
@@ -246,11 +290,11 @@ export function readmeCheckText(last: LastReadmeCheck | null | undefined, now = 
   return `项目说明更新检查：${when} · 看了 ${checked} 个 · ${tail}`;
 }
 
-export type FullScanPanel =
+export type FullScanPanel = { title: string; description: string | null } & (
   | { kind: 'loading' }
   | { kind: 'unavailable'; reason: string }
   | { kind: 'nothing'; last: string | null }
-  | { kind: 'ready'; pending: number; estimate: string; last: string | null }
+  | { kind: 'ready'; pending: number; estimate: string; last: string | null; body: string; buttonLabel: string }
   | {
       kind: 'running';
       done: number;
@@ -262,7 +306,7 @@ export type FullScanPanel =
       until: string;
       paused: boolean;
       pausedReason: string | null;
-    };
+    });
 
 const FULL_SCAN_UNAVAILABLE = '先到「设置 → AI 设置」里选好服务商和模型、保存密钥，才能整理。';
 
@@ -272,13 +316,15 @@ const FULL_SCAN_UNAVAILABLE = '先到「设置 → AI 设置」里选好服务�
  * `unlimited === false` 时即使还留着 fullScan 也不算在跑。
  */
 export function fullScanPanel(status: AutomationStatus | null): FullScanPanel {
-  if (!status) return { kind: 'loading' };
+  if (!status) return { kind: 'loading', title: '整理现有收藏', description: null };
   const scan = status.fullScan;
   if (scan != null && status.unlimited !== false) {
     const progress = fullScanProgress(scan);
     const tokensUsed = Number.isFinite(scan.tokensUsed) ? scan.tokensUsed : 0;
     return {
       kind: 'running',
+      title: '正在整理（不受每天额度限制）',
+      description: '应用在后台一个个整理现有收藏。这一轮不受每天额度限制，整理完自动回到每天自动整理。',
       done: progress.done,
       total: progress.total,
       percent: progress.percent,
@@ -290,14 +336,30 @@ export function fullScanPanel(status: AutomationStatus | null): FullScanPanel {
       pausedReason: status.pauseReason?.message ?? null,
     };
   }
-  if (!status.providerConfigured) return { kind: 'unavailable', reason: FULL_SCAN_UNAVAILABLE };
+  if (!status.providerConfigured) return { kind: 'unavailable', title: '整理现有收藏', description: null, reason: FULL_SCAN_UNAVAILABLE };
   const last = lastFullScanText(status.lastFullScan);
   const pending = fullScanPending(status);
-  if (pending <= 0) return { kind: 'nothing', last };
+  if (pending <= 0) return {
+    kind: 'nothing',
+    title: '现有收藏都整理好了',
+    description: '以后新收藏、README 有实质更新的，会交给下面的「每天自动整理」。',
+    last,
+  };
+  const counts = organizeCounts(status);
+  const firstStep = counts ? counts.organized === 0 : status.lastFullScan == null;
+  const estimate = roundedEstimate(estimateFullScanTokens(pending));
   return {
     kind: 'ready',
+    title: firstStep ? '第一步：把现有收藏整理一遍' : `现在就整理 ${pending} 个`,
+    description: firstStep
+      ? '只在第一次用、或说明的格式升级之后做一次：一口气把现有收藏整理完，不受每天额度限制。整理完，以后就只剩下面的「每天自动整理」。'
+      : '不想等每天自动整理的时候用：这一轮不受每天额度限制，整理完自动回到每天自动整理。',
+    body: firstStep
+      ? `需要整理 ${pending} 个，预计约 ${estimate} token（具体花多少钱以你服务商的账单为准）。`
+      : `有 ${pending} 个收藏在等整理，预计约 ${estimate} token（具体花多少钱以你服务商的账单为准）。`,
+    buttonLabel: firstStep ? `现在整理全部 ${pending} 个` : `现在整理 ${pending} 个`,
     pending,
-    estimate: roundedEstimate(estimateFullScanTokens(pending)),
+    estimate,
     last,
   };
 }
@@ -319,13 +381,14 @@ export function automationState(status: AutomationStatus | null): AutomationStat
     return { label: '已暂停', hue: 4, detail: status.pauseReason?.message ?? '整理被暂停了，点「继续整理」才会接着做。' };
   }
   if (status.unlimited === true) {
-    return { label: '一次性全部整理中', hue: 148, detail: '在后台连续整理，不受每天额度限制；整理完会自动回到每天自动整理。' };
+    return { label: '现在整理中', hue: 148, detail: '在后台连续整理，不受每天额度限制；整理完会自动回到每天自动整理。' };
   }
   if (!status.enabled) {
-    return { label: '未开启', hue: 220, detail: '还没开启时，应用不会调用 AI，也不会花钱。' };
+    return { label: '未开启', hue: 220, detail: '还没开启每天自动整理时，应用不会自动调用 AI，也不会花钱；你手动点「现在整理」时才会花钱（会先让你确认）。' };
   }
   if (status.budgetRemaining <= 0) {
-    return { label: '今天的额度用完了', hue: 36, detail: '明天会自动继续，也可以在下面调高每天的额度。' };
+    const queued = status.queued > 0 ? `；现在有 ${status.queued} 个在排队` : '';
+    return { label: '每天额度用完了', hue: 36, detail: `每天自动整理的额度用完了（按最近 24 小时累计），过一阵额度恢复会自动继续${queued}。想现在就整理，点下面的「现在整理」，不受额度限制；也可以在下面调高每天额度。` };
   }
   if (status.queued + status.running > 0) {
     return { label: '整理中', hue: 148, detail: '在后台一个个整理，整理好的会出现在「今日」和「资料库」里。' };
@@ -372,7 +435,7 @@ export function automationHint(status: AutomationStatus | null, pending: number)
       return {
         hue: 148,
         icon: 'autorenew',
-        title: `正在一次性全部整理，还剩 ${pending} 个`,
+        title: `「现在整理」进行中，还剩 ${pending} 个`,
         detail: `不受每天额度限制，${spent}。整理完会自动回到每天自动整理。`,
         actionLabel: '看整理进度',
       };
@@ -381,7 +444,7 @@ export function automationHint(status: AutomationStatus | null, pending: number)
     return {
       hue: 148,
       icon: 'autorenew',
-      title: '正在一次性全部整理',
+      title: '「现在整理」进行中',
       detail: `这一批已经做完，整理完会自动回到每天自动整理。${spent}。`,
       actionLabel: '看整理进度',
     };
@@ -400,9 +463,9 @@ export function automationHint(status: AutomationStatus | null, pending: number)
     return {
       hue: 36,
       icon: 'schedule',
-      title: '今天的整理额度用完了',
-      detail: `还有 ${pending} 个没整理，明天会自动接着做；想现在就整理完，可以到「设置 → 自动整理与备份」开启「一次性全部整理」。`,
-      actionLabel: '调整每天额度',
+      title: '每天自动整理的额度用完了',
+      detail: `还有 ${pending} 个没整理，过一阵额度恢复会自动接着做；想现在就整理，到「设置 → 自动整理与备份」点「现在整理」。`,
+      actionLabel: '去整理',
     };
   }
   if (status.queued + status.running > 0) {
@@ -428,11 +491,11 @@ export function itemPendingNote(status: AutomationStatus | null): { text: string
   }
   // 一次性全部整理时不要说「额度用完」。每天自动整理（unlimited 不是 true）仍用下面原来的「已经在整理队列里了」，原有测试靠这句。
   if (status.unlimited === true) {
-    return { text: `正在一次性全部整理，整理好会自动出现在这里。${original}`, actionLabel: null };
+    return { text: `「现在整理」进行中，整理好会自动出现在这里。${original}`, actionLabel: null };
   }
   if (!status.enabled) return { text: `自动整理还没开启，所以这里还没有说明。${original}`, actionLabel: '开启自动整理' };
   if (status.budgetRemaining <= 0) {
-    return { text: `今天的整理额度用完了，明天会接着整理。也可以到「设置 → 自动整理与备份」开启一次性全部整理。${original}`, actionLabel: '调整每天额度' };
+    return { text: `每天自动整理的额度用完了，过一阵会接着整理；也可以到「设置 → 自动整理与备份」点「现在整理」。${original}`, actionLabel: '去整理' };
   }
   if (status.queued + status.running > 0) return { text: `已经在整理队列里了，整理好会自动出现在这里。${original}`, actionLabel: null };
   return { text: `整理好之后，这里会出现中文说明、能做什么、怎么试。${original}`, actionLabel: null };
@@ -450,11 +513,11 @@ export function regenerateNote(status: AutomationStatus | null): RegenerateNote 
   if (!status.providerConfigured) return { title: queued, sub: '还没配置 AI 服务，配置好才会重新整理', actionLabel: '去设置 AI' };
   if (status.paused) return { title: queued, sub: '自动整理现在是暂停的，继续后才会重新整理', actionLabel: '继续整理' };
   if (status.unlimited === true) {
-    return { title: queued, sub: '正在一次性全部整理，会在后台重新整理，好了会自动更新', actionLabel: null };
+    return { title: queued, sub: '「现在整理」进行中，会在后台重新整理，好了会自动更新', actionLabel: null };
   }
   if (!status.enabled) return { title: queued, sub: '自动整理还没开启，开启后才会重新整理（不开启就不花钱）', actionLabel: '去开启' };
   if (status.budgetRemaining <= 0) {
-    return { title: queued, sub: '今天的额度用完了，明天会接着整理，也可以到「设置 → 自动整理与备份」开启一次性全部整理', actionLabel: null };
+    return { title: queued, sub: '每天自动整理的额度用完了，过一阵会接着整理，也可以到「设置 → 自动整理与备份」点「现在整理」', actionLabel: null };
   }
   return { title: queued, sub: '会在后台重新整理，好了会自动更新', actionLabel: null };
 }
@@ -500,7 +563,7 @@ export function fullScanConfirmLines(pending: number, estimate: string): [string
   const count = finiteCount(pending);
   const tokens = estimate.trim() || '0';
   return [
-    `还有 ${count} 个收藏没有中文说明，预计整理约 ${count} 个（约 ${tokens} token，具体花多少钱以你服务商的账单为准）。`,
+    `需要整理 ${count} 个，预计约 ${tokens} token（具体花多少钱以你服务商的账单为准）。`,
     '点确认后，应用在后台一直整理，不受每天额度限制，最多跑 48 小时，你随时可以点「停止」。',
     '服务商拒绝请求、失败太多，或花费超过预计的 4 倍时会自动停下。',
   ];
@@ -516,7 +579,7 @@ export type RecentUsage = Pick<AutomationStatus, 'tokens24h' | 'dailyBudgetToken
   succeeded24h?: number | null;
 };
 
-const EARLIER_FULL_SCAN_NOTE = '这是之前一次性整理用的';
+const EARLIER_FULL_SCAN_NOTE = '这是之前整理现有收藏用的，不占每天额度';
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 /**
@@ -576,6 +639,19 @@ export function recentUsageMetric(status: RecentUsage, now = new Date()): { labe
     };
   }
   return { label: '24 小时内已用', value: `${tokens} token`, sub: note ?? '' };
+}
+
+/** 自动整理额度那一格。手动整理的用量不从每天额度里扣。 */
+export function dailyBudgetMetric(status: AutomationStatus): { label: string; value: string; sub: string } {
+  const label = '自动整理额度还剩';
+  if (status.unlimited === true) return { label, value: '不受每天额度限制', sub: '正在整理中' };
+  if (!status.enabled) return { label, value: '—', sub: '没有开启每天自动整理' };
+  const used = formatTokens(status.dailyTokensUsed ?? status.tokens24h);
+  return {
+    label,
+    value: `${formatTokens(status.budgetRemaining)} token`,
+    sub: `约还能整理 ${approxRepos(status.budgetRemaining)} 个 · 已用 ${used} / 额度 ${formatTokens(status.dailyBudgetTokens)}（整理现有收藏用的不算）`,
+  };
 }
 
 /** 「运行状态」那一行。用后台算好的「还没解决的失败数」；没读到就不下结论。 */

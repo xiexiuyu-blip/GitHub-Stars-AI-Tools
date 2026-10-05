@@ -625,13 +625,13 @@ describe('regenerateToast：点「不对，请 AI 重写」之后的提示', () 
     expect(paused.actionLabel).toBe('继续整理');
     const fullScan = regenerateToast(status({ unlimited: true, enabled: false }));
     expect(fullScan.title).toBe('已加入整理队列');
-    expect(fullScan.sub).toContain('一次性全部整理');
+    expect(fullScan.sub).toBe('「现在整理」进行中，会在后台重新整理，好了会自动更新');
     expect(fullScan.actionLabel).toBeNull();
   });
 
-  it('开着的时候照原来的提示：读不到状态只说已加入；额度用完说明天；正常在跑说会在后台重新整理', () => {
+  it('开着的时候照原来的提示：读不到状态只说已加入；额度用完说明过一阵继续和现在整理入口；正常在跑说会在后台重新整理', () => {
     expect(regenerateToast(null)).toEqual({ title: '已加入整理队列', actionLabel: null });
-    expect(regenerateToast(status({ budgetRemaining: 0 })).sub).toContain('明天');
+    expect(regenerateToast(status({ budgetRemaining: 0 })).sub).toBe('每天自动整理的额度用完了，过一阵会接着整理，也可以到「设置 → 自动整理与备份」点「现在整理」');
     expect(regenerateToast(status({ queued: 2 }))).toEqual({
       title: '已加入整理队列',
       sub: '会在后台重新整理，好了会自动更新',
