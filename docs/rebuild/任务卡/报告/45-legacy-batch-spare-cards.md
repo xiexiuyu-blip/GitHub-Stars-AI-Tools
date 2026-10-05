@@ -112,3 +112,89 @@
 - **日志审计**：38 条命令里，命中正式 / 开发数据目录、钥匙串、凭证目录、git 写命令、联网、提权 / 删除的数量全是 0；改过的文件只有 `.card-report.md`、`lib.rs`、`storage.rs`。日志里出现 4 次 `com.foxwork` 都是提示词 / 文档文字，不是命令。
 - **Codex 点出的另外两处写 `repo_ai_documents` 的旧代码，我的判断：不另开卡**。`v2_ops::import_summary_cards`（只由 `prepare_knowledge` 命令调用）和已禁用的 `tools/legacy/fill-missing-cards.mjs` 都是「先读到卡是空的、再写」的两步，中间若刚好有新版整理写进一张未确认的卡，会被占位卡换掉。但：开发库 501 篇文档现在全都有卡，候选是 0；`prepare_knowledge` 前端没有任何调用点（`apps/desktop/src` 里搜不到）；脚本默认禁用。记进「已知坑」，以后若给 `prepare_knowledge` 做入口再加固。
 - **没验证的**：两处 worker 里的检查需要 `AppHandle` 和网络，没有单元测试，靠读代码（上面第 ③ 条）确认「在任何网络请求和写库之前」；数据库层的保险（第 ④ 条）有测试守着，即使 worker 检查被删，旧字段也写不进有 card 的文档。
+
+## 第 2 轮
+
+本节为续作 `docs/rebuild/任务卡/续作/45-legacy-batch-spare-cards-r2.md` 的实际交回结果。上文保留第一轮报告原文，其中测试数字、两文件 diff 和改坏检查都是第一轮的历史记录，不代表本轮重新执行。
+
+### 一句话结论
+
+完成：只替换 storage.rs 新增测试代码中的五行，让三个测试使用不同的临时库标签；格式、编译通过，document 测试连续 20 轮全部通过，每轮 19 项、零失败。
+
+### 验收逐条
+
+| 验收项（照抄续作） | 做到了吗（是/部分/否） | 证据（命令输出摘要，或 文件:行） |
+|---|---|---|
+| 1. `tools/cards/run.sh rust-fmt`、`rust-check` 通过；`tools/cards/run.sh rust-test document` 通过（这个过滤词会把三个新测试和既有的候选测试一起带上）。 | 是 | rust-fmt、rust-check 均退出 0；document 每轮 19 通过 / 0 失败 / 0 忽略 / 1364 被过滤，输出确认三个新测试和既有 `ai_document_candidates_only_include_missing_or_changed_sources` 均通过。 |
+| 2. 把第 1 条里的测试命令**连跑 20 遍**不许失败：`for i in $(seq 1 20); do tools/cards/run.sh rust-test document \|\| break; done`，报告里写跑了几遍、有没有失败。 | 是 | 实际按同一命令连续运行 20/20 轮，默认每轮 8 个测试线程；每轮 19 项全部通过，合计 380 次测试执行、0 失败，循环退出 0。实际循环在失败时打印完整输出并退出，未使用重跑掩盖失败。 |
+| 3. `git diff --stat` 仍然只有 `storage.rs`；**相对第 1 轮提交**（`git diff HEAD`），diff 只涉及夹具函数的签名、它里面那一行 `temp_storage(...)`、和三个测试里调用夹具的那三行（总共几行）。 | 是 | `git diff --stat`：仅 apps/desktop/src-tauri/src/storage.rs，1 file changed, 5 insertions(+), 5 deletions(-)；`git diff HEAD` 只有下面五处替换，lib.rs 无 diff。 |
+| 4. 报告在第 1 轮报告基础上补一节「第 2 轮」：改了哪几行（文件:行）、连跑结果、新标签有没有和别的重复。 | 是 | 保留第一轮原文并追加本节；修改位置、20 轮结果及标签计数见下。 |
+
+### 改了哪些文件：条号 → 文件:行
+
+| 续作条号 | 文件:行 | 改动 |
+|---|---|---|
+| 1. 夹具签名 | `apps/desktop/src-tauri/src/storage.rs:5740` | `legacy_ai_document_storage` 增加 `name: &str` 参数。 |
+| 1. 传递标签 | `apps/desktop/src-tauri/src/storage.rs:5741` | 原写死标签改为 `temp_storage(name)`。 |
+| 2. 候选测试 | `apps/desktop/src-tauri/src/storage.rs:5777` | `ai_document_candidates_exclude_nonempty_card_documents` 传 `legacy-ai-candidates`。 |
+| 2. 判断测试 | `apps/desktop/src-tauri/src/storage.rs:5794` | `has_card_document_requires_nonempty_card_json` 传 `legacy-ai-has-card`。 |
+| 2. 保险测试 | `apps/desktop/src-tauri/src/storage.rs:5812` | `legacy_ai_document_save_preserves_cards_and_updates_legacy_documents` 传 `legacy-ai-save-guard`。 |
+| 3. 其余不动 | `git diff HEAD` | 没有修改任何生产代码、lib.rs、temp_storage 本身、既有测试或断言；没有新增测试。 |
+
+- `.card-report.md`：只在原报告末尾追加第 2 轮记录；报告被 git 忽略。
+
+### 验证
+
+- `tools/cards/run.sh rust-fmt-fix` → 退出 0；没有产生五处替换以外的源码 diff。
+- `tools/cards/run.sh rust-fmt` → 退出 0。
+- `tools/cards/run.sh rust-check` → 退出 0，3.11 秒；6 条既有 dead_code 警告，涉及未修改文件。
+- `tools/cards/run.sh rust-test document` → 连续 20 轮，每轮 19 通过 / 0 失败 / 0 忽略，合计 380 次通过；测试阶段每轮 0.84–1.04 秒。
+- `git diff --check` → 退出 0，没有空白错误。
+- `git diff HEAD -- apps/desktop/src-tauri/src/storage.rs apps/desktop/src-tauri/src/lib.rs`、`git diff --stat`、`git status --short` → 只修改 storage.rs 的五行，5 行新增、5 行删除；lib.rs 无变动。
+- 编辑前用 `rg -n 'legacy_ai_document_storage|ai_document_candidates_exclude_nonempty_card_documents|has_card_document_requires_nonempty_card_json|legacy_ai_document_save_preserves_cards_and_updates_legacy_documents|temp_storage\("' apps/desktop/src-tauri/src/storage.rs` 核对所有标签及三处调用。
+- 编辑后用 `rg -o '(temp_storage|legacy_ai_document_storage)\("[^"]+"' apps/desktop/src-tauri/src/storage.rs | sed -E 's/^[^(]+\("([^"]+)"$/\1/' | sort | uniq -c` 核对：18 个直接或经夹具传递的标签计数均为 1；三个新标签各出现一次，与另 15 个标签无重复。
+
+实际连续执行命令如下，完整的每轮输出写在本次专用 `$TMPDIR/card45-r2-document-1.log` 至 `card45-r2-document-20.log` 中，未在工作区创建临时文件；TMPDIR 会随本次任务清理。
+
+```sh
+document_passed=0
+for document_round in $(seq 1 20); do
+  document_log="$TMPDIR/card45-r2-document-$document_round.log"
+  if tools/cards/run.sh rust-test document > "$document_log" 2>&1; then
+    printf '第 %s/20 轮：' "$document_round"
+    rg '^test result:' "$document_log"
+    document_passed=$((document_passed + 1))
+  else
+    printf '第 %s/20 轮失败，完整输出如下：\n' "$document_round"
+    cat "$document_log"
+    exit 1
+  fi
+done
+printf '连续完成 %s/20 轮，无失败。\n' "$document_passed"
+```
+
+### 没做到的 / 偏离任务卡的地方
+
+- 本轮续作验收无未完成项，也无偏离。
+- 按续作要求只运行格式、编译和 document 过滤套件；第一轮记录的 storage/lib 套件、改坏检查和写入点清单没有重新执行或扩展。
+- 没有启动应用、读取正式库或开发库、访问钥匙串、发出真实 AI 请求或联网安装依赖。
+
+### 需要总控或 Fox 决定的事
+
+- 本轮无新增。
+
+### 给审核者的提示
+
+- 请以本轮 `git diff HEAD` 的五处替换核对范围；第一轮的生产实现已在 HEAD，本轮只隔离测试夹具。
+- 三个测试标签不同，即使纳秒时间戳相同，也会落在不同文件名；没有修改全局 temp_storage 命名方式。
+- 20 轮全部通过是实际运行结果；没有改断言、删测试、加 ignore 或跳过本轮过滤词下的用例。
+
+---
+
+## 总控审核·第 2 轮与发布（2026-10-05 夜，Claude）
+
+- **第 2 轮**（Codex，23:46–23:51，一次过）：只改 `storage.rs` 的 5 行——夹具函数加 `name` 参数、三个测试各传 `legacy-ai-candidates` / `legacy-ai-has-card` / `legacy-ai-save-guard`；`git diff HEAD` 逐行对过，生产代码、`lib.rs`、断言一个字没动，`check-scope.sh` 通过。Codex 自己把 `rust-test document` 连跑 20 遍无失败；我在沙盒外又连跑 30 遍，0 次失败（修之前，3 个测试同时起跑时我撞过 1 次 `UNIQUE constraint failed`）。
+- **合并**：`merge-card.sh` 在卡分支上跑完整检查——Rust **1378 通过 / 0 失败 / 5 忽略**（含钥匙串用例；比卡 44 合并时的 1375 多 3 项，就是本卡新增的 3 个测试）、前端 34 个文件 **853** 项通过——再 `--no-ff` 合进集成线（`5da1cfe`）。
+- **发布 #15**（2026-10-05 23:55）：卡 44 + 卡 45 一起，`fox-rebuild` e84bbae → 5da1cfe（10 个提交，快进）；发布前的完整检查再跑一遍全绿。开发版此前被我关着（23:18 起），发布后由我在终端标签页重新编译启动（编译 15 秒，pid 90074），窗口是正常的「今日」页，没有卡在钥匙串。
+- **发布后只读核对**（没点任何花钱 / 写入的按钮）：启动前后各做一份 `sqlite3 .backup` 对比——501 篇说明逐列没变（500 张 `card-v3` + 1 张旧版分块）、`ai_jobs` 账本 1168 行没变、预算控制文件逐字节没变、完整性检查 ok；新规则下旧版候选 **0**（旧规则是 500）。只点了导航（资料库 / 找方案 / 收集 / 发现 / 设置 / 今日），页面都能打开、数据正常；正式库目录 mtime 仍是 2026-10-01 12:30:17。
+- **还没验证的**：旧版按钮在真界面上的新提示——我不点它们（写入 / 花钱类按钮只有 Fox 点；按代码，现在点下去不会再花 AI token，「抓取并分析」抓 README 那一步仍会联网）；10-05 22:31–23:18 事故留下的 56 万账本要到 10-06 22:31 之后才滚出 24 小时，在那之前每天额度只剩约 5 千，「每天自动整理」和后台排队任务不会领活（页面只给提示；「现在整理」不受限）。
