@@ -786,8 +786,6 @@ function RuntimeReadinessPanel(props: {
             <RuntimeCheckRow title={RUNTIME_CHECK_TITLES.stars} item={props.runtimeCheck.stars} />
             <RuntimeCheckRow title={RUNTIME_CHECK_TITLES.readme} item={props.runtimeCheck.readme} />
             <RuntimeCheckRow title={RUNTIME_CHECK_TITLES.ai} item={props.runtimeCheck.ai} />
-            <RuntimeCheckRow title={RUNTIME_CHECK_TITLES.tagNetwork} item={props.runtimeCheck.tagNetwork} />
-            <RuntimeCheckRow title={RUNTIME_CHECK_TITLES.recommendation} item={props.runtimeCheck.recommendation} />
           </div>
         </div>
       )}
@@ -824,8 +822,6 @@ function summarizeRuntimeCheck(result: RuntimeReadinessCheckResult) {
     result.stars,
     result.readme,
     result.ai,
-    result.tagNetwork,
-    result.recommendation,
   ];
   return items.reduce(
     (summary, item) => {

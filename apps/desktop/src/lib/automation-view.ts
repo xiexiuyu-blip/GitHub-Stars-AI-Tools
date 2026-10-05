@@ -720,7 +720,6 @@ export const RUNTIME_CHECK_COST_NOTE = '如果已经设置了 AI，检查时会�
 /**
  * 「运行检查」检查结果里每一项的名字。
  * 后台只检查前六项，其中「AI 服务」是整个检查里唯一会调用 AI 的一项。
- * 后两项停止检查，去掉旧功能名称；兼容键暂留，设置页还直接读取它们。
  */
 export const RUNTIME_CHECK_TITLES = {
   storage: '资料库文件',
@@ -729,8 +728,6 @@ export const RUNTIME_CHECK_TITLES = {
   stars: '读取我的收藏',
   readme: '下载项目说明',
   ai: 'AI 服务',
-  tagNetwork: '已停止检查',
-  recommendation: '已停止检查',
 } as const;
 
 /* ───────── 设置页：GitHub 令牌 / 钥匙串（欢迎引导和设置共用） ───────── */
