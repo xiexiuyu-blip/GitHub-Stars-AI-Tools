@@ -216,7 +216,7 @@ describe('explainerLinks', () => {
   it('把 github.com 换成 DeepWiki / Zread 的域名', () => {
     expect(explainerLinks('microsoft/markitdown')).toEqual([
       { id: 'deepwiki', label: 'DeepWiki', url: 'https://deepwiki.com/microsoft/markitdown', hint: '按模块讲清项目结构，可以追问' },
-      { id: 'zread', label: 'Zread', url: 'https://zread.ai/microsoft/markitdown', hint: '用 AI 通读仓库后的解读文档' },
+      { id: 'zread', label: 'Zread', url: 'https://zread.ai/microsoft/markitdown', hint: '用 AI 通读这个工具的代码后写的解读文档' },
     ]);
   });
 

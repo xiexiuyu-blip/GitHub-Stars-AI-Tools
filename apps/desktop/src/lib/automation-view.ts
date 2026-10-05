@@ -590,6 +590,9 @@ export function exportSavedText(count: number, fileName: string): string {
   return `已导出 ${finiteCount(count)} 个工具到「下载」文件夹：${fileName}`;
 }
 
+/** 「导出成文档 / 表格」区块下面的说明：存在哪、同名会怎样，以及表格用 Excel 打开中文不会乱码（表格文件开头带了编码标记）。 */
+export const EXPORT_SECTION_HINT = '把资料库导成文件，方便存档或给别的工具读。文件会保存在「下载」文件夹里，同名的会被覆盖。导出的表格用 Excel 打开中文不会乱码。';
+
 /** 本机备份的时间行。没有备份、或时间读不懂，就说还没有。 */
 export function backupTimeLine(lastAutoAt: string | null | undefined): string {
   const tail = '应用开着时，每隔约 20 小时自动备一次。';
@@ -732,12 +735,15 @@ export const RUNTIME_CHECK_TITLES = {
 
 /* ───────── 设置页：GitHub 令牌 / 钥匙串（欢迎引导和设置共用） ───────── */
 
-export const GITHUB_TOKEN_EXPLAINER = '令牌（GitHub 给你的一串密码，应用用它读你的收藏）';
-export const GITHUB_TOKEN_SCOPES = '只读公开收藏：不用勾权限；想读私有收藏：勾「repo」；想用 GitHub 备份：勾「gist」。';
-/** 已经连接上之后，令牌区域那一句。 */
-export const GITHUB_TOKEN_SAVED_NOTE = `${GITHUB_TOKEN_EXPLAINER}已保存在 Mac 的钥匙串里，界面不会显示它。`;
-/** 还没连接时，输入框下面那一句。 */
-export const GITHUB_TOKEN_WILL_SAVE_NOTE = `${GITHUB_TOKEN_EXPLAINER}只会保存在 Mac 的钥匙串里，不会上传到任何服务器。`;
+/** 令牌是什么：一句完整的话。设置页的 GitHub 页只在最上面说一遍，下面的几句不再重复它。 */
+export const GITHUB_TOKEN_EXPLAINER = '令牌是 GitHub 给你的一串密码，应用用它读你的收藏。';
+/** 创建令牌时勾什么权限：repo / gist 各是干什么用的，写在括号里。设置页和欢迎引导里的「怎么拿令牌」共用这一处。 */
+export const GITHUB_TOKEN_EXTRA_SCOPES = '勾「repo」（读你的私有收藏）和「gist」（上传备份用）';
+export const GITHUB_TOKEN_SCOPES = `创建令牌时，只读公开收藏的话一个权限都不用勾；还需要的话再${GITHUB_TOKEN_EXTRA_SCOPES}。`;
+/** 已经连接上之后，令牌区域那一句。令牌是什么上面已经说过，这里不重复。 */
+export const GITHUB_TOKEN_SAVED_NOTE = '令牌已保存在 Mac 的钥匙串里，界面不会显示它。';
+/** 还没连接时（欢迎引导里），输入框下面那一句。这里是第一次提到令牌，所以带着它是什么。 */
+export const GITHUB_TOKEN_WILL_SAVE_NOTE = `${GITHUB_TOKEN_EXPLAINER}它只会保存在 Mac 的钥匙串里，不会上传到任何服务器。`;
 export const CONNECT_VERIFYING = '正在验证 GitHub 令牌…';
 export const CONNECT_SAVING_KEYCHAIN = '正在把令牌存进钥匙串。如果弹出授权框，请点「允许」。';
 export const CONNECT_SLOW = 'GitHub 这会儿比较慢，请再等一会儿';
@@ -799,7 +805,7 @@ export const WELCOME_COPY = {
     '点这个链接',
     '点 Generate new token',
     '名字随便填',
-    '权限一个都不用勾（只读公开收藏）；想读私有收藏勾「repo」，想用 GitHub 备份勾「gist」',
+    `权限一个都不用勾（只读公开收藏）；还需要的话再${GITHUB_TOKEN_EXTRA_SCOPES}`,
     '复制',
   ],
   tokenPlaceholder: '粘贴 GitHub 令牌',

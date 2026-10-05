@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 import { renderToStaticMarkup } from 'react-dom/server';
 import type { LibraryDetail, ScenarioSummary } from '@/lib/contracts';
 import { ItemDetail } from './item-detail';
+// 源码原文：守住「说什么由 item-format 决定」（Vite 的 ?raw，不用 node 的类型）
+import itemDetailSource from './item-detail.tsx?raw';
 
 /** 去掉图标字（Material Symbols 的图标名是文字）和标签，留下用户看得见的字。 */
 function textOf(html: string): string {
@@ -78,9 +80,13 @@ function scenario(id: string, nameZh: string): ScenarioSummary {
 }
 
 describe('详情：收藏于', () => {
+  // 用本机时间造出 UTC 串（GitHub 给的 starredAt 是 UTC）：不管测试在哪个时区跑，它在本机日历上都是同一天
+  const utcAtLocal = (year: number, month: number, day: number, hour: number, minute = 0) =>
+    new Date(year, month - 1, day, hour, minute).toISOString();
+
   it('只写日期、不写钟点（收藏时间是 UTC，钟点和本机时间差好几个小时）', () => {
     const thisYear = new Date().getFullYear();
-    const html = render(make({ starredAt: `${thisYear}-10-03T18:17:00Z` }));
+    const html = render(make({ starredAt: utcAtLocal(thisYear, 10, 3, 18, 17) }));
     const text = textOf(html);
     expect(text).toContain('收藏于 10 月 3 日');
     expect(text).not.toContain('18:17');
@@ -88,9 +94,15 @@ describe('详情：收藏于', () => {
   });
 
   it('不是今年的带年份', () => {
-    const text = textOf(render(make({ starredAt: '2024-10-03T18:17:00Z' })));
+    const text = textOf(render(make({ starredAt: utcAtLocal(2024, 10, 3, 18, 17) })));
     expect(text).toContain('收藏于 2024 年 10 月 3 日');
     expect(text).not.toContain('18:17');
+  });
+
+  it('写的是本机日历上的日期：本机凌晨 / 深夜收藏的，UTC 串里的日期比本机早 / 晚一天，也写本机的当天', () => {
+    const thisYear = new Date().getFullYear();
+    expect(textOf(render(make({ starredAt: utcAtLocal(thisYear, 10, 3, 1, 30) })))).toContain('收藏于 10 月 3 日');
+    expect(textOf(render(make({ starredAt: utcAtLocal(thisYear, 10, 3, 23, 30) })))).toContain('收藏于 10 月 3 日');
   });
 
   it('读不出日期就写破折号，不写「undefined」之类', () => {
@@ -264,5 +276,43 @@ describe('详情：底部的复制按钮', () => {
     const text = textOf(render(make()));
     expect(text).toContain('复制「帮我装好并试用」给 Codex');
     expect(text).not.toContain('复制给 Codex');
+  });
+
+  it('类型是「合集」（资源清单）时也写「帮我装好并试用」：粘出去的话是同一套，按钮不能和它说的不一样', () => {
+    const text = textOf(render(make({ form: 'collection' })));
+    expect(text).toContain('复制「帮我装好并试用」给 Codex');
+    expect(text).not.toContain('帮我看看怎么用');
+  });
+
+  it('其余类型都不变：技能、MCP、命令行、应用、代码库、接口、服务、其他、没填', () => {
+    for (const form of ['skill', 'mcp', 'cli', 'app', 'library', 'api', 'service', 'other', '']) {
+      const text = textOf(render(make({ form })));
+      expect(text, form).toContain('复制「帮我装好并试用」给 Codex');
+      expect(text, form).not.toContain('帮我看看怎么用');
+    }
+  });
+
+  it('按钮仍是页面主按钮，点它交出去的还是同一个动作（只是字不一样）', () => {
+    const html = render(make({ form: 'collection' }));
+    expect(html).toMatch(/<button[^>]*>(?:(?!<\/button>).)*复制「帮我装好并试用」给 Codex<\/button>/);
+  });
+});
+
+describe('详情：概览里「怎么试」没有现成命令时', () => {
+  it('项目说明还在读取：只说正在读取，不先下结论说「没有现成的安装步骤」（读完可能就有）', () => {
+    // 服务端渲染不跑 effect，项目说明就停在「读取中」
+    const text = textOf(render(make({ howToTry: null })));
+    expect(text).toContain('正在读取项目说明…');
+    expect(text).not.toContain('项目说明里没有现成的安装步骤');
+    expect(text).not.toContain('还没下载项目说明，暂时看不到安装步骤');
+  });
+
+  it('下面的链接仍在：让 Codex 帮你装', () => {
+    expect(textOf(render(make({ howToTry: null })))).toContain('去「怎么试」页，让 Codex 帮你装 →');
+  });
+
+  it('接线：用 noInstallStepsNote(readme)，按项目说明读到哪一步说话', () => {
+    expect(itemDetailSource).toContain('noInstallStepsNote(readme)');
+    expect(itemDetailSource).not.toContain('项目说明里没有现成的安装步骤');
   });
 });

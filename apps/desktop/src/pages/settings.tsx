@@ -401,7 +401,7 @@ function GitHubSettings({
           <div className="min-w-0">
             <h3 className="font-headline-md text-[20px] font-semibold text-on-surface mb-1">GitHub 连接状态</h3>
             <p className="font-body-md text-on-surface-variant mb-6">
-              {GITHUB_TOKEN_EXPLAINER}。{GITHUB_TOKEN_SCOPES}
+              {GITHUB_TOKEN_EXPLAINER}{GITHUB_TOKEN_SCOPES}
             </p>
             <div
               className={`flex w-fit max-w-full flex-wrap items-center gap-3 rounded-lg border px-4 py-2.5 ${
@@ -911,7 +911,8 @@ function AISettings({ settingsHook }: { settingsHook: ReturnType<typeof useAppSe
   const apiKeyPlaceholder = currentPreset.apiKeyLabel;
   const modelPlaceholder = currentPreset.modelPlaceholder;
   const effectiveApiKey = apiKeyDraft.trim() ? apiKeyDraft : ai.apiKey;
-  const currentConfigMessage = getAiConfigMessage({ ...ai, apiKey: effectiveApiKey });
+  // 人就在「AI 设置」这一页：提示指这一页上面的输入框，不再说「去设置 → AI 设置」
+  const currentConfigMessage = getAiConfigMessage({ ...ai, apiKey: effectiveApiKey }, { onAiSettingsPage: true });
   const canTestAi = needsRemoteConfig && !currentConfigMessage;
   const aiKeySaveMessage = getAiKeySaveMessage(settingsHook.aiKeySaveStatus);
   const modelOptions = mergeAiModelOptions(currentPreset, availableModels, ai.model);
@@ -998,7 +999,7 @@ function AISettings({ settingsHook }: { settingsHook: ReturnType<typeof useAppSe
 
   async function handleTestAiConnection() {
     const nextAi = { ...ai, apiKey: effectiveApiKey };
-    const configMessage = getAiConfigMessage(nextAi);
+    const configMessage = getAiConfigMessage(nextAi, { onAiSettingsPage: true });
     const startedAt = performance.now();
     const requestId = `ai-config-test-${Date.now()}`;
     const providerLabel = currentPreset.label;

@@ -358,6 +358,6 @@ export function explainerLinks(fullName: string): ExplainerLink[] {
   if (!/^[^/\s]+\/[^/\s]+$/.test(name)) return [];
   return [
     { id: 'deepwiki', label: 'DeepWiki', url: `https://deepwiki.com/${name}`, hint: '按模块讲清项目结构，可以追问' },
-    { id: 'zread', label: 'Zread', url: `https://zread.ai/${name}`, hint: '用 AI 通读仓库后的解读文档' },
+    { id: 'zread', label: 'Zread', url: `https://zread.ai/${name}`, hint: '用 AI 通读这个工具的代码后写的解读文档' },
   ];
 }

@@ -36,6 +36,7 @@ import {
   packPlaceholder,
   packSizeText,
   pendingNote,
+  previewDisplayText,
   RERANK_FIT_LABEL,
   RERANK_TOGGLE_LABEL,
   rerankPicks,
@@ -725,7 +726,9 @@ describe('界面上残留的旧叫法已换成统一用词', () => {
   it('交接单大小：不到一万字写具体数，一万字以上写「约 X 万字」', () => {
     expect(packSizeText(0)).toBe('约 0 字');
     expect(packSizeText(850)).toBe('约 850 字');
-    expect(packSizeText(9999)).toBe('约 9,999 字');
+    expect(packSizeText(9999)).toBe('约 9999 字');
+    expect(packSizeText(3457)).toBe('约 3457 字');
+    expect(packSizeText(1000)).toBe('约 1000 字');
     expect(packSizeText(10000)).toBe('约 1 万字');
     expect(packSizeText(12345)).toBe('约 1.2 万字');
     expect(packSizeText(12950)).toBe('约 1.3 万字');
@@ -733,8 +736,11 @@ describe('界面上残留的旧叫法已换成统一用词', () => {
     expect(packSizeText(123456)).toBe('约 12.3 万字');
     expect(packSizeText(Number.NaN)).toBe('');
     expect(packSizeText(-5)).toBe('');
-    // 一万字以上不再写成带逗号的「12,345」
+    // 一万字以上不再写成带逗号的「12,345」；四位数也不加千分位（「约 3,457 字」→「约 3457 字」）
     expect(packSizeText(12345)).not.toContain(',');
+    for (const length of [1000, 3457, 9999]) {
+      expect(packSizeText(length), String(length)).not.toContain(',');
+    }
   });
 
   it('交接单里有工具已不在资料库里：写工具和资料库，不写项目 / 库', () => {
@@ -804,6 +810,96 @@ describe('复制成功的提示', () => {
       expect(text, `${name} 里还有旧提示`).not.toContain('已复制，去 Codex 里粘贴');
       expect(text, `${name} 里又写了一份提示原文`).not.toContain('粘到 Codex 后');
     }
+  });
+});
+
+describe('previewDisplayText：交接单排版预览里的星数和日期', () => {
+  const now = new Date(2026, 9, 5, 12, 0, 0);
+  const line = (url: string, stars: string, date: string) => `- 链接：${url} · ★${stars} · 最近更新 ${date}`;
+
+  it('★27.2k → ★2.7 万，2026-07-01 → 7 月 1 日（今年的不带年份）', () => {
+    const shown = previewDisplayText(line('https://github.com/a/big', '27.2k', '2026-07-01'), [], now);
+    expect(shown).toBe('- 链接：https://github.com/a/big · ★2.7 万 · 最近更新 7 月 1 日');
+  });
+
+  it('不到一万的写原数字：认得出是哪个工具，就用它真实的个数（★1234，不是从 1.2k 倒推的 ★1200）', () => {
+    const hits = [{ htmlUrl: 'https://github.com/a/mid', starsCount: 1234 }];
+    expect(previewDisplayText(line('https://github.com/a/mid', '1.2k', '2026-07-01'), hits, now))
+      .toBe('- 链接：https://github.com/a/mid · ★1234 · 最近更新 7 月 1 日');
+    // 一万以上也用真实个数：27 249 → 2.7 万，不是 27.2k 倒推出来的 27 200
+    const big = [{ htmlUrl: 'https://github.com/a/big', starsCount: 27249 }];
+    expect(previewDisplayText(line('https://github.com/a/big', '27.2k', '2026-07-01'), big, now))
+      .toContain('★2.7 万');
+  });
+
+  it('对不上哪个工具时，按「k」推回个数：1k → ★1000，12k → ★1.2 万，999 原样', () => {
+    const none: never[] = [];
+    expect(previewDisplayText(line('https://github.com/a/x', '999', '2026-07-01'), none, now)).toContain('★999 ·');
+    expect(previewDisplayText(line('https://github.com/a/x', '1k', '2026-07-01'), none, now)).toContain('★1000 ·');
+    expect(previewDisplayText(line('https://github.com/a/x', '1.2k', '2026-07-01'), none, now)).toContain('★1200 ·');
+    expect(previewDisplayText(line('https://github.com/a/x', '12k', '2026-07-01'), none, now)).toContain('★1.2 万 ·');
+    expect(previewDisplayText(line('https://github.com/a/x', '12.3k', '2026-07-01'), none, now)).toContain('★1.2 万 ·');
+  });
+
+  it('不是今年的日期带年份；不知道的日期原样写「未知」', () => {
+    expect(previewDisplayText(line('https://github.com/a/x', '5', '2025-12-31'), [], now)).toContain('最近更新 2025 年 12 月 31 日');
+    expect(previewDisplayText(line('https://github.com/a/x', '5', '未知'), [], now)).toContain('最近更新 未知');
+  });
+
+  it('整份交接单里只换工具那一行：别的行（包括正文里碰巧写了 ★ 和日期的）一个字不动，多个工具各换各的', () => {
+    const markdown = [
+      '# 交接单：做小红书封面',
+      '我想 ★3.5k 的那种，2026-07-01 之前要做完。',
+      '## 1. a/one（主参考）',
+      line('https://github.com/a/one', '27.2k', '2026-07-01'),
+      '- 许可证：MIT',
+      '## 2. b/two（备选）',
+      line('https://github.com/b/two', '42', '2024-01-02'),
+      '- 是什么：封面工具 ★1k',
+    ].join('\n');
+    const shown = previewDisplayText(markdown, [], now).split('\n');
+    expect(shown[0]).toBe('# 交接单：做小红书封面');
+    expect(shown[1]).toBe('我想 ★3.5k 的那种，2026-07-01 之前要做完。');
+    expect(shown[3]).toBe('- 链接：https://github.com/a/one · ★2.7 万 · 最近更新 7 月 1 日');
+    expect(shown[4]).toBe('- 许可证：MIT');
+    expect(shown[6]).toBe('- 链接：https://github.com/b/two · ★42 · 最近更新 2024 年 1 月 2 日');
+    expect(shown[7]).toBe('- 是什么：封面工具 ★1k');
+    expect(shown).toHaveLength(8);
+  });
+
+  it('没有这种行的文档（JSON、直接交给 Codex 的交接单）原样返回', () => {
+    const json = '{"items":[{"stars":27200,"pushedOn":"2026-07-01"}]}';
+    expect(previewDisplayText(json, [], now)).toBe(json);
+    expect(previewDisplayText('', [], now)).toBe('');
+    expect(previewDisplayText('# 直接交给 Codex：把群聊整理成日报', [], now)).toBe('# 直接交给 Codex：把群聊整理成日报');
+  });
+
+  it('不改传进来的原文（复制的永远是原文）', () => {
+    const original = line('https://github.com/a/one', '27.2k', '2026-07-01');
+    const copy = `${original}`;
+    previewDisplayText(original, [], now);
+    expect(original).toBe(copy);
+    expect(original).toContain('★27.2k');
+  });
+});
+
+describe('找方案页的预览按钮和提示', () => {
+  it('看原文 / 看排版 → 「看 Markdown 原文」「看排版效果」；列表顶上那句缩短成不会折行的一句', () => {
+    const page = uiText(solvePageSource);
+    expect(page).toContain("showRaw ? '看排版效果' : '看 Markdown 原文'");
+    expect(page).not.toContain("'看排版'");
+    expect(page).not.toContain("'看原文'");
+    expect(page).toContain('勾选的写进交接单，点一行看详情');
+    expect(page).not.toContain('勾选的会写进交接单');
+  });
+
+  it('排版预览把交接单交给 previewDisplayText 换写法；原文和复制不经过它', () => {
+    const page = uiText(solvePageSource);
+    expect(page).toContain('markdown={previewDisplayText(props.content, props.hits)}');
+    // 「看原文」和 JSON 直接显示 props.content
+    expect(page).toContain('<pre className={PREVIEW_CLASS}>{props.content}</pre>');
+    // 复制的是后端给的原文，不是换过写法的
+    expect(page).toContain('copy(pack.content, COPY_FOR_CODEX_TOAST, detail)');
   });
 });
 

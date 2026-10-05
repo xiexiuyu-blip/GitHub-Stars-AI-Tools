@@ -1,7 +1,7 @@
 import { FormEvent, Suspense, lazy, useCallback, useEffect, useRef, useState } from 'react';
 import type { LocalCapabilityInput, PackFormat, PackOutput } from '@/lib/api';
 import { buildReferencePack, describeInvokeError, listScenarios, scanLocalCapabilities, solveRerankV2, solveV2 } from '@/lib/api';
-import type { RerankFit, RerankResult, ScenarioSummary, SolveResult } from '@/lib/contracts';
+import type { RerankFit, RerankResult, ScenarioSummary, SolveHit, SolveResult } from '@/lib/contracts';
 import {
   applyRerank,
   promotedHits,
@@ -25,6 +25,7 @@ import {
   packPlaceholder,
   packSizeText,
   pendingNote,
+  previewDisplayText,
   RERANK_TOGGLE_LABEL,
   rerankCandidateIds,
   rerankPicks,
@@ -404,7 +405,7 @@ export function SolvePage(props: {
             title="你收藏里最相关的"
             count={result ? result.hits.length : undefined}
             actions={result && result.hits.length > 0 ? (
-              <span className="text-xs text-on-surface-variant">勾选的会写进交接单；点一行看详情</span>
+              <span className="text-xs text-on-surface-variant">勾选的写进交接单，点一行看详情</span>
             ) : undefined}
           />
           {pickNote ? (
@@ -451,7 +452,7 @@ export function SolvePage(props: {
             <div className="min-w-2 flex-1" />
             {format !== 'json' && (direct || selectedHits.length > 0) ? (
               <Button variant="text" size="sm" onClick={() => setShowRaw((current) => !current)}>
-                {showRaw ? '看排版' : '看原文'}
+                {showRaw ? '看排版效果' : '看 Markdown 原文'}
               </Button>
             ) : null}
             {direct ? (
@@ -488,7 +489,7 @@ export function SolvePage(props: {
               <Button variant="text" onClick={retryPack}>重试</Button>
             </div>
           ) : pack ? (
-            <PackPreview content={pack.content} format={format} raw={showRaw} />
+            <PackPreview content={pack.content} format={format} raw={showRaw} hits={selectedHits} />
           ) : (
             <div className="flex flex-1 items-center justify-center" role="status" aria-label="正在整理交接单">
               <Spinner />
@@ -524,8 +525,11 @@ export function SolvePage(props: {
   );
 }
 
-/** 交接单预览：Markdown / AGENTS.md 排成正常文档，JSON 和「看原文」显示等宽原文（复制的永远是原文）。 */
-function PackPreview(props: { content: string; format: PackFormat; raw: boolean }) {
+/**
+ * 交接单预览：Markdown / AGENTS.md 排成正常文档，JSON 和「看 Markdown 原文」显示等宽原文（复制的永远是原文）。
+ * 排版预览里把写给 Codex 的「★27.2k」「2026-07-01」换成界面上的写法（★2.7 万、7 月 1 日）；原文和复制的不动。
+ */
+function PackPreview(props: { content: string; format: PackFormat; raw: boolean; hits: readonly SolveHit[] }) {
   if (props.format === 'json' || props.raw) {
     return <pre className={PREVIEW_CLASS}>{props.content}</pre>;
   }
@@ -533,7 +537,7 @@ function PackPreview(props: { content: string; format: PackFormat; raw: boolean 
     <div className="min-h-[180px] flex-1 overflow-auto bg-background px-4 py-3.5 max-[899px]:max-h-[70vh] min-[900px]:max-h-none">
       <Suspense fallback={<div className="flex justify-center py-6"><Spinner /></div>}>
         <ReadmeRenderer
-          markdown={props.content}
+          markdown={previewDisplayText(props.content, props.hits)}
           repositoryFullName=""
           sourcePath="交接单.md"
           className="readme-rendered min-w-0 text-sm text-foreground"

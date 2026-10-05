@@ -30,14 +30,14 @@ function render(scenario: DiscoverScenario, active = false): string {
 }
 
 describe('发现左栏：一行场景', () => {
-  it('偏少的标签只写「偏少」，「少于 14 个」在悬停提示里；标签 shrink-0', () => {
+  it('偏少的标签只写「偏少」，「14 个以内」在悬停提示里；标签 shrink-0', () => {
     const html = render(make());
-    const wrapper = /<span class="([^"]*)" title="少于 14 个">/.exec(html);
+    const wrapper = /<span class="([^"]*)" title="14 个以内">/.exec(html);
     expect(wrapper).not.toBeNull();
     expect((wrapper?.[1] ?? '').split(/\s+/)).toContain('shrink-0');
     expect(textOf(html)).toContain('偏少');
     expect(textOf(html)).not.toContain('偏少（');
-    expect(textOf(html)).not.toContain('少于 14 个');
+    expect(textOf(html)).not.toContain('14 个以内');
   });
 
   it('场景名那一段 truncate、能缩，名字再长也不会把标签和个数挤出去', () => {
@@ -79,7 +79,7 @@ describe('发现左栏：一行场景', () => {
   it('不偏少的场景没有标签；选中的那行 aria-pressed', () => {
     const html = render(make({ thin: false }), true);
     expect(textOf(html)).not.toContain('偏少');
-    expect(html).not.toContain('title="少于 14 个"');
+    expect(html).not.toContain('title="14 个以内"');
     expect(html).toContain('aria-pressed="true"');
     expect(render(make({ thin: false }), false)).toContain('aria-pressed="false"');
   });

@@ -3,6 +3,7 @@ import { BrandIcon } from '@/components/ui/brand-icon';
 import { Icon } from '@/components/ui/icon';
 import { formatSyncComplete, formatSyncStatus } from '@/lib/automation-view';
 import { NAV_ITEMS, SETTINGS_ITEM, navKeyFor, type NavItem } from '@/lib/nav';
+import { taskDoingText, taskPercentText } from '@/lib/task-progress-view';
 import type { AppPage, GitHubUser, StarSyncSummary, TaskProgressEvent } from '@/types';
 
 type AppLayoutProps = {
@@ -136,7 +137,7 @@ export function AppLayout(props: AppLayoutProps) {
             className="app-sync-button"
             onClick={() => (props.user ? props.onSyncStars() : props.onNavigate('settings'))}
             disabled={props.isSyncing}
-            title={props.user ? '从 GitHub 拉取你最新收藏的项目' : '请先连接 GitHub 账号'}
+            title={props.user ? '从 GitHub 同步你最新收藏的工具' : '请先连接 GitHub 账号'}
           >
             {props.isSyncing ? '同步中' : '同步'}
           </button>
@@ -499,7 +500,7 @@ function TopbarNoticeItem(props: {
   );
 }
 
-function TaskProgressCard(props: {
+export function TaskProgressCard(props: {
   progress: TaskProgressEvent;
   onRetry: (() => void) | null;
   retryLabel: string | null;
@@ -509,14 +510,12 @@ function TaskProgressCard(props: {
   const hasKnownProgress = progress.total > 0;
   const safeCurrent = hasKnownProgress ? Math.min(progress.current, progress.total) : progress.current;
   const percentage = hasKnownProgress ? Math.min(100, Math.round((safeCurrent / progress.total) * 100)) : 0;
-  const progressLabel = progress.taskId === 'generate-ai-tag-network'
-    ? `已完成 ${safeCurrent}/${progress.total} 批 · ${percentage}%`
-    : `${safeCurrent}/${progress.total} · ${percentage}%`;
   const isRunning = progress.status === 'running';
   const isFailed = progress.status === 'failed';
   const isPartial = progress.status === 'partial';
   const canRetry = (isFailed || isPartial) && Boolean(props.onRetry);
-  const stageLabel = getTaskStageLabel(progress.stage);
+  // 「正在做：读取收藏…（第 3 步，共 12 步）」：不再写「阶段：请求数据」「已完成 3/12 批」
+  const doingText = taskDoingText(progress);
   const iconName = progress.taskType === 'ai'
     ? 'auto_awesome'
     : progress.taskType === 'readme'
@@ -548,11 +547,11 @@ function TaskProgressCard(props: {
           <p className={`mt-0.5 text-[11px] leading-snug text-on-surface-variant ${isFailed || isPartial ? 'whitespace-pre-wrap break-words' : 'line-clamp-2'}`}>
             {progress.message}
           </p>
-          {(stageLabel || progress.repositoryName) && (
+          {(doingText || progress.repositoryName) && (
             <div className="mt-2 flex min-w-0 flex-wrap gap-1.5 text-[10px] leading-none text-on-surface-variant/90">
-              {stageLabel && (
+              {doingText && (
                 <span className="max-w-full rounded-full border border-outline-variant/35 bg-surface-container-low px-2 py-1">
-                  阶段：{stageLabel}
+                  {doingText}
                 </span>
               )}
               {progress.repositoryName && (
@@ -574,7 +573,7 @@ function TaskProgressCard(props: {
             )}
           </div>
           <p className="mt-1 text-right text-[10px] text-on-surface-variant">
-            {hasKnownProgress ? progressLabel : '正在处理…'}
+            {taskPercentText(progress) ?? '正在处理…'}
           </p>
         </div>
       )}
@@ -591,42 +590,4 @@ function TaskProgressCard(props: {
       )}
     </div>
   );
-}
-
-function getTaskStageLabel(stage: string) {
-  switch (stage) {
-    case 'auth':
-      return '验证账号';
-    case 'prepare':
-      return '准备数据';
-    case 'batch':
-      return '批量处理';
-    case 'check':
-      return '检查收藏';
-    case 'plan':
-      return '生成计划';
-    case 'fetch':
-    case 'fetch-readme':
-    case 'github-search':
-      return '请求数据';
-    case 'github-star':
-      return '更新收藏';
-    case 'parse':
-      return '读取数据';
-    case 'save':
-      return '写入本地';
-    case 'summarize':
-    case 'analyze':
-      return '整理说明';
-    case 'partial-failure':
-      return '部分失败';
-    case 'done':
-      return '已完成';
-    case 'error':
-      return '失败';
-    case 'request':
-      return '准备中';
-    default:
-      return stage ? stage : '';
-  }
 }

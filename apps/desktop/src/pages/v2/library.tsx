@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { LibraryCounts, LibraryDetail, LibraryItem, LibraryPage as LibraryPageResult, ReadingGroup, ScenarioSummary } from '@/lib/contracts';
-import { COPY_FAILED_NOTICE, codexFallbackText, copiedNotice, readingGroupLabel } from '@/lib/item-format';
+import { COPY_FAILED_NOTICE, DROP_HINT_LIBRARY, codexFallbackText, copiedNotice, readingGroupLabel } from '@/lib/item-format';
 import {
   confirmLibraryCard,
   copyItemForCodex,
@@ -16,6 +16,7 @@ import {
   clearFilters,
   formOptions,
   hasActiveFilters,
+  libraryEmptyNote,
   nextPageOffset,
   removeIfFilteredOut,
   shouldFallbackToAll,
@@ -670,17 +671,19 @@ export function LibraryPage(props: LibraryPageProps) {
       return <ListMessage message={listError ?? '资料库没有读出来。'} onRetry={() => setListReloadKey((key) => key + 1)} />;
     }
     if (items.length === 0) {
+      // 搜了关键词没搜到，和「点了某个筛选、这一类还没有」不是一回事：后者别说成「没有找到，换个说法试试」
+      const empty = libraryEmptyNote(ui);
       return (
         <div className="flex h-full items-center justify-center">
           <EmptyState
-            icon="search_off"
-            title="没有找到"
-            description="换个说法试试，或去「找方案」说说你想做什么"
-            action={(
+            icon={empty.offerSolve ? 'search_off' : 'inbox'}
+            title={empty.title}
+            description={empty.description ?? undefined}
+            action={empty.offerSolve ? (
               <Button variant="default" onClick={() => props.onOpenSolve?.(ui.keyword.trim())}>
                 去找方案
               </Button>
-            )}
+            ) : undefined}
           />
         </div>
       );
@@ -696,6 +699,7 @@ export function LibraryPage(props: LibraryPageProps) {
             item={item}
             selected={item.id === selectedId}
             scenarios={scenarios}
+            dropHint={DROP_HINT_LIBRARY}
             onSelect={() => pickRow(item.id)}
             onWant={() => void changeReading(item.id, 'want')}
             onDrop={() => void changeReading(item.id, 'dropped')}
