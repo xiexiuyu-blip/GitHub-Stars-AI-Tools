@@ -316,8 +316,6 @@ export type RuntimeReadinessCheckResult = {
   stars: RuntimeReadinessCheckItem;
   readme: RuntimeReadinessCheckItem;
   ai: RuntimeReadinessCheckItem;
-  tagNetwork: RuntimeReadinessCheckItem;
-  recommendation: RuntimeReadinessCheckItem;
 };
 
 /* ===========================================================================

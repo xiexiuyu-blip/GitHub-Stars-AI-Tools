@@ -1063,7 +1063,7 @@ describe('运行检查：说明、费用提示和各项名字', () => {
     expect(RUNTIME_CHECK_TITLES.github).toBe('GitHub 令牌');
   });
 
-  it('停止检查的两项去掉旧功能名称，保留设置页读取的兼容键', () => {
+  it('检查结果只包含仍在运行的六项，并且不再出现旧功能名称', () => {
     expect(RUNTIME_CHECK_TITLES).toEqual({
       storage: '资料库文件',
       settings: '应用设置',
@@ -1071,9 +1071,8 @@ describe('运行检查：说明、费用提示和各项名字', () => {
       stars: '读取我的收藏',
       readme: '下载项目说明',
       ai: 'AI 服务',
-      tagNetwork: '已停止检查',
-      recommendation: '已停止检查',
     });
+    expect(Object.keys(RUNTIME_CHECK_TITLES)).toHaveLength(6);
     expect(Object.values(RUNTIME_CHECK_TITLES).join('|')).not.toMatch(/AI 打标签|AI 找相似工具/);
   });
 });
