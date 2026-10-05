@@ -21,6 +21,8 @@ export function ItemRow(props: {
   selected?: boolean;
   why?: string | null;
   scenarios?: ScenarioSummary[];
+  /** 「不要了」的悬停说明。不传就用今日页那一句；资料库传自己的（见 DROP_HINT_LIBRARY）。 */
+  dropHint?: string;
   onSelect: () => void;
   onWant: () => void;
   onDrop: () => void;
@@ -43,7 +45,8 @@ export function ItemRow(props: {
       <RepoAvatar name={props.item.fullName} size="md" />
       <div className="min-w-0">
         <div className="flex min-w-0 items-baseline gap-2">
-          <b className="min-w-0 shrink truncate text-[15px] leading-[1.35] font-semibold text-foreground">{repo || props.item.fullName}</b>
+          {/* 名字太长会被省略成一样的前缀（agency-agents-zh / agency-agents 都变成 agency-agen…）：悬停显示全名 */}
+          <b className="min-w-0 shrink truncate text-[15px] leading-[1.35] font-semibold text-foreground" title={props.item.fullName}>{repo || props.item.fullName}</b>
           {owner ? <span className="min-w-0 truncate text-xs text-subtle">{owner}</span> : null}
         </div>
         {text ? (
@@ -68,7 +71,7 @@ export function ItemRow(props: {
       </div>
       <div className="absolute top-3 right-3 z-10 hidden items-center gap-0.5 rounded-md border border-border bg-card p-0.5 shadow-sm group-hover:flex">
         <HoverButton label="想试（T）" icon="bookmark_add" onClick={props.onWant} />
-        <HoverButton label="不要了（X）" title={DROP_HINT} icon="close" onClick={props.onDrop} />
+        <HoverButton label="不要了（X）" title={props.dropHint ?? DROP_HINT} icon="close" onClick={props.onDrop} />
       </div>
     </div>
   );

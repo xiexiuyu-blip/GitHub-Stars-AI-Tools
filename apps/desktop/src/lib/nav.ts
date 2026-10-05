@@ -38,7 +38,7 @@ export const SUB_TABS: Record<'library' | 'solve' | 'settings', SubTab[]> = {
   solve: [{ key: 'solve', label: '找方案' }],
   settings: [
     { key: 'settings', label: '设置' },
-    { key: 'toolbox', label: '工具箱' },
+    { key: 'toolbox', label: '自动整理与备份' },
   ],
 };
 

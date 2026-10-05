@@ -53,14 +53,13 @@ export function InboxCard(props: {
 }) {
   const counts = props.page?.counts ?? { pending: 0, ready: 0, failed: 0, archived: 0 };
   const options = inboxFilterOptions(counts);
-  const headerCount = props.phase === 'loading' ? '…' : props.page ? props.page.totalCount : undefined;
   const hasMore = Boolean(props.page && props.page.items.length < props.page.totalCount);
 
   return (
     <Card>
+      {/* 标题上不放数字：它只是当前页签里有几条，放在「收集箱」后面像是总数。各页签的个数在页签上。 */}
       <CardHeader
         title="收集箱"
-        count={headerCount}
         actions={(
           <Segmented
             ariaLabel="收集箱筛选"

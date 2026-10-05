@@ -270,14 +270,24 @@ describe('收集箱筛选、状态和归档', () => {
     expect(undoTarget('failed')).toBeNull();
   });
 
-  it('空状态：待处理和其他筛选项文案不同', () => {
+  it('空状态：待处理和其他筛选项文案不同，按页签说（待处理 / 失败 / 已归档各一句）', () => {
     expect(emptyInboxCopy('pending')).toEqual({
-      title: '收集箱是空的',
+      title: '没有待处理的链接。',
       description: '上面粘贴后点「加入收集箱」，新链接会进来',
     });
-    expect(emptyInboxCopy('ready').title).toBe('这里没有内容');
+    // 内部的 ready 界面上也叫「待处理」，没有单独的页签
+    expect(emptyInboxCopy('ready').title).toBe('没有待处理的链接。');
+    expect(emptyInboxCopy('failed')).toEqual({ title: '没有失败的链接。' });
     expect(emptyInboxCopy('failed').description).toBeUndefined();
-    expect(emptyInboxCopy('archived').title).toBe('这里没有内容');
+    expect(emptyInboxCopy('archived')).toEqual({ title: '还没有归档的链接。' });
+  });
+
+  it('空状态不再说含糊的「这里没有内容」，也不说「收集箱是空的」（别的页签里可能还有）', () => {
+    for (const filter of ['pending', 'ready', 'failed', 'archived'] as const) {
+      const { title } = emptyInboxCopy(filter);
+      expect(title, filter).not.toContain('这里没有内容');
+      expect(title, filter).not.toContain('收集箱是空的');
+    }
   });
 
   it('页签里没有 ready，文字里也没有已整理', () => {

@@ -1,15 +1,16 @@
 import { useMemo, useState } from 'react';
 import type { LibraryDetail, ReadingGroup, ScenarioSummary } from '@/lib/contracts';
 import {
-  COPY_INSTALL_BUTTON,
   RISKS_EMPTY,
   cleanDescription,
   cleanHowToTry,
   clipText,
+  copyButtonLabel,
   displayForYou,
   firstSentences,
   maturityTagLabel,
   monthDay,
+  noInstallStepsNote,
   readmeBasisLabel,
   readmeTabLabel,
   relativeDays,
@@ -26,8 +27,6 @@ import { Icon } from '@/components/ui/icon';
 import { cn } from '@/lib/utils';
 import { CommunityPanel, InstallPanel, PreviewPanel, ReadmePanel, SectionTitle, SoftCard } from './detail-panels';
 import { ReadingSegmented } from './reading-segmented';
-
-const HOW_EMPTY = '项目说明里没有现成的安装步骤。点「打开 GitHub」看发行版或文档；也可以直接复制给 Codex，让它去读项目说明。';
 
 type TabKey = 'overview' | 'install' | 'preview' | 'readme' | 'community';
 
@@ -299,7 +298,7 @@ function DetailBody(props: Parameters<typeof ItemDetail>[0] & { detail: LibraryD
                         </button>
                       </pre>
                     ) : (
-                      <p className="m-0 text-sm leading-[1.6] text-on-surface-variant">{HOW_EMPTY}</p>
+                      <p className="m-0 text-sm leading-[1.6] text-on-surface-variant">{noInstallStepsNote(readme)}</p>
                     )}
                     <button type="button" className="mt-2 text-xs text-accent-foreground hover:underline" onClick={() => setTab('install')}>
                       {tryText ? '看完整的怎么试 →' : '去「怎么试」页，让 Codex 帮你装 →'}
@@ -376,7 +375,7 @@ function DetailBody(props: Parameters<typeof ItemDetail>[0] & { detail: LibraryD
         {/* 页面主按钮：全页只此一个蓝色实底按钮 */}
         <Button variant="primary" onClick={props.onCopyCodex}>
           <Icon name="content_copy" size={16} />
-          {COPY_INSTALL_BUTTON}
+          {copyButtonLabel(detail.form)}
         </Button>
       </div>
     </div>

@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import type { LibraryDetail, LibraryFilters, LibraryItem, ReadingGroup, ScenarioSummary, TodayView } from '@/lib/contracts';
 import {
   COPY_FAILED_NOTICE,
+  WEEK_NEW_LABEL,
   applyReadingOverrides,
   assembleWeekGroups,
   buildTodayLead,
@@ -12,6 +13,7 @@ import {
   pickReason,
   pickWhyLine,
   readingGroupLabel,
+  todayEmptyCopy,
 } from '@/lib/item-format';
 import {
   confirmLibraryCard,
@@ -44,7 +46,7 @@ type TodayPageProps = {
 type TodayFilter = 'week' | 'pending' | 'want' | 'in_use';
 
 const FILTER_LABEL: Record<TodayFilter, string> = {
-  week: '本周新收藏',
+  week: WEEK_NEW_LABEL,
   pending: '待 AI 整理',
   want: '想试',
   in_use: '在用',
@@ -366,7 +368,7 @@ export function TodayPage(props: TodayPageProps) {
   const detailLoading = Boolean(selectedId) && !shownDetail && detailPhase !== 'error';
   const hideList = narrow && detailOpen;
   const hideDetail = narrow && !detailOpen;
-  const empty = emptyCopy(filter);
+  const empty = todayEmptyCopy(filter);
   const hint = automationHint(automation, today?.counts?.cardsPending ?? 0);
   // 统计卡上写的是全部，列表最多列一屏：差多少就老实说，并给一个去资料库看全部的入口
   const listedTotal = filter === 'pending'
@@ -389,7 +391,7 @@ export function TodayPage(props: TodayPageProps) {
     <section className="flex h-full min-h-0 flex-col gap-3 overflow-auto px-5 pt-4 pb-5 max-[899px]:px-4 max-[899px]:pt-3 max-[899px]:pb-4">
       <PageHeader title={`${greetingFor(new Date().getHours())}，${name}`} subtitle={subtitle} />
       <div className="grid shrink-0 grid-cols-2 gap-3 min-[900px]:grid-cols-4">
-        <StatCard label="本周新收藏" value={today ? (today.counts?.weekNew ?? 0) : '…'} icon="auto_awesome" tone="blue" active={filter === 'week'} onClick={() => choose('week')} />
+        <StatCard label={WEEK_NEW_LABEL} value={today ? (today.counts?.weekNew ?? 0) : '…'} icon="auto_awesome" tone="blue" active={filter === 'week'} onClick={() => choose('week')} />
         <StatCard label="待 AI 整理" hint="还没有中文说明的收藏" value={today ? (today.counts?.cardsPending ?? 0) : '…'} icon="hourglass_top" tone="amber" active={filter === 'pending'} onClick={() => choose('pending')} />
         <StatCard label="想试" hint="你标的" value={readingCounts ? readingCounts.want : '…'} icon="bookmark" tone="violet" active={filter === 'want'} onClick={() => choose('want')} />
         <StatCard label="在用" hint="你标的" value={readingCounts ? readingCounts.inUse : '…'} icon="task_alt" tone="green" active={filter === 'in_use'} onClick={() => choose('in_use')} />
@@ -478,7 +480,7 @@ export function TodayPage(props: TodayPageProps) {
         ) : null}
         {rest.length > 0 ? (
           <>
-            <GroupHeader title={filter === 'week' ? '本周新收藏' : FILTER_LABEL[filter]} count={rest.length} />
+            <GroupHeader title={FILTER_LABEL[filter]} count={rest.length} />
             {rest.map((item) => (
               <ItemRow
                 key={item.id}
@@ -505,22 +507,6 @@ export function TodayPage(props: TodayPageProps) {
       </>
     );
   }
-}
-
-function emptyCopy(filter: TodayFilter): { title: string; description?: string } {
-  if (filter === 'pending') {
-    return { title: '都整理好了，没有在等 AI 写说明的收藏。' };
-  }
-  if (filter === 'in_use') {
-    return { title: '还没有标成「在用」的工具。打开一个工具，点「我的状态 → 在用」，就会出现在这里。' };
-  }
-  if (filter === 'week') {
-    return { title: '这一周没有新收藏。去 GitHub 点 Star，再回来点「同步」。' };
-  }
-  return {
-    title: '还没有标成「想试」的工具',
-    description: '先回到「今天值得先看」，看到想试的就点它的「想试」（资料库里也行），就会出现在这里',
-  };
 }
 
 function GroupHeader(props: { title: string; count: number; hint?: string }) {

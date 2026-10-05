@@ -82,7 +82,7 @@ describe('scenarioLead', () => {
 
   it('偏少会说偏少；找过的说多久以前', () => {
     const lead = scenarioLead(scenario({ thin: true, myCount: 3, lastFetchedAt: '2026-10-01T12:00:00Z' }), now);
-    expect(lead).toBe('你在这个场景收藏了 3 个，偏少（少于 14 个）。上次去 GitHub 找是2 天前。');
+    expect(lead).toBe('你在这个场景收藏了 3 个，偏少（14 个以内）。上次去 GitHub 找是2 天前。');
   });
 });
 

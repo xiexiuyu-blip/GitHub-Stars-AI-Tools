@@ -36,24 +36,62 @@ export function relativeDays(iso: string | null | undefined, now: Date | number 
   return `${Math.floor(days / 365)} 年前`;
 }
 
+/** 带钟点的时间串：`2026-10-03T18:17:00Z`、`…+08:00`、`2026-10-03 18:17:00`、只有日期的 `2026-10-03`。 */
+const TIMESTAMP = /^(\d{4})-(\d{1,2})-(\d{1,2})(?:[T ](\d{1,2}):(\d{2})(?::(\d{2})(?:\.\d+)?)?)?\s*(Z|[+-]\d{2}(?::?\d{2})?)?$/i;
+const LEADING_DAY = /^(\d{4})-(\d{1,2})-(\d{1,2})/;
+
+/** 这一年这个月有几天（month 是 1–12）。 */
+function daysInMonth(year: number, month: number): number {
+  return new Date(Date.UTC(year, month, 0)).getUTCDate();
+}
+
 /**
- * `2026-10-03` → `10 月 3 日`；不是今年的带年份：`2025 年 10 月 3 日`。空值或不是日期返回「—」。
- * 只写日期，不写钟点：`starredAt` 是 GitHub 给的 UTC 时间，写上钟点会和你本机的时间差好几个小时。
- * 年月日直接取字符串里的，不做时区换算；字符串后面带的时间一律忽略。
+ * 把时间串换成「你本机日历上的那一天」。
+ * 带 `Z` 或 `+08:00` 的，先按它自己的时区算出那一刻，再取本机时区的年 / 月 / 日（北京时间凌晨收藏的，
+ * GitHub 给的 UTC 日期比本机日历早一天，不能直接用串里的日期）；
+ * 不带时区的（`2026-10-03`、`2026-10-03 18:17:00`）本来就是本机时间，串里写的日期就是本机的那一天。
+ * 认不出、或日期不存在（13 月、2 月 31 日）返回 null。
  */
-export function monthDay(iso: string | null | undefined, now: Date | number | string = new Date()): string {
-  if (!iso) return '—';
-  const match = /^(\d{4})-(\d{1,2})-(\d{1,2})/.exec(iso.trim());
-  if (!match) return '—';
+function localDayOf(iso: string | null | undefined): { year: number; month: number; day: number } | null {
+  const text = iso?.trim();
+  if (!text) return null;
+  const full = TIMESTAMP.exec(text);
+  const match = full ?? LEADING_DAY.exec(text);
+  if (!match) return null;
   const year = Number(match[1]);
   const month = Number(match[2]);
   const day = Number(match[3]);
-  if (!Number.isInteger(month) || !Number.isInteger(day) || month < 1 || month > 12 || day < 1 || day > 31) {
-    return '—';
+  if (month < 1 || month > 12 || day < 1 || day > daysInMonth(year, month)) return null;
+  const zone = full?.[7];
+  if (!zone) return { year, month, day };
+  const hour = Number(full?.[4] ?? 0);
+  const minute = Number(full?.[5] ?? 0);
+  const second = Number(full?.[6] ?? 0);
+  if (hour > 23 || minute > 59 || second > 59) return null;
+  let offsetMinutes = 0;
+  if (zone.toUpperCase() !== 'Z') {
+    const digits = zone.slice(1).replace(':', '');
+    const hours = Number(digits.slice(0, 2));
+    const minutes = Number(digits.slice(2) || 0);
+    if (hours > 23 || minutes > 59) return null;
+    offsetMinutes = (zone.startsWith('-') ? -1 : 1) * (hours * 60 + minutes);
   }
-  const text = `${month} 月 ${day} 日`;
+  const moment = new Date(Date.UTC(year, month - 1, day, hour, minute, second) - offsetMinutes * 60_000);
+  return { year: moment.getFullYear(), month: moment.getMonth() + 1, day: moment.getDate() };
+}
+
+/**
+ * `2026-10-03` → `10 月 3 日`；不是今年的带年份：`2025 年 10 月 3 日`。空值或不是日期返回「—」。
+ * 只写日期，不写钟点；日期是你本机日历上的那一天：`starredAt` 是 GitHub 给的 UTC 时间，
+ * 北京时间 0–8 点收藏的，要算成本机的当天，不是 UTC 的前一天（见 localDayOf）。
+ * 「今年」也按本机日历算。
+ */
+export function monthDay(iso: string | null | undefined, now: Date | number | string = new Date()): string {
+  const day = localDayOf(iso);
+  if (!day) return '—';
+  const text = `${day.month} 月 ${day.day} 日`;
   // 现在的年份读不出来时（now 不是合法时间）宁可多写年份
-  return year === new Date(now).getFullYear() ? text : `${year} 年 ${text}`;
+  return day.year === new Date(now).getFullYear() ? text : `${day.year} 年 ${text}`;
 }
 
 /** 按「。」切句，取前 n 句并补回句号。n 小于 1 时返回空串。 */
@@ -124,6 +162,12 @@ export function greetingFor(hour: number): string {
   return '晚上好';
 }
 
+/**
+ * 今日页「新收藏」那一栏的名字。后端给的是最近 7 天收藏的（`weekNew` 取的就是近 7 天），不是自然周，
+ * 所以别叫「本周」：星期三打开，「本周」会让人以为只有周一到今天。
+ */
+export const WEEK_NEW_LABEL = '最近 7 天新收藏';
+
 /** 今日页问候下面那一句。数字按非负整数用；没有推荐时换一句说明。
  *  「待 AI 整理」的数量已经在统计卡片里，这里不再重复。 */
 export function buildTodayLead(weekNew: number, pickCount: number): string {
@@ -132,7 +176,26 @@ export function buildTodayLead(weekNew: number, pickCount: number): string {
   const tail = picks > 0
     ? `先从下面 ${picks} 个你可能用得上的看起。`
     : 'AI 整理好之后，这里会从还没看过的收藏里，优先挑和你关心的场景有关的。';
-  return `这周你收藏了 ${week} 个新工具。${tail}`;
+  return `最近 7 天你收藏了 ${week} 个新工具。${tail}`;
+}
+
+/** 今日页四个统计卡点进去、列表是空的时候说什么。 */
+export type TodayEmptyKey = 'week' | 'pending' | 'want' | 'in_use';
+
+export function todayEmptyCopy(filter: TodayEmptyKey): { title: string; description?: string } {
+  if (filter === 'pending') {
+    return { title: '都整理好了，没有在等 AI 写说明的收藏。' };
+  }
+  if (filter === 'in_use') {
+    return { title: '还没有标成「在用」的工具。打开一个工具，点「我的状态 → 在用」，就会出现在这里。' };
+  }
+  if (filter === 'week') {
+    return { title: '最近 7 天没有新收藏。去 GitHub 点 Star，再回来点「同步」。' };
+  }
+  return {
+    title: '还没有标成「想试」的工具',
+    description: '先回到「今天值得先看」，看到想试的就点它的「想试」（资料库里也行），就会出现在这里',
+  };
 }
 
 export type CodexFallbackInput = {
@@ -196,15 +259,66 @@ export function pickReason(scenarioNames: readonly string[]): string | null {
   return `它被归在你关心的「${name}」场景，你还没看过`;
 }
 
-/** 「不要了」悬停说明。图标按钮本身的名字仍是「不要了（X）」，这句长的只放在悬停提示里。 */
+/** 今日页上「不要了」的悬停说明。图标按钮本身的名字仍是「不要了（X）」，这句长的只放在悬停提示里。 */
 export const DROP_HINT = '标成「不要了」：只是今日里不再出现，不会取消 GitHub 收藏，可在资料库「我的状态 → 不要了」里找回';
+
+/** 资料库里「不要了」的悬停说明。「只是今日里不再出现」是今日页的话，放到资料库里说的就不对了，所以另写一句。 */
+export const DROP_HINT_LIBRARY = '标成「不要了」：不会取消 GitHub 上的收藏，可以在「我的状态 → 不要了」里找回。';
 
 /** 已经有中文说明、但「用之前注意」是空的时候，显示这一行灰字。 */
 export const RISKS_EMPTY = '项目说明里没提限制，不代表没有';
 
-/** 场景「偏少」的标签字和悬停说明。资料库左栏和发现页共用，只在这里定义一次。 */
+/** 项目说明读到哪一步了（和 hooks/use-repo-readme 的状态同形）。`readme` 是 null 就是还没下载。 */
+export type ReadmeLoad =
+  | { state: 'loading' }
+  | { state: 'ready'; readme: object | null }
+  | { state: 'error'; message: string };
+
+/**
+ * 还没下载项目说明时，怎么补上。两个入口都核对过：顶栏的「同步」会把还没有项目说明的收藏下载下来
+ * （后端同步里的项目说明跟进，没有缓存的排在最前面）；「设置 → GitHub」里有「下载项目说明」按钮。
+ */
+export const README_DOWNLOAD_HOW = '点顶栏的「同步」，或到「设置 → GitHub」点「下载项目说明」，就会补上。';
+
+/** 项目说明页：还没下载。 */
+export const README_NOT_DOWNLOADED_TITLE = '还没下载这个工具的项目说明。';
+
+/** 怎么试页：还没下载项目说明，所以找不到安装命令。 */
+export const INSTALL_NEEDS_README = `还没下载这个工具的项目说明，所以找不到安装命令。${README_DOWNLOAD_HOW}`;
+
+const HOW_NEXT_STEP = '点「打开 GitHub」看发行版或文档；也可以直接复制给 Codex，让它去读项目说明。';
+
+/**
+ * 概览「怎么试」里没有现成命令时说什么。要分清三种情况，别都说成「项目说明里没写」：
+ * 还没下载（根本没看过，不能说它没写）、下载了但里面确实没写、还在读。
+ */
+export function noInstallStepsNote(readme: ReadmeLoad): string {
+  if (readme.state === 'loading') return '正在读取项目说明…';
+  if (readme.state === 'error') return `项目说明没读出来，暂时看不到安装步骤。${HOW_NEXT_STEP}`;
+  if (!readme.readme) return `还没下载项目说明，暂时看不到安装步骤。${HOW_NEXT_STEP}`;
+  return `项目说明里没有现成的安装步骤。${HOW_NEXT_STEP}`;
+}
+
+/**
+ * 预览页没有截图时说什么。`downloaded` 为假是还没下载项目说明：那不是「它没放图」，是我们还没看，
+ * 不能说它没有，也别指到「项目说明」页（那一页也是空的）。
+ */
+export function noScreenshotsNote(downloaded: boolean): { title: string; description: string } {
+  if (!downloaded) {
+    return { title: '还没下载项目说明，暂时看不到截图。', description: README_DOWNLOAD_HOW };
+  }
+  return {
+    title: '项目说明里没有截图',
+    description: '这个工具没有放界面或效果图。可以去 GitHub 看看，或者切到「项目说明」读它的原文。',
+  };
+}
+
+/**
+ * 场景「偏少」的标签字和悬停说明。资料库左栏和发现页共用，只在这里定义一次。
+ * 规则是「收藏数在 14 个及以下」（后端 `count <= thin_threshold`），所以写「14 个以内」，不写「少于 14 个」（刚好 14 个也算偏少）。
+ */
 export const THIN_TAG = '偏少';
-export const THIN_TAG_HINT = '少于 14 个';
+export const THIN_TAG_HINT = '14 个以内';
 
 const README_ONLY_PREFIX = '只有 GitHub 简介，没有 README：';
 const README_BASIS = '依据项目说明（README）';
@@ -244,6 +358,15 @@ export function maturityTagLabel(raw: string | null | undefined): string | null 
 /** 「复制给 Codex」的按钮字：资料库和今日的详情用安装那条，发现页用评估那条。页面都从这里引用，不要各写一份。 */
 export const COPY_INSTALL_BUTTON = '复制「帮我装好并试用」给 Codex';
 export const COPY_EVALUATE_BUTTON = '复制「帮我评估」给 Codex';
+
+/**
+ * 详情底部「复制给 Codex」按钮上的字。所有类型都写「帮我装好并试用」，包括资源清单（form = collection，「合集」）：
+ * 粘出去的话是后端（`packs::render_item_for_codex_with`）生成的「装好并试用」那一套，按钮不能和它说的不一样。
+ * 以后单独给资源清单写一套话（先通读、挑出有用的条目），这里再换成「帮我看看怎么用」。
+ */
+export function copyButtonLabel(_form: string | null | undefined): string {
+  return COPY_INSTALL_BUTTON;
+}
 
 /** 复制不了（剪贴板不让写）时的提示。 */
 export const COPY_FAILED_NOTICE = '没能自动复制，请手动选中后按 ⌘C';

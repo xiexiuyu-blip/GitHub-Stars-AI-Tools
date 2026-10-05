@@ -383,14 +383,8 @@ function AppContent() {
 
   function renderPage() {
     const page = renderCurrentPage();
-    // lib/nav.ts 不在本卡范围：二级页签的新名字在这里覆盖（审读第 10、42 条）
-    const tabs = subTabsFor(currentPage)?.map((tab) => (
-      tab.key === 'toolbox'
-        ? { ...tab, label: '自动整理与备份' }
-        : tab.key === 'map'
-          ? { ...tab, label: '按类型看' }
-          : tab
-    ));
+    // 二级页签的名字以 lib/nav.ts 为准，这里不再改名
+    const tabs = subTabsFor(currentPage);
     if (!tabs) {
       return page;
     }
