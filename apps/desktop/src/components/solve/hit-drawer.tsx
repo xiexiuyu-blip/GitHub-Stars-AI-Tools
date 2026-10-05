@@ -2,6 +2,7 @@ import { useEffect } from 'react';
 import type { ScenarioSummary, SolveHit } from '@/lib/contracts';
 import { confirmLibraryCard, copyItemForCodex, describeInvokeError, setLibraryReading } from '@/lib/api';
 import { readingGroupLabel, codexFallbackText } from '@/lib/item-format';
+import { COPY_FOR_CODEX_TOAST, copyPromptToast } from '@/lib/solve-view';
 import { useCopy } from '@/hooks/use-copy';
 import { useLibraryDetail } from '@/hooks/use-library-detail';
 import { useRegenerate } from '@/hooks/use-regenerate';
@@ -12,7 +13,7 @@ import { cn } from '@/lib/utils';
 
 /**
  * 找方案里点一个结果：在右边滑出这个项目的详情（它是什么、怎么装、截图、README），不用离开这一页；
- * 看完直接在抽屉里决定放不放进参考包。Esc 或点遮罩关闭。
+ * 看完直接在抽屉里决定放不放进交接单。Esc 或点遮罩关闭。
  */
 export function HitDrawer(props: {
   hit: SolveHit;
@@ -62,7 +63,7 @@ export function HitDrawer(props: {
         return;
       }
     }
-    await copy(text, '已复制，去 Codex 里粘贴', props.hit.fullName);
+    await copy(text, COPY_FOR_CODEX_TOAST, props.hit.fullName);
   }
 
   return (
@@ -83,7 +84,7 @@ export function HitDrawer(props: {
           {props.picked && props.isMain ? <span className="text-xs font-medium text-accent-foreground">主参考</span> : null}
           <Button variant={props.picked ? 'default' : 'primary'} className={cn(props.picked && 'text-on-surface-variant')} onClick={props.onTogglePick}>
             <Icon name={props.picked ? 'remove' : 'add'} size={16} />
-            {props.picked ? '从参考包移除' : '加入参考包'}
+            {props.picked ? '从交接单移除' : '加入交接单'}
           </Button>
         </div>
         <div className="flex min-h-0 flex-1 flex-col">
@@ -103,7 +104,7 @@ export function HitDrawer(props: {
             onOpenToolbox={props.onOpenToolbox}
             onCopyCodex={() => { void copyForCodex(); }}
             onCopyHow={(text) => { void copy(text, '已复制'); }}
-            onCopyPrompt={(text) => { void copy(text, '已复制，去 Codex 里粘贴'); }}
+            onCopyPrompt={(text) => { void copy(text, copyPromptToast(text)); }}
           />
         </div>
       </aside>
