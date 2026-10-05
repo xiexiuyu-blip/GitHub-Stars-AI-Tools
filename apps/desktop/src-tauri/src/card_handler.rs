@@ -486,12 +486,12 @@ pub fn start_full_scan(
     confirmed: bool,
 ) -> Result<AutomationStatus, String> {
     if !confirmed {
-        return Err("全量整理会花钱，需要你确认之后才能开始。".to_owned());
+        return Err("一次性全部整理会花钱，需要你确认之后才能开始。".to_owned());
     }
     let (provider_configured, _) = provider_from_settings(settings);
     if !provider_configured {
         return Err(
-            "还没配置 AI 服务，先到「设置 → 引擎」里选好服务商和模型、保存密钥。".to_owned(),
+            "还没配置 AI 服务，先到「设置 → AI 设置」里选好服务商和模型、保存密钥。".to_owned(),
         );
     }
     let control_path = jobs::queue_control_path(db_path);
@@ -2253,6 +2253,28 @@ mod tests {
         assert!(start_full_scan(db.path(), &none, true).is_err());
         // 什么也没发生：没排队、没写全量整理
         assert_eq!(open_jobs(&db), 0);
+        assert!(jobs::read_control(&jobs::queue_control_path(db.path()))
+            .full_scan
+            .is_none());
+    }
+
+    #[test]
+    fn the_full_scan_refusals_use_the_current_names() {
+        // 卡 37：不再说「全量整理」「设置 → 引擎」；整句逐字对
+        let db = TempDb::new("fs-wording");
+        assert_eq!(
+            start_full_scan(db.path(), &fs_settings(), false).expect_err("没确认应拒绝"),
+            "一次性全部整理会花钱，需要你确认之后才能开始。"
+        );
+        assert_eq!(
+            start_full_scan(db.path(), &json!({}), true).expect_err("没配置 AI 服务应拒绝"),
+            "还没配置 AI 服务，先到「设置 → AI 设置」里选好服务商和模型、保存密钥。"
+        );
+        // 确认并配置 AI，但库里没有要整理的：也没有开始一次性全部整理。
+        assert_eq!(
+            start_full_scan(db.path(), &fs_settings(), true).expect_err("没有要整理的应拒绝"),
+            "没有需要整理的仓库了。"
+        );
         assert!(jobs::read_control(&jobs::queue_control_path(db.path()))
             .full_scan
             .is_none());

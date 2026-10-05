@@ -1048,13 +1048,33 @@ describe('buildReadinessRows：运行检查上面的清单读真实数据', () =
 
 describe('运行检查：说明、费用提示和各项名字', () => {
   it('检查会真的调用 AI，要说清会花一点钱', () => {
-    expect(RUNTIME_CHECK_COST_NOTE).toBe('如果已经设置了 AI，检查时会真实调用几次 AI，会产生很少的费用。');
+    expect(RUNTIME_CHECK_COST_NOTE).toBe('如果已经设置了 AI，检查时会真实调用一次 AI，会产生很少的费用。');
+  });
+
+  it('后台只剩一次 AI 探测（连接测试），小字不能再说「几次」', () => {
+    expect(RUNTIME_CHECK_COST_NOTE).toContain('一次 AI');
+    expect(RUNTIME_CHECK_COST_NOTE).not.toContain('几次');
+    expect(RUNTIME_CHECK_COST_NOTE).toContain('很少的费用');
   });
 
   it('检查结果每一项的名字都是人话，不再出现标签网络、Stars API、Token', () => {
     const titles = Object.values(RUNTIME_CHECK_TITLES).join('|');
     expect(titles).not.toMatch(/标签网络|Stars API|Token|README|数据库|SQLite/);
     expect(RUNTIME_CHECK_TITLES.github).toBe('GitHub 令牌');
+  });
+
+  it('停止检查的两项去掉旧功能名称，保留设置页读取的兼容键', () => {
+    expect(RUNTIME_CHECK_TITLES).toEqual({
+      storage: '资料库文件',
+      settings: '应用设置',
+      github: 'GitHub 令牌',
+      stars: '读取我的收藏',
+      readme: '下载项目说明',
+      ai: 'AI 服务',
+      tagNetwork: '已停止检查',
+      recommendation: '已停止检查',
+    });
+    expect(Object.values(RUNTIME_CHECK_TITLES).join('|')).not.toMatch(/AI 打标签|AI 找相似工具/);
   });
 });
 

@@ -487,7 +487,7 @@ pub fn route(database_path: &Path, raw: &[u8]) -> (u16, String) {
     if full_token.is_none() {
         return (
             503,
-            error_body("令牌还没生成，请在工具箱里重新开启本地 API"),
+            error_body("令牌还没生成，请在「自动整理与备份」里重新开启本地接口"),
         );
     }
     if !full_ok {
@@ -883,6 +883,33 @@ mod tests {
                 .mode();
             assert_eq!(mode & 0o777, 0o600, "控制文件里有令牌，必须只有自己能读");
         }
+    }
+
+    #[test]
+    fn a_missing_full_token_says_where_to_turn_the_local_api_back_on() {
+        // 卡 37：接口已开启但完整令牌不见了。提示里不再写旧叫法「工具箱」「本地 API」，整句逐字对
+        let path = temp_db("no-full-token");
+        write_control(
+            &path,
+            &json!({ "enabled": true, "host": HOST, "port": PORT }),
+        )
+        .unwrap();
+        assert!(token(&path).is_none());
+        let (status, body) = route(
+            &path,
+            &request(
+                "GET",
+                "/v1/search?q=x",
+                &[good_host(), ("Authorization", "Bearer nope")],
+                "",
+            ),
+        );
+        assert_eq!(status, 503);
+        let parsed: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(
+            parsed["error"],
+            "令牌还没生成，请在「自动整理与备份」里重新开启本地接口"
+        );
     }
 
     #[test]

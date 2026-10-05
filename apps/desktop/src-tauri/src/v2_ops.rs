@@ -824,7 +824,7 @@ LEFT JOIN entity_categories ON entity_categories.category_id = categories.id AND
 GROUP BY categories.id
 ORDER BY COUNT(entity_categories.entity_id) DESC, categories.sort_order
 "#
-    ).map_err(|error| format!("地图读取失败：{error}"))?;
+    ).map_err(|error| format!("按类型看读取失败：{error}"))?;
     let rows = statement
         .query_map([], |row| {
             Ok(CategoryBlock {
@@ -833,9 +833,9 @@ ORDER BY COUNT(entity_categories.entity_id) DESC, categories.sort_order
                 count: row.get(2)?,
             })
         })
-        .map_err(|error| format!("地图查询失败：{error}"))?;
+        .map_err(|error| format!("按类型看查询失败：{error}"))?;
     rows.collect::<Result<Vec<_>, _>>()
-        .map_err(|error| format!("地图行读取失败：{error}"))
+        .map_err(|error| format!("按类型看行读取失败：{error}"))
 }
 
 #[derive(Debug, Serialize)]
@@ -1041,7 +1041,12 @@ pub fn log_usage(
     Ok(())
 }
 
+/// UTF-8 的字节顺序标记（BOM），3 个字节。Excel（尤其是 Mac 上双击打开）看到它才认出这是 UTF-8，
+/// 没有它会把中文当成别的编码读成乱码。只给 CSV 写；Markdown 是给人和 AI 读的文本，不加。
+const UTF8_BOM: [u8; 3] = [0xEF, 0xBB, 0xBF];
+
 /// 导出成 CSV：全部有效收藏，逐行写。返回写了几个。一句话取中文一句话，没有就退用中文摘要。
+/// 文件开头是 3 个字节的 UTF-8 BOM（`UTF8_BOM`），后面第一行才是表头：用 Excel 打开中文不会乱码。
 pub fn export_csv(path: &Path, destination: &Path) -> Result<usize, String> {
     let connection = open_db(path)?;
     let mut statement = connection
@@ -1064,6 +1069,8 @@ ORDER BY repositories.starred_at DESC
         )
         .map_err(|error| format!("CSV 导出准备失败：{error}"))?;
     write_export_file(destination, "CSV 导出", |out| {
+        out.write_all(&UTF8_BOM)
+            .map_err(|error| export_write_error("CSV 导出", &error))?;
         writeln!(out, "full_name,language,reading,one_liner")
             .map_err(|error| export_write_error("CSV 导出", &error))?;
         let mut rows = statement
@@ -1946,7 +1953,8 @@ mod tests {
         );
         let csv_text = std::fs::read_to_string(&csv).unwrap();
         assert_eq!(csv_text.lines().filter(|line| !line.is_empty()).count(), 1);
-        assert!(csv_text.starts_with("full_name,language,reading,one_liner"));
+        // CSV 开头多了 3 个字节的 UTF-8 BOM（U+FEFF），表头本身没变
+        assert!(csv_text.starts_with("\u{feff}full_name,language,reading,one_liner"));
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(&markdown);
         let _ = std::fs::remove_file(&csv);
@@ -2144,5 +2152,205 @@ mod tests {
         assert!(csv_text.contains("\"fox/bare\",\"Rust\",\"没看\",\"\""));
         let _ = fs::remove_file(&path);
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    // ───────────── 卡 37：CSV 开头的 UTF-8 BOM（Excel 打开中文不乱码） ─────────────
+
+    const CSV_HEADER: &str = "full_name,language,reading,one_liner";
+
+    #[test]
+    fn the_csv_starts_with_a_three_byte_utf8_bom_and_the_markdown_does_not() {
+        let path = temp_db();
+        with_account(&path);
+        let connection = open_db(&path).unwrap();
+        for index in 0..6 {
+            insert_active(
+                &connection,
+                &format!("bom-{index}"),
+                &format!("fox/bom-{index}"),
+            );
+        }
+        drop(connection);
+        let dir = temp_export_dir();
+        let csv = dir.join("library.csv");
+        let markdown = dir.join("library.md");
+        let csv_count = export_csv(&path, &csv).unwrap();
+        let markdown_count = export_markdown(&path, &markdown).unwrap();
+        assert_eq!((csv_count, markdown_count), (7, 7), "行数和加 BOM 之前一样");
+
+        let csv_bytes = fs::read(&csv).unwrap();
+        assert_eq!(csv_bytes[..3], [0xEF, 0xBB, 0xBF], "CSV 的前三个字节是 BOM");
+        let body = std::str::from_utf8(&csv_bytes[3..]).expect("BOM 后面是合法的 UTF-8");
+        assert!(!body.contains('\u{feff}'), "BOM 只写一次，正文里不再有");
+        assert_eq!(
+            body.lines().next(),
+            Some(CSV_HEADER),
+            "BOM 后面第一行是表头"
+        );
+        assert_eq!(
+            body.lines().filter(|line| !line.is_empty()).count(),
+            csv_count + 1,
+            "表头 + 每个工具一行"
+        );
+        assert!(
+            body.contains(
+                "\"fox/tool\",\"TypeScript\",\"没看\",\"这个工具可以批量整理群聊里的链接\""
+            ),
+            "中文原样写进去：{body}"
+        );
+
+        let markdown_bytes = fs::read(&markdown).unwrap();
+        assert_ne!(markdown_bytes[..3], [0xEF, 0xBB, 0xBF], "Markdown 不加 BOM");
+        let markdown_text = String::from_utf8(markdown_bytes).unwrap();
+        assert!(markdown_text.starts_with("# Fox Stars Lab 资料库"));
+        assert!(!markdown_text.contains('\u{feff}'));
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_csv_with_a_bom_still_keeps_quotes_commas_and_newlines_inside_one_cell() {
+        let path = temp_db();
+        with_account(&path);
+        let connection = open_db(&path).unwrap();
+        connection
+            .execute(
+                "UPDATE repo_ai_documents SET one_liner_zh = ?1 WHERE repo_id = 'repo1'",
+                params!["say \"hi\", then\r\nnext line"],
+            )
+            .unwrap();
+        drop(connection);
+        let dir = temp_export_dir();
+        let csv = dir.join("library.csv");
+        assert_eq!(export_csv(&path, &csv).unwrap(), 1);
+        // 整个文件逐字节对：BOM + 表头 + 一行（引号加倍，逗号和换行都留在引号包着的同一格里）
+        let expected = [
+            &[0xEF_u8, 0xBB, 0xBF][..],
+            format!(
+                "{CSV_HEADER}\n\"fox/tool\",\"TypeScript\",\"没看\",\"say \"\"hi\"\", then\r\nnext line\"\n"
+            )
+            .as_bytes(),
+        ]
+        .concat();
+        assert_eq!(fs::read(&csv).unwrap(), expected);
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_empty_library_exports_just_the_bom_and_the_header() {
+        let path = temp_db();
+        ensure_ready(&path).unwrap();
+        let connection = open_db(&path).unwrap();
+        connection
+            .execute(
+                "INSERT INTO github_accounts(id, login, token_ref) VALUES ('acct', 'fox', 'test')",
+                [],
+            )
+            .unwrap();
+        drop(connection);
+        let dir = temp_export_dir();
+        let csv = dir.join("library.csv");
+        assert_eq!(export_csv(&path, &csv).unwrap(), 0);
+        assert_eq!(
+            fs::read(&csv).unwrap(),
+            [
+                &[0xEF_u8, 0xBB, 0xBF][..],
+                format!("{CSV_HEADER}\n").as_bytes()
+            ]
+            .concat()
+        );
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_failed_csv_export_never_leaves_a_bom_only_or_half_written_file() {
+        // 读库的准备就失败：什么文件也不会凭空多出来（也不会有只有 3 个字节 BOM 的文件）
+        let path = temp_db();
+        Connection::open(&path)
+            .unwrap()
+            .execute_batch("CREATE TABLE unrelated(id INTEGER);")
+            .unwrap();
+        let dir = temp_export_dir();
+        let destination = dir.join("library.csv");
+        assert!(export_csv(&path, &destination).is_err());
+        assert!(!destination.exists());
+        assert!(file_names(&dir).is_empty(), "临时文件不能留下");
+        let _ = fs::remove_file(&path);
+
+        // BOM 和表头都已经写进临时文件、读第一行数据时才出错：旧文件一个字都不动，临时文件删干净。
+        // 夹具表不带列类型，工具名存成整数，读成文字时失败
+        let path = temp_db();
+        Connection::open(&path)
+            .unwrap()
+            .execute_batch(
+                "CREATE TABLE repositories(id, account_id, full_name, language, sync_status, starred_at);
+                 CREATE TABLE annotations(repo_id, account_id, read_status);
+                 CREATE TABLE repo_ai_documents(repo_id, one_liner_zh, summary_zh);
+                 INSERT INTO repositories VALUES ('r1', 'acct', 12345, 'Rust', 'active', '2026-10-01T00:00:00Z');",
+            )
+            .unwrap();
+        fs::write(&destination, "旧的表格").unwrap();
+        let error = export_csv(&path, &destination).unwrap_err();
+        assert!(error.starts_with("CSV 导出读取失败："), "{error}");
+        assert_eq!(fs::read_to_string(&destination).unwrap(), "旧的表格");
+        assert_eq!(file_names(&dir), vec!["library.csv".to_owned()]);
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // ───────────── 卡 37：「按类型看」读库出错时用现在的叫法 ─────────────
+
+    #[test]
+    fn the_category_view_errors_say_by_type_not_map() {
+        // 库里没有分类表：准备语句就失败
+        let path = temp_db();
+        Connection::open(&path)
+            .unwrap()
+            .execute_batch("CREATE TABLE unrelated(id INTEGER);")
+            .unwrap();
+        let error = graph_overview(&path).unwrap_err();
+        assert!(error.starts_with("按类型看读取失败："), "{error}");
+        let _ = fs::remove_file(&path);
+
+        // 分类名存成了整数，读成文字时失败：走到「行读取失败」那一句
+        let path = temp_db();
+        Connection::open(&path)
+            .unwrap()
+            .execute_batch(
+                "CREATE TABLE categories(id, slug, name_zh, sort_order);
+                 CREATE TABLE entity_categories(entity_id, category_id, status, is_primary);
+                 INSERT INTO categories VALUES (1, 'coding', 5, 1);",
+            )
+            .unwrap();
+        let error = graph_overview(&path).unwrap_err();
+        assert!(error.starts_with("按类型看行读取失败："), "{error}");
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn the_category_view_error_wording_in_the_source_is_the_new_one() {
+        // 「查询失败」那一句在测试里触发不了（query_map 在语句准备好之后不会单独失败），所以读本文件的源码来确认。
+        // 只看测试模块之前的正式代码；分隔符和旧叫法都用 concat! 拼出来，免得这条测试自己把自己写进被检查的文字里。
+        let source = include_str!("v2_ops.rs");
+        let production = source
+            .split(concat!("#[cfg(test)]\n", "mod tests {"))
+            .next()
+            .unwrap_or(source);
+        for new in [
+            "按类型看读取失败：",
+            "按类型看查询失败：",
+            "按类型看行读取失败：",
+        ] {
+            assert!(production.contains(new), "少了新叫法：{new}");
+        }
+        for old in [
+            concat!("地图", "读取失败"),
+            concat!("地图", "查询失败"),
+            concat!("地图", "行读取失败"),
+        ] {
+            assert!(!source.contains(old), "还有旧叫法：{old}");
+        }
     }
 }
