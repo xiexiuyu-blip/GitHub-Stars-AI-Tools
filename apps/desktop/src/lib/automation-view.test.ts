@@ -207,6 +207,102 @@ describe('automationState', () => {
     const state = automationState(status());
     expect(state.label).toBe('已开启，暂时没有要整理的');
     expect(state.hue).toBe(148);
+    expect(state.detail).toBe('有新收藏，或者你点了「加入整理」，就会自动开始。');
+  });
+
+  it('awaiting 为 495 且后台没排队：说明剩余个数并指向「现在整理」', () => {
+    expect(automationState(status({ awaiting: 495 }))).toEqual({
+      label: '已开启，后台暂时没有排队的',
+      hue: 148,
+      detail: '现有收藏里还有 495 个说明要整理，点下面的「现在整理」一次做完；新收藏、或你点了「加入整理」的，会自动开始。',
+    });
+  });
+
+  it('旧后端只有 needsOrganizing 为 7：说明剩余个数并指向「现在整理」', () => {
+    expect(automationState(status({ needsOrganizing: 7 }))).toEqual({
+      label: '已开启，后台暂时没有排队的',
+      hue: 148,
+      detail: '现有收藏里还有 7 个说明要整理，点下面的「现在整理」一次做完；新收藏、或你点了「加入整理」的，会自动开始。',
+    });
+  });
+
+  it('awaiting 为 1 且后台没排队：仍显示待整理的 1 个说明', () => {
+    expect(automationState(status({ awaiting: 1 }))).toEqual({
+      label: '已开启，后台暂时没有排队的',
+      hue: 148,
+      detail: '现有收藏里还有 1 个说明要整理，点下面的「现在整理」一次做完；新收藏、或你点了「加入整理」的，会自动开始。',
+    });
+  });
+
+  it('awaiting 为 0 时保留原待命文案，不回退 needsOrganizing 的 5 个', () => {
+    const state = automationState(status({ awaiting: 0, needsOrganizing: 5 }));
+    expect(state.label).toBe('已开启，暂时没有要整理的');
+    expect(state.detail).toBe('有新收藏，或者你点了「加入整理」，就会自动开始。');
+  });
+
+  it('awaiting 为 NaN 时保留原待命文案', () => {
+    const state = automationState(status({ awaiting: Number.NaN }));
+    expect(state.label).toBe('已开启，暂时没有要整理的');
+    expect(state.detail).toBe('有新收藏，或者你点了「加入整理」，就会自动开始。');
+  });
+
+  it('awaiting 为 -3 时保留原待命文案', () => {
+    const state = automationState(status({ awaiting: -3 }));
+    expect(state.label).toBe('已开启，暂时没有要整理的');
+    expect(state.detail).toBe('有新收藏，或者你点了「加入整理」，就会自动开始。');
+  });
+
+  it('还有 495 个待整理时，没配置 AI 服务仍优先', () => {
+    expect(automationState(status({ awaiting: 495, providerConfigured: false })).label).toBe('还没配置 AI 服务');
+  });
+
+  it('还有 495 个待整理时，已暂停仍优先', () => {
+    expect(automationState(status({ awaiting: 495, paused: true })).label).toBe('已暂停');
+  });
+
+  it('还有 495 个待整理时，现在整理中仍优先', () => {
+    expect(automationState(status({ awaiting: 495, unlimited: true })).label).toBe('现在整理中');
+  });
+
+  it('还有 495 个待整理时，未开启仍优先', () => {
+    expect(automationState(status({ awaiting: 495, enabled: false })).label).toBe('未开启');
+  });
+
+  it('还有 495 个待整理时，每天额度用完了仍优先', () => {
+    expect(automationState(status({ awaiting: 495, budgetRemaining: 0 })).label).toBe('每天额度用完了');
+  });
+
+  it('还有 495 个待整理时，queued 为 3 仍显示整理中', () => {
+    expect(automationState(status({ awaiting: 495, queued: 3 })).label).toBe('整理中');
+  });
+
+  it('还有 495 个待整理时，running 为 1 仍显示整理中', () => {
+    expect(automationState(status({ awaiting: 495, running: 1 })).label).toBe('整理中');
+  });
+
+  it('有待整理说明的新文案不含「今天」「明天」或「暂时没有要整理的」', () => {
+    const state = automationState(status({ awaiting: 495 }));
+    expect(`${state.label}${state.detail}`).not.toMatch(/今天|明天|暂时没有要整理的/);
+  });
+
+  it('有上次整理记录、awaiting 为 3 且后台没排队：仍说明剩余个数并指向「现在整理」', () => {
+    expect(automationState(status({
+      awaiting: 3,
+      lastFullScan: lastScan({ reason: 'completed', failed: 3, remaining: 3 }),
+    }))).toEqual({
+      label: '已开启，后台暂时没有排队的',
+      hue: 148,
+      detail: '现有收藏里还有 3 个说明要整理，点下面的「现在整理」一次做完；新收藏、或你点了「加入整理」的，会自动开始。',
+    });
+  });
+
+  it('有上次整理记录、awaiting 为 0 且后台没排队：保留原待命文案', () => {
+    const state = automationState(status({
+      awaiting: 0,
+      lastFullScan: lastScan({ reason: 'completed', remaining: 0 }),
+    }));
+    expect(state.label).toBe('已开启，暂时没有要整理的');
+    expect(state.detail).toBe('有新收藏，或者你点了「加入整理」，就会自动开始。');
   });
 });
 
