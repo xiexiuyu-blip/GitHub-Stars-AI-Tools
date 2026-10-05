@@ -1,9 +1,24 @@
 import { useMemo, useState } from 'react';
 import type { LibraryDetail, ReadingGroup, ScenarioSummary } from '@/lib/contracts';
-import { cleanDescription, cleanHowToTry, clipText, firstSentences, maturityLabel, monthDay, relativeDays, splitRepoName } from '@/lib/item-format';
+import {
+  COPY_INSTALL_BUTTON,
+  RISKS_EMPTY,
+  cleanDescription,
+  cleanHowToTry,
+  clipText,
+  displayForYou,
+  firstSentences,
+  maturityTagLabel,
+  monthDay,
+  readmeBasisLabel,
+  readmeTabLabel,
+  relativeDays,
+  splitRepoName,
+  type CopyKind,
+} from '@/lib/item-format';
 import { explainerLinks, extractInstallSteps, extractPreviewImages, hasDownloadHint } from '@/lib/repo-assets';
 import { itemPendingNote } from '@/lib/automation-view';
-import { formLabel } from '@/lib/library-filters';
+import { formTagLabel } from '@/lib/library-filters';
 import { useAiAutomation } from '@/hooks/use-ai-automation';
 import { useRepoReadme } from '@/hooks/use-repo-readme';
 import { Button, CoverImage, EmptyState, LangDot, RepoAvatar, ScenarioChip, StarCount, Tag } from '@/components/kit';
@@ -12,11 +27,11 @@ import { cn } from '@/lib/utils';
 import { CommunityPanel, InstallPanel, PreviewPanel, ReadmePanel, SectionTitle, SoftCard } from './detail-panels';
 import { ReadingSegmented } from './reading-segmented';
 
-const HOW_EMPTY = 'README 里没有现成的安装步骤。点「打开 GitHub」看 Releases 或文档；也可以直接复制给 Codex，让它去读 README。';
+const HOW_EMPTY = '项目说明里没有现成的安装步骤。点「打开 GitHub」看发行版或文档；也可以直接复制给 Codex，让它去读项目说明。';
 
 type TabKey = 'overview' | 'install' | 'preview' | 'readme' | 'community';
 
-/** 记住上次停在哪一页：在「预览」里用 J/K 连着翻几个项目时，不用每次再点一遍。 */
+/** 记住上次停在哪一页：在「预览」里用 J/K 连着翻几个工具时，不用每次再点一遍。 */
 let lastTab: TabKey = 'overview';
 
 export function ItemDetail(props: {
@@ -29,12 +44,12 @@ export function ItemDetail(props: {
   onReadingChange: (group: ReadingGroup) => void;
   onConfirm: () => void;
   onRegenerate: () => void;
-  /** 去工具箱（开启 / 调整 AI 自动整理）。不传就不画这个按钮。 */
+  /** 去自动整理与备份（开启 / 调整自动整理）。不传就不画这个按钮。 */
   onOpenToolbox?: () => void;
   onCopyCodex: () => void;
   onCopyHow: (text: string) => void;
-  /** 复制一段「给 Codex 的话」（安装请求、查别人怎么用）。不传就用 onCopyHow。 */
-  onCopyPrompt?: (text: string) => void;
+  /** 复制一段「给 Codex 的话」（安装请求、查别人怎么用）。kind 说明是哪一种，页面据此给不同的提示。不传就用 onCopyHow。 */
+  onCopyPrompt?: (text: string, kind: CopyKind) => void;
 }) {
   if (!props.detail) {
     if (props.loading) return <DetailSkeleton />;
@@ -43,7 +58,7 @@ export function ItemDetail(props: {
         <div className="flex flex-1 items-center justify-center">
           <EmptyState
             icon="error"
-            title="没有读出这个项目"
+            title="没有读出这个工具"
             description={props.error}
             action={props.onRetry ? <Button variant="text" onClick={props.onRetry}>重试</Button> : undefined}
           />
@@ -55,12 +70,12 @@ export function ItemDetail(props: {
         <EmptyState
           icon="ads_click"
           title="选一个工具"
-          description="右边会出现它的中文说明、怎么装、截图预览，和复制给 Codex 的按钮"
+          description="右边会出现它的中文说明、怎么试、截图预览，和复制给 Codex 的按钮"
         />
       </div>
     );
   }
-  // key：换一个仓库就重新开始（重新读 README；停在哪一页会记住）
+  // key：换一个工具就重新开始（重新读项目说明；停在哪一页会记住）
   return <DetailBody key={props.detail.id} {...props} detail={props.detail} />;
 }
 
@@ -80,7 +95,7 @@ function DetailBody(props: Parameters<typeof ItemDetail>[0] & { detail: LibraryD
 
   const { owner, repo } = splitRepoName(detail.fullName);
   const how = cleanHowToTry(detail.howToTry);
-  // 概览里的「怎么试」：AI 卡写的优先；没有就用从 README 里抽到的第一条安装命令（和「安装」页同一个来源，免得这里说没有、那边却有）
+  // 概览里的「怎么试」：中文说明写的优先；没有就用从项目说明里抽到的第一条命令（和「安装」页同一个来源，免得这里说没有、那边却有）
   const tryText = how || steps[0]?.command || '';
   const summarySource = detail.whatItIs?.trim() ? detail.whatItIs : detail.oneLiner;
   const capabilities = detail.capabilities.slice(0, 4).map((item) => clipText(item, 46));
@@ -91,21 +106,32 @@ function DetailBody(props: Parameters<typeof ItemDetail>[0] & { detail: LibraryD
     .map((id) => props.scenarios?.find((scenario) => scenario.id === id))
     .filter((scenario): scenario is ScenarioSummary => Boolean(scenario));
   const topics = detail.topics.map((topic) => topic.trim()).filter(Boolean);
+  const formTag = formTagLabel(detail.form);
+  const maturityTag = maturityTagLabel(detail.maturity);
+  const forYou = displayForYou(detail.inspirationForFox);
+  const fitSeen = new Set<string>();
+  const fitItems: string[] = [];
+  for (const item of [...detail.problemsSolved, ...useWhen]) {
+    const text = item.trim();
+    if (!text || fitSeen.has(text)) continue;
+    fitSeen.add(text);
+    fitItems.push(text);
+  }
   const now = new Date();
-  const copyPrompt = props.onCopyPrompt ?? props.onCopyHow;
+  const copyPrompt: (text: string, kind: CopyKind) => void = props.onCopyPrompt ?? props.onCopyHow;
 
   const tabs: Array<{ key: TabKey; label: string; icon: string; count?: number }> = [
     { key: 'overview', label: '概览', icon: 'dashboard' },
-    { key: 'install', label: '安装', icon: 'terminal', count: steps.length || undefined },
+    { key: 'install', label: '怎么试', icon: 'terminal', count: steps.length || undefined },
     { key: 'preview', label: '预览', icon: 'image', count: images.length || undefined },
-    { key: 'readme', label: 'README', icon: 'description' },
+    { key: 'readme', label: readmeTabLabel(detail.hasCard, summarySource), icon: 'description' },
     { key: 'community', label: '社区', icon: 'forum' },
   ];
 
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col">
       <div className="min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto">
-        {/* 封面：README 里的第一张截图，完整显示（四周用它自己模糊的样子垫底）；没有图就只是一条按名字上色的渐变，不放大字母 */}
+        {/* 封面：项目说明里的第一张截图，完整显示（四周用它自己模糊的样子垫底）；没有图就只是一条按名字上色的渐变，不放大字母 */}
         <CoverImage
           src={cover}
           seed={detail.fullName}
@@ -127,16 +153,16 @@ function DetailBody(props: Parameters<typeof ItemDetail>[0] & { detail: LibraryD
           <div className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-1.5">
             <StarCount value={detail.starsCount} className="text-[13px]" />
             <LangDot language={detail.language} className="text-[13px]" />
-            <span className="text-xs text-on-surface-variant">最近更新 {relativeDays(detail.pushedAt, now)}</span>
-            <span className="text-xs text-on-surface-variant">收藏于 {monthDay(detail.starredAt)}</span>
+            <span className="text-xs text-on-surface-variant">项目最近更新：{relativeDays(detail.pushedAt, now)}</span>
+            <span className="text-xs text-on-surface-variant">收藏于 {monthDay(detail.starredAt, now)}</span>
           </div>
           <div className="mt-2.5 flex flex-wrap items-center gap-1.5">
             {scenarioList.slice(0, 3).map((scenario) => (
               <ScenarioChip key={scenario.id} name={scenario.nameZh} scenarioKey={scenario.slug || scenario.id} />
             ))}
-            {scenarioList.length > 3 ? <Tag>+{scenarioList.length - 3}</Tag> : null}
-            {formLabel(detail.form) ? <Tag>{formLabel(detail.form)}</Tag> : null}
-            {maturityLabel(detail.maturity) ? <Tag>{maturityLabel(detail.maturity)}</Tag> : null}
+            {scenarioList.length > 3 ? <Tag>还有 {scenarioList.length - 3} 个场景</Tag> : null}
+            {formTag ? <Tag>{formTag}</Tag> : null}
+            {maturityTag ? <Tag>{maturityTag}</Tag> : null}
             {detail.zhFriendly === true ? <Tag tone="blue">中文友好</Tag> : null}
           </div>
 
@@ -146,8 +172,8 @@ function DetailBody(props: Parameters<typeof ItemDetail>[0] & { detail: LibraryD
             <div className="mt-4 rounded-lg bg-accent px-4 py-3.5">
               <div className="flex items-center gap-1.5 text-xs font-medium text-accent-foreground">
                 <Icon name="auto_awesome" size={14} fill />
-                AI 说明
-                <span className="ml-auto font-normal text-on-surface-variant">依据 README</span>
+                中文说明
+                <span className="ml-auto font-normal text-on-surface-variant">{readmeBasisLabel(summarySource)}</span>
               </div>
               <p className="mt-1.5 text-sm leading-[1.8] text-foreground">{firstSentences(summarySource, 3)}</p>
               <div className="mt-2 flex flex-wrap items-center gap-0.5 text-xs text-on-surface-variant">
@@ -158,9 +184,9 @@ function DetailBody(props: Parameters<typeof ItemDetail>[0] & { detail: LibraryD
                   </span>
                 ) : (
                   <>
-                    说得对吗？
+                    上面这段说明说得对吗？
                     <Button variant="text" size="sm" className="h-7 px-1.5 text-xs" onClick={props.onConfirm}>对</Button>
-                    <Button variant="text" size="sm" className="h-7 px-1.5 text-xs" onClick={props.onRegenerate}>不对，重新整理</Button>
+                    <Button variant="text" size="sm" className="h-7 px-1.5 text-xs" onClick={props.onRegenerate}>不对，请 AI 重写（会花一点钱）</Button>
                   </>
                 )}
               </div>
@@ -169,7 +195,7 @@ function DetailBody(props: Parameters<typeof ItemDetail>[0] & { detail: LibraryD
             <PendingNote fullName={detail.fullName} description={detail.description} onOpenToolbox={props.onOpenToolbox} />
           )}
 
-          <div role="tablist" aria-label="项目详情" className="mt-5 flex gap-0.5 overflow-x-auto border-b border-border [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+          <div role="tablist" aria-label="工具详情" className="mt-5 flex gap-0.5 overflow-x-auto border-b border-border [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
             {tabs.map((item) => (
               <button
                 key={item.key}
@@ -210,11 +236,11 @@ function DetailBody(props: Parameters<typeof ItemDetail>[0] & { detail: LibraryD
                   </SoftCard>
                 ) : null}
 
-                {detail.problemsSolved.length > 0 ? (
+                {fitItems.length > 0 ? (
                   <SoftCard>
-                    <SectionTitle icon="flag" hue={28}>适合解决</SectionTitle>
+                    <SectionTitle icon="flag" hue={28}>适合谁 / 什么时候用</SectionTitle>
                     <ul className="m-0 flex list-none flex-col gap-1.5 p-0">
-                      {detail.problemsSolved.map((item, index) => (
+                      {fitItems.map((item, index) => (
                         <li key={`${index}-${item}`} className="flex items-start gap-2 text-sm leading-[1.6] text-foreground">
                           <Icon name="arrow_right" size={18} className="mt-0.5 shrink-0 text-[hsl(28_85%_50%)]" />
                           <span className="min-w-0">{item}</span>
@@ -224,48 +250,35 @@ function DetailBody(props: Parameters<typeof ItemDetail>[0] & { detail: LibraryD
                   </SoftCard>
                 ) : null}
 
-                {useWhen.length > 0 || notFor.length > 0 ? (
-                  <div className={cn('grid gap-3', useWhen.length > 0 && notFor.length > 0 && 'min-[560px]:grid-cols-2')}>
-                    {useWhen.length > 0 ? (
-                      <SoftCard>
-                        <SectionTitle icon="thumb_up" hue={148}>什么时候用它</SectionTitle>
-                        <ul className="m-0 flex list-none flex-col gap-1.5 p-0">
-                          {useWhen.map((item, index) => (
-                            <li key={`${index}-${item}`} className="flex items-start gap-2 text-sm leading-[1.6] text-foreground">
-                              <Icon name="check" size={16} className="mt-[3px] shrink-0 text-[hsl(148_55%_42%)]" />
-                              <span className="min-w-0">{item}</span>
-                            </li>
-                          ))}
-                        </ul>
-                      </SoftCard>
-                    ) : null}
-                    {notFor.length > 0 ? (
-                      <SoftCard>
-                        <SectionTitle icon="block" hue={4}>不太适合</SectionTitle>
-                        <ul className="m-0 flex list-none flex-col gap-1.5 p-0">
-                          {notFor.map((item, index) => (
-                            <li key={`${index}-${item}`} className="flex items-start gap-2 text-sm leading-[1.6] text-foreground">
-                              <Icon name="close" size={16} className="mt-[3px] shrink-0 text-[hsl(4_65%_52%)]" />
-                              <span className="min-w-0">{item}</span>
-                            </li>
-                          ))}
-                        </ul>
-                      </SoftCard>
-                    ) : null}
-                  </div>
-                ) : null}
-
-                {risks.length > 0 ? (
-                  <div className="rounded-lg border border-[hsl(36_80%_80%)] bg-[hsl(36_100%_96%)] p-4 dark:border-[hsl(36_40%_30%)] dark:bg-[hsl(36_30%_16%)]">
-                    <SectionTitle icon="warning" hue={36}>用之前注意</SectionTitle>
+                {notFor.length > 0 ? (
+                  <SoftCard>
+                    <SectionTitle icon="block" hue={4}>不太适合</SectionTitle>
                     <ul className="m-0 flex list-none flex-col gap-1.5 p-0">
-                      {risks.map((item, index) => (
+                      {notFor.map((item, index) => (
                         <li key={`${index}-${item}`} className="flex items-start gap-2 text-sm leading-[1.6] text-foreground">
-                          <Icon name="priority_high" size={16} className="mt-[3px] shrink-0 text-[hsl(36_90%_42%)]" />
+                          <Icon name="close" size={16} className="mt-[3px] shrink-0 text-[hsl(4_65%_52%)]" />
                           <span className="min-w-0">{item}</span>
                         </li>
                       ))}
                     </ul>
+                  </SoftCard>
+                ) : null}
+
+                {detail.hasCard || risks.length > 0 ? (
+                  <div className="rounded-lg border border-[hsl(36_80%_80%)] bg-[hsl(36_100%_96%)] p-4 dark:border-[hsl(36_40%_30%)] dark:bg-[hsl(36_30%_16%)]">
+                    <SectionTitle icon="warning" hue={36}>用之前注意</SectionTitle>
+                    {risks.length > 0 ? (
+                      <ul className="m-0 flex list-none flex-col gap-1.5 p-0">
+                        {risks.map((item, index) => (
+                          <li key={`${index}-${item}`} className="flex items-start gap-2 text-sm leading-[1.6] text-foreground">
+                            <Icon name="priority_high" size={16} className="mt-[3px] shrink-0 text-[hsl(36_90%_42%)]" />
+                            <span className="min-w-0">{item}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    ) : (
+                      <p className="m-0 text-sm leading-[1.6] text-on-surface-variant">{RISKS_EMPTY}</p>
+                    )}
                   </div>
                 ) : null}
 
@@ -279,7 +292,7 @@ function DetailBody(props: Parameters<typeof ItemDetail>[0] & { detail: LibraryD
                           type="button"
                           className="absolute top-1.5 right-1.5 inline-grid size-7 place-items-center rounded-md text-white/70 hover:bg-white/10 hover:text-white"
                           title="复制"
-                          aria-label="复制安装步骤"
+                          aria-label="复制怎么试"
                           onClick={() => props.onCopyHow(tryText)}
                         >
                           <Icon name="content_copy" size={16} />
@@ -289,9 +302,16 @@ function DetailBody(props: Parameters<typeof ItemDetail>[0] & { detail: LibraryD
                       <p className="m-0 text-sm leading-[1.6] text-on-surface-variant">{HOW_EMPTY}</p>
                     )}
                     <button type="button" className="mt-2 text-xs text-accent-foreground hover:underline" onClick={() => setTab('install')}>
-                      {tryText ? '看完整的安装步骤 →' : '去「安装」页，让 Codex 帮你装 →'}
+                      {tryText ? '看完整的怎么试 →' : '去「怎么试」页，让 Codex 帮你装 →'}
                     </button>
                   </SoftCard>
+                ) : null}
+
+                {forYou ? (
+                  <section className="px-1" aria-label="灵感">
+                    <h3 className="m-0 mb-0.5 text-xs font-medium text-on-surface-variant">灵感</h3>
+                    <p className="m-0 text-xs leading-[1.6] text-on-surface-variant">{forYou}</p>
+                  </section>
                 ) : null}
 
                 <details className="group">
@@ -356,7 +376,7 @@ function DetailBody(props: Parameters<typeof ItemDetail>[0] & { detail: LibraryD
         {/* 页面主按钮：全页只此一个蓝色实底按钮 */}
         <Button variant="primary" onClick={props.onCopyCodex}>
           <Icon name="content_copy" size={16} />
-          复制给 Codex
+          {COPY_INSTALL_BUTTON}
         </Button>
       </div>
     </div>

@@ -1,9 +1,9 @@
 import { useEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
 import type { LibraryDetail } from '@/lib/contracts';
-import { buildCommunityPrompt, buildInstallPrompt } from '@/lib/codex-prompts';
+import { INSTALL_COPY_HINT, buildCommunityPrompt, buildInstallPrompt } from '@/lib/codex-prompts';
 import { communityNote, groupCommunity, itemMeta, stateLabel } from '@/lib/community-view';
-import { relativeDays } from '@/lib/item-format';
+import { relativeDays, type CopyKind } from '@/lib/item-format';
 import { useRepoCommunity } from '@/hooks/use-repo-community';
 import {
   communityLinks,
@@ -47,7 +47,7 @@ function PanelSkeleton() {
 }
 
 function panelError(message: string) {
-  return <p className="text-sm text-on-surface-variant">没有读到 README：{message}</p>;
+  return <p className="text-sm text-on-surface-variant">没有读到项目说明：{message}</p>;
 }
 
 const KIND_ICON: Record<InstallStep['kind'], string> = {
@@ -72,7 +72,7 @@ export function InstallPanel(props: {
   hasDownload: boolean;
   scenarioName?: string | null;
   onCopyText: (text: string) => void;
-  onCopyPrompt: (text: string) => void;
+  onCopyPrompt: (text: string, kind: CopyKind) => void;
 }) {
   const { detail } = props;
   if (props.readme.state === 'loading') return <PanelSkeleton />;
@@ -98,7 +98,7 @@ export function InstallPanel(props: {
         <div className="overflow-hidden rounded-lg border border-border bg-card">
           <div className="flex items-center gap-2 border-b border-border bg-surface-container-low px-3 py-2">
             <Icon name="auto_awesome" size={16} className="text-accent-foreground" />
-            <span className="text-[13px] font-medium text-foreground">AI 整理的上手提示</span>
+            <span className="text-[13px] font-medium text-foreground">怎么试</span>
             <span className="flex-1" />
             <Button size="sm" onClick={() => props.onCopyText(props.howFallback)}>
               <Icon name="content_copy" size={14} />
@@ -121,14 +121,14 @@ export function InstallPanel(props: {
           </span>
           <span className="min-w-0 flex-1">
             <b className="block text-sm font-semibold text-foreground">下载安装包</b>
-            <span className="text-xs leading-[1.6] text-on-surface-variant">去 GitHub 的 Releases 页面，找适合你系统的安装包（Mac 选 .dmg 或 .pkg，Windows 选 .exe 或 .msi）。</span>
+            <span className="text-xs leading-[1.6] text-on-surface-variant">在 GitHub 页面右侧找「Releases（发行版）」，下载 .dmg（Mac 安装包）</span>
           </span>
           <Icon name="open_in_new" size={16} className="shrink-0 text-on-surface-variant" />
         </a>
       ) : null}
 
       {props.steps.length === 0 && !props.howFallback && props.readme.state === 'ready' && !props.readme.readme ? (
-        <p className="text-sm text-on-surface-variant">这个仓库还没有缓存 README，所以没法从里面找安装命令。</p>
+        <p className="text-sm text-on-surface-variant">还没下载这个工具的项目说明，所以找不到安装命令。同步后或在「设置 → 自动整理与备份」里会自动下载</p>
       ) : null}
 
       <SoftCard className="flex items-center gap-3">
@@ -137,9 +137,9 @@ export function InstallPanel(props: {
         </span>
         <span className="min-w-0 flex-1">
           <b className="block text-sm font-semibold text-foreground">让 Codex 帮你装</b>
-          <span className="text-xs leading-[1.6] text-on-surface-variant">复制一段话，粘给 Codex：它会先读 README、告诉你要改动什么，再一步步装好并验证。</span>
+          <span className="text-xs leading-[1.6] text-on-surface-variant">{INSTALL_COPY_HINT}</span>
         </span>
-        <Button onClick={() => props.onCopyPrompt(buildInstallPrompt({ fullName: detail.fullName, htmlUrl: detail.htmlUrl, form: detail.form, scenarioName: props.scenarioName }))}>
+        <Button onClick={() => props.onCopyPrompt(buildInstallPrompt({ fullName: detail.fullName, htmlUrl: detail.htmlUrl, form: detail.form, scenarioName: props.scenarioName }), 'install')}>
           <Icon name="content_copy" size={16} />
           复制
         </Button>
@@ -148,7 +148,7 @@ export function InstallPanel(props: {
   );
 }
 
-/* ─────────────── 预览（README 里的截图） ─────────────── */
+/* ─────────────── 预览（项目说明里的截图） ─────────────── */
 
 export function PreviewPanel(props: { detail: LibraryDetail; readme: ReadmeState; images: PreviewImage[] }) {
   const [open, setOpen] = useState<number | null>(null);
@@ -161,8 +161,8 @@ export function PreviewPanel(props: { detail: LibraryDetail; readme: ReadmeState
     return (
       <EmptyState
         icon="hide_image"
-        title="README 里没有截图"
-        description="这个项目没有放界面或效果图。可以去 GitHub 看看，或者切到「README」读它的原文。"
+        title="项目说明里没有截图"
+        description="这个工具没有放界面或效果图。可以去 GitHub 看看，或者切到「项目说明」读它的原文。"
         action={props.detail.htmlUrl ? (
           <a className="text-sm text-accent-foreground hover:underline" href={props.detail.htmlUrl} target="_blank" rel="noopener noreferrer">打开 GitHub</a>
         ) : undefined}
@@ -171,7 +171,7 @@ export function PreviewPanel(props: { detail: LibraryDetail; readme: ReadmeState
   }
   return (
     <>
-      <p className="mb-2.5 text-xs text-on-surface-variant">来自 README 的截图，共 {images.length} 张，点一张放大。</p>
+      <p className="mb-2.5 text-xs text-on-surface-variant">来自项目说明的截图，共 {images.length} 张，点一张放大。</p>
       <div className="grid grid-cols-2 gap-2.5">
         {images.map((image, index) => (
           <button
@@ -250,7 +250,7 @@ function Lightbox(props: { images: PreviewImage[]; index: number; onChange: (ind
   );
 }
 
-/* ─────────────── README 原文 ─────────────── */
+/* ─────────────── 项目说明原文 ─────────────── */
 
 export function ReadmePanel(props: { detail: LibraryDetail; readme: ReadmeState }) {
   if (props.readme.state === 'loading') return <PanelSkeleton />;
@@ -259,8 +259,8 @@ export function ReadmePanel(props: { detail: LibraryDetail; readme: ReadmeState 
     return (
       <EmptyState
         icon="description"
-        title="还没有缓存这个仓库的 README"
-        description="在「设置 → 工具箱」或同步之后抓取 README，这里就能直接读了。"
+        title="还没下载这个工具的项目说明"
+        description="所以找不到安装命令。同步后或在「设置 → 自动整理与备份」里会自动下载"
       />
     );
   }
@@ -276,7 +276,7 @@ export function ReadmePanel(props: { detail: LibraryDetail; readme: ReadmeState 
 
 /* ─────────────── 社区：别人怎么用 ─────────────── */
 
-export function CommunityPanel(props: { detail: LibraryDetail; scenarioName?: string | null; onCopyPrompt: (text: string) => void }) {
+export function CommunityPanel(props: { detail: LibraryDetail; scenarioName?: string | null; onCopyPrompt: (text: string, kind: CopyKind) => void }) {
   const links = communityLinks(props.detail.fullName);
   return (
     <div className="flex flex-col gap-3">
@@ -290,7 +290,7 @@ export function CommunityPanel(props: { detail: LibraryDetail; scenarioName?: st
           <span className="block text-xs leading-[1.6] text-on-surface-variant">
             复制一段话粘给 Codex：它会用你的 web-search，在小红书、知乎、B 站、X、Reddit、YouTube 等地方找真实的使用案例、踩过的坑和替代品，只引用查到的内容，附原帖链接。
           </span>
-          <Button className="mt-2.5" onClick={() => props.onCopyPrompt(buildCommunityPrompt({ fullName: props.detail.fullName, htmlUrl: props.detail.htmlUrl, form: props.detail.form, scenarioName: props.scenarioName }))}>
+          <Button className="mt-2.5" onClick={() => props.onCopyPrompt(buildCommunityPrompt({ fullName: props.detail.fullName, htmlUrl: props.detail.htmlUrl, form: props.detail.form, scenarioName: props.scenarioName }), 'community')}>
             <Icon name="content_copy" size={16} />
             复制给 Codex
           </Button>
@@ -351,7 +351,7 @@ function CommunityDigest(props: { repoId: string }) {
       {state.phase === 'loading' ? <div className="flex items-center gap-2 text-xs text-on-surface-variant"><Spinner /> 读取中…</div> : null}
       {state.refreshing ? (
         <div className="mb-2 flex items-center gap-2 rounded-lg bg-accent px-3 py-2 text-xs text-foreground">
-          <Spinner /> 正在查 Hacker News 和 GitHub Issues（几秒，不用登录）…
+          <Spinner /> 查英文技术社区 Hacker News 和这个项目的「问题反馈区」（GitHub Issues）
         </div>
       ) : null}
       {state.error ? <div className="mb-2 rounded-lg bg-error-container px-3 py-2 text-xs text-on-error-container">{state.error}</div> : null}
@@ -361,7 +361,7 @@ function CommunityDigest(props: { repoId: string }) {
 
       {state.phase === 'ready' && !checked && !state.refreshing ? (
         <SoftCard className="text-xs leading-[1.7] text-on-surface-variant">
-          还没查过。点「查一查」，会去 Hacker News 和 GitHub Issues 找关于它的讨论，按热度列在这里：别人拿它做了什么、踩过什么坑，一眼就能扫一遍。
+          还没查过。点「查一查」，会查英文技术社区 Hacker News 和这个项目的「问题反馈区」（GitHub Issues），按热度列在这里：别人拿它做了什么、踩过什么坑，一眼就能扫一遍。
         </SoftCard>
       ) : null}
 

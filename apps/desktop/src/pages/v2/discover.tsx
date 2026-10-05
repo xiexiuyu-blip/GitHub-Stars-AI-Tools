@@ -3,24 +3,27 @@ import type { CSSProperties } from 'react';
 import type { DiscoverView } from '@/lib/contracts';
 import { commitCaptureBatch, describeInvokeError, isMissingCommandError, listDiscover, refreshDiscover } from '@/lib/api';
 import {
+  addedToInboxToast,
   buildEvaluatePrompt,
   candidateStatus,
+  discoverEmptyCopy,
   sortCandidates,
   refreshNotice,
   scenarioLead,
   sortScenarios,
   type RefreshNotice,
 } from '@/lib/discover-view';
+import { COPY_FAILED_NOTICE, copiedNotice } from '@/lib/item-format';
 import { scenarioHue } from '@/lib/repo-assets';
-import { Button, Card, EmptyState, PageHeader, Spinner, Tag, useToast } from '@/components/kit';
-import { CandidateCard } from '@/components/discover';
+import { Button, Card, EmptyState, PageHeader, Spinner, useToast } from '@/components/kit';
+import { CandidateCard, ScenarioRow } from '@/components/discover';
 import { Icon } from '@/components/ui/icon';
 import { cn } from '@/lib/utils';
 
 type Phase = 'loading' | 'ready' | 'error';
 
 /**
- * 发现：按「你收藏偏少的方向」去 GitHub 找还没收藏的项目。
+ * 发现：按场景去 GitHub 找还没收藏的工具。
  * 左边是场景（偏少的排前面），右边是候选。联网只发生在点「去 GitHub 找找」的时候；平时看的是本地缓存。
  */
 export function DiscoverPage(props: { initialScenarioId?: string | null; onOpenCapture?: () => void }) {
@@ -94,8 +97,7 @@ export function DiscoverPage(props: { initialScenarioId?: string | null; onOpenC
       const result = await commitCaptureBatch(htmlUrl || `https://github.com/${fullName}`, '发现');
       setAdded((currentSet) => new Set(currentSet).add(fullName));
       toast.show({
-        title: result.created > 0 ? '已收进收集箱' : '收集箱里已经有了',
-        sub: fullName,
+        ...addedToInboxToast(result.created, fullName),
         actions: props.onOpenCapture ? [{ label: '去看看', onClick: props.onOpenCapture }] : undefined,
       });
     } catch (reason) {
@@ -110,42 +112,28 @@ export function DiscoverPage(props: { initialScenarioId?: string | null; onOpenC
     try {
       if (!navigator.clipboard?.writeText) throw new Error('clipboard');
       await navigator.clipboard.writeText(text);
-      toast.show({ title: '已复制，去 Codex 里粘贴' });
+      toast.show({ title: copiedNotice('evaluate') });
     } catch {
-      toast.show({ title: '浏览器不允许自动复制', sub: '请手动选中后按 ⌘C' });
+      toast.show({ title: COPY_FAILED_NOTICE });
     }
   }
 
   return (
     <section className="flex h-full min-h-0 flex-col gap-3 overflow-hidden px-5 pt-4 pb-5 max-[899px]:px-4 max-[899px]:pt-3 max-[899px]:pb-4">
-      <PageHeader title="发现" subtitle="按你常做的事，去 GitHub 找还没收藏的好工具。" />
+      <PageHeader title="发现" subtitle="按场景去 GitHub 找还没收藏的好工具。" />
       <div className="grid min-h-0 flex-1 grid-cols-[220px_minmax(0,1fr)] gap-3 max-[899px]:grid-cols-1 max-[899px]:grid-rows-[auto_minmax(0,1fr)]">
         <Card className="flex min-h-0 flex-col overflow-hidden max-[899px]:overflow-visible">
           <div className="px-4 pt-3 pb-1 text-xs text-on-surface-variant max-[899px]:hidden">场景（偏少的在前面）</div>
           <div className="flex min-h-0 flex-1 flex-col overflow-auto py-1.5 max-[899px]:flex-row max-[899px]:gap-1 max-[899px]:overflow-x-auto max-[899px]:px-2 max-[899px]:py-2">
             {phase === 'loading' ? <p className="px-4 py-2 text-xs text-on-surface-variant">正在读取…</p> : null}
-            {scenarios.map((scenario) => {
-              const active = scenario.id === (view?.selected ?? selected);
-              return (
-                <button
-                  key={scenario.id}
-                  type="button"
-                  aria-pressed={active}
-                  onClick={() => choose(scenario.id)}
-                  className={cn(
-                    'mx-2 flex w-[calc(100%-16px)] items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm text-on-surface-variant',
-                    'max-[899px]:mx-0 max-[899px]:w-auto max-[899px]:shrink-0 max-[899px]:whitespace-nowrap',
-                    'hover:bg-surface-container-low hover:text-foreground',
-                    active && 'bg-accent text-accent-foreground hover:bg-accent hover:text-accent-foreground',
-                  )}
-                >
-                  <span className="size-2 shrink-0 rounded-full" style={{ background: `hsl(${scenarioHue(scenario.id)} 70% 52%)` }} aria-hidden="true" />
-                  <span className="min-w-0 flex-1 truncate">{scenario.nameZh}</span>
-                  {scenario.thin ? <Tag tone="blue">偏少</Tag> : null}
-                  <span className="shrink-0 text-xs font-medium tabular-nums">{scenario.candidateCount > 0 ? `${scenario.candidateCount} 个` : '—'}</span>
-                </button>
-              );
-            })}
+            {scenarios.map((scenario) => (
+              <ScenarioRow
+                key={scenario.id}
+                scenario={scenario}
+                active={scenario.id === (view?.selected ?? selected)}
+                onClick={() => choose(scenario.id)}
+              />
+            ))}
           </div>
         </Card>
 
@@ -206,15 +194,7 @@ export function DiscoverPage(props: { initialScenarioId?: string | null; onOpenC
                 </div>
               ) : refreshing || switching ? null : (
                 <Card className="flex flex-1 p-6">
-                  <EmptyState
-                    icon="travel_explore"
-                    title={current.lastFetchedAt ? '这个方向上没有找到你还没收藏的' : '这个方向还没去找过'}
-                    description={
-                      current.lastFetchedAt
-                        ? '可以换个场景，或者过几天再点「重新找找」。'
-                        : '点右上角「去 GitHub 找找」，我会按这个方向搜一遍，把你还没收藏的列出来。不用登录，只会读 GitHub 公开的信息。'
-                    }
-                  />
+                  <EmptyState icon="travel_explore" {...discoverEmptyCopy(current)} />
                 </Card>
               )}
             </>
@@ -222,7 +202,7 @@ export function DiscoverPage(props: { initialScenarioId?: string | null; onOpenC
 
           {phase === 'ready' && !current ? (
             <Card className="p-6">
-              <EmptyState icon="category" title="还没有场景" description="先去「资料库」看看，场景会在第一次整理收藏时生成。" />
+              <EmptyState icon="category" {...discoverEmptyCopy(null)} />
             </Card>
           ) : null}
         </div>
