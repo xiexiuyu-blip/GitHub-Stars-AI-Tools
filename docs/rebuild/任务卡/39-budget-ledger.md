@@ -13,13 +13,13 @@
 2026-10-05 Fox 在开发版「设置 · 自动整理与备份」里看到「今天的额度用完了」，抱怨「额度用完就不能动了，可以有提示，但不能完全不给用」。查下来是**账算错了**：
 
 - 每天额度按「最近 24 小时里已结束任务的 token 之和」算（`jobs::tokens_used_since`）。用它的有三处：认领任务 `claim_next`、状态 `queue_status`、以及旧功能和「找方案」AI 精选的预留 `spend_guard::reserve_with`。
-- 昨晚（10-04 20:17–23:01）那一轮「一次性全部整理」（Fox 亲手确认的、本来就「不受每天额度限制」）用了约 262 万 token，也被算进了「最近 24 小时」。每天额度只有 60 万，于是整理完后的 24 小时里：新收藏同步后排进队列的任务被拦住（此刻就有 5 个 `repo_card` 排着不动，`budgetRemaining = 0`）；「找方案」的 AI 精选也会被拒绝、退回本地排序。
+- 昨晚（10-04 20:17–23:01）那一轮「一次性全部整理」（Fox 亲手确认的、本来就「不受每天额度限制」）用了约 262 万 token，也被算进了「最近 24 小时」。每天额度只有 60 万，于是整理完后的 24 小时里：新收藏同步后排进队列的任务被拦住（此刻就有 5 个 `repo_card` 排着不动，`budgetRemaining = 0`）；走旧功能通道（`spend_guard` 的 `Policy::Legacy`）的 AI 预留（运行检查的 AI 探测、旧页面里的 AI 动作等）也会被拒。**「找方案」的 AI 精选不受这个问题影响**：它的规矩（`refusal_for_rerank`）只看自己那份额度、不看后台整理用了多少，不要改它。
 - 另外界面说「还有 500 个收藏没有中文说明」，其实 461 个是旧格式（card-v2）的说明，真没有的只有约 39 个。后端只给了一个合并的 `needsOrganizing`，前端没法分开说，也没有「在等整理的总数」（排着队但不属于这两类的，比如 README 有实质变化被重新排队的，前端看不到，于是额度用完时界面会说「全部整理好了」而实际有任务排着）。
 
 这张卡只改后端：**一次性整理那段时间里的用量，不再计入每天额度**；并把待整理数拆开、加上「在等整理的总数」。界面怎么改在卡 40，两张卡并行做，**字段名以本卡为准**。
 
 ## Fox 能看到的效果（卡 40 一起合并后）
-- 一次性全部整理做完以后，每天自动整理和「找方案」的 AI 精选照常能用，不会被「额度用完」拦一整天；
+- 一次性全部整理做完以后，每天自动整理照常能继续（新收藏、README 变了的会接着排队处理），旧功能通道的 AI 动作也不会被「额度用完」拦一整天；
 - 每天额度的「已用 / 还剩」只算自动整理和别的小动作，不含一次性整理；
 - 整理页能准确说「新版说明 X 个、旧版说明 Y 个、还没有说明 Z 个」，并且额度用完时也看得到「还有 N 个在等」。
 
@@ -45,7 +45,7 @@
 3. 三处改用它：
    - `claim_next` 的 `used`：`BudgetGate` 目前是 `Copy`、不带控制文件；需要把「要排除的时间段」带进 `BudgetGate`（或者让 `claim_next` 自己读控制文件，二选一；若 `BudgetGate` 因此不能再 `Copy`，同步改用到它的地方）。**现有测试的期望不准改弱**，只能因为字段新增而补充构造参数。
    - `queue_status`：`budget_remaining` 和 `queue_state`（`budget_reached`）改用新口径。`tokens_24h` **保持原样**（还是真实的最近 24 小时总用量，界面里「最近 24 小时用了多少」要说真话），另加 `daily_tokens_used: i64`（新口径，序列化成 `dailyTokensUsed`）。
-   - `spend_guard::reserve_with`：旧功能的 `used` 改用新口径（`rerank_tokens_used_since` 只算「找方案」自己的那份，不动）。
+   - `spend_guard::reserve_with`：旧功能（`Policy::Legacy`）的 `used` 改用新口径。`rerank_tokens_used_since`（只算「找方案」自己的那份）和 `refusal_for_rerank` 的规矩**不动**。
 4. 全量整理自己的计数（`tokens_used_since(&scan.started_at)`：已用 token、刹车线）**不动**——那是这一轮自己的账。
 
 ### 2. `AutomationStatus` 新增字段（`card_handler.rs`，camelCase 序列化）
@@ -72,7 +72,7 @@
 5. **窗口外照常限额**：自动整理自己用了 40k、额度 50k → `claim_next` 在剩余放不下一条预留时不再认领、`state == "budget_reached"`；而一次性整理时间段里再多的用量不影响它认领。
 6. **老控制文件**：只有 `lastFullScan`、没有 `recentFullScans` 的文件，`last_full_scan` 那段照样被排除；别的键（令牌、`lastReadmeCheck` 等）在 `finish_full_scan` 写入后原样保留。`reset_spending_authorization` 之后 `recentFullScans` 没了。
 7. **清理**：追加时早于 25 小时的段被清掉；超过 16 项只留最新 16 项。
-8. **`spend_guard`**：一次性整理刚结束、用量很大的情况下，旧功能 / 「找方案」预留不再因为一次性整理的用量被拒；自动整理自己的用量超额度时仍然拒（保持原提示文案）。
+8. **`spend_guard`**：一次性整理刚结束、用量很大的情况下，**旧功能（`Policy::Legacy`）**预留不再因为一次性整理的用量被拒；自动整理自己的用量超额度时仍然拒（保持原提示文案）；「找方案」（`Policy::SolveRerank`）的行为**保持原样**（只看自己那份），加一条断言钉住。
 9. **`AutomationStatus` 的 JSON 键测试**（`card_handler.rs` 里现有那条按键名断言的测试）加上 5 个新键；旧键一个不少。
 10. **拆分计数**：造库——A 没有卡；B 旧格式（`card_schema_version = 1`）；C 现行格式；D 旧格式但 `review_status = confirmed`（不计入）；E 已取消收藏（`sync_status != 'active'`，不计入）；F 现行格式但有 `repo_card` 排队（计入 `awaiting`，不计入 missing / outdated）；G 没有卡又排着队（`awaiting` 里只算一次）→ 断言 `needs_organizing_missing`、`needs_organizing_outdated`、`needs_organizing`、`awaiting`、`active_repos` 的具体数。
 
