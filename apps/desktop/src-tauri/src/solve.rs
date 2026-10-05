@@ -652,7 +652,7 @@ pub fn solve_query(db_path: &Path, query: &str) -> Result<SolveResult, String> {
         .collect::<Vec<_>>();
     // 默认勾选：全都对上、至少有一个意图词在内容里对上、卡片没写「不支持 macOS」的前 3 条。
     // 只靠 README 里提到几次的命中（「做表情包」「写周报」这类收藏里没有专门工具的问题）不默认勾选，免得
-    // 一打开参考包托盘里就是三个不太相关的工具；它们仍在列表里，要用自己勾。
+    // 一打开交接单里就是三个不太相关的工具；它们仍在列表里，要用自己勾。
     let preselected = hits
         .iter()
         .zip(readme_only.iter().zip(&mac_unsupported))
@@ -1608,6 +1608,8 @@ fn is_stop(word: &str) -> bool {
     STOP_WORDS.iter().any(|stop| *stop == word)
 }
 
+const WHY_PREFIX: &str = "对得上的地方：";
+
 fn why_text(
     repo: &RepoRecord,
     main: &[String],
@@ -1622,7 +1624,7 @@ fn why_text(
         .iter()
         .map(|intent| {
             let hits = readme.map_or(0, |stats| stats.hits_of(intent));
-            format!("{intent}（{}）", match_label(repo, intent, hits))
+            format!("「{intent}」→{}", match_label(repo, intent, hits))
         })
         .collect::<Vec<_>>();
     join_why_parts(&parts)
@@ -1658,41 +1660,42 @@ fn why_text_legacy(repo: &RepoRecord, terms: &[String]) -> String {
     truncate_chars(fallback, WHY_LIMIT)
 }
 
-/// 说明这个词在哪里对上的。`readme_hits` 是 README 里提到的次数：只在 README 里对上就写「项目说明里提到 N 次」；
-/// 别处已经对上、README 里也提到得多（5 次以上）时，在后面补一句「说明里提到 N 次」（给不看代码的人读，不写 README 这个词）。
+/// 说明这个词在哪里对上的。字段名写成给人不看表的话。
+/// `readme_hits` 是项目说明里提到的次数：只在项目说明里对上就写「项目说明里提到 N 次」；
+/// 别处已经对上、项目说明里也提到得多（5 次以上）时，后面用逗号补同一句。
 fn match_label(repo: &RepoRecord, intent: &str, readme_hits: usize) -> String {
     match field_label(repo, intent) {
-        Some(label) if readme_hits >= 5 => format!("{label}·说明里提到 {readme_hits} 次"),
+        Some(label) if readme_hits >= 5 => format!("{label}，项目说明里提到 {readme_hits} 次"),
         Some(label) => label,
         None if readme_hits >= README_MIN_HITS => format!("项目说明里提到 {readme_hits} 次"),
-        None => "描述".to_owned(),
+        None => "GitHub 简介里有".to_owned(),
     }
 }
 
 fn field_label(repo: &RepoRecord, intent: &str) -> Option<String> {
     if repo.blocks.name.contains(intent) {
-        return Some("名称".to_owned());
+        return Some("名字里有".to_owned());
     }
     if let Some(item) = find_containing(&repo.capabilities, intent) {
-        return Some(format!("能力：{}", snippet20(item)));
+        return Some(format!("它能做「{}」", snippet_with_ellipsis(item, 20)));
     }
     if let Some(item) = find_containing(&repo.problems, intent) {
-        return Some(format!("问题：{}", snippet20(item)));
+        return Some(format!("它能解决「{}」", snippet_with_ellipsis(item, 20)));
     }
     if repo.blocks.one_liner.contains(intent) {
-        return Some("一句话".to_owned());
+        return Some("一句话简介里有".to_owned());
     }
     if repo.blocks.keywords.contains(intent) {
-        return Some("关键词".to_owned());
+        return Some("标签词里有".to_owned());
     }
     if repo.blocks.summary.contains(intent) {
-        return Some("摘要".to_owned());
+        return Some("中文说明里有".to_owned());
     }
     if repo.blocks.description.contains(intent) {
-        return Some("描述".to_owned());
+        return Some("GitHub 简介里有".to_owned());
     }
     if repo.blocks.topics.contains(intent) {
-        return Some("话题".to_owned());
+        return Some("GitHub 话题里有".to_owned());
     }
     synonym_label(repo, intent)
 }
@@ -1704,8 +1707,41 @@ fn find_containing<'a>(items: &'a [String], intent: &str) -> Option<&'a str> {
         .map(String::as_str)
 }
 
-fn snippet20(text: &str) -> String {
-    text.chars().take(20).collect()
+/// 超过 `limit` 个字符时截到这么多，并补省略号。按字符切，不从多字节字符中间切开。
+fn snippet_with_ellipsis(text: &str, limit: usize) -> String {
+    let mut chars = text.chars();
+    let head: String = chars.by_ref().take(limit).collect();
+    if chars.next().is_some() {
+        format!("{head}…")
+    } else {
+        head
+    }
+}
+
+fn plain_field(label: &str) -> &'static str {
+    match label {
+        "名称" => "名字里有",
+        "一句话" => "一句话简介里有",
+        "关键词" => "标签词里有",
+        "摘要" => "中文说明里有",
+        "描述" => "GitHub 简介里有",
+        "话题" => "GitHub 话题里有",
+        _ => "GitHub 简介里有",
+    }
+}
+
+fn synonym_place(label: &str) -> &'static str {
+    match label {
+        "名称" => "名字",
+        "一句话" => "一句话简介",
+        "能力" => "它能做的事",
+        "问题" => "它能解决的事",
+        "关键词" => "标签词",
+        "摘要" => "中文说明",
+        "描述" => "GitHub 简介",
+        "话题" => "GitHub 话题",
+        _ => "说明",
+    }
 }
 
 fn synonym_label(repo: &RepoRecord, intent: &str) -> Option<String> {
@@ -1722,10 +1758,10 @@ fn synonym_label(repo: &RepoRecord, intent: &str) -> Option<String> {
             .iter()
             .any(|word| !word.chars().any(is_han) && field_has_synonym(field, word))
         {
-            return Some(label.to_owned());
+            return Some(plain_field(label).to_owned());
         }
     }
-    // 中文近义说法：写出是哪个词，免得「对上：抓取（一句话）」让人以为那句话里有「抓取」
+    // 中文近义说法：写出是哪个词、出现在哪，免得让人以为原文里就有搜索词。
     let han_fields = [
         (repo.blocks.name.as_str(), "名称"),
         (repo.blocks.one_liner.as_str(), "一句话"),
@@ -1741,7 +1777,10 @@ fn synonym_label(repo: &RepoRecord, intent: &str) -> Option<String> {
             .iter()
             .find(|word| word.chars().any(is_han) && field.contains(**word))
         {
-            return Some(format!("近义「{word}」·{label}"));
+            return Some(format!(
+                "相近说法「{word}」出现在{}里",
+                synonym_place(label)
+            ));
         }
     }
     None
@@ -1749,7 +1788,7 @@ fn synonym_label(repo: &RepoRecord, intent: &str) -> Option<String> {
 
 fn join_why_parts(parts: &[String]) -> String {
     if parts.is_empty() {
-        return "对上：".to_owned();
+        return WHY_PREFIX.to_owned();
     }
     let mut kept: Vec<&str> = Vec::new();
     for part in parts {
@@ -1766,22 +1805,19 @@ fn join_why_parts(parts: &[String]) -> String {
 }
 
 fn format_why(parts: &[&str]) -> String {
-    format!("对上：{}", parts.join("、"))
+    format!("{WHY_PREFIX}{}", parts.join("；"))
 }
 
-/// 单条说明本身超过 80 字时，丢掉能力/问题附注，保留完整意图词，不从词中间切开。
+/// 单条说明本身超过 80 字时，按字符截断并补省略号，不从词中间切开。
 fn shrink_one_why_part(part: &str) -> String {
-    let full = format!("对上：{part}");
+    let full = format_why(&[part]);
     if full.chars().count() <= WHY_LIMIT {
         return full;
     }
-    if let Some((intent, _)) = part.split_once('（') {
-        let short = format!("对上：{intent}");
-        if short.chars().count() <= WHY_LIMIT {
-            return short;
-        }
-    }
-    full.chars().take(WHY_LIMIT).collect()
+    let budget = WHY_LIMIT.saturating_sub(1);
+    let mut cut: String = full.chars().take(budget).collect();
+    cut.push('…');
+    cut
 }
 
 fn hit_one_liner(repo: &RepoRecord) -> Option<String> {
@@ -2808,7 +2844,7 @@ mod tests {
         assert!(q1.hits[0].full_match);
         assert_eq!(
             q1.hits[0].why,
-            "对上：小红书（能力：生成小红书封面）、封面（能力：生成小红书封面）"
+            "对得上的地方：「小红书」→它能做「生成小红书封面」；「封面」→它能做「生成小红书封面」"
         );
         assert_ne!(
             q1.hits[0].why,
@@ -3148,16 +3184,23 @@ mod tests {
                 .find(|hit| hit.id == id)
                 .unwrap_or_else(|| panic!("缺少 {id}"))
         };
-        assert_eq!(find("order").why, "对上：封面（问题：这里有封面）");
-        assert_eq!(find("fallback").why, "对上：封面（关键词）");
+        assert_eq!(
+            find("order").why,
+            "对得上的地方：「封面」→它能解决「这里有封面」"
+        );
+        assert_eq!(find("fallback").why, "对得上的地方：「封面」→标签词里有");
         let explained = &find("long").why;
-        assert!(explained.starts_with("对上：封面（问题："));
+        assert!(explained.starts_with("对得上的地方：「封面」→它能解决「"));
         assert!(explained.chars().count() <= 80);
-        assert!(!explained.ends_with('…'));
+        assert!(explained.contains('…'));
+        assert!(explained.ends_with('」'));
         let prefix: String = long.chars().take(20).collect();
         assert!(explained.contains(&prefix));
         assert_ne!(find("exact").why, exact);
-        assert!(find("exact").why.starts_with("对上：封面（问题："));
+        assert!(find("exact")
+            .why
+            .starts_with("对得上的地方：「封面」→它能解决「"));
+        assert!(find("exact").why.contains('…'));
     }
 
     #[test]
@@ -3292,13 +3335,13 @@ mod tests {
         assert_eq!(result.hits.len(), 8);
         let good = result.hits.iter().find(|hit| hit.id == "good").unwrap();
         assert_eq!(good.form.as_deref(), Some("cli"));
-        assert_eq!(good.why, "对上：封面（能力：封面能力）");
+        assert_eq!(good.why, "对得上的地方：「封面」→它能做「封面能力」");
         let partial_hit = result.hits.iter().find(|hit| hit.id == "partial").unwrap();
         assert_eq!(partial_hit.form.as_deref(), Some("app"));
-        assert_eq!(partial_hit.why, "对上：封面（能力：封面能力）");
+        assert_eq!(partial_hit.why, "对得上的地方：「封面」→它能做「封面能力」");
         let types = result.hits.iter().find(|hit| hit.id == "types").unwrap();
         assert!(types.form.is_none());
-        assert_eq!(types.why, "对上：封面（一句话）");
+        assert_eq!(types.why, "对得上的地方：「封面」→一句话简介里有");
     }
 
     #[test]
@@ -4067,8 +4110,8 @@ mod tests {
         assert_eq!(hit.matched, vec!["字幕".to_owned()]);
         assert!(hit.missing.iter().any(|word| word == "短视频"));
         assert!(!hit.full_match);
-        assert!(hit.why.contains("对上："));
-        assert!(hit.why.contains("字幕（名称）"));
+        assert!(hit.why.starts_with("对得上的地方："));
+        assert!(hit.why.contains("「字幕」→名字里有"));
         assert_ne!(hit.why, hit.one_liner.as_deref().unwrap_or(""));
     }
 
@@ -4084,7 +4127,7 @@ mod tests {
         assert_eq!(result.hits.len(), 1);
         assert_eq!(result.hits[0].matched, vec!["封面".to_owned()]);
         assert!(result.hits[0].full_match);
-        assert!(result.hits[0].why.contains("（描述）"));
+        assert!(result.hits[0].why.contains("GitHub 简介里有"));
         let weight = (1.0_f64 + 1.0 / 1.0).ln();
         approx(result.hits[0].score, weight);
     }
@@ -4100,7 +4143,7 @@ mod tests {
         let result = run(&db, "电商");
         assert_eq!(result.hits.len(), 1);
         assert_eq!(result.hits[0].matched, vec!["电商".to_owned()]);
-        assert!(result.hits[0].why.starts_with("对上：电商（"));
+        assert!(result.hits[0].why.starts_with("对得上的地方：「电商」→"));
         assert!(!result.hits[0].has_card);
     }
 
@@ -4246,13 +4289,13 @@ mod tests {
             );
         });
         let result = run(&db, "封面");
-        assert_eq!(result.hits[0].why, "对上：封面（名称）");
+        assert_eq!(result.hits[0].why, "对得上的地方：「封面」→名字里有");
         assert_ne!(
             result.hits[0].why,
             result.hits[0].one_liner.as_deref().unwrap_or("")
         );
-        assert!(result.hits[0].why.contains("对上："));
-        assert!(result.hits[0].why.contains("（名称）"));
+        assert!(result.hits[0].why.starts_with("对得上的地方："));
+        assert!(result.hits[0].why.contains("名字里有"));
     }
 
     #[test]
@@ -4278,16 +4321,17 @@ mod tests {
         });
         let result = run(&db, "小红书封面字幕");
         let why = &result.hits[0].why;
-        assert!(why.starts_with("对上："));
+        assert!(why.starts_with("对得上的地方："));
         assert!(
             why.chars().count() <= 80,
             "{why} 有 {} 字",
             why.chars().count()
         );
-        assert!(!why.contains("字幕（能力"));
-        assert!(why.contains("、"));
-        assert!(!why.ends_with('、'));
+        assert!(!why.contains("「字幕」→"));
+        assert!(why.contains('；'));
+        assert!(!why.ends_with('；'));
         assert!(!why.ends_with('…'));
+        assert!(why.contains('…'));
         let snippet: String = cap.chars().take(20).collect();
         assert!(why.contains(&snippet));
         assert_ne!(why, result.hits[0].one_liner.as_deref().unwrap_or(""));
@@ -4317,6 +4361,7 @@ mod tests {
         assert_eq!(result.extras, vec!["zzqq".to_owned()]);
         assert_eq!(result.hits[0].why, "zzqq 问题说明");
         assert!(!result.hits[0].why.starts_with("对上："));
+        assert!(!result.hits[0].why.starts_with("对得上的地方："));
         assert!(!result.hits[0].full_match);
         assert!(result.preselected.is_empty());
     }
@@ -4331,8 +4376,258 @@ mod tests {
         assert_eq!(result.hits.len(), 1);
         assert!(!result.hits[0].has_card);
         assert_eq!(result.hits[0].matched, vec!["字幕".to_owned()]);
-        assert_eq!(result.hits[0].why, "对上：字幕（话题）");
+        assert_eq!(result.hits[0].why, "对得上的地方：「字幕」→GitHub 话题里有");
         assert_eq!(result.hits[0].one_liner.as_deref(), Some("nothing here"));
+    }
+
+    fn repo_for_why<'a>(
+        id: &'a str,
+        full_name: &'a str,
+        description: &'a str,
+        one_liner: Option<&'a str>,
+        summary: &'a str,
+        keywords_json: &'a str,
+        card_json: Option<&'a str>,
+    ) -> NewRepo<'a> {
+        NewRepo {
+            id,
+            full_name,
+            description,
+            stars: 1,
+            status: "active",
+            one_liner,
+            summary,
+            keywords_json,
+            card_json,
+        }
+    }
+
+    #[test]
+    fn why_plain_name() {
+        let db = prepare("why-plain-name", |conn| {
+            insert_repo(
+                conn,
+                &repo_for_why("n", "lab/封面库", "", Some("别的简介"), "", "[]", None),
+            );
+        });
+        let hit = &run(&db, "封面").hits[0];
+        assert_eq!(hit.why, "对得上的地方：「封面」→名字里有");
+        assert!(hit.why.starts_with("对得上的地方："));
+    }
+
+    #[test]
+    fn why_plain_capability() {
+        let card = card_json("app", &["生成封面"], &[]);
+        let db = prepare("why-plain-cap", |conn| {
+            insert_repo(
+                conn,
+                &repo_for_why("c", "lab/tool", "", Some("别的简介"), "", "[]", Some(&card)),
+            );
+        });
+        assert_eq!(
+            run(&db, "封面").hits[0].why,
+            "对得上的地方：「封面」→它能做「生成封面」"
+        );
+    }
+
+    #[test]
+    fn why_plain_problem() {
+        let card = card_json("app", &[], &["需要把封面做好"]);
+        let db = prepare("why-plain-problem", |conn| {
+            insert_repo(
+                conn,
+                &repo_for_why("p", "lab/tool", "", Some("别的简介"), "", "[]", Some(&card)),
+            );
+        });
+        assert_eq!(
+            run(&db, "封面").hits[0].why,
+            "对得上的地方：「封面」→它能解决「需要把封面做好」"
+        );
+    }
+
+    #[test]
+    fn why_plain_one_liner() {
+        let db = prepare("why-plain-line", |conn| {
+            insert_repo(
+                conn,
+                &repo_for_why("l", "lab/tool", "", Some("专门做封面"), "", "[]", None),
+            );
+        });
+        assert_eq!(
+            run(&db, "封面").hits[0].why,
+            "对得上的地方：「封面」→一句话简介里有"
+        );
+    }
+
+    #[test]
+    fn why_plain_keyword() {
+        let db = prepare("why-plain-kw", |conn| {
+            insert_repo(
+                conn,
+                &repo_for_why(
+                    "k",
+                    "lab/tool",
+                    "",
+                    Some("别的简介"),
+                    "",
+                    "[\"封面\"]",
+                    None,
+                ),
+            );
+        });
+        assert_eq!(
+            run(&db, "封面").hits[0].why,
+            "对得上的地方：「封面」→标签词里有"
+        );
+    }
+
+    #[test]
+    fn why_plain_summary() {
+        let db = prepare("why-plain-sum", |conn| {
+            insert_repo(
+                conn,
+                &repo_for_why(
+                    "s",
+                    "lab/tool",
+                    "",
+                    Some("别的简介"),
+                    "写了封面",
+                    "[]",
+                    None,
+                ),
+            );
+        });
+        assert_eq!(
+            run(&db, "封面").hits[0].why,
+            "对得上的地方：「封面」→中文说明里有"
+        );
+    }
+
+    #[test]
+    fn why_plain_description() {
+        let db = prepare("why-plain-desc", |conn| {
+            insert_repo(
+                conn,
+                &repo_for_why(
+                    "d",
+                    "lab/tool",
+                    "封面工具",
+                    Some("别的简介"),
+                    "",
+                    "[]",
+                    None,
+                ),
+            );
+        });
+        assert_eq!(
+            run(&db, "封面").hits[0].why,
+            "对得上的地方：「封面」→GitHub 简介里有"
+        );
+    }
+
+    #[test]
+    fn why_plain_topic() {
+        let db = prepare("why-plain-topic", |conn| {
+            insert_repo(
+                conn,
+                &repo_for_why("t", "lab/plain", "", Some("别的简介"), "", "[]", None),
+            );
+            set_topics(conn, "t", r#"["封面"]"#);
+        });
+        assert_eq!(
+            run(&db, "封面").hits[0].why,
+            "对得上的地方：「封面」→GitHub 话题里有"
+        );
+    }
+
+    #[test]
+    fn why_plain_chinese_synonym() {
+        let card = card_json("app", &["内容监控与采集"], &[]);
+        let db = prepare("why-plain-syn", |conn| {
+            insert_repo(
+                conn,
+                &repo_for_why(
+                    "h",
+                    "lab/hub",
+                    "dashboard",
+                    Some("一个面板"),
+                    "",
+                    "[]",
+                    Some(&card),
+                ),
+            );
+        });
+        let why = &run(&db, "抓取").hits[0].why;
+        assert_eq!(
+            why,
+            "对得上的地方：「抓取」→相近说法「采集」出现在它能做的事里"
+        );
+        assert!(why.starts_with("对得上的地方："));
+        assert!(!why.contains("近义"));
+        assert!(!why.contains('·'));
+    }
+
+    #[test]
+    fn why_plain_readme_count() {
+        let db = prepare("why-plain-readme", |conn| {
+            insert_repo(
+                conn,
+                &repo_for_why(
+                    "r",
+                    "lab/tool",
+                    "封面工具",
+                    Some("别的简介"),
+                    "",
+                    "[]",
+                    None,
+                ),
+            );
+            insert_readme(conn, "r", &"封面。".repeat(9));
+        });
+        assert_eq!(
+            run(&db, "封面").hits[0].why,
+            "对得上的地方：「封面」→GitHub 简介里有，项目说明里提到 9 次"
+        );
+    }
+
+    #[test]
+    fn why_long_snippet_adds_ellipsis() {
+        let text = format!("生成封面{}", "测".repeat(20));
+        assert!(text.chars().count() > 20);
+        let card = card_json("app", &[&text], &[]);
+        let db = prepare("why-ellipsis", |conn| {
+            insert_repo(
+                conn,
+                &repo_for_why("e", "lab/tool", "", Some("别的简介"), "", "[]", Some(&card)),
+            );
+        });
+        let why = &run(&db, "封面").hits[0].why;
+        let head: String = text.chars().take(20).collect();
+        assert!(why.starts_with("对得上的地方："));
+        assert!(why.contains(&format!("它能做「{head}…」")), "{why}");
+        assert!(!why.contains(&text), "{why}");
+        let huge = "词".repeat(90);
+        let cut = shrink_one_why_part(&format!("「{huge}」→名字里有"));
+        assert!(cut.starts_with("对得上的地方："));
+        assert!(cut.ends_with('…'));
+        assert_eq!(cut.chars().count(), WHY_LIMIT);
+    }
+
+    #[test]
+    fn why_copy_does_not_change_score_matched_or_full_match() {
+        let db = prepare("why-score-stable", |conn| {
+            insert_repo(
+                conn,
+                &repo_for_why("n", "lab/封面库", "", Some("别的简介"), "", "[]", None),
+            );
+        });
+        let hit = &run(&db, "封面").hits[0];
+        let weight = (1.0_f64 + 1.0 / 2.0).ln();
+        approx(hit.score, 3.0 * weight);
+        assert_eq!(hit.matched, vec!["封面".to_owned()]);
+        assert!(hit.missing.is_empty());
+        assert!(hit.full_match);
+        assert_eq!(hit.why, "对得上的地方：「封面」→名字里有");
     }
 
     #[test]
@@ -4462,13 +4757,13 @@ mod tests {
         assert!(tool.has_card);
         assert_eq!(
             tool.why,
-            "对上：短视频（一句话）、字幕（能力：自动剪口播并生成字幕）"
+            "对得上的地方：「短视频」→一句话简介里有；「字幕」→它能做「自动剪口播并生成字幕」"
         );
         assert_eq!(auto.matched, vec!["字幕".to_owned()]);
         assert_eq!(auto.missing, vec!["短视频".to_owned()]);
         assert!(!auto.full_match);
         assert!(!auto.has_card);
-        assert_eq!(auto.why, "对上：字幕（名称）");
+        assert_eq!(auto.why, "对得上的地方：「字幕」→名字里有");
         assert_eq!(
             auto.one_liner.as_deref(),
             Some("AI video clipping with subtitle generation")
@@ -5291,7 +5586,9 @@ mod tests {
         assert_eq!(result.hits.len(), 1, "{:?}", result.hits);
         assert!(has_term(&result.hits[0].matched, "抓取"));
         assert!(
-            result.hits[0].why.contains("近义「采集」"),
+            result.hits[0]
+                .why
+                .contains("相近说法「采集」出现在一句话简介里"),
             "{}",
             result.hits[0].why
         );
@@ -5610,8 +5907,8 @@ mod tests {
         assert_eq!(result.hits.len(), 1, "{:?}", result.hits);
         assert!(has_term(&result.hits[0].matched, "字幕"));
         assert!(
-            result.hits[0].why.contains("问题"),
-            "何时用应算进问题：{}",
+            result.hits[0].why.contains("它能解决"),
+            "何时用应算进「它能解决」：{}",
             result.hits[0].why
         );
         assert!(
@@ -5652,8 +5949,8 @@ mod tests {
         let weight = (1.0_f64 + 1.0 / 2.0).ln();
         approx(result.hits[0].score, 1.5 * weight);
         assert!(
-            result.hits[0].why.contains("摘要"),
-            "what_it_is 应落在摘要档：{}",
+            result.hits[0].why.contains("中文说明里有"),
+            "what_it_is 应落在中文说明：{}",
             result.hits[0].why
         );
     }
