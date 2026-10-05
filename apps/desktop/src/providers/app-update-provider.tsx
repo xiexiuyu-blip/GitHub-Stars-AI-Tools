@@ -8,6 +8,7 @@ import { getVersion } from '@tauri-apps/api/app';
 import { relaunch } from '@tauri-apps/plugin-process';
 import { check, type Update } from '@tauri-apps/plugin-updater';
 import type { DownloadEvent } from '@tauri-apps/plugin-updater';
+import { describeUpdaterError, UPDATE_RELAUNCH_FAILED, UPDATE_WINDOW_STILL_OPEN } from '@/lib/api';
 
 export type AppUpdateStatus =
   | 'idle'
@@ -162,7 +163,7 @@ export function AppUpdateProvider({ children }: { children: ReactNode }) {
       setState((current) => ({
         ...current,
         status: 'error',
-        errorMessage: toUpdaterErrorMessage(error),
+        errorMessage: describeUpdaterError(error, 'install'),
       }));
     } finally {
       installInFlightRef.current = false;
@@ -229,7 +230,7 @@ export function AppUpdateProvider({ children }: { children: ReactNode }) {
         ...current,
         status: 'error',
         lastCheckedAt: checkedAt,
-        errorMessage: toUpdaterErrorMessage(error),
+        errorMessage: describeUpdaterError(error, 'check'),
       }));
     }
   }
@@ -258,13 +259,14 @@ export function AppUpdateProvider({ children }: { children: ReactNode }) {
       setState((current) => ({
         ...current,
         status: 'installed',
-        errorMessage: '更新已安装，但当前窗口仍未关闭。请再次点击重启应用，或手动退出后重新打开。',
+        errorMessage: UPDATE_WINDOW_STILL_OPEN,
       }));
-    } catch (error) {
+    } catch {
+      // 重启失败和「更新失败」是两回事：更新已经装好了，下一步是重启，不是重试更新
       setState((current) => ({
         ...current,
         status: 'installed',
-        errorMessage: `更新已安装，但${mode === 'automatic' ? '自动' : '手动'}重启失败：${toUpdaterErrorMessage(error)}。请再次点击重启应用，或手动退出后重新打开。`,
+        errorMessage: UPDATE_RELAUNCH_FAILED,
       }));
     } finally {
       relaunchInFlightRef.current = false;
@@ -293,39 +295,6 @@ function buildDownloadProgress(downloadedBytes: number, totalBytes: number | nul
     totalBytes,
     percent,
   };
-}
-
-function toUpdaterErrorMessage(error: unknown) {
-  const rawMessage = error instanceof Error ? error.message : String(error ?? '');
-  const normalizedMessage = rawMessage.toLowerCase();
-
-  if (normalizedMessage.includes('valid release json') || normalizedMessage.includes('latest.json')) {
-    return '没有找到可用于应用内更新的发布文件。请确认 GitHub Release 已上传 latest.json 后再试。';
-  }
-
-  if (normalizedMessage.includes('signature') || normalizedMessage.includes('pubkey')) {
-    return '更新包签名校验失败，请确认发布时使用的签名私钥和应用内公钥一致。';
-  }
-
-  if (
-    normalizedMessage.includes('network') ||
-    normalizedMessage.includes('dns') ||
-    normalizedMessage.includes('timed out') ||
-    normalizedMessage.includes('timeout') ||
-    normalizedMessage.includes('failed to fetch')
-  ) {
-    return '连接更新服务器失败，请检查网络后重试。';
-  }
-
-  if (
-    normalizedMessage.includes('permission') ||
-    normalizedMessage.includes('operation not permitted') ||
-    normalizedMessage.includes('access denied')
-  ) {
-    return '更新包写入失败，请确认应用目录权限正常后重试。';
-  }
-
-  return rawMessage || '检查更新失败，请稍后重试。';
 }
 
 function delay(ms: number) {

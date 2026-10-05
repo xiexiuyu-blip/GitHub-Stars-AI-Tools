@@ -4211,6 +4211,18 @@ fn record_manual_readme_follow(storage: &AppStorage, refreshed: usize) {
     }
 }
 
+/// 同步完成那一句。`StarSyncSummary.updated_count` 是「这次同步里已有的收藏的全部个数」，
+/// 不是「信息变了的个数」（后端没有逐个比对），所以这一句不写它：只写现在共多少、新增多少、取消收藏多少。
+fn sync_complete_message(
+    active_count: usize,
+    created_count: usize,
+    removed_count: usize,
+) -> String {
+    format!(
+        "同步完成：你现在共收藏 {active_count} 个，新增 {created_count} 个，有 {removed_count} 个是你在 GitHub 上取消收藏的（已从资料库隐藏）。"
+    )
+}
+
 fn sync_github_stars_worker(app_handle: tauri::AppHandle) -> Result<StarSyncSummary, String> {
     emit_task_progress(
         &app_handle,
@@ -4296,9 +4308,7 @@ fn sync_github_stars_worker(app_handle: tauri::AppHandle) -> Result<StarSyncSumm
             "sync",
             incoming_ids.len(),
             incoming_ids.len(),
-            format!(
-                "同步完成：当前 {active_count} 个，新增 {created_count} 个，移除 {removed_count} 个"
-            ),
+            sync_complete_message(active_count, created_count, removed_count),
         ),
     );
     // 先把该更新的 README 抓下来，再给新收藏排队。失败只记日志，同步结果照常返回。
@@ -7682,6 +7692,17 @@ mod tests {
     use super::*;
     use std::sync::{mpsc, Arc};
     use std::time::Duration;
+
+    #[test]
+    fn the_sync_message_does_not_claim_how_many_were_updated() {
+        // `updated_count` 是已有收藏的全部个数，不是信息变了的个数：这一句里不能出现「更新」
+        let message = sync_complete_message(497, 14, 2);
+        assert_eq!(
+            message,
+            "同步完成：你现在共收藏 497 个，新增 14 个，有 2 个是你在 GitHub 上取消收藏的（已从资料库隐藏）。"
+        );
+        assert!(!message.contains("更新"), "{message}");
+    }
 
     #[test]
     fn the_batch_stops_after_five_failures_before_anything_has_worked() {

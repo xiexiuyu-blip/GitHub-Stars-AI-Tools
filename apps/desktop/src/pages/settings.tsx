@@ -8,6 +8,13 @@ import { useAppUpdate, type AppUpdateContextValue } from '@/providers/app-update
 import { AppUpdatePanel } from '@/components/app-update-panel';
 import { Icon } from '@/components/ui/icon';
 import {
+  AI_AUTO_ORGANIZE_POINTER,
+  AI_PROVIDER_PRESETS,
+  AI_TEST_COST_NOTE,
+  aiBaseUrlHelp,
+  aiKeyHelpText,
+  aiKeySaveStatusText,
+  describeCurrentAiService,
   getAiConfigMessage,
   getEmbeddingConfigMessage,
   isSavedAiApiKeyPlaceholder,
@@ -15,7 +22,34 @@ import {
   shouldFlushEmbeddingApiKey,
   toBackendAiRequestConfig,
   toBackendEmbeddingRequestConfig,
+  type AIProviderPreset,
+  type AIProviderPresetOption,
 } from '@/lib/ai-config';
+import {
+  autoSyncDescription,
+  buildReadinessRows,
+  CLEAR_LOCAL_DATA_DONE,
+  CLEAR_LOCAL_DATA_FAILED,
+  CLEAR_LOCAL_DATA_WARNING,
+  CONNECT_SAVING_KEYCHAIN,
+  CONNECT_SLOW,
+  CONNECT_VERIFYING,
+  formatMinute,
+  formatSyncComplete,
+  GIST_BACKUP_LIBRARY,
+  GIST_BACKUP_MARKS,
+  GIST_IMPORT_WARNING,
+  GIST_NEEDS_SCOPE,
+  GIST_SECTION_TITLE,
+  gistImportHint,
+  GITHUB_TOKEN_EXPLAINER,
+  GITHUB_TOKEN_SAVED_NOTE,
+  GITHUB_TOKEN_SCOPES,
+  RUNTIME_CHECK_COST_NOTE,
+  RUNTIME_CHECK_TITLES,
+  SYNC_INTERVAL_HINT,
+  WELCOME_STARTUP_HINT,
+} from '@/lib/automation-view';
 import { compactNumber } from '@/lib/format';
 import { COLOR_PRESETS } from '@/types-settings';
 import type { AiStreamEvent, AppIdentity, DashboardStats, RuntimeReadinessCheckItem, RuntimeReadinessCheckResult } from '@/types';
@@ -48,154 +82,6 @@ type AiRequestDiagnostics = {
   failureReason: string | null;
 };
 
-type AIProviderPreset = AISettingsValue['providerPreset'];
-
-type AIProviderPresetOption = {
-  id: AIProviderPreset;
-  label: string;
-  description: string;
-  provider: AISettingsValue['provider'];
-  baseUrl: string;
-  apiKeyLabel: string;
-  modelPlaceholder: string;
-  modelSuggestions: string[];
-  icon: string;
-};
-
-const AI_PROVIDER_PRESETS: AIProviderPresetOption[] = [
-  {
-    id: 'openai',
-    label: 'OpenAI',
-    description: '官方 Chat Completions 接口',
-    provider: 'openai',
-    baseUrl: 'https://api.openai.com/v1',
-    apiKeyLabel: 'API Key',
-    modelPlaceholder: '填写 OpenAI 模型 ID',
-    modelSuggestions: ['gpt-5.5', 'gpt-5.5-mini', 'gpt-5.5-nano'],
-    icon: 'auto_awesome',
-  },
-  {
-    id: 'anthropic',
-    label: 'Anthropic',
-    description: 'Claude Messages API',
-    provider: 'anthropic',
-    baseUrl: 'https://api.anthropic.com/v1',
-    apiKeyLabel: 'API Key',
-    modelPlaceholder: '填写 Claude 模型 ID',
-    modelSuggestions: ['claude-sonnet-5', 'claude-opus-4-8', 'claude-haiku-4-5'],
-    icon: 'psychology',
-  },
-  {
-    id: 'openrouter',
-    label: 'OpenRouter',
-    description: '多模型 OpenAI 兼容网关',
-    provider: 'openai-compatible',
-    baseUrl: 'https://openrouter.ai/api/v1',
-    apiKeyLabel: 'API Key',
-    modelPlaceholder: '例如 openai/gpt-5.5',
-    modelSuggestions: ['openai/gpt-5.5', 'anthropic/claude-sonnet-5', 'deepseek/deepseek-chat'],
-    icon: 'route',
-  },
-  {
-    id: 'deepseek',
-    label: 'DeepSeek',
-    description: 'DeepSeek OpenAI 兼容接口',
-    provider: 'openai-compatible',
-    baseUrl: 'https://api.deepseek.com/v1',
-    apiKeyLabel: 'API Key',
-    modelPlaceholder: '例如 deepseek-chat',
-    modelSuggestions: ['deepseek-chat', 'deepseek-reasoner'],
-    icon: 'travel_explore',
-  },
-  {
-    id: 'moonshot',
-    label: 'Moonshot / Kimi',
-    description: 'Moonshot OpenAI 兼容接口',
-    provider: 'openai-compatible',
-    baseUrl: 'https://api.moonshot.cn/v1',
-    apiKeyLabel: 'API Key',
-    modelPlaceholder: '例如 kimi-k2-0711-preview',
-    modelSuggestions: ['kimi-k2-0711-preview', 'moonshot-v1-8k', 'moonshot-v1-32k'],
-    icon: 'dark_mode',
-  },
-  {
-    id: 'qwen',
-    label: '阿里通义 Qwen',
-    description: 'DashScope OpenAI 兼容接口',
-    provider: 'openai-compatible',
-    baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
-    apiKeyLabel: 'API Key',
-    modelPlaceholder: '例如 qwen-plus',
-    modelSuggestions: ['qwen-plus', 'qwen-max', 'qwen-turbo'],
-    icon: 'cloud',
-  },
-  {
-    id: 'zhipu',
-    label: '智谱 GLM',
-    description: '智谱 OpenAI 兼容接口',
-    provider: 'openai-compatible',
-    baseUrl: 'https://open.bigmodel.cn/api/paas/v4',
-    apiKeyLabel: 'API Key',
-    modelPlaceholder: '例如 glm-4.5',
-    modelSuggestions: ['glm-4.5', 'glm-4.5-air', 'glm-4-flash'],
-    icon: 'neurology',
-  },
-  {
-    id: 'siliconflow',
-    label: '硅基流动',
-    description: 'SiliconFlow OpenAI 兼容接口',
-    provider: 'openai-compatible',
-    baseUrl: 'https://api.siliconflow.cn/v1',
-    apiKeyLabel: 'API Key',
-    modelPlaceholder: '填写 SiliconFlow 模型 ID',
-    modelSuggestions: ['Qwen/Qwen3-Coder-480B-A35B-Instruct', 'deepseek-ai/DeepSeek-V3', 'THUDM/GLM-4.1V-9B-Thinking'],
-    icon: 'memory',
-  },
-  {
-    id: 'ollama',
-    label: 'Ollama',
-    description: '本机 OpenAI 兼容服务，可不填 Key',
-    provider: 'openai-compatible',
-    baseUrl: 'http://127.0.0.1:11434/v1',
-    apiKeyLabel: 'API Key（可留空）',
-    modelPlaceholder: '例如 llama3.1',
-    modelSuggestions: ['llama3.1', 'qwen2.5-coder', 'deepseek-r1'],
-    icon: 'dns',
-  },
-  {
-    id: 'lmstudio',
-    label: 'LM Studio',
-    description: '本机 OpenAI 兼容服务，可不填 Key',
-    provider: 'openai-compatible',
-    baseUrl: 'http://127.0.0.1:1234/v1',
-    apiKeyLabel: 'API Key（可留空）',
-    modelPlaceholder: '填写本机加载的模型 ID',
-    modelSuggestions: ['local-model'],
-    icon: 'desktop_windows',
-  },
-  {
-    id: 'custom-openai-compatible',
-    label: '自定义兼容接口',
-    description: '手动填写 OpenAI 兼容地址',
-    provider: 'openai-compatible',
-    baseUrl: '',
-    apiKeyLabel: 'API Key（本机服务可留空）',
-    modelPlaceholder: '填写服务商模型 ID',
-    modelSuggestions: [],
-    icon: 'tune',
-  },
-  {
-    id: 'none',
-    label: '关闭 AI',
-    description: '只使用本地知识搜索和手动整理',
-    provider: 'none',
-    baseUrl: '',
-    apiKeyLabel: 'API Key',
-    modelPlaceholder: '选择服务后填写模型 ID',
-    modelSuggestions: [],
-    icon: 'block',
-  },
-];
 const FEATURED_AI_PROVIDER_IDS: AIProviderPreset[] = [
   'openai',
   'anthropic',
@@ -213,7 +99,6 @@ const PROJECT_REPOSITORY_URL = 'https://github.com/xiexiuyu-blip/GitHub-Stars-AI
 const PROJECT_ISSUES_URL = 'https://github.com/xiexiuyu-blip/GitHub-Stars-AI-Tools/issues';
 const PROJECT_LICENSE_URL = 'https://github.com/xiexiuyu-blip/GitHub-Stars-AI-Tools/blob/fox-product-lab/LICENSE';
 const PROJECT_ACKNOWLEDGEMENTS_URL = 'https://github.com/xiexiuyu-blip/GitHub-Stars-AI-Tools/tree/fox-product-lab#%E8%87%B4%E8%B0%A2';
-const WEILOO_GPT_URL = 'https://ai.weiloo.com';
 
 type AiConnectionTestResult = {
   summaryZh: string;
@@ -305,13 +190,15 @@ export function SettingsPage() {
   const appUpdate = useAppUpdate();
   const [activeTab, setActiveTab] = useState<SettingsTab>('github');
 
+  // 页签：GitHub / AI 设置 / 通用 / GitHub 备份 / 关于（审读第 42 条）。
+  // 「向量」页签先藏起来（审读第 15 条）：新界面里没有任何页面用到向量检索，点「下载并启用」却要下载约 490 MB。
+  // 面板（EmbeddingSettingsPanel）和后台命令都留着；要恢复，在这里加回一项 key 为 'embedding' 的页签。
   const tabs: { key: SettingsTab; icon: string; label: string; shortLabel: string }[] = [
-    { key: 'github', icon: 'code', label: 'GitHub 账号', shortLabel: '账号' },
-    { key: 'ai', icon: 'smart_toy', label: 'AI 引擎配置', shortLabel: '引擎' },
-    { key: 'embedding', icon: 'database', label: '向量检索', shortLabel: '向量' },
-    { key: 'general', icon: 'tune', label: '通用设置', shortLabel: '通用' },
-    { key: 'backup', icon: 'backup', label: '数据备份', shortLabel: '备份' },
-    { key: 'about', icon: 'info', label: '关于项目', shortLabel: '关于' },
+    { key: 'github', icon: 'code', label: 'GitHub', shortLabel: 'GitHub' },
+    { key: 'ai', icon: 'smart_toy', label: 'AI 设置', shortLabel: 'AI 设置' },
+    { key: 'general', icon: 'tune', label: '通用', shortLabel: '通用' },
+    { key: 'backup', icon: 'backup', label: 'GitHub 备份', shortLabel: 'GitHub 备份' },
+    { key: 'about', icon: 'info', label: '关于', shortLabel: '关于' },
   ];
   const activeTabLabel = tabs.find((tab) => tab.key === activeTab)?.label ?? '设置';
 
@@ -322,7 +209,7 @@ export function SettingsPage() {
           <h2 className="font-headline-md text-headline-md text-on-surface">设置</h2>
           <p className="mt-1 font-body-md text-sm text-on-surface-variant">{activeTabLabel}</p>
         </div>
-        <nav className="grid w-full grid-cols-3 gap-1 rounded-lg border border-card-border bg-surface-container-lowest p-1 sm:grid-cols-6" aria-label="设置分类">
+        <nav className="grid w-full grid-cols-3 gap-1 rounded-lg border border-card-border bg-surface-container-lowest p-1 sm:grid-cols-5" aria-label="设置分类">
           {tabs.map((tab) => (
             <button
               key={tab.key}
@@ -458,13 +345,13 @@ function GitHubSettings({
     }
 
     const statusTimers: number[] = [];
-    setConnectStatus('正在验证 GitHub Token...');
+    setConnectStatus(CONNECT_VERIFYING);
     try {
       statusTimers.push(window.setTimeout(() => {
-        setConnectStatus('正在保存本地凭据，如果系统弹出凭据管理授权，请选择允许。');
+        setConnectStatus(CONNECT_SAVING_KEYCHAIN);
       }, 1200));
       statusTimers.push(window.setTimeout(() => {
-        setConnectStatus('连接仍在进行中，可能是 GitHub 网络较慢，请稍候。');
+        setConnectStatus(`${CONNECT_SLOW}。`);
       }, 8000));
       await workspace.connectWithToken(workspace.token);
       setConnectStatus(null);
@@ -493,8 +380,8 @@ function GitHubSettings({
       setRuntimeCheckCompletedAt(record.completedAt);
       try {
         await settingsHook.updateRuntime({ lastSelfCheckRecord: record });
-      } catch (error) {
-        setReadinessWarning(`真实链路自检已完成，但自检记录未保存：${toErrorMessage(error)}`);
+      } catch {
+        setReadinessWarning('检查已经做完了，但这次的结果没能记下来。你的资料都还在。');
       }
     } catch (error) {
       setReadinessError(toErrorMessage(error));
@@ -514,7 +401,7 @@ function GitHubSettings({
           <div className="min-w-0">
             <h3 className="font-headline-md text-[20px] font-semibold text-on-surface mb-1">GitHub 连接状态</h3>
             <p className="font-body-md text-on-surface-variant mb-6">
-              管理 GitHub Personal Access Token。公开 Stars 可使用只读 Token，私有仓库 Stars 需要仓库读取权限，Gist 备份需要 gist 权限。
+              {GITHUB_TOKEN_EXPLAINER}。{GITHUB_TOKEN_SCOPES}
             </p>
             <div
               className={`flex w-fit max-w-full flex-wrap items-center gap-3 rounded-lg border px-4 py-2.5 ${
@@ -527,7 +414,7 @@ function GitHubSettings({
                 className={`shrink-0 ${isConnected ? 'text-success' : 'text-error'}`}
               />
               <span className={`font-body-md font-medium ${isConnected ? 'text-success' : 'text-error'}`}>
-                {isConnected ? '已连接 (Token 有效)' : '未连接'}
+                {isConnected ? '已连接（令牌有效）' : '未连接'}
               </span>
             </div>
           </div>
@@ -556,10 +443,10 @@ function GitHubSettings({
         errorMessage={readinessError}
         warningMessage={readinessWarning}
         aiConfigMessage={getAiConfigMessage(settingsHook.settings.ai)}
+        aiModel={settingsHook.settings.ai.model}
         isSyncingStars={workspace.isSyncingStars}
         isFetchingReadmes={workspace.isFetchingReadmes}
         isBatchGeneratingAiDocuments={workspace.isBatchGeneratingAiDocuments}
-        isGeneratingTagNetwork={workspace.isGeneratingTagNetwork}
         runtimeCheck={runtimeCheck}
         runtimeCheckCompletedAt={runtimeCheckCompletedAt}
         lastSelfCheckRecord={settingsHook.settings.runtime.lastSelfCheckRecord}
@@ -584,14 +471,6 @@ function GitHubSettings({
             });
           })().catch(() => undefined);
         }}
-        onGenerateTagNetwork={() => {
-          void (async () => {
-            if (shouldFlushAiApiKey(settingsHook.settings.ai)) {
-              await settingsHook.flushAIKey(settingsHook.settings.ai.apiKey);
-            }
-            await workspace.handleGenerateAiTagNetwork(settingsHook.settings.ai);
-          })().catch(() => undefined);
-        }}
         onOpenAiSettings={onOpenAiSettings}
         onCheckRuntime={() => void handleRuntimeReadinessCheck()}
       />
@@ -602,17 +481,16 @@ function GitHubSettings({
           <h3 className="font-headline-md text-[20px] font-semibold text-on-surface">访问配置</h3>
         </div>
         <div className="p-6 space-y-6">
-          {/* Token 输入 */}
+          {/* 令牌输入 */}
           {isConnected ? (
             <div className="space-y-2">
               <label className="font-body-md text-on-surface font-medium flex items-center gap-2">
-                Personal Access Token
+                GitHub 令牌
                 <Icon name="info" size={16} className="text-on-surface-variant cursor-help" />
               </label>
               <div className="flex gap-3">
                 <div className="flex-1 rounded-lg border border-outline-variant bg-surface-container-low px-4 py-2">
-                  <p className="font-label-sm text-on-surface">Token 已保存到系统凭据管理器</p>
-                  <p className="mt-1 text-xs text-on-surface-variant">为保护凭据安全，应用不会在界面中显示明文 Token。</p>
+                  <p className="font-label-sm text-on-surface">{GITHUB_TOKEN_SAVED_NOTE}</p>
                 </div>
                 <button
                   onClick={() => void workspace.handleClearToken()}
@@ -629,7 +507,7 @@ function GitHubSettings({
               className="space-y-2"
             >
               <label className="font-body-md text-on-surface font-medium flex items-center gap-2">
-                Personal Access Token
+                GitHub 令牌
                 <Icon name="info" size={16} className="text-on-surface-variant cursor-help" />
               </label>
               <div className="flex gap-3">
@@ -650,7 +528,7 @@ function GitHubSettings({
                   disabled={workspace.isSavingToken || !workspace.token.trim()}
                   className="px-4 py-2 bg-primary text-white rounded-lg font-body-md hover:brightness-110 transition-all shadow-sm disabled:opacity-60"
                 >
-                  {workspace.isSavingToken ? '连接中...' : '连接 GitHub'}
+                  {workspace.isSavingToken ? '连接中…' : '连接 GitHub'}
                 </button>
               </div>
             </form>
@@ -677,13 +555,13 @@ function GitHubSettings({
           <div className="flex items-center justify-between py-4">
             <div className="flex-1 pr-6">
               <h4 className="font-body-lg font-medium text-on-surface flex items-center gap-2">
-                README 缓存
+                项目说明（README）
                 <span className="bg-primary-fixed text-on-primary-fixed text-[10px] px-2 py-0.5 rounded-full font-bold uppercase tracking-wider">
-                  AI 上下文
+                  AI 要读的资料
                 </span>
               </h4>
               <p className="font-body-md text-on-surface-variant mt-1">
-                README 是中文定位、AI 摘要和标签网络的上下文；只抓取 README 不会直接生成中文用途说明。
+                项目说明是 AI 写中文说明时要读的资料；只下载项目说明，不会直接生成中文说明。
               </p>
             </div>
           </div>
@@ -692,7 +570,7 @@ function GitHubSettings({
 
       {/* 同步操作 */}
       <section className="glass-panel rounded-lg p-6">
-        <h3 className="font-headline-md text-[20px] font-semibold text-on-surface mb-4">数据同步操作</h3>
+        <h3 className="font-headline-md text-[20px] font-semibold text-on-surface mb-4">同步</h3>
         <div className="flex flex-wrap gap-3">
           <button
             onClick={() => void workspace.handleSyncStars()}
@@ -700,7 +578,7 @@ function GitHubSettings({
             className="px-4 py-2 bg-primary text-white rounded-lg font-body-md flex items-center gap-2 hover:brightness-110 transition-all shadow-sm disabled:opacity-60"
           >
             <Icon name="sync" size={18} className={workspace.isSyncingStars ? 'animate-spin' : ''} />
-            {workspace.isSyncingStars ? '同步中...' : '同步 Stars'}
+            {workspace.isSyncingStars ? '同步中…' : '同步我的收藏'}
           </button>
           <button
             onClick={() => {
@@ -729,33 +607,12 @@ function GitHubSettings({
           >
             <Icon name="description" size={18} className={workspace.isFetchingReadmes || workspace.isBatchGeneratingAiDocuments ? 'animate-spin' : ''} />
             {workspace.isFetchingReadmes
-              ? '抓取中...'
+              ? '下载中…'
               : workspace.isBatchGeneratingAiDocuments
-                ? 'AI 分析中...'
+                ? 'AI 整理中…'
                 : settingsHook.settings.ai.enableAutoSummary
-                  ? '抓取 README 并分析'
-	                  : '抓取 README'}
-	          </button>
-          <button
-            onClick={() => {
-              void (async () => {
-                if (shouldFlushAiApiKey(settingsHook.settings.ai)) {
-                  await settingsHook.flushAIKey(settingsHook.settings.ai.apiKey);
-                }
-                await workspace.handleGenerateAiTagNetwork(settingsHook.settings.ai);
-              })().catch(() => undefined);
-            }}
-            disabled={
-              workspace.isGeneratingTagNetwork ||
-              workspace.isBatchGeneratingAiDocuments ||
-              !isConnected ||
-              Boolean(getAiConfigMessage(settingsHook.settings.ai))
-            }
-            title={getAiConfigMessage(settingsHook.settings.ai) ?? '根据已同步仓库、README 摘要和 Topics 生成标签网络'}
-            className="px-4 py-2 bg-primary/10 hover:bg-primary/15 text-primary rounded-lg border border-primary/20 font-body-md flex items-center gap-2 transition-all disabled:opacity-60"
-          >
-            <Icon name="hub" size={18} className={workspace.isGeneratingTagNetwork ? 'animate-spin' : ''} />
-            {workspace.isGeneratingTagNetwork ? '生成中...' : '生成标签网络'}
+                  ? '下载项目说明并整理（会花钱）'
+                  : '下载项目说明'}
           </button>
         </div>
         {autoSummaryConfigMessage && (
@@ -766,9 +623,7 @@ function GitHubSettings({
         {workspace.syncSummary && (
           <div className="mt-4 p-3 rounded-lg bg-success/10 border border-success/20">
             <p className="font-body-md text-sm text-success">
-              同步完成：活跃 {workspace.syncSummary.activeCount} 个，新增{' '}
-              {workspace.syncSummary.createdCount} 个，更新 {workspace.syncSummary.updatedCount} 个，移除{' '}
-              {workspace.syncSummary.removedCount} 个，扫描 {workspace.syncSummary.scannedCount} 个。
+              {formatSyncComplete(workspace.syncSummary)}
             </p>
           </div>
         )}
@@ -785,10 +640,10 @@ function RuntimeReadinessPanel(props: {
   errorMessage: string | null;
   warningMessage: string | null;
   aiConfigMessage: string | null;
+  aiModel: string;
   isSyncingStars: boolean;
   isFetchingReadmes: boolean;
   isBatchGeneratingAiDocuments: boolean;
-  isGeneratingTagNetwork: boolean;
   runtimeCheck: RuntimeReadinessCheckResult | null;
   runtimeCheckCompletedAt: string | null;
   lastSelfCheckRecord: RuntimeSelfCheckRecord | null;
@@ -796,24 +651,9 @@ function RuntimeReadinessPanel(props: {
   onSyncStars: () => void;
   onFetchReadmes: () => void;
   onGenerateAi: () => void;
-  onGenerateTagNetwork: () => void;
   onOpenAiSettings: () => void;
   onCheckRuntime: () => void;
 }) {
-  const totalRepos = props.stats?.totalRepos ?? 0;
-  const totalReadmes = props.stats?.totalReadmes ?? 0;
-  const totalAiSummaries = props.stats?.totalAiSummaries ?? 0;
-  const totalTags = props.stats?.totalTags ?? 0;
-  const totalAiInputTokens = props.stats?.totalAiInputTokens ?? 0;
-  const totalAiOutputTokens = props.stats?.totalAiOutputTokens ?? 0;
-  const hasRepos = totalRepos > 0;
-  const readmeNeedsTopUp = props.isConnected && hasRepos && totalReadmes < totalRepos;
-  const aiNeedsTopUp = props.isConnected && hasRepos && (
-    totalAiSummaries === 0 || (totalReadmes > 0 && totalAiSummaries < totalReadmes)
-  );
-  const aiReady = !props.aiConfigMessage;
-  const isReadmeBusy = props.isFetchingReadmes || props.isBatchGeneratingAiDocuments;
-  const isAiWorkflowBusy = isReadmeBusy || props.isGeneratingTagNetwork;
   const runtimeCheckSummary = props.runtimeCheck ? summarizeRuntimeCheck(props.runtimeCheck) : null;
   const selfCheckRecord = runtimeCheckSummary
     ? {
@@ -821,76 +661,40 @@ function RuntimeReadinessPanel(props: {
         ...runtimeCheckSummary,
       }
     : props.lastSelfCheckRecord;
-  const readinessItems = [
-    {
-      title: 'GitHub 账号',
-      done: props.isConnected,
-      detail: props.isConnected && props.userLogin ? `已连接 @${props.userLogin}` : '请先输入 GitHub Token 并连接账号',
-      actionLabel: null,
-      onAction: null,
-      actionDisabled: false,
-    },
-    {
-      title: 'Stars 同步',
-      done: totalRepos > 0,
-      detail: totalRepos > 0 ? `本地已有 ${totalRepos} 个仓库` : '连接后执行同步 Stars',
-      actionLabel: props.isSyncingStars ? '同步中...' : '同步 Stars',
-      onAction: props.isConnected ? props.onSyncStars : null,
-      actionDisabled: props.isSyncingStars,
-    },
-    {
-      title: 'README 缓存',
-      done: totalReadmes > 0,
-      detail: totalReadmes > 0
-        ? `已缓存 ${totalReadmes} / ${Math.max(totalRepos, totalReadmes)} 个 README${readmeNeedsTopUp ? '，可继续补抓缺失项' : ''}`
-        : '同步后先抓取 README，作为中文定位和标签网络的上下文',
-      actionLabel: props.isFetchingReadmes ? '抓取中...' : totalReadmes > 0 ? '补抓缺失 README' : '抓取 README',
-      onAction: readmeNeedsTopUp ? props.onFetchReadmes : null,
-      actionDisabled: isAiWorkflowBusy,
-    },
-    {
-      title: 'AI 引擎',
-      done: aiReady && totalAiSummaries > 0,
-      detail: totalAiSummaries > 0
-        ? `已生成 ${totalAiSummaries} 个 AI 摘要，累计输入 ${compactNumber(totalAiInputTokens)} tokens，输出 ${compactNumber(totalAiOutputTokens)} tokens`
-        : aiReady
-          ? '配置已完整，可在 AI 引擎配置中测试连接并生成摘要'
-          : props.aiConfigMessage ?? '请配置 AI 服务',
-      actionLabel: aiReady
-        ? props.isBatchGeneratingAiDocuments ? '分析中...' : totalAiSummaries > 0 ? '继续分析缺失摘要' : '抓取 README 并分析'
-        : '打开 AI 设置',
-      onAction: aiReady
-        ? aiNeedsTopUp ? props.onGenerateAi : null
-        : props.onOpenAiSettings,
-      actionDisabled: isAiWorkflowBusy,
-    },
-    {
-      title: '标签网络',
-      done: totalTags > 0,
-      detail: totalTags > 0
-        ? `已生成 ${totalTags} 个标签，可在标签网络页查看关联`
-        : totalAiSummaries > 0
-          ? '已有中文摘要后，可生成标签网络并联动中文定位'
-          : '先生成 AI 摘要，再用标签网络聚类项目用途',
-      actionLabel: props.isGeneratingTagNetwork ? '生成中...' : totalTags > 0 ? '重新生成标签网络' : '生成标签网络',
-      onAction: aiReady && totalAiSummaries > 0 ? props.onGenerateTagNetwork : aiReady ? null : props.onOpenAiSettings,
-      actionDisabled: isAiWorkflowBusy,
-    },
-  ];
+  // 清单每一行读真实数据（资料库里有几个收藏、AI 设的是哪个模型），逻辑在 lib/automation-view.ts 的 buildReadinessRows
+  const readinessRows = buildReadinessRows({
+    connected: props.isConnected,
+    login: props.userLogin,
+    totalRepos: props.stats?.totalRepos ?? 0,
+    totalReadmes: props.stats?.totalReadmes ?? 0,
+    totalAiSummaries: props.stats?.totalAiSummaries ?? 0,
+    aiConfigMessage: props.aiConfigMessage,
+    aiModel: props.aiModel,
+    syncing: props.isSyncingStars,
+    fetchingReadmes: props.isFetchingReadmes,
+    writingCards: props.isBatchGeneratingAiDocuments,
+  });
+  const rowActions = {
+    sync: props.onSyncStars,
+    readme: props.onFetchReadmes,
+    writeCards: props.onGenerateAi,
+    openAiSettings: props.onOpenAiSettings,
+  } as const;
 
   return (
     <section className="glass-panel rounded-xl p-6">
       <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
         <div>
-          <h3 className="font-headline-md text-[20px] font-semibold text-on-surface">客户端就绪状态</h3>
+          <h3 className="font-headline-md text-[20px] font-semibold text-on-surface">运行检查</h3>
           <p className="mt-1 font-body-md text-sm text-on-surface-variant">
-            基于当前本地数据库和应用内设置检查真实可用链路。
+            看看 GitHub 连接、同步、AI 是不是都正常。
           </p>
+          <p className="mt-1 font-body-md text-xs text-on-surface-variant">{RUNTIME_CHECK_COST_NOTE}</p>
         </div>
         {props.isLoading && (
           <span className="inline-flex items-center gap-1.5 rounded-lg border border-primary/20 bg-primary/10 px-3 py-1.5 text-xs text-primary">
             <Icon name="progress_activity" size={14} className="animate-spin" />
-            正在检查
+            正在读取
           </span>
         )}
         <button
@@ -900,12 +704,12 @@ function RuntimeReadinessPanel(props: {
           className="inline-flex items-center gap-1.5 rounded-lg border border-primary/25 bg-primary/10 px-3 py-1.5 font-body-md text-xs font-medium text-primary transition-colors hover:bg-primary/15 disabled:opacity-60"
         >
           <Icon name="verified" size={14} className={props.isCheckingRuntime ? 'animate-spin' : ''} />
-          {props.isCheckingRuntime ? '正在运行真实链路自检' : '运行真实链路自检'}
+          {props.isCheckingRuntime ? '正在检查…' : '开始检查'}
         </button>
       </div>
       {props.errorMessage && (
         <p className="mt-4 rounded-lg border border-error/20 bg-error/10 px-3 py-2 font-body-md text-sm text-error">
-          就绪状态读取失败：{props.errorMessage}
+          没能读出现在的状态。你的资料都还在。再点一次「开始检查」；还不行就重启应用，再不行把这条截图发给开发者。
         </p>
       )}
       {props.warningMessage && (
@@ -914,37 +718,37 @@ function RuntimeReadinessPanel(props: {
         </p>
       )}
       <div className="mt-5 grid gap-3 sm:grid-cols-2">
-        {readinessItems.map((item) => (
+        {readinessRows.map((row) => (
           <div
-            key={item.title}
+            key={row.key}
             className={`rounded-lg border px-4 py-3 ${
-              item.done
+              row.done
                 ? 'border-success/20 bg-success/10'
                 : 'border-card-border bg-surface-container-low'
             }`}
           >
             <div className="flex items-center gap-2">
               <Icon
-                name={item.done ? 'check_circle' : 'radio_button_unchecked'}
+                name={row.done ? 'check_circle' : 'radio_button_unchecked'}
                 size={18}
-                className={item.done ? 'text-success' : 'text-on-surface-variant'}
+                className={row.done ? 'text-success' : 'text-on-surface-variant'}
               />
-              <h4 className="font-body-md font-medium text-on-surface">{item.title}</h4>
+              <h4 className="font-body-md font-medium text-on-surface">{row.title}</h4>
             </div>
             <p className="mt-1 pl-6 font-body-md text-xs leading-relaxed text-on-surface-variant">
-              {item.detail}
+              {row.detail}
             </p>
-            {item.onAction && (
+            {row.action && (
               <button
                 type="button"
-                onClick={item.onAction}
-                disabled={item.actionDisabled}
+                onClick={rowActions[row.action]}
+                disabled={row.actionDisabled}
                 className="mt-3 ml-6 inline-flex items-center gap-1.5 rounded-lg border border-card-border bg-surface px-3 py-1.5 font-body-md text-xs text-on-surface transition-colors hover:bg-surface-container-high disabled:opacity-60"
               >
-                {item.actionLabel?.includes('中...') && (
+                {row.busy && (
                   <Icon name="progress_activity" size={14} className="animate-spin" />
                 )}
-                {item.actionLabel ?? '继续'}
+                {row.actionLabel ?? '继续'}
               </button>
             )}
           </div>
@@ -955,9 +759,9 @@ function RuntimeReadinessPanel(props: {
           <div className="flex min-w-0 items-start gap-2">
             <Icon name="fact_check" size={18} className="mt-0.5 shrink-0 text-primary" />
             <div className="min-w-0 flex-1">
-              <h4 className="font-body-md font-medium text-on-surface">发布包自检记录</h4>
+              <h4 className="font-body-md font-medium text-on-surface">上次检查结果</h4>
               <p className="mt-1 font-body-md text-xs leading-relaxed text-on-surface-variant">
-                上一次真实链路自检摘要已保存，重新运行自检可刷新当前结果。
+                上次检查的结果已记下，再点「开始检查」可以更新。
               </p>
               <SelfCheckRecordCard record={selfCheckRecord} className="mt-3" />
             </div>
@@ -969,21 +773,21 @@ function RuntimeReadinessPanel(props: {
           <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
             <div className="flex min-w-0 items-center gap-2">
               <Icon name="fact_check" size={18} className="shrink-0 text-primary" />
-              <h4 className="font-body-md font-medium text-on-surface">真实链路自检结果</h4>
+              <h4 className="font-body-md font-medium text-on-surface">检查结果</h4>
             </div>
             {selfCheckRecord && (
               <SelfCheckRecordCard record={selfCheckRecord} />
             )}
           </div>
           <div className="mt-3 grid gap-2">
-            <RuntimeCheckRow title="本地数据库" item={props.runtimeCheck.storage} />
-            <RuntimeCheckRow title="应用设置存储" item={props.runtimeCheck.settings} />
-            <RuntimeCheckRow title="GitHub Token" item={props.runtimeCheck.github} />
-            <RuntimeCheckRow title="Stars API" item={props.runtimeCheck.stars} />
-            <RuntimeCheckRow title="README 抓取" item={props.runtimeCheck.readme} />
-            <RuntimeCheckRow title="AI 服务" item={props.runtimeCheck.ai} />
-            <RuntimeCheckRow title="AI 标签网络" item={props.runtimeCheck.tagNetwork} />
-            <RuntimeCheckRow title="相似推荐" item={props.runtimeCheck.recommendation} />
+            <RuntimeCheckRow title={RUNTIME_CHECK_TITLES.storage} item={props.runtimeCheck.storage} />
+            <RuntimeCheckRow title={RUNTIME_CHECK_TITLES.settings} item={props.runtimeCheck.settings} />
+            <RuntimeCheckRow title={RUNTIME_CHECK_TITLES.github} item={props.runtimeCheck.github} />
+            <RuntimeCheckRow title={RUNTIME_CHECK_TITLES.stars} item={props.runtimeCheck.stars} />
+            <RuntimeCheckRow title={RUNTIME_CHECK_TITLES.readme} item={props.runtimeCheck.readme} />
+            <RuntimeCheckRow title={RUNTIME_CHECK_TITLES.ai} item={props.runtimeCheck.ai} />
+            <RuntimeCheckRow title={RUNTIME_CHECK_TITLES.tagNetwork} item={props.runtimeCheck.tagNetwork} />
+            <RuntimeCheckRow title={RUNTIME_CHECK_TITLES.recommendation} item={props.runtimeCheck.recommendation} />
           </div>
         </div>
       )}
@@ -994,12 +798,12 @@ function RuntimeReadinessPanel(props: {
 function SelfCheckRecordCard(props: { record: RuntimeSelfCheckRecord; className?: string }) {
   return (
     <div className={`rounded-lg border border-outline-variant/30 bg-surface px-3 py-2 text-xs text-on-surface-variant ${props.className ?? ''}`}>
-      <p className="font-body-md font-medium text-on-surface">发布包自检记录</p>
+      <p className="font-body-md font-medium text-on-surface">检查结果小结</p>
       <p className="mt-1 font-body-md">
         检查时间：{props.record.completedAt}
       </p>
       <p className="mt-1 font-body-md">
-        通过 {props.record.passed} 项，失败 {props.record.failed} 项，跳过 {props.record.skipped} 项
+        通过 {props.record.passed} 项，没通过 {props.record.failed} 项，没检查 {props.record.skipped} 项
       </p>
     </div>
   );
@@ -1007,7 +811,7 @@ function SelfCheckRecordCard(props: { record: RuntimeSelfCheckRecord; className?
 
 function buildRuntimeSelfCheckRecord(result: RuntimeReadinessCheckResult): RuntimeSelfCheckRecord {
   return {
-    completedAt: new Date().toLocaleString(),
+    completedAt: formatMinute(new Date().toISOString()),
     ...summarizeRuntimeCheck(result),
   };
 }
@@ -1049,7 +853,7 @@ function RuntimeCheckRow({ title, item }: { title: string; item: RuntimeReadines
     : item.status === 'failed'
       ? 'error'
       : 'radio_button_unchecked';
-  const label = item.status === 'passed' ? '通过' : item.status === 'failed' ? '失败' : '跳过';
+  const label = item.status === 'passed' ? '通过' : item.status === 'failed' ? '没通过' : '没检查';
 
   return (
     <div className="rounded-md border border-outline-variant/30 bg-surface px-3 py-2">
@@ -1080,7 +884,7 @@ function RuntimeCheckRow({ title, item }: { title: string; item: RuntimeReadines
   );
 }
 
-/* === AI 引擎设置 === */
+/* === AI 设置 === */
 function AISettings({ settingsHook }: { settingsHook: ReturnType<typeof useAppSettings> }) {
   const ai = settingsHook.settings.ai;
   const needsRemoteConfig = ai.provider !== 'none';
@@ -1098,6 +902,9 @@ function AISettings({ settingsHook }: { settingsHook: ReturnType<typeof useAppSe
   const [moreProvidersOpen, setMoreProvidersOpen] = useState(
     MORE_AI_PROVIDER_PRESETS.some((preset) => preset.id === ai.providerPreset),
   );
+  // 「高级」（请求地址和诊断信息）默认收起；自定义服务一定要填请求地址，这时自动展开
+  const needsBaseUrlNow = ai.provider === 'openai-compatible' && !ai.baseUrl.trim();
+  const [advancedOpen, setAdvancedOpen] = useState(needsBaseUrlNow);
   const activeTestRequestRef = useRef<{ requestId: string; startedAt: number; firstTokenSeen: boolean } | null>(null);
   const currentPreset = getAiProviderPreset(ai.providerPreset);
   const endpointPlaceholder = currentPreset.baseUrl || getAiEndpointPlaceholder(ai.provider);
@@ -1112,6 +919,10 @@ function AISettings({ settingsHook }: { settingsHook: ReturnType<typeof useAppSe
   useEffect(() => {
     setApiKeyDraft(isSavedAiApiKeyPlaceholder(ai.apiKey) ? '' : ai.apiKey);
   }, [ai.apiKey]);
+
+  useEffect(() => {
+    if (needsBaseUrlNow) setAdvancedOpen(true);
+  }, [needsBaseUrlNow]);
 
   useEffect(() => {
     setAvailableModels([]);
@@ -1141,7 +952,7 @@ function AISettings({ settingsHook }: { settingsHook: ReturnType<typeof useAppSe
           ? {
               ...current,
               status: 'running',
-              stage: '正在接收模型输出',
+              stage: '正在接收 AI 的回复',
               firstTokenLatencyMs: current.firstTokenLatencyMs ?? firstTokenLatencyMs,
               summary: payload.text ? payload.text.slice(0, 120) : current.summary,
             }
@@ -1173,8 +984,8 @@ function AISettings({ settingsHook }: { settingsHook: ReturnType<typeof useAppSe
     setTestMessage({
       type: 'success',
       text: preset.provider === 'none'
-        ? 'AI 功能已关闭，已保存的服务 Key 会保留在系统凭据管理器中。'
-        : `已切换到 ${preset.label}，请填写 API Key 和模型 ID。`,
+        ? 'AI 已关闭，已保存的密钥还留在 Mac 的钥匙串里。'
+        : `已切换到 ${preset.label}，请填写密钥和模型名。`,
     });
     await settingsHook.updateAI({
       provider: preset.provider,
@@ -1192,12 +1003,12 @@ function AISettings({ settingsHook }: { settingsHook: ReturnType<typeof useAppSe
     const requestId = `ai-config-test-${Date.now()}`;
     const providerLabel = currentPreset.label;
     const endpoint = nextAi.baseUrl.trim() || currentPreset.baseUrl || '默认服务地址';
-    const model = nextAi.model.trim() || '未填写模型';
+    const model = nextAi.model.trim() || '还没填模型名';
 
     setTestDialog({
       isOpen: true,
       status: configMessage ? 'error' : 'preparing',
-      stage: configMessage ? '配置未完成' : '正在准备配置',
+      stage: configMessage ? '设置还没填完整' : '正在准备',
       providerLabel,
       endpoint,
       model,
@@ -1238,7 +1049,7 @@ function AISettings({ settingsHook }: { settingsHook: ReturnType<typeof useAppSe
       const summary = result.summaryZh.slice(0, 120);
       setTestMessage({
         type: 'success',
-        text: `AI 配置可用，${result.model} 已返回摘要：${summary}`,
+        text: `AI 设置可用，${result.model} 回复了一段测试内容：${summary}`,
       });
       setTestDialog((current) => current
         ? {
@@ -1312,11 +1123,11 @@ function AISettings({ settingsHook }: { settingsHook: ReturnType<typeof useAppSe
     const nextAi = { ...ai, apiKey: effectiveApiKey };
     const baseUrl = nextAi.baseUrl.trim();
     if (nextAi.provider === 'openai-compatible' && !baseUrl) {
-      setModelListMessage({ type: 'error', text: '请先填写 OpenAI 兼容接口的请求地址。' });
+      setModelListMessage({ type: 'error', text: '请先到下面的「高级」里填写请求地址。' });
       return;
     }
     if (!nextAi.apiKey.trim() && nextAi.provider !== 'openai-compatible') {
-      setModelListMessage({ type: 'error', text: '请先填写 API Key 后再获取模型列表。' });
+      setModelListMessage({ type: 'error', text: '请先填写密钥，再获取模型列表。' });
       return;
     }
 
@@ -1351,7 +1162,7 @@ function AISettings({ settingsHook }: { settingsHook: ReturnType<typeof useAppSe
 
   async function handleClearSavedAiKey() {
     setApiKeyDraft('');
-    setTestMessage({ type: 'success', text: '已清除保存的 AI API Key。' });
+    setTestMessage({ type: 'success', text: '已清除保存的密钥。' });
     await settingsHook.updateAI({ apiKey: '' });
   }
 
@@ -1359,32 +1170,15 @@ function AISettings({ settingsHook }: { settingsHook: ReturnType<typeof useAppSe
     <>
       <section className="glass-panel rounded-lg p-6">
         <div className="mb-4">
-          <h3 className="font-headline-md text-[20px] font-semibold text-on-surface">AI 引擎配置</h3>
-          <p className="mt-1 font-body-md text-sm text-on-surface-variant">
-            推荐使用
-            <a
-              href={WEILOO_GPT_URL}
-              target="_blank"
-              rel="noreferrer"
-              className="font-semibold text-primary underline-offset-4 hover:underline"
-            >
-              weiloo GPT
-            </a>
-            ，高级模型效果更好，费用更低！
-          </p>
+          <h3 className="font-headline-md text-[20px] font-semibold text-on-surface">AI 设置</h3>
         </div>
         <div className="space-y-6">
         <div className="space-y-4">
-          <div className="flex flex-col gap-1 sm:flex-row sm:items-end sm:justify-between">
-            <div>
-              <h4 className="font-body-md text-sm font-semibold text-on-surface">常用服务</h4>
-              <p className="mt-1 font-body-md text-xs text-on-surface-variant">
-                当前使用 {currentPreset.label}，切换后再填写对应模型和凭据。
-              </p>
-            </div>
-            <span className="font-body-md text-xs text-on-surface-variant">
-              OpenAI 兼容服务使用 Chat Completions 协议
-            </span>
+          <div>
+            <h4 className="font-body-md text-sm font-semibold text-on-surface">常用服务</h4>
+            <p className="mt-1 font-body-md text-xs text-on-surface-variant">
+              {describeCurrentAiService(currentPreset.label, currentPreset.id === DISABLED_AI_PROVIDER_PRESET.id)}
+            </p>
           </div>
           <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
             {FEATURED_AI_PROVIDER_PRESETS.map((preset) => (
@@ -1436,33 +1230,13 @@ function AISettings({ settingsHook }: { settingsHook: ReturnType<typeof useAppSe
             </span>
             <span className="min-w-0 flex-1">
               <span className="block font-body-md text-sm font-medium text-on-surface">关闭 AI</span>
-              <span className="block font-body-md text-xs text-on-surface-variant">保留已保存 Key，只使用本地知识搜索</span>
+              <span className="block font-body-md text-xs text-on-surface-variant">保留已保存的密钥，不再调用 AI；已有的中文说明和搜索照常能用</span>
             </span>
             {currentPreset.id === DISABLED_AI_PROVIDER_PRESET.id && <Icon name="check_circle" size={18} className="shrink-0 text-warning" />}
           </button>
         </div>
         {needsRemoteConfig && (
           <>
-            <div className="grid gap-2">
-              <label className="font-body-md text-on-surface font-medium">请求地址</label>
-              <input
-                type="url"
-                autoComplete="off"
-                autoCapitalize="none"
-                autoCorrect="off"
-                spellCheck={false}
-                inputMode="url"
-                value={ai.baseUrl}
-                onChange={(e) => void settingsHook.updateAI({ baseUrl: e.target.value })}
-                placeholder={endpointPlaceholder}
-                className="w-full bg-surface-container-low border border-outline-variant rounded-lg px-4 py-2 font-body-md text-on-surface focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary"
-              />
-              <p className="font-body-md text-[12px] text-on-surface-variant">
-                {ai.provider === 'openai-compatible'
-                  ? '填写服务商提供的 OpenAI Chat Completions 兼容地址。'
-                  : '也可以直接填写完整接口路径，系统会自动避免重复拼接。'}
-              </p>
-            </div>
             <div className="grid gap-2">
               <label className="font-body-md text-on-surface font-medium">
                 {currentPreset.apiKeyLabel}
@@ -1490,11 +1264,7 @@ function AISettings({ settingsHook }: { settingsHook: ReturnType<typeof useAppSe
                 className="w-full bg-surface-container-low border border-outline-variant rounded-lg px-4 py-2 font-body-md text-on-surface focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary"
               />
               <p className="font-body-md text-[12px] text-on-surface-variant">
-                {hasSavedApiKey
-                  ? '已保存 AI API Key；输入新 Key 可替换，或清除后重新配置。'
-                  : ai.provider === 'openai-compatible'
-                    ? '连接 Ollama、LM Studio 等本机兼容服务时可留空；填写后仅保存到系统凭据管理器。'
-                    : 'API Key 仅保存到系统凭据管理器，本地设置文件只保存请求地址和模型 ID。'}
+                {aiKeyHelpText({ hasSavedKey: hasSavedApiKey, provider: ai.provider })}
               </p>
               {hasSavedApiKey && !apiKeyDraft.trim() && (
                 <button
@@ -1502,7 +1272,7 @@ function AISettings({ settingsHook }: { settingsHook: ReturnType<typeof useAppSe
                   onClick={() => void handleClearSavedAiKey()}
                   className="w-fit rounded-lg border border-card-border bg-surface-container-high px-3 py-1.5 font-body-md text-xs text-on-surface transition-colors hover:bg-surface-container-highest"
                 >
-                  清除已保存 Key
+                  清除已保存的密钥
                 </button>
               )}
               {aiKeySaveMessage && (
@@ -1517,26 +1287,15 @@ function AISettings({ settingsHook }: { settingsHook: ReturnType<typeof useAppSe
             </div>
           </>
         )}
-        <div className="flex flex-col gap-3 border-t border-card-border py-4 sm:flex-row sm:items-center sm:justify-between">
-          <div className="flex-1 sm:pr-6">
-            <h4 className="font-body-lg font-medium text-on-surface">自动生成 AI 摘要</h4>
-            <p className="font-body-md text-on-surface-variant mt-1">
-              {needsRemoteConfig
-                ? '同步 README 后自动调用 AI 引擎生成中文定位、摘要、关键词和建议标签。'
-                : '选择 OpenAI、OpenAI 兼容接口或 Anthropic 后可启用自动摘要。'}
-            </p>
-          </div>
-          <ToggleSwitch
-            checked={needsRemoteConfig && settingsHook.settings.ai.enableAutoSummary}
-            disabled={!needsRemoteConfig}
-            onChange={(checked) => void settingsHook.updateAI({ enableAutoSummary: checked })}
-          />
+        <div className="border-t border-card-border py-4">
+          <h4 className="font-body-lg font-medium text-on-surface">自动整理</h4>
+          <p className="font-body-md text-on-surface-variant mt-1">{AI_AUTO_ORGANIZE_POINTER}。</p>
         </div>
         <div className="grid gap-4 border-t border-card-border py-4 lg:grid-cols-[minmax(0,1fr)_minmax(320px,420px)] lg:items-start">
           <div>
-            <h4 className="font-body-lg font-medium text-on-surface">AI 服务模型</h4>
+            <h4 className="font-body-lg font-medium text-on-surface">模型</h4>
             <p className="font-body-md text-on-surface-variant mt-1">
-              可从当前服务拉取模型列表，也可以手动输入服务商提供的模型 ID。
+              可以从当前服务获取模型列表，也可以直接填服务商给你的模型名。
             </p>
           </div>
           <div className="min-w-0 space-y-3">
@@ -1616,18 +1375,53 @@ function AISettings({ settingsHook }: { settingsHook: ReturnType<typeof useAppSe
             )}
           </div>
         </div>
-        <AiRequestDiagnosticsPanel
-          diagnostics={aiDiagnostics}
-          errorMessage={diagnosticsError}
-          isLoading={isLoadingDiagnostics}
-          testMessage={testMessage}
-          onRefresh={() => void refreshAiDiagnostics({ flushKey: true })}
-        />
+        {needsRemoteConfig && (
+          <details
+            className="rounded-lg border border-card-border bg-surface-container-lowest"
+            open={advancedOpen}
+            onToggle={(event) => setAdvancedOpen(event.currentTarget.open)}
+          >
+            <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-4 py-3 font-body-md text-sm font-medium text-on-surface">
+              <span className="flex items-center gap-2">
+                <Icon name="settings" size={17} className="text-on-surface-variant" />
+                高级（请求地址和诊断信息）
+              </span>
+              <Icon name="expand_more" size={18} className="text-on-surface-variant" />
+            </summary>
+            <div className="space-y-4 border-t border-card-border p-4">
+                <div className="grid gap-2">
+                  <label className="font-body-md text-on-surface font-medium">请求地址</label>
+                  <input
+                    type="url"
+                    autoComplete="off"
+                    autoCapitalize="none"
+                    autoCorrect="off"
+                    spellCheck={false}
+                    inputMode="url"
+                    value={ai.baseUrl}
+                    onChange={(e) => void settingsHook.updateAI({ baseUrl: e.target.value })}
+                    placeholder={endpointPlaceholder}
+                    className="w-full bg-surface-container-low border border-outline-variant rounded-lg px-4 py-2 font-body-md text-on-surface focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary"
+                  />
+                  <p className="font-body-md text-[12px] text-on-surface-variant">
+                    {aiBaseUrlHelp(ai.provider)}
+                  </p>
+                </div>
+              <AiRequestDiagnosticsPanel
+                diagnostics={aiDiagnostics}
+                errorMessage={diagnosticsError}
+                isLoading={isLoadingDiagnostics}
+                testMessage={testMessage}
+                onRefresh={() => void refreshAiDiagnostics({ flushKey: true })}
+              />
+            </div>
+          </details>
+        )}
         <div className="flex flex-col items-stretch justify-between gap-4 border-t border-card-border py-4 sm:flex-row sm:items-start">
           <div className="flex-1">
-            <h4 className="font-body-lg font-medium text-on-surface">测试 AI 配置</h4>
+            <h4 className="font-body-lg font-medium text-on-surface">测试连接</h4>
             <p className="font-body-md text-on-surface-variant mt-1">
-              使用当前请求地址、密钥和模型发起一次测试摘要请求。
+              {AI_TEST_COST_NOTE}
             </p>
             <p
               className={`mt-3 rounded-lg border px-3 py-2 font-body-md text-sm ${
@@ -1636,7 +1430,7 @@ function AISettings({ settingsHook }: { settingsHook: ReturnType<typeof useAppSe
                   : 'border-error/20 bg-error/10 text-error'
               }`}
             >
-              {canTestAi ? '当前 AI 配置已填写完整，可以发起测试连接。' : currentConfigMessage}
+              {canTestAi ? '设置已填完整，可以点「测试连接」。' : currentConfigMessage}
             </p>
             {testMessage && (
               <p
@@ -1654,10 +1448,10 @@ function AISettings({ settingsHook }: { settingsHook: ReturnType<typeof useAppSe
             type="button"
             onClick={() => void handleTestAiConnection()}
             disabled={isTestingAi || !canTestAi}
-            title={canTestAi ? '测试当前 AI 配置' : (currentConfigMessage ?? '请先补全 AI 配置')}
+            title={canTestAi ? '用现在的设置真实调用一次 AI，会产生很少的费用' : (currentConfigMessage ?? '请先把设置填完整')}
             className="shrink-0 rounded-lg border border-card-border bg-surface-container-high px-4 py-2 font-body-md text-sm text-on-surface transition-all hover:bg-surface-container-highest disabled:opacity-60"
           >
-            {isTestingAi ? '测试中...' : '测试连接'}
+            {isTestingAi ? '测试中…' : '测试连接'}
           </button>
         </div>
         </div>
@@ -2126,7 +1920,7 @@ function EmbeddingSettingsPanel({
                 <label className="grid gap-2 font-body-md text-sm font-medium text-on-surface">
                   API Key
                   <input type="password" autoComplete="off" autoCapitalize="none" autoCorrect="off" spellCheck={false} value={apiKeyDraft} onChange={(event) => setApiKeyDraft(event.target.value)} onBlur={() => void persistEmbeddingKey().catch(() => undefined)} disabled={!embedding.enabled || embedding.provider === 'local'} placeholder={hasSavedApiKey ? '已保存，输入新 Key 可替换' : '输入 Embedding API Key'} className="rounded-lg border border-outline-variant bg-surface-container-low px-3 py-2 font-body-md text-sm text-on-surface focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary disabled:opacity-60" />
-                  <span className="font-body-md text-xs font-normal text-on-surface-variant">只发送仓库知识文本，不发送个人笔记；Key 仅保存到系统凭据管理器。</span>
+                  <span className="font-body-md text-xs font-normal text-on-surface-variant">只发送工具的公开资料文本，不发送个人笔记；密钥只保存在 Mac 的钥匙串里。</span>
                   {hasSavedApiKey && !apiKeyDraft.trim() && <button type="button" onClick={() => void handleClearSavedKey()} className="w-fit rounded-lg border border-card-border bg-surface-container-high px-3 py-1.5 font-body-md text-xs text-on-surface">清除已保存 Key</button>}
                   {keySaveMessage && <span className="font-body-md text-xs text-on-surface-variant">{keySaveMessage}</span>}
                 </label>
@@ -2403,9 +2197,9 @@ function AiRequestDiagnosticsPanel(props: {
     <div className="border-t border-card-border py-4">
       <div className="mb-3 flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
         <div>
-          <h4 className="font-body-lg font-medium text-on-surface">AI 请求诊断</h4>
+          <h4 className="font-body-lg font-medium text-on-surface">AI 请求详情</h4>
           <p className="font-body-md mt-1 text-sm text-on-surface-variant">
-            显示当前最终请求参数，方便定位模型、地址、超时、批处理和失败原因。
+            显示这次请求最终用的参数，方便查模型、地址、超时和失败原因。
           </p>
         </div>
         <button
@@ -2415,7 +2209,7 @@ function AiRequestDiagnosticsPanel(props: {
           className="inline-flex shrink-0 items-center justify-center gap-2 rounded-lg border border-card-border bg-surface-container-high px-3 py-2 font-body-md text-sm text-on-surface transition-colors hover:bg-surface-container-highest disabled:opacity-60"
         >
           <Icon name={props.isLoading ? 'progress_activity' : 'refresh'} size={16} className={props.isLoading ? 'animate-spin' : ''} />
-          {props.isLoading ? '诊断中' : '刷新诊断'}
+          {props.isLoading ? '读取中' : '重新读取'}
         </button>
       </div>
 
@@ -2423,29 +2217,27 @@ function AiRequestDiagnosticsPanel(props: {
         <>
           <div className={`mb-3 rounded-lg border px-3 py-2 font-body-md text-sm ${statusClass}`}>
             {diagnostics.status === 'ready'
-              ? '当前 AI 请求配置可发起测试。'
-              : diagnostics.failureReason ?? '当前 AI 请求配置尚未完整。'}
+              ? '设置已填完整，可以测试连接。'
+              : diagnostics.failureReason ?? '设置还没填完整。'}
           </div>
           <dl className="grid gap-x-6 gap-y-0 overflow-hidden rounded-lg border border-card-border md:grid-cols-2">
-            <AiDiagnosticsRow label="Provider" value={diagnostics.provider} />
+            <AiDiagnosticsRow label="服务类型" value={diagnostics.provider} />
             <AiDiagnosticsRow label="请求协议" value={formatAiWireProtocol(diagnostics.wireProtocol)} />
-            <AiDiagnosticsRow label="Base URL" value={diagnostics.baseUrl ?? '未配置，使用默认地址'} />
-            <AiDiagnosticsRow label="请求 Endpoint" value={diagnostics.endpoint ?? '未生成'} />
-            <AiDiagnosticsRow label="模型" value={diagnostics.model || '未填写'} />
-            <AiDiagnosticsRow label="API Key" value={formatAiApiKeyState(diagnostics.apiKeyState)} />
+            <AiDiagnosticsRow label="请求地址" value={diagnostics.baseUrl ?? '没填，用默认地址'} />
+            <AiDiagnosticsRow label="实际请求的地址" value={diagnostics.endpoint ?? '还没生成'} />
+            <AiDiagnosticsRow label="模型" value={diagnostics.model || '还没填'} />
+            <AiDiagnosticsRow label="密钥" value={formatAiApiKeyState(diagnostics.apiKeyState)} />
             <AiDiagnosticsRow label="连接超时" value={`${diagnostics.connectTimeoutSeconds} 秒`} />
             <AiDiagnosticsRow label="请求超时" value={`${diagnostics.requestTimeoutSeconds} 秒`} />
-            <AiDiagnosticsRow label="模型列表超时" value={`${diagnostics.modelListTimeoutSeconds} 秒`} />
+            <AiDiagnosticsRow label="获取模型超时" value={`${diagnostics.modelListTimeoutSeconds} 秒`} />
             <AiDiagnosticsRow label="失败重试" value={`${diagnostics.retryAttempts} 次，间隔 ${diagnostics.retryBaseDelayMs}ms 起`} />
-            <AiDiagnosticsRow label="README 输入上限" value={`${compactNumber(diagnostics.readmePromptCharLimit)} 字符`} />
-            <AiDiagnosticsRow label="标签网络批量" value={`每批最多 ${diagnostics.tagNetworkBatchSize} 个仓库`} />
-            <AiDiagnosticsRow label="摘要 Prompt" value={diagnostics.summaryPromptVersion} />
-            <AiDiagnosticsRow label="标签 Prompt" value={diagnostics.tagNetworkPromptVersion} />
+            <AiDiagnosticsRow label="项目说明读取上限" value={`${compactNumber(diagnostics.readmePromptCharLimit)} 字符`} />
+            <AiDiagnosticsRow label="说明提示词版本" value={diagnostics.summaryPromptVersion} />
           </dl>
         </>
       ) : (
         <div className="rounded-lg border border-outline-variant/25 bg-surface-container-low px-3 py-3 font-body-md text-sm text-on-surface-variant">
-          {props.errorMessage ?? '正在等待 AI 配置诊断。'}
+          {props.errorMessage ?? '正在读取…'}
         </div>
       )}
 
@@ -2490,7 +2282,7 @@ function formatAiApiKeyState(value: string) {
     case 'present':
       return '已读取';
     case 'missing':
-      return '缺失';
+      return '没有';
     case 'optional_for_local':
       return '本机兼容服务可留空';
     case 'not_required':
@@ -2534,9 +2326,9 @@ function AiTestDialog(props: {
       <div className="w-full max-w-[560px] rounded-xl border border-card-border bg-surface p-5 shadow-2xl">
         <div className="flex items-start justify-between gap-4">
           <div className="min-w-0">
-            <h3 className="font-headline-md text-[20px] font-semibold text-on-surface">AI 配置测试</h3>
+            <h3 className="font-headline-md text-[20px] font-semibold text-on-surface">AI 连接测试</h3>
             <p className="mt-1 font-body-md text-sm text-on-surface-variant">
-              正在用当前配置发起一次真实摘要请求，结果会显示响应耗时和估算输出速度。
+              正在用现在的设置真实调用一次 AI，会产生很少的费用。结果会显示用时和大概的输出速度。
             </p>
           </div>
           <button
@@ -2544,7 +2336,7 @@ function AiTestDialog(props: {
             onClick={props.onClose}
             className="rounded-lg border border-card-border bg-surface-container-high px-3 py-1.5 font-body-md text-sm text-on-surface transition-colors hover:bg-surface-container-highest"
           >
-            {props.isTesting ? '后台等待' : '关闭'}
+            {props.isTesting ? '继续在后台等' : '关闭'}
           </button>
         </div>
 
@@ -2563,16 +2355,16 @@ function AiTestDialog(props: {
           <AiTestMetric label="服务" value={state.providerLabel} />
           <AiTestMetric label="模型" value={state.model} />
           <AiTestMetric label="请求地址" value={state.endpoint} wide />
-          <AiTestMetric label="首字响应" value={formatLatency(state.firstTokenLatencyMs)} />
-          <AiTestMetric label="总耗时" value={formatLatency(state.totalLatencyMs)} />
-          <AiTestMetric label="输出 token" value={state.outputTokens === null ? '等待结果' : String(state.outputTokens)} />
+          <AiTestMetric label="开始回复用时" value={formatLatency(state.firstTokenLatencyMs)} />
+          <AiTestMetric label="总用时" value={formatLatency(state.totalLatencyMs)} />
+          <AiTestMetric label="输出量（token）" value={state.outputTokens === null ? '等待结果' : String(state.outputTokens)} />
           <AiTestMetric label="输出速度" value={formatTokensPerSecond(state.tokensPerSecond)} />
           <AiTestMetric label="最长等待" value="约 120 秒" />
         </dl>
 
         {state.summary && (
           <div className="mt-4 rounded-lg border border-success/20 bg-success/10 px-3 py-2">
-            <p className="font-body-md text-xs font-medium text-success">模型返回摘要</p>
+            <p className="font-body-md text-xs font-medium text-success">AI 回复的测试内容</p>
             <p className="mt-1 font-body-md text-sm leading-relaxed text-on-surface">{state.summary}</p>
           </div>
         )}
@@ -2686,7 +2478,7 @@ function getAiApiKeyPlaceholder(provider: AISettingsValue['provider']) {
     case 'anthropic':
       return 'sk-ant-...';
     case 'openai-compatible':
-      return '本机服务可留空，云端兼容服务填写 API Key';
+      return '本机服务可留空，云端服务填写密钥';
     case 'openai':
     default:
       return 'sk-...';
@@ -2698,7 +2490,7 @@ function getAiModelPlaceholder(provider: AISettingsValue['provider']) {
     case 'anthropic':
       return 'claude-sonnet-5';
     case 'openai-compatible':
-      return '服务商模型 ID';
+      return '服务商给你的模型名';
     case 'openai':
     default:
       return 'gpt-5.5';
@@ -2706,17 +2498,7 @@ function getAiModelPlaceholder(provider: AISettingsValue['provider']) {
 }
 
 function getAiKeySaveMessage(status: ReturnType<typeof useAppSettings>['aiKeySaveStatus']) {
-  switch (status) {
-    case 'saving':
-      return '正在安全保存 API Key...';
-    case 'saved':
-      return 'API Key 已安全保存。';
-    case 'error':
-      return 'API Key 保存失败，请检查系统凭据管理器权限。';
-    case 'idle':
-    default:
-      return null;
-  }
+  return aiKeySaveStatusText(status);
 }
 
 /* === 通用设置 === */
@@ -2738,9 +2520,9 @@ function GeneralSettings({
       await settingsHook.resetSettings();
       await workspace.handleClearLocalData();
       setIsClearDataConfirmOpen(false);
-      setLocalDataMessage({ type: 'success', text: '本机数据已清空，重新连接 GitHub 后即可重新同步。' });
-    } catch (error) {
-      setLocalDataMessage({ type: 'error', text: `本机数据清空失败：${toErrorMessage(error)}` });
+      setLocalDataMessage({ type: 'success', text: CLEAR_LOCAL_DATA_DONE });
+    } catch {
+      setLocalDataMessage({ type: 'error', text: CLEAR_LOCAL_DATA_FAILED });
     } finally {
       setIsClearingAllLocalData(false);
     }
@@ -2748,7 +2530,7 @@ function GeneralSettings({
 
   return (
     <section className="glass-panel rounded-xl p-6">
-      <h3 className="font-headline-md text-[20px] font-semibold text-on-surface mb-6">通用设置</h3>
+      <h3 className="font-headline-md text-[20px] font-semibold text-on-surface mb-6">通用</h3>
       <div className="space-y-6">
         <div className="flex flex-col gap-3 py-4 md:flex-row md:items-center md:justify-between">
           <div className="min-w-0 flex-1 md:pr-6">
@@ -2824,7 +2606,7 @@ function GeneralSettings({
         <div className="flex items-start justify-between gap-4 border-t border-card-border py-4">
           <div className="min-w-0 flex-1">
             <h4 className="font-body-lg font-medium text-on-surface">启动时显示欢迎引导</h4>
-            <p className="font-body-md text-on-surface-variant mt-1">首次打开应用时显示欢迎流程。</p>
+            <p className="font-body-md text-on-surface-variant mt-1">{WELCOME_STARTUP_HINT}</p>
           </div>
           <ToggleSwitch
             checked={settingsHook.settings.general.showWelcomeOnStartup}
@@ -2835,7 +2617,7 @@ function GeneralSettings({
           <div className="min-w-0 flex-1">
             <h4 className="font-body-lg font-medium text-on-surface">自动同步</h4>
             <p className="font-body-md text-on-surface-variant mt-1">
-              应用启动后立即同步一次，并按设定间隔完整核对 GitHub Stars。
+              {autoSyncDescription(settingsHook.settings.sync.autoSyncInterval)}
             </p>
           </div>
           <ToggleSwitch
@@ -2847,7 +2629,7 @@ function GeneralSettings({
           <div className="flex flex-col gap-3 border-t border-card-border py-4 sm:flex-row sm:items-center sm:justify-between">
             <div className="min-w-0 flex-1 sm:pr-6">
               <h4 className="font-body-lg font-medium text-on-surface">同步间隔</h4>
-              <p className="font-body-md text-on-surface-variant mt-1">可设置 5 到 1440 分钟，避免过于频繁请求 GitHub API。</p>
+              <p className="font-body-md text-on-surface-variant mt-1">{SYNC_INTERVAL_HINT}</p>
             </div>
             <div className="flex items-center gap-2">
               <input
@@ -2874,7 +2656,7 @@ function GeneralSettings({
                   <h4 className="font-body-lg font-semibold text-on-surface">清空本机数据</h4>
                 </div>
                 <p className="mt-2 max-w-2xl font-body-md text-sm leading-relaxed text-on-surface-variant">
-                  删除本机 SQLite 数据库、应用设置、GitHub Token 和 AI API Key。适合重新登录、清理损坏数据或准备重新同步。
+                  {CLEAR_LOCAL_DATA_WARNING}
                 </p>
                 {localDataMessage && (
                   <p
@@ -2917,7 +2699,7 @@ function GeneralSettings({
                       确认清空本机数据
                     </h4>
                     <p className="mt-2 text-sm leading-relaxed text-on-surface-variant">
-                      这会删除本机 Stars、README、AI 摘要、标签、笔记、GitHub Token 和 AI API Key。操作完成后应用会回到新安装状态。
+                      {CLEAR_LOCAL_DATA_WARNING}
                     </p>
                   </div>
                 </div>
@@ -2955,14 +2737,13 @@ function AppIdentityDetails({ identity, errorMessage }: { identity: AppIdentity 
     { label: 'Bundle ID', value: identity.bundleIdentifier },
     { label: 'App Bundle', value: identity.appBundleName },
     { label: '安装包命名', value: identity.dmgFilePattern },
-    { label: '数据目录', value: identity.dataDir },
-    { label: '配置目录', value: identity.configDir },
-    { label: '本地数据库', value: identity.databasePath },
+    { label: '配置文件夹', value: identity.configDir },
+    { label: '资料库文件', value: identity.databasePath },
     { label: '设置文件', value: identity.settingsPath },
-    { label: '系统凭据服务', value: identity.credentialService },
-    { label: 'Gist 备份文件', value: identity.annotationGistFile },
+    { label: '钥匙串服务名', value: identity.credentialService },
+    { label: 'GitHub 备份文件名', value: identity.annotationGistFile },
     { label: '更新地址', value: identity.updateEndpoint },
-    { label: '个人版分支', value: identity.repositoryUrl },
+    { label: '项目的 GitHub 页面', value: identity.repositoryUrl },
   ] : [];
 
   return (
@@ -2973,12 +2754,12 @@ function AppIdentityDetails({ identity, errorMessage }: { identity: AppIdentity 
       </div>
       {errorMessage ? (
         <p className="rounded-lg border border-error/20 bg-error/10 px-3 py-2 text-sm text-error">
-          身份信息读取失败：{errorMessage}
+          没读出来。你的资料都还在。重启应用再试；还不行就把这条截图发给开发者。
         </p>
       ) : null}
       {!identity && !errorMessage ? (
         <p className="rounded-lg border border-outline-variant/25 bg-surface px-3 py-2 text-sm text-on-surface-variant">
-          正在读取应用身份和本机数据位置。
+          正在读取…
         </p>
       ) : null}
       {identity ? (
@@ -3029,80 +2810,75 @@ function AboutSettings({ appUpdate }: { appUpdate: AppUpdateContextValue }) {
 
   return (
     <section className="glass-panel rounded-xl p-6">
-      <h3 className="mb-6 font-headline-md text-[20px] font-semibold text-on-surface">关于项目</h3>
+      <h3 className="mb-6 font-headline-md text-[20px] font-semibold text-on-surface">关于</h3>
       <div className="space-y-5">
         <div className="rounded-xl border border-outline-variant/30 bg-surface-container-low p-4">
-          <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
-            <div className="min-w-0">
-              <div className="flex items-center gap-2">
-                <Icon name="stars" size={20} className="shrink-0 text-primary" />
-                <h4 className="min-w-0 font-body-lg font-semibold text-on-surface">Fox Stars Lab</h4>
-              </div>
-              <p className="mt-2 max-w-2xl font-body-md text-sm leading-relaxed text-on-surface-variant">
-                这是 Fox 长期使用的个人定制版，应用身份、数据目录和凭据服务已与原版隔离。README、AI 摘要和标签网络仍把收藏仓库整理成本机可检索的技术资产。
-              </p>
-              <p className="mt-2 max-w-2xl font-body-md text-sm leading-relaxed text-on-surface-variant">
-                本项目源码公开，采用非商用许可。个人学习、研究和非营利用途可以使用；商业使用、集成或再分发需要另行获得授权。
-              </p>
-              <div className="mt-3 flex flex-wrap gap-2 text-xs text-on-surface-variant">
-                <span className="rounded-lg border border-outline-variant/30 bg-surface px-2.5 py-1">FSL</span>
-                <span className="rounded-lg border border-outline-variant/30 bg-surface px-2.5 py-1">本地优先客户端</span>
-                <span className="rounded-lg border border-outline-variant/30 bg-surface px-2.5 py-1">AI 知识整理</span>
-                <span className="rounded-lg border border-outline-variant/30 bg-surface px-2.5 py-1">PolyForm Noncommercial 1.0.0</span>
-              </div>
-            </div>
-            <div className="grid w-full grid-cols-1 gap-2 sm:w-auto sm:min-w-40">
-              <a
-                href={PROJECT_REPOSITORY_URL}
-                target="_blank"
-                rel="noreferrer"
-                className="inline-flex items-center justify-center gap-2 rounded-lg bg-primary px-3 py-2 text-sm font-semibold text-white shadow-sm shadow-primary/20 transition-all hover:-translate-y-0.5 hover:brightness-110 active:translate-y-0"
-              >
-                <Icon name="code" size={17} />
-                项目仓库
-                <Icon name="open_in_new" size={15} />
-              </a>
-              <a
-                href={PROJECT_ISSUES_URL}
-                target="_blank"
-                rel="noreferrer"
-                className="inline-flex items-center justify-center gap-2 rounded-lg border border-outline-variant/35 bg-surface px-3 py-2 text-sm font-medium text-on-surface transition-colors hover:bg-surface-container-high"
-              >
-                <Icon name="bug_report" size={17} />
-                问题反馈
-                <Icon name="open_in_new" size={15} />
-              </a>
-            </div>
+          <div className="flex items-center gap-2">
+            <Icon name="stars" size={20} className="shrink-0 text-primary" />
+            <h4 className="min-w-0 font-body-lg font-semibold text-on-surface">Fox Stars Lab</h4>
           </div>
-            <AppIdentityDetails identity={appIdentity} errorMessage={appIdentityError} />
-          <div className="mt-4 grid gap-2 border-t border-outline-variant/25 pt-3 md:grid-cols-2">
+          <dl className="mt-4 grid gap-x-4 gap-y-3 text-sm md:grid-cols-2">
+            <IdentityField label="版本号" value={appUpdate.currentVersion || '读取中'} />
+            <IdentityField
+              label="数据放在哪个文件夹"
+              value={appIdentity?.dataDir ?? (appIdentityError ? '没读出来。你的资料都还在。' : '正在读取…')}
+            />
+            <div className="min-w-0 border-b border-outline-variant/20 pb-2 md:col-span-2">
+              <dt className="text-xs font-medium text-on-surface-variant">许可证</dt>
+              <dd className="mt-1 text-sm leading-relaxed text-on-surface">
+                非商用许可：个人学习、研究和非营利用途可以使用；商业使用、集成或再分发需要另行获得授权。
+                <a
+                  href={PROJECT_LICENSE_URL}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="ml-2 text-primary hover:underline"
+                >
+                  查看许可证全文
+                </a>
+              </dd>
+            </div>
+          </dl>
+        </div>
+        <AppUpdatePanel appUpdate={appUpdate} />
+        <details className="rounded-xl border border-outline-variant/30 bg-surface-container-low px-4 py-3">
+          <summary className="cursor-pointer font-body-md text-sm font-medium text-on-surface">开发者信息</summary>
+          <p className="mt-3 max-w-2xl font-body-md text-sm leading-relaxed text-on-surface-variant">
+            这是 Fox 长期使用的个人定制版，应用身份、数据文件夹和钥匙串条目已与原版隔离。许可证全称：PolyForm Noncommercial 1.0.0。
+          </p>
+          <div className="mt-3 flex flex-wrap gap-2 text-sm">
             <a
-              href={PROJECT_LICENSE_URL}
+              href={PROJECT_REPOSITORY_URL}
               target="_blank"
               rel="noreferrer"
-              className="flex items-start gap-2 rounded-lg border border-outline-variant/25 bg-surface px-3 py-2 text-sm text-on-surface-variant transition-colors hover:bg-surface-container-high hover:text-on-surface"
+              className="inline-flex items-center gap-1.5 rounded-lg border border-outline-variant/35 bg-surface px-3 py-1.5 text-on-surface transition-colors hover:bg-surface-container-high"
             >
-              <Icon name="policy" size={18} className="mt-0.5 shrink-0 text-primary" />
-              <span className="min-w-0">
-                <span className="block font-medium text-on-surface">查看许可证</span>
-                <span className="text-xs">确认非商用授权边界</span>
-              </span>
+              <Icon name="code" size={16} />
+              项目的 GitHub 页面
+              <Icon name="open_in_new" size={14} />
+            </a>
+            <a
+              href={PROJECT_ISSUES_URL}
+              target="_blank"
+              rel="noreferrer"
+              className="inline-flex items-center gap-1.5 rounded-lg border border-outline-variant/35 bg-surface px-3 py-1.5 text-on-surface transition-colors hover:bg-surface-container-high"
+            >
+              <Icon name="bug_report" size={16} />
+              问题反馈
+              <Icon name="open_in_new" size={14} />
             </a>
             <a
               href={PROJECT_ACKNOWLEDGEMENTS_URL}
               target="_blank"
               rel="noreferrer"
-              className="flex items-start gap-2 rounded-lg border border-outline-variant/25 bg-surface px-3 py-2 text-sm text-on-surface-variant transition-colors hover:bg-surface-container-high hover:text-on-surface"
+              className="inline-flex items-center gap-1.5 rounded-lg border border-outline-variant/35 bg-surface px-3 py-1.5 text-on-surface transition-colors hover:bg-surface-container-high"
             >
-              <Icon name="diversity_3" size={18} className="mt-0.5 shrink-0 text-primary" />
-              <span className="min-w-0">
-                <span className="block font-medium text-on-surface">开源组件鸣谢</span>
-                <span className="text-xs">查看项目依赖与生态致谢</span>
-              </span>
+              <Icon name="diversity_3" size={16} />
+              开源组件鸣谢
+              <Icon name="open_in_new" size={14} />
             </a>
           </div>
-        </div>
-        <AppUpdatePanel appUpdate={appUpdate} />
+          <AppIdentityDetails identity={appIdentity} errorMessage={appIdentityError} />
+        </details>
       </div>
     </section>
   );
@@ -3117,7 +2893,7 @@ function normalizeSyncIntervalInput(value: string) {
   return Math.min(Math.max(parsed, 5), 1440);
 }
 
-/* === 数据备份设置 === */
+/* === GitHub 备份设置 === */
 function BackupSettings({ workspace }: { workspace: ReturnType<typeof useWorkspace> }) {
   const isConnected = workspace.authState.hasToken && Boolean(workspace.authState.user);
   const isAnyBackupActionRunning =
@@ -3125,19 +2901,16 @@ function BackupSettings({ workspace }: { workspace: ReturnType<typeof useWorkspa
     workspace.isImportingAnnotations ||
     workspace.isExportingRepositoryLibrary ||
     workspace.isImportingRepositoryLibrary;
-  const importHint = !isConnected
-    ? '请先连接 GitHub 账号后再导入 Gist 备份。'
-    : workspace.gistIdDraft.trim()
-      ? '导入会覆盖匹配仓库的标签、笔记和阅读状态，请确认 Gist ID 来自你的 GSAT 备份。'
-      : '输入 Gist ID 后即可从备份恢复数据。';
+  // 覆盖标记的警告一直显示在导入区上面；这里只说「为什么现在点不了」
+  const importHint = gistImportHint(isConnected, Boolean(workspace.gistIdDraft.trim()));
 
   return (
     <section className="glass-panel rounded-xl p-6">
-      <h3 className="font-headline-md text-[20px] font-semibold text-on-surface mb-6">数据备份与恢复</h3>
+      <h3 className="font-headline-md text-[20px] font-semibold text-on-surface mb-6">{GIST_SECTION_TITLE}</h3>
       <div className="space-y-6">
         {!isConnected && (
           <p className="rounded-lg border border-error/20 bg-error/10 px-3 py-2 font-body-md text-sm text-error">
-            请先连接 GitHub 账号。Gist 备份需要 Token 具备 gist 权限。
+            {GIST_NEEDS_SCOPE}
           </p>
         )}
         {workspace.authMessage && (
@@ -3153,46 +2926,49 @@ function BackupSettings({ workspace }: { workspace: ReturnType<typeof useWorkspa
         <div className="p-4 rounded-lg bg-surface-container-low border border-card-border">
           <h4 className="font-body-lg font-medium text-on-surface mb-2 flex items-center gap-2">
             <Icon name="cloud_upload" size={20} className="text-primary" />
-            导出注解
+            {GIST_BACKUP_MARKS.title}
           </h4>
           <p className="font-body-md text-sm text-on-surface-variant mb-3">
-            只导出标签、笔记和阅读状态。适合在已同步相同 Stars 的设备之间恢复整理结果。
+            {GIST_BACKUP_MARKS.body}
           </p>
           <button
             onClick={() => void workspace.handleExportAnnotations()}
             disabled={isAnyBackupActionRunning || !isConnected}
-            title={isConnected ? '导出标签、笔记和阅读状态到私密 Gist' : '请先连接 GitHub 账号'}
+            title={isConnected ? '把标记、标签和笔记上传到你的私密 Gist' : '请先连接 GitHub 账号'}
             className="px-4 py-2 bg-primary text-white rounded-lg font-body-md flex items-center gap-2 hover:brightness-110 transition-all shadow-sm disabled:opacity-60"
           >
             <Icon name="upload" size={18} />
-            {workspace.isExportingAnnotations ? '导出中...' : '导出注解'}
+            {workspace.isExportingAnnotations ? '上传中…' : GIST_BACKUP_MARKS.title}
           </button>
         </div>
         <div className="p-4 rounded-lg bg-surface-container-low border border-card-border">
           <h4 className="font-body-lg font-medium text-on-surface mb-2 flex items-center gap-2">
             <Icon name="inventory_2" size={20} className="text-primary" />
-            导出所有仓库
+            {GIST_BACKUP_LIBRARY.title}
           </h4>
           <p className="font-body-md text-sm text-on-surface-variant mb-3">
-            导出仓库清单、标签、笔记和阅读状态，不包含 README、AI 摘要、Embedding、API Key 或本机设置。
+            {GIST_BACKUP_LIBRARY.body}
           </p>
           <button
             onClick={() => void workspace.handleExportRepositoryLibrary()}
             disabled={isAnyBackupActionRunning || !isConnected}
-            title={isConnected ? '导出所有仓库和整理结果到私密 Gist' : '请先连接 GitHub 账号'}
+            title={isConnected ? '把整个清单（含标记、标签和笔记）上传到你的私密 Gist' : '请先连接 GitHub 账号'}
             className="px-4 py-2 bg-primary text-white rounded-lg font-body-md flex items-center gap-2 hover:brightness-110 transition-all shadow-sm disabled:opacity-60"
           >
             <Icon name="upload" size={18} />
-            {workspace.isExportingRepositoryLibrary ? '导出中...' : '导出所有仓库'}
+            {workspace.isExportingRepositoryLibrary ? '上传中…' : GIST_BACKUP_LIBRARY.title}
           </button>
         </div>
         <div className="p-4 rounded-lg bg-surface-container-low border border-card-border">
           <h4 className="font-body-lg font-medium text-on-surface mb-2 flex items-center gap-2">
             <Icon name="cloud_download" size={20} className="text-primary" />
-            从 Gist 导入
+            从 GitHub 导入备份
           </h4>
           <p className="font-body-md text-sm text-on-surface-variant mb-3">
-            输入 Gist ID 后选择导入范围。导入所有仓库会为当前账号创建缺失的本地仓库记录。
+            填入上传备份时得到的 Gist ID（备份的编号），再选要导入什么。导入整个清单时，这台电脑上还没有的收藏会补上。
+          </p>
+          <p className="mb-3 rounded-lg border border-warning/25 bg-warning/10 px-3 py-2 font-body-md text-xs text-warning">
+            {GIST_IMPORT_WARNING}
           </p>
           <form
             onSubmit={(event) => void workspace.handleImportAnnotations(event)}
@@ -3202,32 +2978,34 @@ function BackupSettings({ workspace }: { workspace: ReturnType<typeof useWorkspa
               type="text"
               value={workspace.gistIdDraft}
               onChange={(e) => workspace.setGistIdDraft(e.target.value)}
-              placeholder="输入 Gist ID..."
+              placeholder="粘贴 Gist ID"
               className="w-full bg-surface border border-outline-variant rounded-lg px-4 py-2 font-body-md text-on-surface focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary"
             />
             <div className="flex flex-col gap-2 sm:flex-row sm:gap-3">
               <button
                 type="submit"
                 disabled={isAnyBackupActionRunning || !workspace.gistIdDraft.trim() || !isConnected}
-                title={isConnected ? '从 Gist 恢复已有仓库的标签、笔记和阅读状态' : '请先连接 GitHub 账号'}
+                title={isConnected ? '从 Gist 恢复这台电脑上已有工具的标记、标签和笔记' : '请先连接 GitHub 账号'}
                 className="px-4 py-2 bg-surface-container-high hover:bg-surface-container-highest text-on-surface rounded-lg border border-card-border font-body-md transition-all disabled:opacity-60"
               >
-                {workspace.isImportingAnnotations ? '导入中...' : '导入注解'}
+                {workspace.isImportingAnnotations ? '导入中…' : '导入我的标记'}
               </button>
               <button
                 type="button"
                 onClick={(event) => void workspace.handleImportRepositoryLibrary(event)}
                 disabled={isAnyBackupActionRunning || !workspace.gistIdDraft.trim() || !isConnected}
-                title={isConnected ? '从 Gist 恢复仓库清单、标签、笔记和阅读状态' : '请先连接 GitHub 账号'}
+                title={isConnected ? '从 Gist 恢复整个清单（含标记、标签和笔记）' : '请先连接 GitHub 账号'}
                 className="px-4 py-2 bg-surface-container-high hover:bg-surface-container-highest text-on-surface rounded-lg border border-card-border font-body-md transition-all disabled:opacity-60"
               >
-                {workspace.isImportingRepositoryLibrary ? '导入中...' : '导入所有仓库'}
+                {workspace.isImportingRepositoryLibrary ? '导入中…' : '导入整个清单'}
               </button>
             </div>
           </form>
-          <p className={`mt-2 font-body-md text-xs ${isConnected ? 'text-on-surface-variant' : 'text-error'}`}>
-            {importHint}
-          </p>
+          {importHint && (
+            <p className={`mt-2 font-body-md text-xs ${isConnected ? 'text-on-surface-variant' : 'text-error'}`}>
+              {importHint}
+            </p>
+          )}
         </div>
       </div>
     </section>

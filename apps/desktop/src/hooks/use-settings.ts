@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import {
   isSavedAiApiKeyPlaceholder,
+  keychainFailureText,
   normalizeEmbeddingSettings,
   SAVED_AI_API_KEY_PLACEHOLDER,
   shouldFlushAiApiKey,
@@ -11,6 +12,8 @@ import type { AppSettings } from '@/types-settings';
 import { DEFAULT_SETTINGS } from '@/types-settings';
 
 const STALE_SETTINGS_CACHE_KEY = 'fox-stars-lab-settings';
+const SETTINGS_NOT_READ = '设置没读出来，先用了默认设置。你的资料都还在。重启应用再试一次；还不行就把这条截图发给开发者。';
+const SETTINGS_NOT_SAVED = '设置没保存上。你的资料都还在。再改一次试试；还不行就重启应用，再不行把这条截图发给开发者。';
 type AiKeySaveStatus = 'idle' | 'saving' | 'saved' | 'error';
 type AppSettingsPatch = {
   theme?: Partial<AppSettings['theme']>;
@@ -65,8 +68,8 @@ export function useSettings() {
           runtime: normalizeRuntimeSettings({ ...DEFAULT_SETTINGS.runtime, ...parsed.runtime }),
         };
       }
-    } catch (error) {
-      nextError = `设置读取失败，已使用默认配置：${toErrorMessage(error)}`;
+    } catch {
+      nextError = SETTINGS_NOT_READ;
       nextSettings = DEFAULT_SETTINGS;
     }
 
@@ -76,7 +79,7 @@ export function useSettings() {
         apiKey = await readSavedAiApiKeyPlaceholder(nextSettings.ai);
       } catch (error) {
         apiKey = '';
-        nextError = `AI Key 状态读取失败，请检查系统凭据管理器权限：${toErrorMessage(error)}`;
+        nextError = keychainFailureText('read');
       }
     }
 
@@ -88,7 +91,7 @@ export function useSettings() {
         embeddingApiKey = '';
         nextError = mergeSettingsError(
           nextError,
-          `Embedding Key 状态读取失败，请检查系统凭据管理器权限：${toErrorMessage(error)}`,
+          keychainFailureText('read'),
         );
       }
     }
@@ -101,8 +104,8 @@ export function useSettings() {
     setSettings(hydratedSettings);
     try {
       await persistSettingsSnapshot(hydratedSettings);
-    } catch (error) {
-      nextError = mergeSettingsError(nextError, `设置写入失败，请检查本机存储权限：${toErrorMessage(error)}`);
+    } catch {
+      nextError = mergeSettingsError(nextError, SETTINGS_NOT_SAVED);
     }
     setSettingsError(nextError);
     setIsLoading(false);
@@ -138,7 +141,7 @@ export function useSettings() {
         };
       } catch (error) {
         nextAi = { ...nextAi, apiKey: '' };
-        nextError = `AI Key 状态读取失败，请检查系统凭据管理器权限：${toErrorMessage(error)}`;
+        nextError = keychainFailureText('read');
       }
     }
 
@@ -153,7 +156,7 @@ export function useSettings() {
           nextEmbedding = { ...nextEmbedding, apiKey: '' };
           nextError = mergeSettingsError(
             nextError,
-            `Embedding Key 状态读取失败，请检查系统凭据管理器权限：${toErrorMessage(error)}`,
+            keychainFailureText('read'),
           );
         }
       } else {
@@ -182,7 +185,7 @@ export function useSettings() {
           setAiKeySaveStatus((partial.ai?.apiKey ?? '').trim() ? 'saved' : 'idle');
         } catch (error) {
           setAiKeySaveStatus('error');
-          nextError = `AI Key 保存失败，请检查系统凭据管理器权限：${toErrorMessage(error)}`;
+          nextError = keychainFailureText('save');
         }
       }
       if (partialEmbeddingIncludesApiKey) {
@@ -194,13 +197,13 @@ export function useSettings() {
           setEmbeddingKeySaveStatus('error');
           nextError = mergeSettingsError(
             nextError,
-            `Embedding Key 保存失败，请检查系统凭据管理器权限：${toErrorMessage(error)}`,
+            keychainFailureText('save'),
           );
         }
       }
       await persistSettingsSnapshot(updated);
-    } catch (error) {
-      nextError = mergeSettingsError(nextError, `设置保存失败，请检查本机存储权限：${toErrorMessage(error)}`);
+    } catch {
+      nextError = mergeSettingsError(nextError, SETTINGS_NOT_SAVED);
     }
     setSettingsError(nextError);
   }
@@ -239,7 +242,7 @@ export function useSettings() {
       setSettingsError(null);
     } catch (error) {
       setEmbeddingKeySaveStatus('error');
-      setSettingsError(`Embedding Key 保存失败，请检查系统凭据管理器权限：${toErrorMessage(error)}`);
+      setSettingsError(keychainFailureText('save'));
       throw error;
     }
   }
@@ -253,8 +256,8 @@ export function useSettings() {
     try {
       await persistSettingsSnapshot(updated);
       setSettingsError(null);
-    } catch (error) {
-      setSettingsError(`设置保存失败，请检查本机存储权限：${toErrorMessage(error)}`);
+    } catch {
+      setSettingsError(SETTINGS_NOT_SAVED);
     }
     scheduleAiKeySave(apiKey, updated.ai.provider);
   }
@@ -269,7 +272,7 @@ export function useSettings() {
       setSettingsError(null);
     } catch (error) {
       setAiKeySaveStatus('error');
-      setSettingsError(`AI Key 保存失败，请检查系统凭据管理器权限：${toErrorMessage(error)}`);
+      setSettingsError(keychainFailureText('save'));
       throw error;
     }
   }
@@ -289,26 +292,26 @@ export function useSettings() {
 
     try {
       await invoke('clear_ai_api_key', { provider: null });
-    } catch (error) {
-      failures.push(`AI Key 清理失败：${toErrorMessage(error)}`);
+    } catch {
+      failures.push('没能清掉保存的 AI 密钥');
     }
 
     try {
       await invoke('clear_embedding_api_key');
-    } catch (error) {
-      failures.push(`Embedding Key 清理失败：${toErrorMessage(error)}`);
+    } catch {
+      failures.push('没能清掉保存的检索服务密钥');
     }
 
     try {
       await invoke('clear_app_settings');
-    } catch (error) {
-      failures.push(`设置文件清理失败：${toErrorMessage(error)}`);
+    } catch {
+      failures.push('没能清掉设置文件');
     }
 
     try {
       localStorage.removeItem(STALE_SETTINGS_CACHE_KEY);
-    } catch (error) {
-      failures.push(`本地设置镜像清理失败：${toErrorMessage(error)}`);
+    } catch {
+      failures.push('没能清掉设置的临时副本');
     }
 
     pendingAiKeyRef.current = null;
@@ -317,7 +320,7 @@ export function useSettings() {
     setEmbeddingKeySaveStatus('idle');
 
     if (failures.length > 0) {
-      const message = `设置重置失败，请检查本机存储权限：${failures.join('；')}`;
+      const message = `设置没能重置：${failures.join('；')}。再点一次；还不行就重启应用，再不行把这条截图发给开发者。`;
       setSettingsError(message);
       throw new Error(message);
     }
@@ -348,7 +351,7 @@ export function useSettings() {
         })
         .catch((error) => {
           setAiKeySaveStatus('error');
-          setSettingsError(`AI Key 保存失败，请检查系统凭据管理器权限：${toErrorMessage(error)}`);
+          setSettingsError(keychainFailureText('save'));
         });
     }, 500);
   }
@@ -410,10 +413,6 @@ export function useSettings() {
     updateRuntime,
     resetSettings,
   };
-}
-
-function toErrorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }
 
 function mergeSettingsError(current: string | null, next: string): string {

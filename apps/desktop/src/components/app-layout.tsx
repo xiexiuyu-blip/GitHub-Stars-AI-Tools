@@ -1,6 +1,7 @@
 import { FormEvent, ReactNode, useEffect, useRef, useState } from 'react';
 import { BrandIcon } from '@/components/ui/brand-icon';
 import { Icon } from '@/components/ui/icon';
+import { formatSyncComplete, formatSyncStatus } from '@/lib/automation-view';
 import { NAV_ITEMS, SETTINGS_ITEM, navKeyFor, type NavItem } from '@/lib/nav';
 import type { AppPage, GitHubUser, StarSyncSummary, TaskProgressEvent } from '@/types';
 
@@ -20,6 +21,8 @@ type AppLayoutProps = {
   onCheckForUpdate: () => void;
   isCheckingUpdate: boolean;
   syncSummary: StarSyncSummary | null;
+  /** 资料库里最近一次同步时间。没有就是还没同步过。 */
+  syncedAt: string | null;
   onGlobalSearch: (query: string) => void;
   taskProgress: TaskProgressEvent | null;
   onRetryTask: (() => void) | null;
@@ -95,10 +98,10 @@ export function AppLayout(props: AppLayoutProps) {
   const syncText = props.isSyncing
     ? '正在同步…'
     : props.user
-      ? (props.syncSummary ? '已同步' : '尚未同步')
+      ? formatSyncStatus(props.syncedAt)
       : '未连接';
-  // 绿点只给「真的同步过」：连着账号但还没同步是灰点
-  const syncDotState = props.isSyncing ? 'syncing' : props.user && props.syncSummary ? 'ok' : 'off';
+  // 绿点只给「真的有同步时间」：连着账号但还没同步过是灰点
+  const syncDotState = props.isSyncing ? 'syncing' : props.user && props.syncedAt ? 'ok' : 'off';
 
   return (
     <div className="app-layout flex h-full min-h-0 min-w-0 flex-col overflow-hidden">
@@ -120,7 +123,7 @@ export function AppLayout(props: AppLayoutProps) {
           aria-keyshortcuts="Meta+K"
         >
           <Icon name="search" size={16} />
-          <span className="app-search-label">搜索仓库、标签或内容</span>
+          <span className="app-search-label">搜工具、说明或关键词</span>
           <kbd>⌘K</kbd>
         </button>
         <div ref={topbarActionsRef} className="app-top-actions">
@@ -133,7 +136,7 @@ export function AppLayout(props: AppLayoutProps) {
             className="app-sync-button"
             onClick={() => (props.user ? props.onSyncStars() : props.onNavigate('settings'))}
             disabled={props.isSyncing}
-            title={props.user ? '同步 GitHub Stars' : '请先连接 GitHub 账号'}
+            title={props.user ? '从 GitHub 拉取你最新收藏的项目' : '请先连接 GitHub 账号'}
           >
             {props.isSyncing ? '同步中' : '同步'}
           </button>
@@ -206,18 +209,14 @@ export function AppLayout(props: AppLayoutProps) {
               taskProgress={props.taskProgress}
               statusMessage={props.statusMessage}
               errorMessage={props.errorMessage}
-              onOpenDashboard={() => {
-                setIsNotificationOpen(false);
-                props.onNavigate('dashboard');
-              }}
             />
           )}
           <button
             type="button"
             className="app-avatar"
-            onClick={() => props.onNavigate('profile')}
-            title={props.user?.login ?? '个人主页'}
-            aria-label={props.user ? `打开 ${props.user.login} 的个人主页` : '打开个人主页'}
+            onClick={() => props.onNavigate('settings')}
+            title={props.user?.login ?? '设置'}
+            aria-label="打开设置"
           >
             {props.user?.avatarUrl ? (
               <img src={props.user.avatarUrl} alt="" />
@@ -329,12 +328,12 @@ function TopbarQuickActionsMenu(props: {
   return (
     <div className="fixed right-3 top-[46px] z-50 w-[calc(100vw-1.5rem)] max-w-[360px] rounded-lg border border-border bg-card p-2 shadow-lg sm:right-4">
       <form className="border-b border-border px-2 pb-2" onSubmit={props.onGlobalSearchSubmit}>
-        <p className="px-0.5 pb-1 text-xs font-medium text-on-surface">全局搜索</p>
+        <p className="px-0.5 pb-1 text-xs font-medium text-on-surface">搜工具</p>
         <input
           value={props.searchQuery}
           onChange={(event) => props.onSearchQueryChange(event.target.value)}
-          placeholder="在全部仓库中搜索"
-          aria-label="全局搜索"
+          placeholder="搜工具、说明或关键词"
+          aria-label="搜工具"
           className="h-8 w-full rounded-md border border-input bg-card px-2 text-sm text-on-surface outline-none focus:border-primary"
         />
       </form>
@@ -345,35 +344,27 @@ function TopbarQuickActionsMenu(props: {
       <div className="space-y-1">
         <QuickActionMenuItem
           icon="sync"
-          label="同步 Stars"
-          description={props.hasGitHubUser ? '拉取 GitHub 最新收藏。' : '先连接 GitHub 账号。'}
+          label="同步我的收藏"
+          description={props.hasGitHubUser ? '从 GitHub 同步你最新的收藏。' : '先连接 GitHub 账号。'}
           disabled={needsGitHub || props.isSyncing}
           loading={props.isSyncing}
           onClick={props.onSyncStars}
         />
         <QuickActionMenuItem
           icon="description"
-          label="抓取 README"
-          description={props.hasGitHubUser ? '补齐缺失或变化的 README。' : '先连接 GitHub 账号。'}
+          label="下载项目说明"
+          description={props.hasGitHubUser ? '补齐还没有或有变化的项目说明。' : '先连接 GitHub 账号。'}
           disabled={needsGitHub || props.isFetchingReadmes}
           loading={props.isFetchingReadmes}
           onClick={props.onFetchReadmes}
         />
         <QuickActionMenuItem
           icon="auto_awesome"
-          label="增量 AI 解析"
-          description="为已有 README 生成摘要、关键词和推荐标签。（会消耗 AI 额度）"
+          label="给没有说明的收藏写中文说明"
+          description="会花钱，受「设置 → 自动整理与备份」里的每天额度限制"
           disabled={needsGitHub || props.isBatchGeneratingAiDocuments}
           loading={props.isBatchGeneratingAiDocuments}
           onClick={props.onBatchGenerateAiDocuments}
-        />
-        <QuickActionMenuItem
-          icon="hub"
-          label="生成标签网络"
-          description="用 AI 分析仓库之间的标签关系。（会消耗 AI 额度）"
-          disabled={needsGitHub || props.isGeneratingTagNetwork}
-          loading={props.isGeneratingTagNetwork}
-          onClick={props.onGenerateAiTagNetwork}
         />
         <QuickActionMenuItem
           icon="system_update_alt"
@@ -417,7 +408,7 @@ function QuickActionMenuItem(props: {
         <Icon name={props.loading ? 'progress_activity' : props.icon} size={17} className={props.loading ? 'animate-spin' : ''} />
       </span>
       <span className="min-w-0 flex-1">
-        <span className="block text-sm font-medium text-on-surface">{props.loading ? `${props.label}中` : props.label}</span>
+        <span className="block text-sm font-medium text-on-surface">{props.loading ? `${props.label}…` : props.label}</span>
         <span className="mt-0.5 block text-xs leading-relaxed text-on-surface-variant">{props.description}</span>
       </span>
     </button>
@@ -429,7 +420,6 @@ function TopbarNotificationPanel(props: {
   taskProgress: TaskProgressEvent | null;
   statusMessage: string | null;
   errorMessage: string | null;
-  onOpenDashboard: () => void;
 }) {
   const hasContent = props.syncSummary || props.taskProgress || props.statusMessage || props.errorMessage;
 
@@ -437,16 +427,6 @@ function TopbarNotificationPanel(props: {
     <div className="fixed right-3 top-[46px] z-50 w-[calc(100vw-1.5rem)] max-w-sm rounded-lg border border-border bg-card p-3 shadow-lg sm:right-4">
       <div className="mb-2 flex items-center justify-between gap-3">
         <p className="font-body-md text-sm font-semibold text-on-surface">通知和任务</p>
-        <button
-          type="button"
-          onClick={props.onOpenDashboard}
-          className="flex h-8 items-center justify-center gap-1.5 rounded-lg px-2 text-xs font-medium text-primary transition-colors hover:bg-primary/10"
-          title="打开仪表盘"
-          aria-label="打开仪表盘"
-        >
-          <Icon name="dashboard" size={17} />
-          仪表盘
-        </button>
       </div>
       {!hasContent && (
         <div className="rounded-lg border border-outline-variant/25 bg-surface-container-low px-3 py-4 text-center text-sm text-on-surface-variant">
@@ -484,7 +464,7 @@ function TopbarNotificationPanel(props: {
             icon="sync_saved_locally"
             tone="primary"
             title="最近同步"
-            message={`活跃 ${props.syncSummary.activeCount} 个，新增 ${props.syncSummary.createdCount} 个，更新 ${props.syncSummary.updatedCount} 个，移除 ${props.syncSummary.removedCount} 个。`}
+            message={formatSyncComplete(props.syncSummary)}
           />
         )}
       </div>
@@ -594,7 +574,7 @@ function TaskProgressCard(props: {
             )}
           </div>
           <p className="mt-1 text-right text-[10px] text-on-surface-variant">
-            {hasKnownProgress ? progressLabel : '正在处理...'}
+            {hasKnownProgress ? progressLabel : '正在处理…'}
           </p>
         </div>
       )}
@@ -622,7 +602,7 @@ function getTaskStageLabel(stage: string) {
     case 'batch':
       return '批量处理';
     case 'check':
-      return '检查仓库';
+      return '检查收藏';
     case 'plan':
       return '生成计划';
     case 'fetch':
@@ -630,14 +610,14 @@ function getTaskStageLabel(stage: string) {
     case 'github-search':
       return '请求数据';
     case 'github-star':
-      return '更新 Stars';
+      return '更新收藏';
     case 'parse':
-      return '解析数据';
+      return '读取数据';
     case 'save':
       return '写入本地';
     case 'summarize':
     case 'analyze':
-      return 'AI 分析';
+      return '整理说明';
     case 'partial-failure':
       return '部分失败';
     case 'done':
