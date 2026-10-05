@@ -1268,7 +1268,9 @@ fn solve_v2(app_handle: tauri::AppHandle, query: String) -> Result<solve::SolveR
     solve::solve_query(storage.database_path(), &query)
 }
 
-/// 找方案的 AI 精选。本地结果已经先返回；这里最多等 60 秒，失败都折成结果里的 status。
+/// 找方案的 AI 精选。本地结果已经先返回；这里最多等 `solve_rerank::WAIT_SECONDS`（95 秒），失败都折成结果里的 status。
+/// 95 秒比一次模型请求的时限（`ai::SOLVE_RERANK_TIMEOUT_SECONDS`，90 秒，整个请求合计，不重试）略大：工作线程先自己结束
+/// （只剩数据库、钥匙串偶尔的等待可能拖过这 5 秒），这个等待只是兜底，不会再出现「这里已经报超时、后台线程还在悄悄重试、结果进了缓存」。
 #[tauri::command]
 async fn solve_rerank_v2(
     app_handle: tauri::AppHandle,
@@ -1276,7 +1278,7 @@ async fn solve_rerank_v2(
 ) -> Result<solve_rerank::RerankResult, String> {
     let task =
         tauri::async_runtime::spawn_blocking(move || solve_rerank_v2_worker(app_handle, request));
-    match tokio::time::timeout(Duration::from_secs(60), task).await {
+    match tokio::time::timeout(Duration::from_secs(solve_rerank::WAIT_SECONDS), task).await {
         Ok(Ok(result)) => result,
         Ok(Err(_)) => Ok(solve_rerank::RerankResult::failed(
             "AI 精选没成功，这次按本地排序",
