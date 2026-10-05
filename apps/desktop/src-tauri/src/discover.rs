@@ -1,4 +1,4 @@
-//! 发现：按场景去 GitHub 搜还没收藏的项目。平时只读缓存，刷新才联网。
+//! 发现：按场景去 GitHub 搜还没收藏的工具。平时只读缓存，刷新才联网。
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -14,6 +14,9 @@ use crate::web_fetch::{
 const QUERIES: &str = include_str!("../../../../docs/rebuild/spec/discover_queries.json");
 /// 候选的 GitHub 描述超过这个长度就当垃圾丢掉（实测有「个人收藏书籍列表」这类仓库，描述里塞满关键词，搜什么都出现）。
 const MAX_DESCRIPTION_CHARS: usize = 300;
+/// 查得太频繁时给用户看的那句。不把还要等几秒写进去。
+const RATE_LIMIT_MESSAGE: &str =
+    "GitHub 暂时不让查太频繁，过几分钟再点「重新找找」，已找到的先列在下面";
 const GITHUB_HEADERS: &[(&str, &str)] = &[
     ("Accept", "application/vnd.github+json"),
     ("X-GitHub-Api-Version", "2022-11-28"),
@@ -315,8 +318,8 @@ fn refresh_with_config(
             }
         }
     }
-    let message = if let Some(wait) = rate_wait {
-        Some(format!("GitHub 搜索太频繁了，约 {wait} 秒后再试"))
+    let message = if rate_wait.is_some() {
+        Some(RATE_LIMIT_MESSAGE.to_owned())
     } else if successes == 0 {
         Some("联网失败，保留上次的结果".to_owned())
     } else {
@@ -394,13 +397,13 @@ fn active_names(connection: &Connection, account_id: &str) -> Result<HashSet<Str
         .prepare(
             "SELECT full_name FROM repositories WHERE account_id = ?1 AND sync_status = 'active'",
         )
-        .map_err(|error| format!("已收藏仓库读取失败：{error}"))?;
+        .map_err(|error| format!("已收藏工具读取失败：{error}"))?;
     let rows = statement
         .query_map(params![account_id], |row| row.get::<_, String>(0))
-        .map_err(|error| format!("已收藏仓库查询失败：{error}"))?;
+        .map_err(|error| format!("已收藏工具查询失败：{error}"))?;
     let mut names = HashSet::new();
     for row in rows {
-        let name = row.map_err(|error| format!("已收藏仓库行读取失败：{error}"))?;
+        let name = row.map_err(|error| format!("已收藏工具行读取失败：{error}"))?;
         names.insert(name.to_ascii_lowercase());
     }
     Ok(names)
@@ -1160,7 +1163,7 @@ mod tests {
         assert_eq!(fetcher.calls().len(), 1);
         assert_eq!(
             report.message.as_deref(),
-            Some("GitHub 搜索太频繁了，约 45 秒后再试")
+            Some("GitHub 暂时不让查太频繁，过几分钟再点「重新找找」，已找到的先列在下面")
         );
         let reset_at = format_unix_time(epoch() + 45).expect("时间");
         assert_eq!(
@@ -1208,7 +1211,7 @@ mod tests {
         assert!(calls.iter().all(|url| !url.contains("q=q3&")));
         assert_eq!(
             report.message.as_deref(),
-            Some("GitHub 搜索太频繁了，约 45 秒后再试")
+            Some("GitHub 暂时不让查太频繁，过几分钟再点「重新找找」，已找到的先列在下面")
         );
         let reset_at = format_unix_time(epoch() + 45).expect("时间");
         assert_eq!(
@@ -1558,5 +1561,87 @@ mod tests {
         let list_fn = list.split("\n///").next().unwrap_or(list);
         assert!(list_fn.starts_with("fn list_discover("));
         assert!(!list_fn.contains("spawn_blocking"));
+    }
+
+    #[test]
+    fn rate_limit_message_does_not_carry_the_wait() {
+        // 等 3 秒和等 15 分钟说的是同一句；秒数不写给用户，只记在 rate_limit_reset_at 里。
+        let mut messages = Vec::new();
+        for (label, wait) in [("limit-short", 3_i64), ("limit-long", 900_i64)] {
+            let db = ready(label);
+            let fetcher = Scripted::new(vec![limited(epoch() + wait)]);
+            let report =
+                refresh_discover_with(&fetcher, &db.0, "scn-xhs", epoch()).expect("应返回");
+            let text = report.message.clone().expect("有提示");
+            assert!(
+                !text.chars().any(|ch| ch.is_ascii_digit()),
+                "提示里不该有等待的数字：{text}"
+            );
+            assert!(!text.contains('秒'), "不要把还要等几秒写进提示：{text}");
+            assert!(!text.contains("限流"), "不要用「限流」这个词：{text}");
+            let reset_at = format_unix_time(epoch() + wait).expect("时间");
+            assert_eq!(
+                report.rate_limit_reset_at.as_deref(),
+                Some(reset_at.as_str())
+            );
+            messages.push(text);
+        }
+        assert_eq!(messages[0], messages[1]);
+        assert_eq!(
+            messages[0],
+            "GitHub 暂时不让查太频繁，过几分钟再点「重新找找」，已找到的先列在下面"
+        );
+    }
+
+    #[test]
+    fn mine_lookup_errors_say_tool_not_repository() {
+        // 读「已收藏」名单失败时，报错里写「工具」，不写「仓库」。两个失败点：库里没有表，和名字是空的。
+        let empty = Connection::open_in_memory().expect("内存库");
+        let no_table = active_names(&empty, "acct").expect_err("没有表应失败");
+        assert!(no_table.starts_with("已收藏工具读取失败："), "{no_table}");
+        assert!(!no_table.contains("仓库"), "{no_table}");
+
+        let broken = Connection::open_in_memory().expect("内存库");
+        broken
+            .execute_batch(
+                "CREATE TABLE repositories(account_id TEXT, full_name TEXT, sync_status TEXT);
+                 INSERT INTO repositories VALUES ('acct', NULL, 'active');",
+            )
+            .expect("应能建表");
+        let no_name = active_names(&broken, "acct").expect_err("名字是空的应失败");
+        assert!(no_name.starts_with("已收藏工具行读取失败："), "{no_name}");
+        assert!(!no_name.contains("仓库"), "{no_name}");
+    }
+
+    #[test]
+    fn list_tells_fetched_without_results_from_never_fetched() {
+        // 界面据此分「找过了，这次没有结果」和「还没找过」：两个场景候选数都是 0，区别只在 last_fetched_at。
+        let db = ready("fetched-empty");
+        let fetcher = Scripted::new(vec![
+            ok_body(search_body(vec![])),
+            ok_body(search_body(vec![])),
+        ]);
+        let report =
+            refresh_discover_with(&fetcher, &db.0, "scn-seo", epoch()).expect("空结果也成功");
+        assert_eq!(report.fetched, 0);
+        assert_eq!(report.message, None);
+        let view = list_discover_view(&db.0, None).expect("列表");
+        let fetched = view
+            .scenarios
+            .iter()
+            .find(|item| item.id == "scn-seo")
+            .expect("seo");
+        let never = view
+            .scenarios
+            .iter()
+            .find(|item| item.id == "scn-ec")
+            .expect("ec");
+        assert_eq!(fetched.candidate_count, 0);
+        assert_eq!(
+            fetched.last_fetched_at.as_deref(),
+            Some(format_unix_time(epoch()).expect("时间").as_str())
+        );
+        assert_eq!(never.candidate_count, 0);
+        assert_eq!(never.last_fetched_at, None);
     }
 }

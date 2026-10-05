@@ -1,10 +1,12 @@
 import { useEffect, useRef, useState } from 'react';
 import type { LibraryDetail, LibraryFilters, LibraryItem, ReadingGroup, ScenarioSummary, TodayView } from '@/lib/contracts';
 import {
+  COPY_FAILED_NOTICE,
   applyReadingOverrides,
   assembleWeekGroups,
   buildTodayLead,
   codexFallbackText,
+  copiedNotice,
   greetingFor,
   itemsForReadingFilter,
   pickReason,
@@ -35,7 +37,7 @@ type TodayPageProps = {
   onOpenLibrary: (preset?: LibraryPreset) => void;
   onOpenCapture: () => void;
   onOpenSolve: () => void;
-  /** 去工具箱（开启 / 调整 AI 自动整理） */
+  /** 去自动整理与备份（开启 / 调整自动整理） */
   onOpenToolbox?: () => void;
 };
 
@@ -43,7 +45,7 @@ type TodayFilter = 'week' | 'pending' | 'want' | 'in_use';
 
 const FILTER_LABEL: Record<TodayFilter, string> = {
   week: '本周新收藏',
-  pending: '待整理',
+  pending: '待 AI 整理',
   want: '想试',
   in_use: '在用',
 };
@@ -294,7 +296,7 @@ export function TodayPage(props: TodayPageProps) {
       await navigator.clipboard.writeText(text);
       return true;
     } catch {
-      toast.show({ title: '浏览器不允许自动复制', sub: '请手动选中后按 ⌘C' });
+      toast.show({ title: COPY_FAILED_NOTICE });
       return false;
     }
   }
@@ -314,7 +316,7 @@ export function TodayPage(props: TodayPageProps) {
       }
     }
     const copied = await writeClipboard(text);
-    if (copied) toast.show({ title: '已复制，去 Codex 里粘贴', sub: projectName || undefined });
+    if (copied) toast.show({ title: copiedNotice('install'), sub: projectName || undefined });
   }
 
   async function confirmCard(id: string) {
@@ -388,9 +390,9 @@ export function TodayPage(props: TodayPageProps) {
       <PageHeader title={`${greetingFor(new Date().getHours())}，${name}`} subtitle={subtitle} />
       <div className="grid shrink-0 grid-cols-2 gap-3 min-[900px]:grid-cols-4">
         <StatCard label="本周新收藏" value={today ? (today.counts?.weekNew ?? 0) : '…'} icon="auto_awesome" tone="blue" active={filter === 'week'} onClick={() => choose('week')} />
-        <StatCard label="待整理" value={today ? (today.counts?.cardsPending ?? 0) : '…'} icon="hourglass_top" tone="amber" active={filter === 'pending'} onClick={() => choose('pending')} />
-        <StatCard label="想试" value={readingCounts ? readingCounts.want : '…'} icon="bookmark" tone="violet" active={filter === 'want'} onClick={() => choose('want')} />
-        <StatCard label="在用" value={readingCounts ? readingCounts.inUse : '…'} icon="task_alt" tone="green" active={filter === 'in_use'} onClick={() => choose('in_use')} />
+        <StatCard label="待 AI 整理" hint="还没有中文说明的收藏" value={today ? (today.counts?.cardsPending ?? 0) : '…'} icon="hourglass_top" tone="amber" active={filter === 'pending'} onClick={() => choose('pending')} />
+        <StatCard label="想试" hint="你标的" value={readingCounts ? readingCounts.want : '…'} icon="bookmark" tone="violet" active={filter === 'want'} onClick={() => choose('want')} />
+        <StatCard label="在用" hint="你标的" value={readingCounts ? readingCounts.inUse : '…'} icon="task_alt" tone="green" active={filter === 'in_use'} onClick={() => choose('in_use')} />
       </div>
       <AutomationBanner hint={hint} onAction={props.onOpenToolbox} />
       {/* 窗口矮的时候整页滚动，不要把列表和详情压成一条缝：下面这一块至少 420px 高 */}
@@ -400,7 +402,7 @@ export function TodayPage(props: TodayPageProps) {
             {renderListBody()}
           </div>
           <div className="flex shrink-0 flex-wrap gap-2.5 border-t border-muted px-4 py-2.5 text-xs text-on-surface-variant">
-            <span className="inline-flex items-center gap-1"><Kbd>J</Kbd><Kbd>K</Kbd> 上下</span>
+            <span className="inline-flex items-center gap-1"><Kbd>J</Kbd> / <Kbd>K</Kbd> 下一个 / 上一个</span>
             <span className="inline-flex items-center gap-1"><Kbd>T</Kbd> 想试</span>
             <span className="inline-flex items-center gap-1"><Kbd>X</Kbd> 不要了</span>
             <span className="inline-flex items-center gap-1"><Kbd>C</Kbd> 复制给 Codex</span>
@@ -424,9 +426,9 @@ export function TodayPage(props: TodayPageProps) {
                 if (copied) toast.show({ title: '已复制' });
               });
             }}
-            onCopyPrompt={(text) => {
+            onCopyPrompt={(text, kind) => {
               void writeClipboard(text).then((copied) => {
-                if (copied) toast.show({ title: '已复制，去 Codex 里粘贴' });
+                if (copied) toast.show({ title: copiedNotice(kind) });
               });
             }}
           />
@@ -458,7 +460,7 @@ export function TodayPage(props: TodayPageProps) {
         ) : null}
         {picks.length > 0 ? (
           <>
-            <GroupHeader title="今天值得先看" count={picks.length} hint="从你还没看过的里，按你常做的事挑的" />
+            <GroupHeader title="今天值得先看" count={picks.length} hint="还没看过的收藏里，优先挑和小红书、公众号、抖音等场景有关的" />
             {picks.map((item) => (
               <PickCard
                 key={item.id}
@@ -505,16 +507,19 @@ export function TodayPage(props: TodayPageProps) {
   }
 }
 
-function emptyCopy(filter: TodayFilter): { title: string; description: string } {
-  if (filter === 'want') {
-    return {
-      title: '还没有标成「想试」的工具',
-      description: '先回到「今天值得先看」，看到想试的就点它的「想试」（资料库里也行），就会出现在这里',
-    };
+function emptyCopy(filter: TodayFilter): { title: string; description?: string } {
+  if (filter === 'pending') {
+    return { title: '都整理好了，没有在等 AI 写说明的收藏。' };
+  }
+  if (filter === 'in_use') {
+    return { title: '还没有标成「在用」的工具。打开一个工具，点「我的状态 → 在用」，就会出现在这里。' };
+  }
+  if (filter === 'week') {
+    return { title: '这一周没有新收藏。去 GitHub 点 Star，再回来点「同步」。' };
   }
   return {
-    title: '这里没有内容',
-    description: '先回到「今天值得先看」，看到想试的就点它的「想试」，就会出现在这里',
+    title: '还没有标成「想试」的工具',
+    description: '先回到「今天值得先看」，看到想试的就点它的「想试」（资料库里也行），就会出现在这里',
   };
 }
 

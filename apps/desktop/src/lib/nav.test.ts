@@ -72,6 +72,20 @@ describe('导航数据', () => {
 });
 
 describe('subTabsFor', () => {
+  it('资料库右边的子页签叫「按类型看」，页面 key 仍是 map，用户看得见的字里没有「地图」', () => {
+    expect(SUB_TABS.library).toEqual([
+      { key: 'library', label: '资料库' },
+      { key: 'map', label: '按类型看' },
+    ]);
+    expect(subTabsFor('map')?.map((tab) => tab.label)).toEqual(['资料库', '按类型看']);
+    expect(navKeyFor('map')).toBe('library');
+    const allLabels = [
+      ...NAV_ITEMS.map((item) => item.label),
+      ...Object.values(SUB_TABS).flatMap((tabs) => tabs.map((tab) => tab.label)),
+    ];
+    expect(allLabels.filter((label) => label.includes('地图'))).toEqual([]);
+  });
+
   it('资料库和设置有两个标签，找方案只有一个就不显示标签条', () => {
     expect(subTabsFor('library')?.map((tab) => tab.key)).toEqual(['library', 'map']);
     expect(subTabsFor('settings')?.map((tab) => tab.key)).toEqual(['settings', 'toolbox']);
