@@ -39,6 +39,8 @@ const FULL_SCAN_NO_SUCCESS_FAILURES: i64 = 10;
 /// 失败比成功还多（并且至少这么多个）：失败率超过一半，说明有系统性问题。
 const FULL_SCAN_MAJORITY_FAILURES: i64 = 20;
 pub(crate) const DAY_SECS: i64 = 24 * 60 * 60;
+const FULL_SCAN_HISTORY_SECS: i64 = 25 * 60 * 60;
+const MAX_RECENT_FULL_SCANS: usize = 16;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorKind {
@@ -160,12 +162,14 @@ pub struct ClaimCandidate {
 }
 
 /// 认领时用的预算门闩。用量不在这里，认领时从库里现算。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BudgetGate {
     pub paused: bool,
     pub daily_budget_tokens: u64,
     /// 全量整理进行中：花钱的任务不看每天额度（暂停照样拦）。
     pub unlimited: bool,
+    /// 这一轮认领时每日额度不计入的时段；用量仍在认领事务里现算。
+    pub full_scan_periods: Vec<FullScanPeriod>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -176,8 +180,14 @@ pub struct QueueControl {
     pub pause_reason: Option<PauseReason>,
     /// 全量整理正在进行（Fox 亲手确认过）。没有这一项就按每天额度。
     pub full_scan: Option<FullScan>,
-    /// 上一轮全量整理怎么结束的，只用来显示。
+    /// 上一轮全量整理怎么结束的，也兼容没有时段历史的老控制文件。
     pub last_full_scan: Option<LastFullScan>,
+    /// 最近结束的全量整理时段，用来排除每日额度里的这一部分用量。
+    #[serde(default)]
+    pub recent_full_scans: Vec<FullScanPeriod>,
+    /// 只记控制文件是否已有时段历史（空数组也算）；不写入 JSON、不参与整理授权。
+    #[serde(skip)]
+    pub(crate) recent_full_scans_recorded: bool,
     /// 上次 README 更新检查。没有、或读不懂，就当没有。
     pub last_readme_check: Option<LastReadmeCheck>,
 }
@@ -206,6 +216,27 @@ pub struct LastFullScan {
     /// 开始以来失败了几个。
     #[serde(default)]
     pub failed: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FullScanPeriod {
+    pub started_at: String,
+    pub finished_at: String,
+}
+
+impl FullScanPeriod {
+    fn new(started_at: &str, finished_at: &str) -> Option<Self> {
+        parse_db_time(started_at).ok()?;
+        parse_db_time(finished_at).ok()?;
+        if started_at > finished_at {
+            return None;
+        }
+        Some(Self {
+            started_at: started_at.to_owned(),
+            finished_at: finished_at.to_owned(),
+        })
+    }
 }
 
 /// 一次 README 更新检查的结果。写在控制文件的 `lastReadmeCheck` 里，只用来显示。
@@ -251,6 +282,7 @@ pub struct QueueStatus {
     pub succeeded_24h: i64,
     pub failed: i64,
     pub tokens_24h: i64,
+    pub daily_tokens_used: i64,
     pub daily_budget: u64,
     pub budget_remaining: u64,
     /// 全量整理进行中（不看每天额度）。
@@ -369,7 +401,7 @@ pub fn claim_next(
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|error| format!("任务认领失败：{error}"))?;
     // 在跑任务的预留已经写在它们自己的行里，算在 used 里；再加上这一条自己的预留也放得下才认领。
-    let used = tokens_used_since(&tx, &cutoff)?.max(0);
+    let used = daily_tokens_excluding(&tx, &budget_gate.full_scan_periods, now)?;
     let spending_open = budget_gate.unlimited
         || (budget_gate.daily_budget_tokens > 0
             && (used as u64).saturating_add(CLAIM_RESERVE_TOKENS as u64)
@@ -610,7 +642,8 @@ fn requeue_job(
 pub fn queue_status(db_path: &Path) -> Result<QueueStatus, String> {
     let control = read_control(&queue_control_path(db_path));
     let conn = open_db(db_path)?;
-    let cutoff = shift_db_time(&now_db_time(), -DAY_SECS)?;
+    let now = now_db_time();
+    let cutoff = shift_db_time(&now, -DAY_SECS)?;
     let queued = count_status(&conn, "queued")?;
     let running = count_status(&conn, "running")?;
     let failed = count_unresolved_failures(&conn)?;
@@ -622,13 +655,14 @@ pub fn queue_status(db_path: &Path) -> Result<QueueStatus, String> {
         )
         .map_err(|error| format!("任务计数失败：{error}"))?;
     let tokens_24h = tokens_used_since(&conn, &cutoff)?.max(0);
-    let unlimited = control.full_scan_active(&now_db_time());
+    let daily_tokens_used = daily_tokens_used(&conn, &control, &now)?;
+    let unlimited = control.full_scan_active(&now);
     let state = queue_state(
         control.paused,
         control.pause_reason.is_some(),
         running,
         control.daily_budget_tokens,
-        tokens_24h,
+        daily_tokens_used,
         unlimited,
     );
     Ok(QueueStatus {
@@ -639,8 +673,9 @@ pub fn queue_status(db_path: &Path) -> Result<QueueStatus, String> {
         succeeded_24h,
         failed,
         tokens_24h,
+        daily_tokens_used,
         daily_budget: control.daily_budget_tokens,
-        budget_remaining: budget_remaining(control.daily_budget_tokens, tokens_24h),
+        budget_remaining: budget_remaining(control.daily_budget_tokens, daily_tokens_used),
         unlimited,
     })
 }
@@ -847,6 +882,7 @@ fn claim_for_worker(
         paused: control.paused,
         daily_budget_tokens: control.daily_budget_tokens,
         unlimited: control.full_scan_active(&now),
+        full_scan_periods: full_scan_periods(&control, &now),
     };
     let handled = handlers
         .iter()
@@ -1001,6 +1037,95 @@ pub(crate) fn tokens_used_since(conn: &Connection, cutoff: &str) -> Result<i64, 
     .map_err(|error| format!("用量读取失败：{error}"))
 }
 
+/// 每日额度的口径：账本照常记全部用量，只排除落在任意一次全量整理时段里的任务。
+pub(crate) fn daily_tokens_used(
+    conn: &Connection,
+    control: &QueueControl,
+    now: &str,
+) -> Result<i64, String> {
+    daily_tokens_excluding(conn, &full_scan_periods(control, now), now)
+}
+
+fn full_scan_periods(control: &QueueControl, now: &str) -> Vec<FullScanPeriod> {
+    let mut periods = control.recent_full_scans.clone();
+    if let Some(scan) = &control.last_full_scan {
+        append_last_scan_fallback(&mut periods, scan, control.recent_full_scans_recorded);
+    }
+    if let Some(scan) = &control.full_scan {
+        if let Some(end) = scan_period_end(scan, now) {
+            if let Some(period) = FullScanPeriod::new(&scan.started_at, &end) {
+                periods.push(period);
+            }
+        }
+    }
+    periods
+}
+
+/// 未及时收尾也只免计开始后 48 小时内的用量；时间读不懂就不生成免计时段。
+fn scan_period_end(scan: &FullScan, now: &str) -> Option<String> {
+    parse_db_time(now).ok()?;
+    let deadline = shift_db_time(&scan.started_at, FULL_SCAN_SECS).ok()?;
+    Some(if now < deadline.as_str() {
+        now.to_owned()
+    } else {
+        deadline
+    })
+}
+
+fn append_last_scan_fallback(
+    periods: &mut Vec<FullScanPeriod>,
+    scan: &LastFullScan,
+    history_recorded: bool,
+) {
+    // 历史里同一轮的时段已封顶；展示记录保留实际收尾时间，不能再把免计时段拉长。
+    // 历史已清空也不能回退；只有老文件未记历史时才沿用 lastFullScan 的起止时间。
+    if !history_recorded
+        && !periods
+            .iter()
+            .any(|period| period.started_at == scan.started_at)
+    {
+        if let Some(period) = FullScanPeriod::new(&scan.started_at, &scan.finished_at) {
+            periods.push(period);
+        }
+    }
+}
+
+fn daily_tokens_excluding(
+    conn: &Connection,
+    periods: &[FullScanPeriod],
+    now: &str,
+) -> Result<i64, String> {
+    let mut bound = vec![shift_db_time(now, -DAY_SECS)?];
+    // charged_at 和 tokens_used_since 的记账时间一致：已结束看 finished_at，在途预留看 updated_at。
+    let mut sql = String::from(
+        "WITH usage AS (
+           SELECT input_tokens + output_tokens AS tokens,
+                  CASE WHEN status IN ('succeeded', 'skipped', 'failed', 'cancelled') THEN finished_at
+                       WHEN status IN ('queued', 'running') AND input_tokens + output_tokens > 0 THEN updated_at
+                  END AS charged_at
+           FROM ai_jobs
+         ) SELECT COALESCE(SUM(tokens), 0) FROM usage WHERE charged_at >= ?",
+    );
+    if !periods.is_empty() {
+        sql.push_str(" AND NOT (");
+        for (index, period) in periods.iter().enumerate() {
+            if index > 0 {
+                sql.push_str(" OR ");
+            }
+            sql.push_str("charged_at BETWEEN ? AND ?");
+            bound.push(period.started_at.clone());
+            bound.push(period.finished_at.clone());
+        }
+        sql.push(')');
+    }
+    // 一次过滤求和：重叠时段只会排除一条任务一次，两端都包含。
+    conn.query_row(&sql, params_from_iter(bound.iter()), |row| {
+        row.get::<_, i64>(0)
+    })
+    .map(|used| used.max(0))
+    .map_err(|error| format!("用量读取失败：{error}"))
+}
+
 /// 队列里某个状态的任务数。旧功能（`spend_guard`）的账本行不算：它们不是队列任务，
 /// 数进去，一次 AI 搜索在途时界面就会说「正在后台整理」「进行中 1」。用量（`tokens_used_since`）照旧含它们。
 /// 全量整理的刹车线：用量超过它就自动结束。按开始时要整理的个数估（每张约 5k，乘 4），至少 300 万。
@@ -1151,6 +1276,27 @@ fn finish_full_scan(
         if current != Some(scan.started_at.as_str()) {
             return Ok(());
         }
+        let cutoff = shift_db_time(now, -FULL_SCAN_HISTORY_SECS)?;
+        let control = control_from_map(map);
+        let mut periods = control.recent_full_scans;
+        // 老文件只有 lastFullScan：覆盖之前也把它纳入历史，避免紧接着的小轮把大轮的账算回来。
+        if let Some(last) = control.last_full_scan {
+            append_last_scan_fallback(&mut periods, &last, control.recent_full_scans_recorded);
+        }
+        if let Some(end) = scan_period_end(scan, now) {
+            if let Some(period) = FullScanPeriod::new(&scan.started_at, &end) {
+                periods.push(period);
+            }
+        }
+        periods.retain(|period| period.finished_at >= cutoff);
+        periods
+            .sort_by(|a, b| (&a.finished_at, &a.started_at).cmp(&(&b.finished_at, &b.started_at)));
+        periods.dedup();
+        let excess = periods.len().saturating_sub(MAX_RECENT_FULL_SCANS);
+        periods.drain(..excess);
+        let history = serde_json::to_value(periods)
+            .map_err(|error| format!("全量整理时段序列化失败：{error}"))?;
+        map.insert("recentFullScans".to_owned(), history);
         map.remove("fullScan");
         map.insert("lastFullScan".to_owned(), record.clone());
         Ok(())
@@ -1165,6 +1311,7 @@ pub fn reset_spending_authorization(path: &Path) -> Result<(), String> {
         map.insert("dailyBudgetTokens".to_owned(), Value::from(0_u64));
         map.remove("fullScan");
         map.remove("lastFullScan");
+        map.remove("recentFullScans");
         Ok(())
     })
 }
@@ -1240,7 +1387,7 @@ pub(crate) fn add_charge(db_path: &Path, id: &str, tokens: u64) -> Result<(), St
     Ok(())
 }
 
-/// 最近 24 小时已用的 token。和队列认领、状态显示是同一个口径（含在跑任务的预留、已取消的任务）。
+/// 最近 24 小时真实用量（含在跑任务的预留、已取消的任务），不排除全量整理。
 /// 只给测试用：生产代码在自己的事务里直接调 `tokens_used_since`。
 #[cfg(test)]
 pub(crate) fn tokens_used_in_last_day(db_path: &Path, now: &str) -> Result<i64, String> {
@@ -1256,7 +1403,7 @@ fn queue_state(
     has_reason: bool,
     running: i64,
     budget: u64,
-    tokens_24h: i64,
+    daily_tokens_used: i64,
     unlimited: bool,
 ) -> &'static str {
     if paused && has_reason {
@@ -1267,7 +1414,7 @@ fn queue_state(
         "running"
     } else if !unlimited
         && budget > 0
-        && tokens_24h.saturating_add(CLAIM_RESERVE_TOKENS)
+        && daily_tokens_used.saturating_add(CLAIM_RESERVE_TOKENS)
             > i64::try_from(budget).unwrap_or(i64::MAX)
     {
         // 剩下的额度放不下再认领一条任务的预留，就等于用完了：队列不会再领，界面也该这么说
@@ -1279,14 +1426,14 @@ fn queue_state(
 
 /// 还能用多少。剩下的不够认领一条任务的预留（`CLAIM_RESERVE_TOKENS`）就当 0：
 /// 队列不会再领，界面也不该说「还能整理几个」。
-fn budget_remaining(budget: u64, tokens_24h: i64) -> u64 {
+fn budget_remaining(budget: u64, daily_tokens_used: i64) -> u64 {
     let Ok(budget_i64) = i64::try_from(budget) else {
         return 0;
     };
-    if budget_i64 == 0 || tokens_24h >= budget_i64 {
+    if budget_i64 == 0 || daily_tokens_used >= budget_i64 {
         return 0;
     }
-    let remaining = (budget_i64 - tokens_24h.max(0)) as u64;
+    let remaining = (budget_i64 - daily_tokens_used.max(0)) as u64;
     if remaining < CLAIM_RESERVE_TOKENS as u64 {
         0
     } else {
@@ -1353,6 +1500,22 @@ fn control_from_map(map: &Map<String, Value>) -> QueueControl {
     let last_full_scan = map
         .get("lastFullScan")
         .and_then(|value| serde_json::from_value::<LastFullScan>(value.clone()).ok());
+    // 每项独立校验；坏项不影响其它键。最多读最后 16 个有效时段，限制 SQL 参数数目。
+    let mut recent_full_scans: Vec<_> = map
+        .get("recentFullScans")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .rev()
+        .filter_map(|value| {
+            FullScanPeriod::new(
+                value.get("startedAt")?.as_str()?,
+                value.get("finishedAt")?.as_str()?,
+            )
+        })
+        .take(MAX_RECENT_FULL_SCANS)
+        .collect();
+    recent_full_scans.reverse();
     // 读不懂的 lastReadmeCheck 当作没有，不挡预算和全量整理。
     let last_readme_check = map.get("lastReadmeCheck").and_then(|value| {
         if value.is_null() {
@@ -1367,6 +1530,11 @@ fn control_from_map(map: &Map<String, Value>) -> QueueControl {
         pause_reason,
         full_scan,
         last_full_scan,
+        recent_full_scans,
+        recent_full_scans_recorded: map
+            .get("recentFullScans")
+            .and_then(Value::as_array)
+            .is_some(),
         last_readme_check,
     }
 }
@@ -1428,6 +1596,7 @@ fn format_db_time(value: time::OffsetDateTime) -> String {
 fn parse_db_time(text: &str) -> Result<time::OffsetDateTime, String> {
     let bytes = text.as_bytes();
     if bytes.len() != 24
+        || !bytes.is_ascii()
         || bytes[4] != b'-'
         || bytes[7] != b'-'
         || bytes[10] != b'T'
@@ -1635,6 +1804,7 @@ mod tests {
             paused,
             daily_budget_tokens: budget,
             unlimited: false,
+            full_scan_periods: Vec::new(),
         }
     }
 
@@ -3407,11 +3577,564 @@ mod tests {
             paused: false,
             daily_budget_tokens: budget,
             unlimited: true,
+            full_scan_periods: Vec::new(),
         }
     }
 
     fn at(seconds_after_now: i64) -> String {
         shift_db_time(NOW, seconds_after_now).unwrap()
+    }
+
+    fn period(started_at: &str, finished_at: &str) -> FullScanPeriod {
+        FullScanPeriod::new(started_at, finished_at).unwrap()
+    }
+
+    fn last_scan(started_at: &str, finished_at: &str) -> LastFullScan {
+        LastFullScan {
+            started_at: started_at.to_owned(),
+            finished_at: finished_at.to_owned(),
+            tokens_used: 0,
+            reason: "completed".to_owned(),
+            total: 1,
+            remaining: 0,
+            failed: 0,
+        }
+    }
+
+    #[test]
+    fn daily_budget_excludes_full_scan_usage_and_preserves_raw_24h_usage() {
+        let db = TestDb::new("daily-vs-raw");
+        let now = now_db_time();
+        let before = shift_db_time(&now, -9000).unwrap();
+        let start = shift_db_time(&now, -7200).unwrap();
+        let inside = shift_db_time(&now, -5400).unwrap();
+        let end = shift_db_time(&now, -3600).unwrap();
+        let after = shift_db_time(&now, -1800).unwrap();
+        let conn = db.conn();
+        open_job_row(&conn, "a", "succeeded", 100, Some(&before));
+        open_job_row(&conn, "b", "succeeded", 5000, Some(&inside));
+        open_job_row(&conn, "c", "succeeded", 200, Some(&after));
+        let control = QueueControl {
+            daily_budget_tokens: 50_000,
+            recent_full_scans: vec![period(&start, &end)],
+            ..QueueControl::default()
+        };
+        fs::write(
+            queue_control_path(db.path()),
+            serde_json::to_vec(&control).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(daily_tokens_used(&conn, &control, &now).unwrap(), 300);
+        let status = queue_status(db.path()).unwrap();
+        assert_eq!(status.tokens_24h, 5300);
+        assert_eq!(status.daily_tokens_used, 300);
+        assert_eq!(status.budget_remaining, 50_000 - 300);
+        assert_eq!(status.state, "idle");
+        let json = serde_json::to_value(&status).unwrap();
+        assert_eq!(json["dailyTokensUsed"], 300);
+        assert_eq!(json["tokens24h"], 5300);
+    }
+
+    #[test]
+    fn queue_status_uses_daily_usage_after_an_expensive_full_scan() {
+        let db = TestDb::new("daily-state-after-large-scan");
+        let now = now_db_time();
+        let before = shift_db_time(&now, -9000).unwrap();
+        let start = shift_db_time(&now, -7200).unwrap();
+        let inside = shift_db_time(&now, -5400).unwrap();
+        let end = shift_db_time(&now, -3600).unwrap();
+        let conn = db.conn();
+        open_job_row(&conn, "auto", "succeeded", 100, Some(&before));
+        open_job_row(&conn, "scan", "succeeded", 3_000_000, Some(&inside));
+        let control = QueueControl {
+            daily_budget_tokens: 50_000,
+            recent_full_scans: vec![period(&start, &end)],
+            ..QueueControl::default()
+        };
+        fs::write(
+            queue_control_path(db.path()),
+            serde_json::to_vec(&control).unwrap(),
+        )
+        .unwrap();
+        let status = queue_status(db.path()).unwrap();
+        assert_eq!(status.queued, 0);
+        assert_eq!(status.running, 0);
+        assert!(!status.unlimited, "已经结束，状态不能靠不限额放行");
+        assert_eq!(status.state, "idle");
+        assert_eq!(status.daily_tokens_used, 100);
+        assert_eq!(status.tokens_24h, 3_000_100);
+        assert_eq!(status.budget_remaining, 49_900);
+
+        // 自动用量增加后只剩 1 万，放不下 1.2 万的认领预留，仍要报额度用完。
+        conn.execute(
+            "UPDATE ai_jobs SET input_tokens = 40000 WHERE id = 'auto'",
+            [],
+        )
+        .unwrap();
+        let reached = queue_status(db.path()).unwrap();
+        assert_eq!(reached.daily_tokens_used, 40_000);
+        assert_eq!(reached.tokens_24h, 3_040_000);
+        assert_eq!(reached.state, "budget_reached");
+        assert_eq!(reached.budget_remaining, 0);
+    }
+
+    #[test]
+    fn a_small_scan_after_a_large_scan_keeps_both_out_of_the_daily_budget() {
+        let db = TestDb::new("daily-two-scans");
+        let path = queue_control_path(db.path());
+        let conn = db.conn();
+        open_job_row(&conn, "auto", "succeeded", 100, Some(&at(-10)));
+        begin_full_scan(&path, NOW, 400).unwrap();
+        open_job_row(&conn, "big", "succeeded", 3_000_000, Some(&at(100)));
+        stop_full_scan(&conn, &path, &at(600)).unwrap();
+        begin_full_scan(&path, &at(1200), 1).unwrap();
+        open_job_row(&conn, "small", "succeeded", 200, Some(&at(1300)));
+        stop_full_scan(&conn, &path, &at(1500)).unwrap();
+        let control = read_control(&path);
+        assert_eq!(
+            control.last_full_scan.as_ref().unwrap().started_at,
+            at(1200)
+        );
+        assert_eq!(
+            control.recent_full_scans,
+            vec![period(NOW, &at(600)), period(&at(1200), &at(1500))]
+        );
+        assert_eq!(daily_tokens_used(&conn, &control, &at(1600)).unwrap(), 100);
+        assert_eq!(
+            tokens_used_in_last_day(db.path(), &at(1600)).unwrap(),
+            3_000_300
+        );
+    }
+
+    #[test]
+    fn overlapping_scan_periods_exclude_each_job_only_once() {
+        let db = TestDb::new("daily-overlap");
+        let conn = db.conn();
+        open_job_row(&conn, "inside", "succeeded", 5000, Some(&at(100)));
+        let control = QueueControl {
+            recent_full_scans: vec![period(NOW, &at(300)), period(&at(50), &at(400))],
+            last_full_scan: Some(last_scan(NOW, &at(300))),
+            ..QueueControl::default()
+        };
+        assert_eq!(daily_tokens_used(&conn, &control, &at(500)).unwrap(), 0);
+        open_job_row(&conn, "outside", "succeeded", 100, Some(&at(-1)));
+        assert_eq!(daily_tokens_used(&conn, &control, &at(500)).unwrap(), 100);
+        assert_eq!(tokens_used_in_last_day(db.path(), &at(500)).unwrap(), 5100);
+    }
+
+    #[test]
+    fn an_ongoing_full_scan_is_excluded_from_daily_usage() {
+        let db = TestDb::new("daily-ongoing");
+        let conn = db.conn();
+        open_job_row(&conn, "before", "succeeded", 100, Some(&at(-1)));
+        open_job_row(&conn, "after", "succeeded", 5000, Some(&at(10)));
+        let control = full_scan_control(NOW, 10);
+        assert_eq!(daily_tokens_used(&conn, &control, &at(20)).unwrap(), 100);
+        assert_eq!(
+            tokens_used_since(&conn, NOW).unwrap(),
+            5000,
+            "这一轮自己的用量与刹车线口径不变"
+        );
+    }
+
+    #[test]
+    fn an_unsettled_expired_scan_excludes_usage_only_through_its_48_hour_deadline() {
+        let db = TestDb::new("daily-unsettled-expired");
+        let conn = db.conn();
+        let now = at(49 * 3600);
+        open_job_row(&conn, "early", "succeeded", 100, Some(&at(10 * 3600)));
+        // 另造最近 24 小时内的线内用量，避免只靠滚动窗口排除早期那笔。
+        open_job_row(&conn, "inside", "succeeded", 5000, Some(&at(47 * 3600)));
+        open_job_row(
+            &conn,
+            "deadline",
+            "succeeded",
+            7000,
+            Some(&at(FULL_SCAN_SECS)),
+        );
+        open_job_row(&conn, "outside", "succeeded", 200, Some(&now));
+        let control = full_scan_control(NOW, 1);
+        assert_eq!(
+            full_scan_periods(&control, &now),
+            vec![period(NOW, &at(FULL_SCAN_SECS))]
+        );
+        assert_eq!(daily_tokens_used(&conn, &control, &now).unwrap(), 200);
+        assert_eq!(tokens_used_in_last_day(db.path(), &now).unwrap(), 12_200);
+        assert_eq!(tokens_used_since(&conn, NOW).unwrap(), 12_300);
+        assert!(!control.full_scan_active(&now));
+    }
+
+    #[test]
+    fn a_late_expired_finish_caps_history_but_preserves_the_displayed_finish_time() {
+        let db = TestDb::new("daily-late-expired-finish");
+        let path = queue_control_path(db.path());
+        let conn = db.conn();
+        let scan = begin_full_scan(&path, NOW, 1).unwrap();
+        let now = at(FULL_SCAN_SECS + 3 * 3600);
+        open_job_row(&conn, "inside", "succeeded", 5000, Some(&at(47 * 3600)));
+        finish_full_scan(&path, &scan, "expired", 5000, 0, 0, &now).unwrap();
+        let control = read_control(&path);
+        let capped = period(NOW, &at(FULL_SCAN_SECS));
+        assert_eq!(control.recent_full_scans, vec![capped.clone()]);
+        assert_eq!(
+            control.last_full_scan.as_ref().unwrap(),
+            &LastFullScan {
+                started_at: NOW.to_owned(),
+                finished_at: now.clone(),
+                tokens_used: 5000,
+                reason: "expired".to_owned(),
+                total: 1,
+                remaining: 0,
+                failed: 0,
+            }
+        );
+        assert!(control.full_scan.is_none());
+        // 收尾后补记：结束于 48 小时线外 1 小时，不能被展示记录的 finishedAt 排除。
+        open_job_row(
+            &conn,
+            "outside",
+            "succeeded",
+            200,
+            Some(&at(FULL_SCAN_SECS + 3600)),
+        );
+        assert_eq!(daily_tokens_used(&conn, &control, &now).unwrap(), 200);
+        assert_eq!(tokens_used_in_last_day(db.path(), &now).unwrap(), 5200);
+
+        // 下一轮收尾也不能把上一轮展示记录的宽时段重新塞回历史。
+        let next_start = at(FULL_SCAN_SECS + 3 * 3600 + 10);
+        let next_finish = at(FULL_SCAN_SECS + 3 * 3600 + 20);
+        let next = begin_full_scan(&path, &next_start, 1).unwrap();
+        finish_full_scan(&path, &next, "completed", 0, 0, 0, &next_finish).unwrap();
+        let after = read_control(&path);
+        assert_eq!(
+            after.recent_full_scans,
+            vec![capped, period(&next_start, &next_finish)]
+        );
+        assert_eq!(daily_tokens_used(&conn, &after, &next_finish).unwrap(), 200);
+    }
+
+    #[test]
+    fn a_normal_finish_archives_the_actual_finish_time_before_the_deadline() {
+        let db = TestDb::new("daily-normal-finish");
+        let path = queue_control_path(db.path());
+        let conn = db.conn();
+        let scan = begin_full_scan(&path, NOW, 1).unwrap();
+        let finish = at(3600);
+        open_job_row(&conn, "inside", "succeeded", 5000, Some(&at(1800)));
+        finish_full_scan(&path, &scan, "completed", 5000, 0, 0, &finish).unwrap();
+        let control = read_control(&path);
+        assert_eq!(control.recent_full_scans, vec![period(NOW, &finish)]);
+        assert_eq!(control.last_full_scan.as_ref().unwrap().finished_at, finish);
+        open_job_row(&conn, "outside", "succeeded", 200, Some(&at(3601)));
+        assert_eq!(daily_tokens_used(&conn, &control, &at(7200)).unwrap(), 200);
+        assert_eq!(tokens_used_in_last_day(db.path(), &at(7200)).unwrap(), 5200);
+    }
+
+    #[test]
+    fn a_long_dormant_finish_does_not_restore_pruned_exemptions_from_the_display_record() {
+        let db = TestDb::new("daily-dormant-expired-finish");
+        let path = queue_control_path(db.path());
+        let conn = db.conn();
+        let scan = begin_full_scan(&path, NOW, 1).unwrap();
+        let now = at(FULL_SCAN_SECS + 26 * 3600);
+        open_job_row(&conn, "outside", "succeeded", 200, Some(&at(73 * 3600)));
+        finish_full_scan(&path, &scan, "expired", 200, 0, 0, &now).unwrap();
+        let control = read_control(&path);
+        assert!(control.recent_full_scans.is_empty(), "封顶时段早于 25 小时");
+        assert!(control.recent_full_scans_recorded);
+        assert!(full_scan_periods(&control, &now).is_empty());
+        assert_eq!(control.last_full_scan.as_ref().unwrap().finished_at, now);
+        assert_eq!(daily_tokens_used(&conn, &control, &now).unwrap(), 200);
+        let json = serde_json::to_value(&control).unwrap();
+        assert!(json.get("recentFullScansRecorded").is_none());
+        // 同一份记录若来自没有历史键的老文件，回退区间仍保持原样。
+        let mut legacy_map = load_object(&path).unwrap();
+        legacy_map.remove("recentFullScans");
+        let legacy = control_from_map(&legacy_map);
+        assert!(!legacy.recent_full_scans_recorded);
+        assert_eq!(legacy.last_full_scan, control.last_full_scan);
+        assert_eq!(daily_tokens_used(&conn, &legacy, &now).unwrap(), 0);
+
+        let next_start = at(FULL_SCAN_SECS + 26 * 3600 + 10);
+        let next_finish = at(FULL_SCAN_SECS + 26 * 3600 + 20);
+        let next = begin_full_scan(&path, &next_start, 1).unwrap();
+        finish_full_scan(&path, &next, "completed", 0, 0, 0, &next_finish).unwrap();
+        let after = read_control(&path);
+        assert_eq!(
+            after.recent_full_scans,
+            vec![period(&next_start, &next_finish)]
+        );
+        assert_eq!(daily_tokens_used(&conn, &after, &next_finish).unwrap(), 200);
+    }
+
+    #[test]
+    fn daily_usage_uses_ledger_timestamps_and_includes_both_period_endpoints() {
+        let db = TestDb::new("daily-timestamps");
+        let conn = db.conn();
+        // 已结束只看 finished_at；在途预留只看 updated_at。故意让另一列落在相反的时段。
+        for (id, status, charged, updated, tokens) in [
+            ("start", "succeeded", at(-100), at(-1000), 5000),
+            ("end", "cancelled", at(-50), at(-1000), 6000),
+            ("failed", "failed", at(-75), at(-1000), 4000),
+            ("skipped", "skipped", at(-75), at(-1000), 3000),
+            ("automatic", "succeeded", at(-1), at(-75), 200),
+            ("reserved", "queued", at(-1), at(-75), 12_000),
+            ("running", "running", at(-75), at(-1), 12_000),
+            ("day-edge", "succeeded", at(-DAY_SECS), at(-75), 100),
+            ("too-old", "succeeded", at(-DAY_SECS - 1), at(-75), 99_000),
+        ] {
+            open_job_row(&conn, id, status, tokens, Some(&charged));
+            conn.execute(
+                "UPDATE ai_jobs SET updated_at = ?1 WHERE id = ?2",
+                params![updated, id],
+            )
+            .unwrap();
+        }
+        open_job_row(&conn, "no-finish", "succeeded", 99_000, None);
+        let control = QueueControl {
+            recent_full_scans: vec![period(&at(-100), &at(-50))],
+            ..QueueControl::default()
+        };
+        assert_eq!(daily_tokens_used(&conn, &control, NOW).unwrap(), 12_300);
+        assert_eq!(tokens_used_in_last_day(db.path(), NOW).unwrap(), 42_300);
+        assert_eq!(
+            daily_tokens_used(&conn, &QueueControl::default(), NOW).unwrap(),
+            42_300
+        );
+    }
+
+    #[test]
+    fn automatic_usage_still_limits_claims_after_an_expensive_full_scan() {
+        let db = TestDb::new("daily-claim");
+        let now = now_db_time();
+        let before = shift_db_time(&now, -3600).unwrap();
+        let start = shift_db_time(&now, -2000).unwrap();
+        let inside = shift_db_time(&now, -1800).unwrap();
+        let end = shift_db_time(&now, -1000).unwrap();
+        let conn = db.conn();
+        open_job_row(&conn, "auto", "succeeded", 40_000, Some(&before));
+        open_job_row(&conn, "scan", "succeeded", 3_000_000, Some(&inside));
+        open_job_row(&conn, "next", "queued", 0, None);
+        let control = QueueControl {
+            daily_budget_tokens: 50_000,
+            recent_full_scans: vec![period(&start, &end)],
+            ..QueueControl::default()
+        };
+        fs::write(
+            queue_control_path(db.path()),
+            serde_json::to_vec(&control).unwrap(),
+        )
+        .unwrap();
+        let handlers: Vec<Arc<dyn JobHandler>> = vec![Arc::new(BigSpender)];
+        assert!(claim_for_worker(db.path(), &handlers).unwrap().is_none());
+        let reached = queue_status(db.path()).unwrap();
+        assert_eq!(reached.state, "budget_reached");
+        assert_eq!(reached.budget_remaining, 0);
+        assert_eq!(reached.daily_tokens_used, 40_000);
+        assert_eq!(reached.tokens_24h, 3_040_000);
+        conn.execute(
+            "UPDATE ai_jobs SET input_tokens = 30000 WHERE id = 'auto'",
+            [],
+        )
+        .unwrap();
+        assert_eq!(
+            claim_for_worker(db.path(), &handlers).unwrap().unwrap().id,
+            "next"
+        );
+        let status = queue_status(db.path()).unwrap();
+        assert_eq!(status.daily_tokens_used, 30_000 + CLAIM_RESERVE_TOKENS);
+        assert_eq!(status.tokens_24h, 3_030_000 + CLAIM_RESERVE_TOKENS);
+    }
+
+    #[test]
+    fn legacy_scan_history_survives_a_new_scan_and_reset_removes_it() {
+        let db = TestDb::new("daily-legacy-file");
+        let path = queue_control_path(db.path());
+        let check = serde_json::json!({"checkedAt": NOW, "checked": 3, "refreshed": 2, "material": 1, "queued": 1});
+        let raw = serde_json::json!({
+            "dailyBudgetTokens": 50_000, "paused": false,
+            "lastFullScan": last_scan(NOW, &at(600)),
+            "captureToken": "fixture-only", "lastReadmeCheck": check, "futureKey": [1, 2, 3]
+        });
+        fs::write(&path, serde_json::to_vec(&raw).unwrap()).unwrap();
+        let conn = db.conn();
+        open_job_row(&conn, "legacy-scan", "succeeded", 5000, Some(&at(100)));
+        open_job_row(&conn, "automatic", "succeeded", 100, Some(&at(-1)));
+        let old = read_control(&path);
+        assert!(old.recent_full_scans.is_empty());
+        assert_eq!(daily_tokens_used(&conn, &old, &at(900)).unwrap(), 100);
+        begin_full_scan(&path, &at(1200), 1).unwrap();
+        stop_full_scan(&conn, &path, &at(1500)).unwrap();
+        let after = load_object(&path).unwrap();
+        for key in [
+            "captureToken",
+            "lastReadmeCheck",
+            "futureKey",
+            "dailyBudgetTokens",
+            "paused",
+        ] {
+            assert_eq!(after[key], raw[key], "其它键原样保留：{key}");
+        }
+        assert_eq!(read_control(&path).recent_full_scans.len(), 2);
+        assert_eq!(
+            daily_tokens_used(&conn, &read_control(&path), &at(1600)).unwrap(),
+            100
+        );
+        reset_spending_authorization(&path).unwrap();
+        let reset = load_object(&path).unwrap();
+        assert!(!reset.contains_key("recentFullScans"));
+        assert!(!reset.contains_key("lastFullScan"));
+        assert!(!reset.contains_key("fullScan"));
+        for key in ["captureToken", "lastReadmeCheck", "futureKey", "paused"] {
+            assert_eq!(reset[key], raw[key]);
+        }
+    }
+
+    #[test]
+    fn finishing_a_full_scan_deduplicates_existing_history_in_the_raw_file() {
+        let db = TestDb::new("daily-history-dedup-raw");
+        let path = queue_control_path(db.path());
+        let p1 = period(&at(-7200), &at(-6600));
+        let p2 = period(&at(-3600), &at(-3000));
+        let raw = serde_json::json!({"recentFullScans": [&p1, &p1, &p2]});
+        fs::write(&path, serde_json::to_vec(&raw).unwrap()).unwrap();
+        let conn = db.conn();
+        begin_full_scan(&path, &at(-60), 1).unwrap();
+        stop_full_scan(&conn, &path, NOW).unwrap();
+
+        // 直接检查写入内容，避免读取端的处理掩盖重复记录。
+        let written: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        let history = written["recentFullScans"].as_array().unwrap();
+        assert_eq!(history.len(), 3);
+        assert_eq!(
+            written["recentFullScans"],
+            serde_json::json!([p1, p2, period(&at(-60), NOW)]),
+            "相同的 P1 只留一次，时段按结束时间从早到晚写入"
+        );
+    }
+
+    #[test]
+    fn recent_scan_history_prunes_older_than_25_hours_and_keeps_latest_16() {
+        let db = TestDb::new("daily-history-prune");
+        let path = queue_control_path(db.path());
+        let cutoff = at(-FULL_SCAN_HISTORY_SECS);
+        let raw = serde_json::json!({"recentFullScans": [
+            period(&at(-FULL_SCAN_HISTORY_SECS - 100), &at(-FULL_SCAN_HISTORY_SECS - 1)),
+            period(&at(-FULL_SCAN_HISTORY_SECS - 100), &cutoff)
+        ]});
+        fs::write(&path, serde_json::to_vec(&raw).unwrap()).unwrap();
+        let conn = db.conn();
+        begin_full_scan(&path, &at(-10), 1).unwrap();
+        stop_full_scan(&conn, &path, NOW).unwrap();
+        let first = read_control(&path).recent_full_scans;
+        assert_eq!(
+            first,
+            vec![
+                period(&at(-FULL_SCAN_HISTORY_SECS - 100), &cutoff),
+                period(&at(-10), NOW)
+            ]
+        );
+        for index in 1..=20 {
+            begin_full_scan(&path, &at(index * 60), 1).unwrap();
+            stop_full_scan(&conn, &path, &at(index * 60 + 10)).unwrap();
+        }
+        let recent = read_control(&path).recent_full_scans;
+        assert_eq!(recent.len(), MAX_RECENT_FULL_SCANS);
+        assert_eq!(
+            recent,
+            (5..=20)
+                .map(|index| period(&at(index * 60), &at(index * 60 + 10)))
+                .collect::<Vec<_>>()
+        );
+        // 读取端也会截成 16 项，必须直接检查文件才能守住写入端的上限。
+        let written: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        let history = written["recentFullScans"].as_array().unwrap();
+        assert_eq!(history.len(), MAX_RECENT_FULL_SCANS);
+        let expected: Vec<_> = (5..=20)
+            .map(|index| period(&at(index * 60), &at(index * 60 + 10)))
+            .collect();
+        assert_eq!(
+            written["recentFullScans"],
+            serde_json::to_value(expected).unwrap(),
+            "原始文件只保存第 5 至 20 轮，不能靠读取端截断"
+        );
+    }
+
+    #[test]
+    fn scan_period_end_rejects_invalid_times_and_caps_valid_times_at_48_hours() {
+        let scan = full_scan_control(NOW, 1).full_scan.unwrap();
+        let deadline = at(FULL_SCAN_SECS);
+        let invalid_now = "z-not-a-time";
+        assert!(invalid_now > deadline.as_str());
+        assert_eq!(
+            scan_period_end(&scan, invalid_now),
+            None,
+            "现在时间读不懂时，即使字典序已超过截止时间，也不能生成免计时段"
+        );
+        let one_hour_later = at(3600);
+        assert_eq!(
+            scan_period_end(&scan, &one_hour_later),
+            Some(one_hour_later)
+        );
+        assert_eq!(
+            scan_period_end(&scan, &at(FULL_SCAN_SECS + 3600)),
+            Some(deadline)
+        );
+        let invalid_start = full_scan_control("z-not-a-time", 1).full_scan.unwrap();
+        assert_eq!(scan_period_end(&invalid_start, &at(3600)), None);
+    }
+
+    #[test]
+    fn malformed_recent_scans_are_ignored_individually_without_panics_or_slow_scans() {
+        let valid = period(NOW, &at(60));
+        let raw = serde_json::json!({
+            "dailyBudgetTokens": 50_000, "paused": true,
+            "recentFullScans": [null, 3, {}, {"startedAt": NOW},
+                {"startedAt": "2026-中-03T12:00:00.000Z", "finishedAt": at(60)},
+                {"startedAt": "2026-10-03T12:00:00.00中", "finishedAt": at(60)},
+                {"startedAt": at(60), "finishedAt": NOW},
+                {"startedAt": "2026-02-30T12:00:00.000Z", "finishedAt": at(60)}, valid]
+        });
+        let control = control_from_map(raw.as_object().unwrap());
+        assert_eq!(control.recent_full_scans, vec![valid]);
+        assert_eq!(control.daily_budget_tokens, 50_000);
+        assert!(control.paused);
+        let malicious = serde_json::json!({"recentFullScans": vec![serde_json::json!({
+            "startedAt": "\\中中中中中中中", "finishedAt": "<a<a<a<a"
+        }); 100_000]});
+        let started = Instant::now();
+        assert!(control_from_map(malicious.as_object().unwrap())
+            .recent_full_scans
+            .is_empty());
+        assert!(started.elapsed() < Duration::from_secs(5));
+        for value in [Value::Null, Value::from("坏数组"), serde_json::json!({})] {
+            let map = serde_json::json!({"dailyBudgetTokens": 50_000, "recentFullScans": value});
+            let control = control_from_map(map.as_object().unwrap());
+            assert!(control.recent_full_scans.is_empty());
+            assert_eq!(control.daily_budget_tokens, 50_000);
+        }
+    }
+
+    #[test]
+    fn every_full_scan_finish_reason_archives_its_period_idempotently() {
+        let db = TestDb::new("daily-finish-reasons");
+        let path = queue_control_path(db.path());
+        for (index, reason) in ["completed", "stopped", "expired", "ceiling", "failures"]
+            .iter()
+            .enumerate()
+        {
+            let start = at(index as i64 * 100);
+            let finish = shift_db_time(&start, 60).unwrap();
+            let scan = begin_full_scan(&path, &start, 1).unwrap();
+            finish_full_scan(&path, &scan, reason, 100, 0, 0, &finish).unwrap();
+            assert_eq!(read_control(&path).recent_full_scans.len(), index + 1);
+            assert_eq!(
+                read_control(&path).recent_full_scans.last(),
+                Some(&period(&start, &finish))
+            );
+            finish_full_scan(&path, &scan, reason, 100, 0, 0, &finish).unwrap();
+            assert_eq!(read_control(&path).recent_full_scans.len(), index + 1);
+        }
     }
 
     #[test]
@@ -3438,6 +4161,7 @@ mod tests {
             paused: true,
             daily_budget_tokens: 50_000,
             unlimited: true,
+            full_scan_periods: Vec::new(),
         };
         assert!(claim_one(&mut conn, &handled, &paused).is_none());
     }
@@ -3595,6 +4319,8 @@ mod tests {
         set_daily_budget(&path, 20_000).unwrap();
         begin_full_scan(&path, NOW, 3).unwrap();
         let mut conn = db.conn();
+        // 全量整理之前，自动整理自己的用量已超过每天额度；停止后依然受限。
+        open_job_row(&conn, "automatic", "succeeded", 30_000, Some(&at(-10)));
         for id in ["a", "b", "c"] {
             open_job_row(&conn, id, "queued", 0, None);
         }
@@ -3610,11 +4336,12 @@ mod tests {
         // 没有在进行时再停一次：什么也不做，记录不变
         stop_full_scan(&conn, &path, &at(20)).unwrap();
         assert_eq!(read_control(&path).last_full_scan, Some(last));
-        // 之后认领按每天额度：已用 3 万超过 2 万，领不到
+        // 之后认领按每天额度：自动整理已用 3 万超过 2 万，领不到
         let gate = BudgetGate {
             paused: false,
             daily_budget_tokens: control.daily_budget_tokens,
             unlimited: control.full_scan_active(&at(20)),
+            full_scan_periods: full_scan_periods(&control, &at(20)),
         };
         assert!(claim_one(&mut conn, &free_and_spend(), &gate).is_none());
     }
@@ -3668,6 +4395,13 @@ mod tests {
         };
         // 每天额度模式：领第一个（预留 1.2 万 ≤ 5 万），花 4 万之后第二个领不到
         assert_eq!(drain(1), 1);
+        // 明确分开前一条自动整理和下一轮开始的毫秒边界；全量整理时段两端都包含。
+        db.conn()
+            .execute(
+                "UPDATE ai_jobs SET finished_at = ?1 WHERE status = 'succeeded'",
+                [shift_db_time(&now_db_time(), -1).unwrap()],
+            )
+            .unwrap();
         // 全量整理：剩下 4 个一口气做完，用量远超每天额度也不停
         let remaining = count_open_cards(&db.conn()).unwrap();
         assert_eq!(remaining, 4);
@@ -3685,7 +4419,8 @@ mod tests {
         );
         assert_eq!(last.tokens_used, 4 * 40_000);
         assert!(!status.unlimited, "收尾之后界面读到的是回到日常额度");
-        // 新来的任务又按每天额度：已用 20 万，领不到
+        assert_eq!(status.daily_tokens_used, 40_000);
+        // 新来的任务又按每天额度：自动整理已用 4 万，剩下的放不下一条预留，领不到
         insert_job(&db.conn(), "late", "repo_card", 6, NOW, None, "queued");
         assert!(claim_for_worker(db.path(), &handlers).unwrap().is_none());
     }
