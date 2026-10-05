@@ -400,6 +400,8 @@ pub struct AutomationStatus {
     pub paused: bool,
     pub pause_reason: Option<jobs::PauseReason>,
     pub tokens_24h: i64,
+    /// 每日额度的已用，不含一次性全量整理时段里的用量。
+    pub daily_tokens_used: i64,
     /// 日常额度还剩多少。全量整理期间它不代表队列会不会停，界面要先看 `unlimited`。
     pub budget_remaining: u64,
     pub queued: i64,
@@ -415,24 +417,45 @@ pub struct AutomationStatus {
     pub last_readme_check: Option<jobs::LastReadmeCheck>,
     /// 现在还没整理好的有效仓库数（没有理解卡 + 说明过期、没被确认），用来估全量整理要多少。
     pub needs_organizing: i64,
+    pub active_repos: i64,
+    pub needs_organizing_missing: i64,
+    pub needs_organizing_outdated: i64,
+    /// 缺失、过期，以及已经排队或进行中的理解卡任务，按仓库去重。
+    pub awaiting: i64,
 }
 
-/// 有效仓库里「全量整理」要处理的：没有理解卡的，加上还是第 2 版之前结构的（没被确认的都算）。
-/// 和 `insert_scoped` 的两个范围一致。
-fn count_needs_organizing(conn: &Connection) -> Result<i64, String> {
+/// 与 insert_scoped 的 Missing / Outdated 范围一致；拆分计数来自同一次查询。
+fn organizing_counts(conn: &Connection) -> Result<(i64, i64, i64, i64), String> {
+    let missing =
+        "(repo_ai_documents.repo_id IS NULL OR IFNULL(trim(repo_ai_documents.card_json), '') = '')";
     let outdated = outdated_sql();
     let sql = format!(
-        "SELECT COUNT(*) FROM repositories
+        "SELECT COUNT(*),
+                COALESCE(SUM(CASE WHEN {missing} AND {NOT_CONFIRMED_SQL} THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN ({outdated}) AND {NOT_CONFIRMED_SQL} THEN 1 ELSE 0 END), 0)
+         FROM repositories
          LEFT JOIN repo_ai_documents ON repo_ai_documents.repo_id = repositories.id
-         WHERE repositories.sync_status = 'active'
-           AND (
-             (repo_ai_documents.repo_id IS NULL OR IFNULL(trim(repo_ai_documents.card_json), '') = '')
-             OR ({outdated})
-           )
-           AND {NOT_CONFIRMED_SQL}"
+         WHERE repositories.sync_status = 'active'"
     );
-    conn.query_row(&sql, [], |row| row.get(0))
-        .map_err(|error| format!("待整理数读取失败：{error}"))
+    let (active, missing_count, outdated_count) = conn
+        .query_row(&sql, [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .map_err(|error| format!("待整理数读取失败：{error}"))?;
+    // 与 start_full_scan 补排 Missing / Outdated 后的 count_open_cards 集合一致；UNION 按仓库去重。
+    let awaiting_sql = format!(
+        "SELECT COUNT(*) FROM (
+           SELECT repositories.id FROM repositories
+           LEFT JOIN repo_ai_documents ON repo_ai_documents.repo_id = repositories.id
+           WHERE repositories.sync_status = 'active'
+             AND ({missing} OR ({outdated})) AND {NOT_CONFIRMED_SQL}
+           UNION
+           SELECT target_id FROM ai_jobs
+           WHERE job_type = 'repo_card' AND status IN ('queued', 'running')
+         )"
+    );
+    let awaiting = conn
+        .query_row(&awaiting_sql, [], |row| row.get(0))
+        .map_err(|error| format!("待整理数读取失败：{error}"))?;
+    Ok((active, missing_count, outdated_count, awaiting))
 }
 
 /// `settings` 是设置文件里的 JSON。不读钥匙串，也不看 `apiKey`。
@@ -457,12 +480,15 @@ pub fn automation_status(db_path: &Path, settings: &Value) -> Result<AutomationS
         }),
         _ => None,
     };
+    let (active_repos, needs_organizing_missing, needs_organizing_outdated, awaiting) =
+        organizing_counts(&conn)?;
     Ok(AutomationStatus {
         enabled: (control.daily_budget_tokens > 0 || unlimited) && !control.paused,
         daily_budget_tokens: control.daily_budget_tokens,
         paused: control.paused,
         pause_reason: control.pause_reason,
         tokens_24h: queue.tokens_24h,
+        daily_tokens_used: queue.daily_tokens_used,
         budget_remaining: queue.budget_remaining,
         queued: queue.queued,
         running: queue.running,
@@ -473,7 +499,11 @@ pub fn automation_status(db_path: &Path, settings: &Value) -> Result<AutomationS
         full_scan,
         last_full_scan: control.last_full_scan,
         last_readme_check: control.last_readme_check,
-        needs_organizing: count_needs_organizing(&conn)?,
+        needs_organizing: needs_organizing_missing + needs_organizing_outdated,
+        active_repos,
+        needs_organizing_missing,
+        needs_organizing_outdated,
+        awaiting,
     })
 }
 
@@ -486,7 +516,7 @@ pub fn start_full_scan(
     confirmed: bool,
 ) -> Result<AutomationStatus, String> {
     if !confirmed {
-        return Err("一次性全部整理会花钱，需要你确认之后才能开始。".to_owned());
+        return Err("「现在整理」会花钱，需要你确认之后才能开始。".to_owned());
     }
     let (provider_configured, _) = provider_from_settings(settings);
     if !provider_configured {
@@ -2090,6 +2120,7 @@ mod tests {
         assert!(!status.paused);
         assert!(status.pause_reason.is_none());
         assert_eq!(status.tokens_24h, 16);
+        assert_eq!(status.daily_tokens_used, 16);
         assert_eq!(status.budget_remaining, 50_000 - 16);
         assert_eq!(status.queued, 2);
         assert_eq!(status.running, 1);
@@ -2196,6 +2227,7 @@ mod tests {
             "paused",
             "pauseReason",
             "tokens24h",
+            "dailyTokensUsed",
             "budgetRemaining",
             "queued",
             "running",
@@ -2207,10 +2239,134 @@ mod tests {
             "lastFullScan",
             "lastReadmeCheck",
             "needsOrganizing",
+            "activeRepos",
+            "needsOrganizingMissing",
+            "needsOrganizingOutdated",
+            "awaiting",
         ]
         .into_iter()
         .map(str::to_owned)
         .collect()
+    }
+
+    #[test]
+    fn automation_status_splits_missing_outdated_and_deduplicates_awaiting_repos() {
+        let db = TempDb::new("status-split-counts");
+        let conn = db.open();
+        for id in ["a", "b", "c", "d", "f", "g"] {
+            insert_repo(&conn, id, "active");
+        }
+        insert_repo(&conn, "e", "removed");
+        for (id, schema, review) in [
+            ("b", 1, "suggested"),
+            ("c", 2, "suggested"),
+            ("d", 1, "confirmed"),
+            ("f", 2, "suggested"),
+        ] {
+            insert_card(
+                &conn,
+                id,
+                &json!({"review_status": review}).to_string(),
+                schema,
+                "h",
+            );
+        }
+        conn.execute(
+            "INSERT INTO ai_jobs(id, account_id, job_type, target_type, target_id, status)
+             VALUES ('f-queued', 'acct', 'repo_card', 'repository', 'f', 'queued'),
+                    ('g-queued', 'acct', 'repo_card', 'repository', 'g', 'queued')",
+            [],
+        )
+        .unwrap();
+        // c 已有新版说明，归类任务排队不能把它算进待整理的理解卡。
+        conn.execute(
+            "INSERT INTO ai_jobs(id, account_id, job_type, target_type, target_id, status)
+             VALUES ('c-categorize', 'acct', 'categorize', 'repository', 'c', 'queued')",
+            [],
+        )
+        .unwrap();
+        let status = automation_status(db.path(), &fs_settings()).unwrap();
+        assert_eq!(status.active_repos, 6);
+        assert_eq!(
+            status.needs_organizing_missing, 2,
+            "a、g 没有卡；已移除的 e 不算"
+        );
+        assert_eq!(
+            status.needs_organizing_outdated, 1,
+            "b 是旧格式；已确认的 d 不算"
+        );
+        assert_eq!(status.needs_organizing, 3);
+        assert_eq!(
+            status.needs_organizing,
+            status.needs_organizing_missing + status.needs_organizing_outdated
+        );
+        assert_eq!(status.awaiting, 4, "a、b、f、g；g 既没卡又排队只算一次");
+        conn.execute(
+            "UPDATE ai_jobs SET status = 'running' WHERE id = 'c-categorize'",
+            [],
+        )
+        .unwrap();
+        assert_eq!(
+            automation_status(db.path(), &fs_settings())
+                .unwrap()
+                .awaiting,
+            4,
+            "c 的归类任务进行中也不算待整理，仍然只有 a、b、f、g"
+        );
+        conn.execute(
+            "UPDATE ai_jobs SET status = 'running' WHERE id = 'f-queued'",
+            [],
+        )
+        .unwrap();
+        assert_eq!(
+            automation_status(db.path(), &fs_settings())
+                .unwrap()
+                .awaiting,
+            4
+        );
+        // start_full_scan 也保留原本已经在排队的任务；补排后集合与 awaiting 完全一致。
+        let scan = start_full_scan(db.path(), &fs_settings(), true).unwrap();
+        assert_eq!(scan.awaiting, 4);
+        assert_eq!(scan.full_scan.unwrap().total, 4);
+    }
+
+    #[test]
+    fn automation_status_reports_daily_usage_separately_from_full_scan_usage() {
+        let db = TempDb::new("status-daily-usage");
+        let now = jobs::now_db_time();
+        let start = jobs::shift_db_time(&now, -7200).unwrap();
+        let inside = jobs::shift_db_time(&now, -5400).unwrap();
+        let finish = jobs::shift_db_time(&now, -3600).unwrap();
+        let conn = db.open();
+        conn.execute(
+            "INSERT INTO ai_jobs(id, account_id, job_type, target_type, target_id, status, input_tokens, finished_at)
+             VALUES ('scan', 'acct', 'repo_card', 'repository', 'scan', 'succeeded', 3000000, ?1),
+                    ('auto', 'acct', 'repo_card', 'repository', 'auto', 'succeeded', 300, ?2)",
+            params![inside, now],
+        ).unwrap();
+        fs::write(
+            jobs::queue_control_path(db.path()),
+            json!({
+                "dailyBudgetTokens": 50_000,
+                "recentFullScans": [{"startedAt": start, "finishedAt": finish}]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let status = automation_status(db.path(), &fs_settings()).unwrap();
+        assert_eq!(status.tokens_24h, 3_000_300);
+        assert_eq!(status.daily_tokens_used, 300);
+        assert_eq!(status.budget_remaining, 50_000 - 300);
+        assert_eq!(
+            (
+                status.active_repos,
+                status.needs_organizing_missing,
+                status.needs_organizing_outdated,
+                status.needs_organizing,
+                status.awaiting
+            ),
+            (0, 0, 0, 0, 0)
+        );
     }
 
     // —— 全量整理 ——
@@ -2264,7 +2420,7 @@ mod tests {
         let db = TempDb::new("fs-wording");
         assert_eq!(
             start_full_scan(db.path(), &fs_settings(), false).expect_err("没确认应拒绝"),
-            "一次性全部整理会花钱，需要你确认之后才能开始。"
+            "「现在整理」会花钱，需要你确认之后才能开始。"
         );
         assert_eq!(
             start_full_scan(db.path(), &json!({}), true).expect_err("没配置 AI 服务应拒绝"),

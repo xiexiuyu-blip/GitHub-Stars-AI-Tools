@@ -456,12 +456,12 @@ fn refusal_for(
     }
     if control.daily_budget_tokens == 0 {
         return Err(format!(
-            "{REFUSAL_PREFIX}每天额度是 0，所有 AI 功能都还不能用。要用请先到「设置 → 自动整理与备份」的「每天自动整理」里开启每天额度，或开启「一次性全部整理」。"
+            "{REFUSAL_PREFIX}每天额度是 0，所有 AI 功能都还不能用。要用请先到「设置 → 自动整理与备份」的「每天自动整理」里开启每天额度，或在同一页点「现在整理」。"
         ));
     }
     if used.saturating_add(estimated) > control.daily_budget_tokens {
         return Err(format!(
-            "{REFUSAL_PREFIX}最近 24 小时已经用了约 {}，这一次预计还要约 {}，会超过每天 {} 的额度，所以没有发请求。过一阵额度恢复后再试，或到「设置 → 自动整理与备份」里调高每天额度；想一次性整理完，可以开启「一次性全部整理」。",
+            "{REFUSAL_PREFIX}最近 24 小时已经用了约 {}（整理现有收藏用的不算），这一次预计还要约 {}，会超过每天 {} 的额度，所以没有发请求。过一阵额度恢复后再试，或到「设置 → 自动整理与备份」里调高每天额度；想马上整理完，可以点「现在整理」。",
             readable_tokens(used),
             readable_tokens(estimated),
             readable_tokens(control.daily_budget_tokens),
@@ -553,7 +553,7 @@ fn reserve_with(
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|error| refuse(error.to_string()))?;
     let cutoff = jobs::shift_db_time(now, -jobs::DAY_SECS).map_err(refuse)?;
-    let used = jobs::tokens_used_since(&transaction, &cutoff)
+    let used = jobs::daily_tokens_used(&transaction, &control, now)
         .map_err(refuse)?
         .max(0) as u64;
     // 全量整理进行中（Fox 亲手确认过、没超时、用量没超过刹车线）：这一轮不看每天额度。预留照常写，用量照常记账
@@ -1335,7 +1335,7 @@ mod tests {
             .expect("每天额度模式下应拒绝");
         assert!(is_refusal(&error), "{error}");
         assert!(
-            error.contains("一次性全部整理"),
+            error.contains("现在整理"),
             "拒绝的话要告诉他还有这条路：{error}"
         );
         // 全量整理进行中：放行，预留照常写、用量照常记
@@ -1368,16 +1368,34 @@ mod tests {
     }
 
     #[test]
-    fn a_full_scan_far_beyond_its_estimate_no_longer_lifts_the_cap() {
-        // 预计只有 1 个：刹车线 300 万。用量超过它，说明哪里不对劲，旧功能也要拦
+    fn a_full_scan_past_its_ceiling_uses_the_daily_budget_without_unlimited_access() {
+        // 预计只有 1 个：刹车线 300 万。超过后取消不限额，整理用量仍不占每日额度。
         let dir = Dir::new();
         let now = jobs::now_db_time();
         dir.control(&control_with_full_scan(100_000, false, &now, 1));
         record_at(dir.path(), &now, "p", "m", 3_000_000, 1).unwrap();
-        let error = begin(Some(dir.path()), "提示词")
-            .err()
-            .expect("超过刹车线应拒绝");
+        let conn = Connection::open(dir.path()).unwrap();
+        let control = jobs::read_control(&jobs::queue_control_path(dir.path()));
+        assert!(!jobs::full_scan_open(&conn, &control, &now));
+        assert_eq!(jobs::daily_tokens_used(&conn, &control, &now).unwrap(), 0);
+        assert!(reserve_with(dir.path(), &now, 4_000, Policy::Legacy).is_ok());
+        assert_eq!(dir.used(), 3_004_001, "按每天额度放行，预留照常记账");
+
+        // 开始前的自动用量超过 10 万：同一个请求必须按每天额度拒绝。
+        let before = jobs::shift_db_time(&now, -1).unwrap();
+        record_at(dir.path(), &before, "p", "m", 100_001, 0).unwrap();
+        assert_eq!(
+            jobs::daily_tokens_used(&conn, &control, &now).unwrap(),
+            100_001
+        );
+        let used_before = dir.used();
+        let error = reserve_with(dir.path(), &now, 4_000, Policy::Legacy).unwrap_err();
         assert!(is_refusal(&error), "{error}");
+        assert_eq!(
+            error,
+            refusal_for(&control, 100_001, 4_000, false).unwrap_err()
+        );
+        assert_eq!(dir.used(), used_before, "被拒绝不能留下预留");
     }
 
     #[test]
@@ -1406,6 +1424,86 @@ mod tests {
 
     fn rerank_begin(dir: &Dir, prompt: &str) -> Result<SpendPermit, String> {
         solve_rerank(|| begin(Some(dir.path()), prompt))
+    }
+
+    #[test]
+    fn legacy_and_rerank_reservations_work_immediately_after_a_large_full_scan() {
+        let dir = Dir::new();
+        let now = jobs::now_db_time();
+        let start = jobs::shift_db_time(&now, -7200).unwrap();
+        let inside = jobs::shift_db_time(&now, -5400).unwrap();
+        let finish = jobs::shift_db_time(&now, -3600).unwrap();
+        dir.control(r#"{"dailyBudgetTokens":50000,"paused":false}"#);
+        jobs::begin_full_scan(&jobs::queue_control_path(dir.path()), &start, 400).unwrap();
+        record_at(dir.path(), &inside, "fake", "fake", 2_000_000, 1_000_000).unwrap();
+        let conn = Connection::open(dir.path()).unwrap();
+        jobs::stop_full_scan(&conn, &jobs::queue_control_path(dir.path()), &finish).unwrap();
+        record_at(dir.path(), &now, "fake", "fake", 40_000, 0).unwrap();
+        let control = jobs::read_control(&jobs::queue_control_path(dir.path()));
+        assert!(
+            control.full_scan.is_none(),
+            "已经收尾，不能靠不限额绕过每日闸门"
+        );
+        assert_eq!(
+            jobs::daily_tokens_used(&conn, &control, &now).unwrap(),
+            40_000
+        );
+        assert!(reserve_with(dir.path(), &now, 5_000, Policy::Legacy).is_ok());
+        assert!(reserve_with(dir.path(), &now, 5_000, Policy::SolveRerank).is_ok());
+        assert_eq!(
+            jobs::daily_tokens_used(&conn, &control, &now).unwrap(),
+            50_000
+        );
+        assert_eq!(dir.used(), 3_050_000, "全部真实用量和预留照常记账");
+        let error = reserve_with(dir.path(), &now, 1, Policy::Legacy).unwrap_err();
+        assert_eq!(
+            error,
+            refusal_for(&control, 50_000, 1, false).unwrap_err(),
+            "自动用量超额度时原拒绝文案保持不变"
+        );
+    }
+
+    #[test]
+    fn daily_exclusions_leave_rerank_own_allowance_and_automatic_refusals_unchanged() {
+        let dir = Dir::new();
+        let now = jobs::now_db_time();
+        let start = jobs::shift_db_time(&now, -7200).unwrap();
+        let inside = jobs::shift_db_time(&now, -5400).unwrap();
+        let finish = jobs::shift_db_time(&now, -3600).unwrap();
+        dir.control(
+            &serde_json::json!({
+                "dailyBudgetTokens": 50_000, "paused": false,
+                "recentFullScans": [{"startedAt": start, "finishedAt": finish}]
+            })
+            .to_string(),
+        );
+        // AI 精选即使落在全量整理时段里，自己的这份额度也照样计入，不改原口径。
+        record_at_tagged(
+            dir.path(),
+            &inside,
+            "fake",
+            "fake",
+            25_000,
+            0,
+            SOLVE_RERANK_TAG,
+        )
+        .unwrap();
+        record_at(dir.path(), &now, "fake", "fake", 50_001, 0).unwrap();
+        let control = jobs::read_control(&jobs::queue_control_path(dir.path()));
+        let conn = Connection::open(dir.path()).unwrap();
+        assert_eq!(
+            jobs::daily_tokens_used(&conn, &control, &now).unwrap(),
+            50_001
+        );
+        assert_eq!(
+            reserve_with(dir.path(), &now, 1, Policy::Legacy).unwrap_err(),
+            refusal_for(&control, 50_001, 1, false).unwrap_err()
+        );
+        assert_eq!(
+            reserve_with(dir.path(), &now, 1, Policy::SolveRerank).unwrap_err(),
+            refusal_for_rerank(&control, 25_000, 1, false).unwrap_err()
+        );
+        assert_eq!(dir.used(), 75_001, "被拒绝不能留下预留");
     }
 
     #[test]
@@ -1909,13 +2007,13 @@ mod tests {
         let zero = refusal_for(&control_of(0, false), 0, 1, false).unwrap_err();
         assert_eq!(
             zero,
-            format!("{REFUSAL_PREFIX}每天额度是 0，所有 AI 功能都还不能用。要用请先到「设置 → 自动整理与备份」的「每天自动整理」里开启每天额度，或开启「一次性全部整理」。")
+            format!("{REFUSAL_PREFIX}每天额度是 0，所有 AI 功能都还不能用。要用请先到「设置 → 自动整理与备份」的「每天自动整理」里开启每天额度，或在同一页点「现在整理」。")
         );
         // 24 小时已经用了 13 万，这一次预计 4000，每天额度 10 万
         let over = refusal_for(&control_of(100_000, false), 130_000, 4_000, false).unwrap_err();
         assert_eq!(
             over,
-            format!("{REFUSAL_PREFIX}最近 24 小时已经用了约 13.0 万 token，这一次预计还要约 4000 token，会超过每天 10.0 万 token 的额度，所以没有发请求。过一阵额度恢复后再试，或到「设置 → 自动整理与备份」里调高每天额度；想一次性整理完，可以开启「一次性全部整理」。")
+            format!("{REFUSAL_PREFIX}最近 24 小时已经用了约 13.0 万 token（整理现有收藏用的不算），这一次预计还要约 4000 token，会超过每天 10.0 万 token 的额度，所以没有发请求。过一阵额度恢复后再试，或到「设置 → 自动整理与备份」里调高每天额度；想马上整理完，可以点「现在整理」。")
         );
         for message in [&paused, &zero, &over] {
             assert_refusal_with_current_names(message);
