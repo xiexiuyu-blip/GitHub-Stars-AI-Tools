@@ -963,15 +963,15 @@ fn core_ranks(connection: &Connection) -> Result<HashMap<String, i64>, String> {
                AND s.sort_order <= ?1
              GROUP BY es.entity_id",
         )
-        .map_err(|error| format!("方向排名准备失败：{error}"))?;
+        .map_err(|error| format!("场景排名准备失败：{error}"))?;
     let rows = statement
         .query_map(params![CORE_SORT_MAX], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
         })
-        .map_err(|error| format!("方向排名失败：{error}"))?;
+        .map_err(|error| format!("场景排名失败：{error}"))?;
     let mut ranks = HashMap::new();
     for row in rows {
-        let (id, rank) = row.map_err(|error| format!("方向排名读取失败：{error}"))?;
+        let (id, rank) = row.map_err(|error| format!("场景排名读取失败：{error}"))?;
         ranks.insert(id, rank);
     }
     Ok(ranks)
@@ -3522,5 +3522,56 @@ mod tests {
 
     fn owned(ids: &[&str]) -> Vec<String> {
         ids.iter().map(|id| (*id).to_owned()).collect()
+    }
+
+    // ───────────── 卡 37：「场景排名」读库出错时用现在的叫法 ─────────────
+
+    #[test]
+    fn the_scenario_ranking_errors_say_scenario_not_direction() {
+        // 库里没有场景表：准备语句就失败
+        let connection = Connection::open_in_memory().expect("应能打开内存库");
+        let error = core_ranks(&connection).expect_err("没有表应失败");
+        assert!(error.starts_with("场景排名准备失败："), "{error}");
+
+        // 夹具表不带列类型，值按原样存。工具编号是文字时能读出排名……
+        let connection = Connection::open_in_memory().expect("应能打开内存库");
+        connection
+            .execute_batch(
+                "CREATE TABLE scenarios(id, sort_order);
+                 CREATE TABLE entity_scenarios(entity_type, entity_id, scenario_id, status);
+                 INSERT INTO scenarios VALUES ('scn-a', 1);
+                 INSERT INTO entity_scenarios VALUES ('repository', '42', 'scn-a', 'suggested');",
+            )
+            .expect("应能建夹具");
+        let ranks = core_ranks(&connection).expect("文字编号应能读");
+        assert_eq!(ranks.get("42"), Some(&1));
+        // ……存成整数就读成文字失败：走到「读取失败」那一句
+        connection
+            .execute("UPDATE entity_scenarios SET entity_id = 42", [])
+            .expect("应能改夹具");
+        let error = core_ranks(&connection).expect_err("整数编号读成文字应失败");
+        assert!(error.starts_with("场景排名读取失败："), "{error}");
+    }
+
+    #[test]
+    fn the_scenario_ranking_error_wording_in_the_source_is_the_new_one() {
+        // 中间那句「场景排名失败」在测试里触发不了（query_map 在语句准备好之后不会单独失败），所以读本文件的源码来确认。
+        // 只看测试模块之前的正式代码；分隔符和旧叫法都用 concat! 拼出来，免得这条测试自己把自己写进被检查的文字里。
+        let source = include_str!("library_view.rs");
+        let production = source
+            .split(concat!("#[cfg(test)]\n", "mod tests {"))
+            .next()
+            .unwrap_or(source);
+        for new in ["场景排名准备失败：", "场景排名失败：", "场景排名读取失败："]
+        {
+            assert!(production.contains(new), "少了新叫法：{new}");
+        }
+        for old in [
+            concat!("方向", "排名准备失败"),
+            concat!("方向", "排名失败"),
+            concat!("方向", "排名读取失败"),
+        ] {
+            assert!(!source.contains(old), "还有旧叫法：{old}");
+        }
     }
 }

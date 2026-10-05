@@ -3,6 +3,7 @@ import { GitBranch, KeyRound, UserRound } from 'lucide-react';
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { GITHUB_TOKEN_WILL_SAVE_NOTE } from '@/lib/automation-view';
 import type { GitHubAuthState } from '@/types';
 
 type ConnectionPanelProps = {
@@ -43,7 +44,7 @@ export function ConnectionPanel(props: ConnectionPanelProps) {
       ) : (
         <form className="grid gap-3" onSubmit={props.onSaveToken}>
           <label className="grid gap-2.5 text-xs font-semibold text-foreground" htmlFor="github-token">
-            Personal Access Token
+            GitHub 令牌
             <div className="relative">
               <KeyRound className="pointer-events-none absolute left-3.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
               <Input
@@ -56,12 +57,12 @@ export function ConnectionPanel(props: ConnectionPanelProps) {
                 autoCorrect="off"
                 spellCheck={false}
                 inputMode="text"
-                placeholder="粘贴 GitHub Token"
+                placeholder="粘贴 GitHub 令牌"
                 onChange={(event) => props.onSetToken(event.target.value)}
               />
             </div>
           </label>
-          <p className="text-xs leading-relaxed text-muted-foreground">Token 仅用于本地验证和 GitHub API 请求，保存在系统凭据管理器。</p>
+          <p className="text-xs leading-relaxed text-muted-foreground">{GITHUB_TOKEN_WILL_SAVE_NOTE}</p>
           <Button className="h-10 rounded-lg shadow-sm" disabled={props.isSavingToken || props.token.trim().length === 0} type="submit">
             {props.isSavingToken ? '验证中…' : '连接账号'}
           </Button>

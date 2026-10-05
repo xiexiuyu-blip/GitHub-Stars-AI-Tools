@@ -3,6 +3,8 @@ import rehypeSanitize from 'rehype-sanitize';
 import remarkGfm from 'remark-gfm';
 import type { AppUpdateContextValue } from '@/providers/app-update-provider';
 import { Icon } from '@/components/ui/icon';
+import { describeUpdateStatus } from '@/lib/api';
+import { formatMinute } from '@/lib/automation-view';
 
 type AppUpdatePanelProps = {
   appUpdate: AppUpdateContextValue;
@@ -222,25 +224,7 @@ const releaseMarkdownComponents: Components = {
 };
 
 function getAppUpdateStatusMessage(appUpdate: AppUpdateContextValue) {
-  switch (appUpdate.status) {
-    case 'checking':
-      return '正在检查更新...';
-    case 'available':
-      return `发现新版本 ${appUpdate.availableVersion ?? ''}，可查看说明后立即安装。`;
-    case 'not-available':
-      return '已是最新版本。';
-    case 'downloading':
-      return '正在下载并安装更新，请保持应用打开。';
-    case 'installed':
-      return appUpdate.errorMessage ?? '更新已安装，正在准备重启应用。';
-    case 'relaunching':
-      return '更新已安装，正在重启应用。';
-    case 'error':
-      return appUpdate.errorMessage ? `更新失败：${appUpdate.errorMessage}` : '更新失败，请稍后重试。';
-    case 'idle':
-    default:
-      return '应用会在启动时静默检查更新，也可以在这里手动检查。';
-  }
+  return describeUpdateStatus(appUpdate);
 }
 
 function getAppUpdateStatusToneClass(appUpdate: AppUpdateContextValue) {
@@ -261,15 +245,10 @@ function getAppUpdateStatusToneClass(appUpdate: AppUpdateContextValue) {
 
 function formatUpdateCheckedAt(value: string | null) {
   if (!value) {
-    return '尚未检查';
+    return '还没检查过';
   }
 
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) {
-    return value;
-  }
-
-  return date.toLocaleString();
+  return formatMinute(value);
 }
 
 function formatBytes(value: number) {

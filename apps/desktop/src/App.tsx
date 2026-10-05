@@ -193,6 +193,11 @@ function AppContent() {
   }
 
   function handleGlobalSearch(query: string) {
+    setLibraryKeyword(query);
+    setCurrentPage('library');
+  }
+
+  function handleLegacyRepositorySearch(query: string) {
     setRepositoryNavigation((current) => ({
       query,
       language: '',
@@ -266,7 +271,7 @@ function AppContent() {
   if (settingsHook.isLoading) {
     return (
       <div className="flex h-full items-center justify-center bg-background text-sm text-muted-foreground">
-        正在加载本地配置...
+        正在加载本地配置…
       </div>
     );
   }
@@ -274,7 +279,7 @@ function AppContent() {
   if (workspace.isLoadingAuth) {
     return (
       <div className="flex h-full items-center justify-center bg-background text-sm text-muted-foreground">
-        正在检查 GitHub 连接...
+        正在检查 GitHub 连接…
       </div>
     );
   }
@@ -296,7 +301,7 @@ function AppContent() {
             throwOnFailure: true,
           });
           if (!summary) {
-            throw new Error('README 缓存失败，请检查网络连接后重试。');
+            throw new Error('项目说明没读出来。你的资料都还在。');
           }
         }}
         taskProgress={workspace.taskProgress}
@@ -335,7 +340,7 @@ function AppContent() {
       case 'dashboard':
         return (
           <DashboardPage
-            onOpenRepository={(query) => handleGlobalSearch(query)}
+            onOpenRepository={(query) => handleLegacyRepositorySearch(query)}
             onSelectLanguage={handleRepositoryLanguageSelect}
             onOpenSettings={() => setCurrentPage('settings')}
             onOpenProfile={() => setCurrentPage('profile')}
@@ -366,7 +371,7 @@ function AppContent() {
       default:
         return (
           <DashboardPage
-            onOpenRepository={handleGlobalSearch}
+            onOpenRepository={handleLegacyRepositorySearch}
             onSelectLanguage={handleRepositoryLanguageSelect}
             onOpenSettings={() => setCurrentPage('settings')}
             onOpenProfile={() => setCurrentPage('profile')}
@@ -378,6 +383,7 @@ function AppContent() {
 
   function renderPage() {
     const page = renderCurrentPage();
+    // 二级页签的名字以 lib/nav.ts 为准，这里不再改名
     const tabs = subTabsFor(currentPage);
     if (!tabs) {
       return page;
@@ -419,6 +425,7 @@ function AppContent() {
         onCheckForUpdate={handleCheckForUpdate}
         isCheckingUpdate={appUpdate.status === 'checking'}
         syncSummary={workspace.syncSummary}
+        syncedAt={workspace.lastSyncedAt}
         onGlobalSearch={handleGlobalSearch}
         taskProgress={workspace.taskProgress}
         onRetryTask={failedTaskRetry?.onRetry ?? null}
@@ -507,7 +514,7 @@ function StartupUpdateNotice(props: { version: string; onOpenUpdate: () => void;
 function PageLoadingFallback() {
   return (
     <div className="flex h-full min-h-[320px] items-center justify-center bg-background text-sm text-muted-foreground">
-      正在加载页面...
+      正在加载页面…
     </div>
   );
 }
@@ -549,7 +556,7 @@ function getFailedTaskRetry(options: {
   switch (options.taskId) {
     case 'connect-github':
       return {
-        label: '重新输入 Token',
+        label: '重新输入令牌',
         isRetrying: options.workspace.isSavingToken,
         onRetry: options.openSettings,
       };
@@ -573,7 +580,7 @@ function getFailedTaskRetry(options: {
     case 'fetch-readmes': {
       const failedReadmeRepositoryIds = getFailureRepositoryIds(options.workspace.readmeSummary?.failures);
       return {
-        label: failedReadmeRepositoryIds.length > 0 ? '重试失败 README' : '重试 README 缓存',
+        label: failedReadmeRepositoryIds.length > 0 ? '重试没读到的项目说明' : '重试项目说明',
         isRetrying: options.workspace.isFetchingReadmes || options.workspace.isBatchGeneratingAiDocuments,
         onRetry: () => {
           void (async () => {
@@ -595,7 +602,7 @@ function getFailedTaskRetry(options: {
         return null;
       }
       return {
-        label: '重试当前 README',
+        label: '重试当前项目说明',
         isRetrying: options.workspace.isFetchingRepositoryReadme,
         onRetry: () => void options.workspace.handleFetchRepositoryReadme().catch(() => undefined),
       };
@@ -604,7 +611,7 @@ function getFailedTaskRetry(options: {
         return null;
       }
       return {
-        label: '重试当前 AI 摘要',
+        label: '重试当前中文说明',
         isRetrying: options.workspace.isGeneratingAiDocument,
         onRetry: () => {
           void (async () => {
@@ -618,7 +625,7 @@ function getFailedTaskRetry(options: {
     case 'batch-generate-ai-documents': {
       const failedAiRepositoryIds = getFailureRepositoryIds(options.workspace.batchAiSummary?.failures);
       return {
-        label: failedAiRepositoryIds.length > 0 ? '重试失败 AI' : '重试增量 AI',
+        label: failedAiRepositoryIds.length > 0 ? '重试没整理成功的' : '重试自动整理',
         isRetrying: options.workspace.isBatchGeneratingAiDocuments,
         onRetry: () => {
           void (async () => {
@@ -635,7 +642,7 @@ function getFailedTaskRetry(options: {
     }
     case 'generate-ai-tag-network':
       return {
-        label: '重试 AI 标签网络',
+        label: '重试这项整理',
         isRetrying: options.workspace.isGeneratingTagNetwork,
         onRetry: () => {
           void (async () => {
@@ -648,7 +655,7 @@ function getFailedTaskRetry(options: {
       };
     case 'ai-search':
       return {
-        label: '重试 AI 搜索',
+        label: '重试搜索',
         isRetrying: options.workspace.isRetryingAiSearch,
         onRetry: () => void options.workspace.retryLastAiSearch().catch(() => undefined),
       };
@@ -673,7 +680,7 @@ function getFailedTaskRetry(options: {
         return null;
       }
       return {
-        label: '重试加入 Stars',
+        label: '重试收藏',
         isRetrying: options.workspace.isStarringRecommendationCandidate,
         onRetry: () => {
           void options.workspace
@@ -683,25 +690,25 @@ function getFailedTaskRetry(options: {
       };
     case 'export-annotation-gist':
       return {
-        label: '重试导出 Gist',
+        label: '重试上传备份',
         isRetrying: options.workspace.isExportingAnnotations,
         onRetry: () => void options.workspace.handleExportAnnotations(),
       };
     case 'import-annotation-gist':
       return {
-        label: '重试导入 Gist',
+        label: '重试导入备份',
         isRetrying: options.workspace.isImportingAnnotations,
         onRetry: () => void options.workspace.runImportAnnotations(),
       };
     case 'export-repository-library-gist':
       return {
-        label: '重试导出仓库清单',
+        label: '重试上传备份',
         isRetrying: options.workspace.isExportingRepositoryLibrary,
         onRetry: () => void options.workspace.handleExportRepositoryLibrary(),
       };
     case 'import-repository-library-gist':
       return {
-        label: '重试导入仓库清单',
+        label: '重试导入备份',
         isRetrying: options.workspace.isImportingRepositoryLibrary,
         onRetry: () => void options.workspace.handleImportRepositoryLibrary(),
       };

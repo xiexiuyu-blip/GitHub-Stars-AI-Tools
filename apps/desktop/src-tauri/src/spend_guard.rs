@@ -22,8 +22,11 @@
 //! 连接测试和自检是一次很小的调用，用 `probe` 包起来：不看额度、不被暂停拦住，但仍然记账。
 //!
 //! 「找方案」的 AI 精选（用户一搜就自动调一次模型，约 4k token）用 `solve_rerank` 包起来：它在同一个账本里记账
-//! （`prompt_version = 'solve-rerank'`），但**有自己的每日额度**（`SOLVE_RERANK_DAILY_TOKENS`），不被后台整理（尤其是全量整理）
-//! 用掉的额度挡住；前提是 Fox 开过 AI 额度（每天额度大于 0，或全量整理在进行）、队列没有暂停。
+//! （`prompt_version = 'solve-rerank'`），但**有自己的每日额度**，不被后台整理（尤其是全量整理）用掉的额度挡住；
+//! 这份额度跟着每天额度走（`rerank_cap`）：最多 `SOLVE_RERANK_DAILY_TOKENS`，并且不超过每天额度的一半（全量整理进行时按上限）；
+//! 前提是 Fox 开过 AI 额度（每天额度大于 0，或全量整理在进行）、队列没有暂停。
+//! AI 精选一次搜索只发一个请求（`ai::AiCallOptions`，不重试）；等了很久才失败、没拿到可用回复的那一次（最终超时等，
+//! 见 `account_slow_failure`），账本里至少记 `jobs::TIMEOUT_ATTEMPT_TOKEN_ESTIMATE`。
 
 use crate::jobs;
 use rusqlite::{params, Connection, TransactionBehavior};
@@ -53,7 +56,8 @@ pub const REFUSAL_PREFIX: &str = "AI 额度：";
 const LEGACY_TAG: &str = "legacy";
 /// 「找方案」AI 精选在账本里的标记。队列从不认领 `problem_answer`，所以它和旧功能一样只是账本行。
 pub const SOLVE_RERANK_TAG: &str = "solve-rerank";
-/// 「找方案」AI 精选每 24 小时最多用这么多 token（一次约 4k，够搜 70 次左右）。
+/// 「找方案」AI 精选每 24 小时最多用这么多 token（一次约 4k，够搜 70 次左右）。这是「上限的上限」：
+/// 实际能用多少看 `rerank_cap`（每天额度小的时候只给一半，全量整理进行时才给满）。
 pub const SOLVE_RERANK_DAILY_TOKENS: u64 = 300_000;
 
 static DATABASE: OnceLock<PathBuf> = OnceLock::new();
@@ -132,8 +136,8 @@ impl Drop for RerankScope {
     }
 }
 
-/// 「找方案」的 AI 精选：包在里面的请求按它自己的每日额度（`SOLVE_RERANK_DAILY_TOKENS`）算，不看后台整理用掉了多少；
-/// 账本行标成 `solve-rerank`。暂停、每天额度是 0（Fox 还没开过 AI 额度，全量整理也没开）照样拦。
+/// 「找方案」的 AI 精选：包在里面的请求按它自己的每日额度（`rerank_cap`，不超过 `SOLVE_RERANK_DAILY_TOKENS`）算，
+/// 不看后台整理用掉了多少；账本行标成 `solve-rerank`。暂停、每天额度是 0（Fox 还没开过 AI 额度，全量整理也没开）照样拦。
 pub fn solve_rerank<R>(run: impl FnOnce() -> R) -> R {
     RERANK_DEPTH.with(|depth| depth.set(depth.get() + 1));
     let _scope = RerankScope;
@@ -215,7 +219,7 @@ fn begin(database: Option<&Path>, prompt: &str) -> Result<SpendPermit, String> {
             return Ok(permit);
         }
         return Err(format!(
-            "{REFUSAL_PREFIX}额度闸门还没有准备好，旧版的 AI 功能先不能用。重新打开应用再试。"
+            "{REFUSAL_PREFIX}每天额度的检查还没有准备好，AI 功能先不能用。重新打开应用再试。"
         ));
     };
     if probing() {
@@ -287,6 +291,29 @@ pub fn account_failed_stream() {
     if MAYBE_BILLED.with(Cell::get) {
         account_failed_attempt();
     }
+}
+
+/// 等了很久才失败、没拿到可用回复，但服务商多半已经在算的这一次（最终超时：请求发出去了，一直等到时限也没等到回应；
+/// 等了一阵才回的 5xx；等了一阵才断开的连接；响应体一直读不完）。已经写出来的会计费，只留「提示词那部分」会明显偏低。
+/// 这一次在账本里记 **max(`jobs::TIMEOUT_ATTEMPT_TOKEN_ESTIMATE`，提示词估计 + 输出上限)**：
+/// 不少于队列对超时的记法（1 万），提示词很长时再按最坏情形（把输出额度写满）往上补；`max_output_tokens` 没有上限就传 0。
+/// 做法：把「提示词估计之外还要补的部分」（上面那个数减去提示词估计，不会是负数）加进 `EXTRA_TOKENS`，
+/// 凭证放掉时（`SpendPermit::drop`，没改）和提示词那部分一起结算，所以这一行 = 上面那个数，再加上更早失败的尝试。
+/// 这次尝试之后也标成「可能已计费」，之后不会被 `release_unbilled` 退回。
+/// 每次失败只调用一次；没有预留行（探测、没装闸的测试）时什么也不做。
+pub fn account_slow_failure(max_output_tokens: u64) {
+    let Some(input) = RESERVATION.with(|slot| {
+        slot.borrow()
+            .as_ref()
+            .map(|reservation| reservation.input_estimate)
+    }) else {
+        return;
+    };
+    let timeout_floor = u64::try_from(jobs::TIMEOUT_ATTEMPT_TOKEN_ESTIMATE).unwrap_or(0);
+    let floor = timeout_floor.max(input.saturating_add(max_output_tokens));
+    let top_up = floor.saturating_sub(input);
+    EXTRA_TOKENS.with(|extra| extra.set(extra.get().saturating_add(top_up)));
+    MAYBE_BILLED.with(|flag| flag.set(true));
 }
 
 /// `usage` 是服务商回的真实用量（输入，输出）；没有、或不可信就按文字估。
@@ -421,7 +448,7 @@ fn refusal_for(
 ) -> Result<(), String> {
     if control.paused {
         return Err(format!(
-            "{REFUSAL_PREFIX}AI 整理现在是暂停状态，旧版的 AI 功能也一起停着。要继续请先在工具箱里点「继续整理」。"
+            "{REFUSAL_PREFIX}AI 整理现在是暂停状态，其它 AI 功能也一起停着。要继续请先到「设置 → 自动整理与备份」里点「继续整理」。"
         ));
     }
     if unlimited {
@@ -429,12 +456,12 @@ fn refusal_for(
     }
     if control.daily_budget_tokens == 0 {
         return Err(format!(
-            "{REFUSAL_PREFIX}每天的 AI 额度是 0，所有 AI 功能（包括旧版的整批解析、标签网络、AI 搜索）都还不能用。要用请先在工具箱的「AI 自动整理」里开启额度，或开启「全量整理」。"
+            "{REFUSAL_PREFIX}每天额度是 0，所有 AI 功能都还不能用。要用请先到「设置 → 自动整理与备份」的「每天自动整理」里开启每天额度，或开启「一次性全部整理」。"
         ));
     }
     if used.saturating_add(estimated) > control.daily_budget_tokens {
         return Err(format!(
-            "{REFUSAL_PREFIX}最近 24 小时已经用了约 {}，这一次预计还要约 {}，会超过每天 {} 的额度，所以没有发请求。过一阵额度恢复后再试，或在工具箱里调高额度；想一次性整理完，可以开启「全量整理」（不限额）。",
+            "{REFUSAL_PREFIX}最近 24 小时已经用了约 {}，这一次预计还要约 {}，会超过每天 {} 的额度，所以没有发请求。过一阵额度恢复后再试，或到「设置 → 自动整理与备份」里调高每天额度；想一次性整理完，可以开启「一次性全部整理」。",
             readable_tokens(used),
             readable_tokens(estimated),
             readable_tokens(control.daily_budget_tokens),
@@ -443,7 +470,20 @@ fn refusal_for(
     Ok(())
 }
 
-/// 「找方案」AI 精选的规矩（纯函数）：暂停、每天额度是 0（又没有全量整理在进行）、自己这份额度放不下。
+/// 「找方案」AI 精选现在每 24 小时最多能用多少（有效上限）：
+/// - 全量整理在进行（Fox 亲手开的）：`SOLVE_RERANK_DAILY_TOKENS`；
+/// - 否则：每天额度的一半，但不超过 `SOLVE_RERANK_DAILY_TOKENS`。每天额度调小（试跑 10 万），AI 精选也跟着少花，
+///   不会出现「额度只有 5 万、AI 精选却能花 30 万、后台整理被挡一整天」（同一本账，它用掉的队列也看得见）。
+/// 每天额度是 0 又没有全量整理时这里给 0；调用方（`refusal_for_rerank`）在那之前就已经拒绝了。
+fn rerank_cap(control: &jobs::QueueControl, scan_open: bool) -> u64 {
+    if scan_open {
+        SOLVE_RERANK_DAILY_TOKENS
+    } else {
+        SOLVE_RERANK_DAILY_TOKENS.min(control.daily_budget_tokens / 2)
+    }
+}
+
+/// 「找方案」AI 精选的规矩（纯函数）：暂停、每天额度是 0（又没有全量整理在进行）、自己这份额度（`rerank_cap`）放不下。
 /// 不看后台整理已经用了多少：后台用满了，AI 精选照样能用自己的那份。
 fn refusal_for_rerank(
     control: &jobs::QueueControl,
@@ -458,15 +498,16 @@ fn refusal_for_rerank(
     }
     if control.daily_budget_tokens == 0 && !scan_open {
         return Err(format!(
-            "{REFUSAL_PREFIX}每天的 AI 额度是 0，「找方案」的 AI 精选还不能用，这次按本地排序。"
+            "{REFUSAL_PREFIX}每天额度是 0，「找方案」的 AI 精选还不能用，这次按本地排序。"
         ));
     }
-    if rerank_used.saturating_add(estimated) > SOLVE_RERANK_DAILY_TOKENS {
+    let cap = rerank_cap(control, scan_open);
+    if rerank_used.saturating_add(estimated) > cap {
         return Err(format!(
             "{REFUSAL_PREFIX}「找方案」的 AI 精选最近 24 小时已经用了约 {}，这一次预计还要约 {}，会超过它每天 {} 的额度，所以没有发请求；这次按本地排序，过一阵额度恢复后再试。",
             readable_tokens(rerank_used),
             readable_tokens(estimated),
-            readable_tokens(SOLVE_RERANK_DAILY_TOKENS),
+            readable_tokens(cap),
         ));
     }
     Ok(())
@@ -542,7 +583,7 @@ fn reserve_with(
         .map_err(|error| format!("{REFUSAL_PREFIX}额度预留失败：{error}"))?;
     if inserted == 0 {
         return Err(format!(
-            "{REFUSAL_PREFIX}还没有连接 GitHub 账号，用量没法记账，所以旧版的 AI 功能先不能用。"
+            "{REFUSAL_PREFIX}还没有连接 GitHub 账号，用量没法记账，所以 AI 功能先不能用。"
         ));
     }
     transaction
@@ -782,6 +823,7 @@ mod tests {
     use std::thread;
 
     const BUDGET_100K: &str = r#"{"dailyBudgetTokens":100000,"paused":false}"#;
+    const BUDGET_600K: &str = r#"{"dailyBudgetTokens":600000,"paused":false}"#;
     const LEGACY_ROW: &str =
         "SELECT status, input_tokens, output_tokens FROM ai_jobs WHERE target_id LIKE 'legacy-%'";
     const LEGACY_ROW_LATEST: &str = "SELECT status, input_tokens, output_tokens FROM ai_jobs WHERE target_id LIKE 'legacy-%' ORDER BY created_at DESC, rowid DESC LIMIT 1";
@@ -1293,7 +1335,7 @@ mod tests {
             .expect("每天额度模式下应拒绝");
         assert!(is_refusal(&error), "{error}");
         assert!(
-            error.contains("全量整理"),
+            error.contains("一次性全部整理"),
             "拒绝的话要告诉他还有这条路：{error}"
         );
         // 全量整理进行中：放行，预留照常写、用量照常记
@@ -1420,7 +1462,9 @@ mod tests {
     fn rerank_stops_at_its_own_daily_allowance_and_says_so() {
         let dir = Dir::new();
         let now = jobs::now_db_time();
-        dir.control(BUDGET_100K);
+        // 卡 34：AI 精选的上限 = min(30 万, 每天额度的一半)。这条测的是「30 万」这个上限本身，
+        // 所以每天额度要给到 60 万（原来是 10 万，那样上限只有 5 万）；下面的断言没有改
+        dir.control(BUDGET_600K);
         record_at_tagged(
             dir.path(),
             &now,
@@ -1458,7 +1502,7 @@ mod tests {
             SOLVE_RERANK_TAG,
         )
         .unwrap();
-        // 25 小时前的 29.5 万不算：要是还算着，这次 1 万就超过 30 万了
+        // 25 小时前的 29.5 万不算：要是还算着，这次 1 万就超过上限了（每天额度 10 万，上限 5 万）
         assert!(reserve_with(dir.path(), &now, 10_000, Policy::SolveRerank).is_ok());
     }
 
@@ -1570,12 +1614,370 @@ mod tests {
             daily_budget_tokens: budget,
             ..jobs::QueueControl::default()
         };
-        assert!(refusal_for_rerank(&control(1, false), 0, 5_000, false).is_ok());
+        // 卡 34：上限跟着每天额度走（最多 30 万、不超过每天额度的一半），原来表里「有额度」写的是 1，
+        // 现在它的上限是 0；换成 60 万（上限正好 30 万）。每一行的期望结果都没有改
+        const AMPLE: u64 = 600_000;
+        assert!(refusal_for_rerank(&control(AMPLE, false), 0, 5_000, false).is_ok());
         assert!(refusal_for_rerank(&control(0, false), 0, 5_000, true).is_ok());
         assert!(refusal_for_rerank(&control(0, false), 0, 5_000, false).is_err());
         assert!(refusal_for_rerank(&control(1, true), 0, 5_000, true).is_err());
-        assert!(refusal_for_rerank(&control(1, false), 295_000, 5_000, false).is_ok());
-        assert!(refusal_for_rerank(&control(1, false), 295_001, 5_000, false).is_err());
-        assert!(refusal_for_rerank(&control(1, false), u64::MAX, 1, false).is_err());
+        assert!(refusal_for_rerank(&control(AMPLE, false), 295_000, 5_000, false).is_ok());
+        assert!(refusal_for_rerank(&control(AMPLE, false), 295_001, 5_000, false).is_err());
+        assert!(refusal_for_rerank(&control(AMPLE, false), u64::MAX, 1, false).is_err());
+    }
+
+    // ───────────── 卡 34：AI 精选的额度跟着每天额度走 ─────────────
+
+    fn control_of(budget: u64, paused: bool) -> jobs::QueueControl {
+        jobs::QueueControl {
+            paused,
+            daily_budget_tokens: budget,
+            ..jobs::QueueControl::default()
+        }
+    }
+
+    #[test]
+    fn the_rerank_cap_is_half_the_daily_budget_but_never_above_the_ceiling() {
+        for (budget, expected) in [
+            (1, 0),
+            (2, 1),
+            (99_999, 49_999),
+            (100_000, 50_000),
+            (100_001, 50_000),
+            (599_999, 299_999),
+            (600_000, 300_000),
+            (600_001, 300_000),
+            (10_000_000, 300_000),
+            (u64::MAX, 300_000),
+        ] {
+            assert_eq!(
+                rerank_cap(&control_of(budget, false), false),
+                expected,
+                "每天额度 {budget}"
+            );
+        }
+        // 全量整理进行中（Fox 亲手开的）：每天额度是多少（包括 0）都按上限
+        for budget in [0, 1, 100_000, 10_000_000] {
+            assert_eq!(
+                rerank_cap(&control_of(budget, false), true),
+                SOLVE_RERANK_DAILY_TOKENS,
+                "全量整理 + 每天额度 {budget}"
+            );
+        }
+        assert_eq!(SOLVE_RERANK_DAILY_TOKENS, 300_000, "上限的上限不改");
+    }
+
+    #[test]
+    fn rerank_edges_follow_the_effective_cap() {
+        // （每天额度，有没有全量整理，有效上限）：用量 + 预计正好等于上限放行，再多 1 个拒绝
+        for (budget, scan_open, cap) in [
+            (0, true, 300_000_u64),
+            (100_000, false, 50_000),
+            (100_000, true, 300_000),
+            (600_000, false, 300_000),
+            (10_000_000, false, 300_000),
+        ] {
+            let control = control_of(budget, false);
+            let label = format!("每天额度 {budget}，全量整理 {scan_open}，上限 {cap}");
+            assert!(
+                refusal_for_rerank(&control, cap - 5_000, 5_000, scan_open).is_ok(),
+                "{label}：已用 + 预计 == 上限应放行"
+            );
+            assert!(
+                refusal_for_rerank(&control, cap - 5_000, 5_001, scan_open).is_err(),
+                "{label}：多 1 个应拒绝"
+            );
+            assert!(
+                refusal_for_rerank(&control, 0, cap, scan_open).is_ok(),
+                "{label}"
+            );
+            assert!(
+                refusal_for_rerank(&control, 0, cap + 1, scan_open).is_err(),
+                "{label}"
+            );
+        }
+    }
+
+    #[test]
+    fn rerank_zero_budget_and_pause_still_refuse_with_the_same_wording() {
+        let zero = refusal_for_rerank(&control_of(0, false), 0, 1, false).unwrap_err();
+        assert_eq!(
+            zero,
+            format!("{REFUSAL_PREFIX}每天额度是 0，「找方案」的 AI 精选还不能用，这次按本地排序。")
+        );
+        // 暂停照旧拒绝；全量整理也越不过暂停
+        for scan_open in [false, true] {
+            let paused =
+                refusal_for_rerank(&control_of(100_000, true), 0, 1, scan_open).unwrap_err();
+            assert_eq!(
+                paused,
+                format!("{REFUSAL_PREFIX}AI 整理现在是暂停状态，「找方案」的 AI 精选也先停着，这次按本地排序。")
+            );
+        }
+        // 每天额度 1：一半取整是 0，没有任何空间（不是「还能用 30 万」）
+        assert!(refusal_for_rerank(&control_of(1, false), 0, 1, false).is_err());
+    }
+
+    #[test]
+    fn the_refusal_names_the_effective_cap_not_the_ceiling() {
+        for (budget, scan_open, shown) in [
+            (100_000, false, "5.0 万 token"),
+            (40_000, false, "2.0 万 token"),
+            (10_000, false, "5000 token"),
+            (600_000, false, "30.0 万 token"),
+            (10_000_000, false, "30.0 万 token"),
+            (0, true, "30.0 万 token"),
+        ] {
+            let error = refusal_for_rerank(&control_of(budget, false), 0, u64::MAX / 2, scan_open)
+                .unwrap_err();
+            assert!(
+                error.contains(&format!("会超过它每天 {shown} 的额度")),
+                "每天额度 {budget}：{error}"
+            );
+            assert!(is_refusal(&error), "{error}");
+        }
+    }
+
+    #[test]
+    fn a_small_daily_budget_shrinks_rerank_through_reserve_with() {
+        // 经过 reserve_with 的集成：10 万额度、AI 精选已经用了 4.5 万，这次预计 1 万 → 4.5 + 1 = 5.5 万，超过 5 万，拒绝
+        let dir = Dir::new();
+        let now = jobs::now_db_time();
+        dir.control(BUDGET_100K);
+        record_at_tagged(dir.path(), &now, "p", "m", 40_000, 5_000, SOLVE_RERANK_TAG).unwrap();
+        let error = reserve_with(dir.path(), &now, 10_000, Policy::SolveRerank)
+            .expect_err("4.5 万 + 1 万超过有效上限 5 万");
+        assert!(is_refusal(&error), "{error}");
+        assert!(
+            error.contains("会超过它每天 5.0 万 token 的额度"),
+            "{error}"
+        );
+        assert!(error.contains("所以没有发请求"), "{error}");
+        assert_eq!(dir.used(), 45_000, "被拒绝不能留下预留");
+        // 4.5 万 + 5 千 = 5 万，正好放行；再多 1 个拒绝（刚放行的预留也算在用量里）
+        assert!(reserve_with(dir.path(), &now, 5_000, Policy::SolveRerank).is_ok());
+        assert!(reserve_with(dir.path(), &now, 1, Policy::SolveRerank).is_err());
+        assert_eq!(dir.used(), 50_000);
+    }
+
+    #[test]
+    fn a_full_scan_lifts_rerank_to_the_ceiling_even_with_a_small_daily_budget() {
+        let dir = Dir::new();
+        let now = jobs::now_db_time();
+        // 每天额度只有 10 万（平时 AI 精选只有 5 万），但全量整理在进行：上限 30 万
+        dir.control(&control_with_full_scan(100_000, false, &now, 300));
+        record_at_tagged(dir.path(), &now, "p", "m", 250_000, 0, SOLVE_RERANK_TAG).unwrap();
+        assert!(reserve_with(dir.path(), &now, 50_000, Policy::SolveRerank).is_ok());
+        let error = reserve_with(dir.path(), &now, 1, Policy::SolveRerank)
+            .expect_err("30 万用满了，再多 1 个也拒绝");
+        assert!(
+            error.contains("会超过它每天 30.0 万 token 的额度"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_slow_failure_books_at_least_the_timeout_estimate() {
+        let dir = Dir::new();
+        dir.control(BUDGET_100K);
+        let permit = rerank_begin(&dir, &"说".repeat(1000)).expect("应通过");
+        account_slow_failure(4096);
+        drop(permit);
+        // 这一笔 = max(1 万, 提示词估计 1000 + 输出上限 4096) = 1 万：提示词那部分 1000 + 补的 9000
+        assert_eq!(dir.row(RERANK_ROW), ("cancelled".to_owned(), 10_000, 0));
+        assert_eq!(dir.used(), 10_000);
+        assert!(
+            dir.row(RERANK_ROW).1 >= jobs::TIMEOUT_ATTEMPT_TOKEN_ESTIMATE,
+            "不少于队列对超时的记法"
+        );
+    }
+
+    #[test]
+    fn a_slow_failure_with_a_long_prompt_is_booked_at_the_worst_case() {
+        // 提示词估计 6500（AI 精选提示词的上限）：6500 + 输出上限 4096 = 10596，比 1 万多，按最坏情形记
+        let dir = Dir::new();
+        dir.control(BUDGET_100K);
+        let permit = rerank_begin(&dir, &"说".repeat(6_500)).expect("应通过");
+        account_slow_failure(4096);
+        drop(permit);
+        assert_eq!(dir.row(RERANK_ROW), ("cancelled".to_owned(), 10_596, 0));
+    }
+
+    #[test]
+    fn a_slow_failure_without_an_output_limit_is_neither_topped_up_nor_reduced_past_the_floor() {
+        // 没有输出上限（传 0）：提示词估计超过 1 万就是提示词估计，一分不补，也不会比它少
+        let dir = Dir::new();
+        dir.control(BUDGET_600K);
+        let permit = rerank_begin(&dir, &"说".repeat(12_000)).expect("应通过");
+        account_slow_failure(0);
+        drop(permit);
+        assert_eq!(dir.row(RERANK_ROW), ("cancelled".to_owned(), 12_000, 0));
+        // 提示词估计不到 1 万：补到 1 万
+        let permit = rerank_begin(&dir, &"说".repeat(1_000)).expect("应通过");
+        account_slow_failure(0);
+        drop(permit);
+        assert_eq!(dir.row(RERANK_ROW), ("cancelled".to_owned(), 10_000, 0));
+    }
+
+    #[test]
+    fn a_slow_failure_is_never_refunded_and_keeps_the_earlier_attempts() {
+        let dir = Dir::new();
+        dir.control(BUDGET_100K);
+        let permit = rerank_begin(&dir, &"说".repeat(1000)).expect("应通过");
+        account_failed_attempt(); // 更早失败但可能计费的一次：提示词估计 1000
+        account_slow_failure(4096); // 最后这一次等了很久才失败：这一次至少 1 万，补 9000
+        release_unbilled(); // 这次可能已经计费，退不了
+        drop(permit);
+        assert_eq!(
+            dir.row(RERANK_ROW),
+            ("cancelled".to_owned(), 11_000, 0),
+            "更早那次 1000 + 这一次 max(1 万, 1000 + 4096)"
+        );
+    }
+
+    #[test]
+    fn a_slow_failure_without_a_reservation_does_nothing() {
+        // 探测（不看额度、没有预留行）：没有账可补，不能 panic，也不能把状态带给下一次请求
+        let dir = Dir::new();
+        let permit = probe(|| begin(Some(dir.path()), "测试连接")).expect("探测不看额度");
+        account_slow_failure(4096);
+        drop(permit);
+        assert_eq!(dir.used(), 0);
+        dir.control(BUDGET_100K);
+        let permit = rerank_begin(&dir, &"说".repeat(1000)).expect("应通过");
+        release_unbilled();
+        drop(permit);
+        assert_eq!(
+            dir.used(),
+            0,
+            "上一次的补账和「可能计费」标记不能带进下一次"
+        );
+    }
+
+    #[test]
+    fn the_slow_failure_top_up_does_not_leak_into_the_next_request() {
+        let dir = Dir::new();
+        dir.control(BUDGET_100K);
+        let permit = rerank_begin(&dir, &"说".repeat(1000)).expect("应通过");
+        account_slow_failure(4096);
+        drop(permit);
+        assert_eq!(dir.used(), 10_000);
+        let permit = rerank_begin(&dir, &"说".repeat(1000)).expect("应通过");
+        release_unbilled(); // 这一次被服务商直接拒绝：整笔退回，不能带着上一次补的 9000
+        drop(permit);
+        assert_eq!(dir.used(), 10_000);
+    }
+
+    // ───────────── 卡 37：提示正文换成现在的叫法（前缀和判断逻辑一个字没动） ─────────────
+
+    /// 旧叫法：卡 37 之后，每一条额度拒绝提示的正文里都不该再出现。
+    const OLD_WORDING: [&str; 10] = [
+        "工具箱",
+        "AI 自动整理",
+        "AI 额度",
+        "全量整理",
+        "不限额",
+        "标签网络",
+        "整批解析",
+        "AI 搜索",
+        "旧版",
+        "闸门",
+    ];
+
+    /// 是额度拒绝（前缀没换、`is_refusal` 认得），正文里没有旧叫法。
+    fn assert_refusal_with_current_names(message: &str) {
+        assert!(is_refusal(message), "{message}");
+        let body = message
+            .strip_prefix(REFUSAL_PREFIX)
+            .expect("前缀不能换，不然前端和找方案认不出额度拒绝");
+        for old in OLD_WORDING {
+            assert!(!body.contains(old), "还在说旧叫法「{old}」：{message}");
+        }
+    }
+
+    #[test]
+    fn the_prefix_stays_and_the_daily_refusals_use_the_current_names() {
+        assert_eq!(
+            REFUSAL_PREFIX, "AI 额度：",
+            "前缀不换：前端和「找方案」靠它认额度拒绝"
+        );
+        let paused = refusal_for(&control_of(100_000, true), 0, 1, false).unwrap_err();
+        assert_eq!(
+            paused,
+            format!("{REFUSAL_PREFIX}AI 整理现在是暂停状态，其它 AI 功能也一起停着。要继续请先到「设置 → 自动整理与备份」里点「继续整理」。")
+        );
+        let zero = refusal_for(&control_of(0, false), 0, 1, false).unwrap_err();
+        assert_eq!(
+            zero,
+            format!("{REFUSAL_PREFIX}每天额度是 0，所有 AI 功能都还不能用。要用请先到「设置 → 自动整理与备份」的「每天自动整理」里开启每天额度，或开启「一次性全部整理」。")
+        );
+        // 24 小时已经用了 13 万，这一次预计 4000，每天额度 10 万
+        let over = refusal_for(&control_of(100_000, false), 130_000, 4_000, false).unwrap_err();
+        assert_eq!(
+            over,
+            format!("{REFUSAL_PREFIX}最近 24 小时已经用了约 13.0 万 token，这一次预计还要约 4000 token，会超过每天 10.0 万 token 的额度，所以没有发请求。过一阵额度恢复后再试，或到「设置 → 自动整理与备份」里调高每天额度；想一次性整理完，可以开启「一次性全部整理」。")
+        );
+        for message in [&paused, &zero, &over] {
+            assert_refusal_with_current_names(message);
+        }
+        // 判断逻辑没动：一次性全部整理进行中放行额度，暂停照样拦
+        assert!(refusal_for(&control_of(0, false), 130_000, 4_000, true).is_ok());
+        assert!(refusal_for(&control_of(0, true), 0, 1, true).is_err());
+    }
+
+    #[test]
+    fn the_rerank_refusals_use_the_current_names_too() {
+        let zero = refusal_for_rerank(&control_of(0, false), 0, 1, false).unwrap_err();
+        assert_eq!(
+            zero,
+            format!("{REFUSAL_PREFIX}每天额度是 0，「找方案」的 AI 精选还不能用，这次按本地排序。")
+        );
+        let paused = refusal_for_rerank(&control_of(100_000, true), 0, 1, false).unwrap_err();
+        assert_eq!(
+            paused,
+            format!("{REFUSAL_PREFIX}AI 整理现在是暂停状态，「找方案」的 AI 精选也先停着，这次按本地排序。")
+        );
+        // 每天额度 10 万，AI 精选的有效上限 5 万，已经用了 4.5 万，这一次预计 1 万
+        let over =
+            refusal_for_rerank(&control_of(100_000, false), 45_000, 10_000, false).unwrap_err();
+        assert_eq!(
+            over,
+            format!("{REFUSAL_PREFIX}「找方案」的 AI 精选最近 24 小时已经用了约 4.5 万 token，这一次预计还要约 1.0 万 token，会超过它每天 5.0 万 token 的额度，所以没有发请求；这次按本地排序，过一阵额度恢复后再试。")
+        );
+        for message in [&zero, &paused, &over] {
+            assert_refusal_with_current_names(message);
+        }
+    }
+
+    #[test]
+    fn the_no_account_refusal_says_ai_features_not_old_version() {
+        let dir = Dir::new();
+        dir.control(BUDGET_100K);
+        Connection::open(dir.path())
+            .unwrap()
+            .execute("DELETE FROM github_accounts", [])
+            .unwrap();
+        let error = begin(Some(dir.path()), "提示词")
+            .err()
+            .expect("没有账号应拒绝");
+        assert_eq!(
+            error,
+            format!("{REFUSAL_PREFIX}还没有连接 GitHub 账号，用量没法记账，所以 AI 功能先不能用。")
+        );
+        assert_refusal_with_current_names(&error);
+    }
+
+    #[test]
+    fn the_guard_not_installed_refusal_wording_is_plain() {
+        // 正式运行时没装上额度检查会走到这一句，单元测试里 `begin` 对「没装」放行，所以读源码确认。
+        // 只看测试模块之前的正式代码；分隔符用 concat! 拼出来，免得这条测试自己把自己写进被检查的文字里。
+        let source = include_str!("spend_guard.rs");
+        let production = source
+            .split(concat!("#[cfg(test)]\n", "mod tests {"))
+            .next()
+            .unwrap_or(source);
+        assert!(production.contains(
+            "{REFUSAL_PREFIX}每天额度的检查还没有准备好，AI 功能先不能用。重新打开应用再试。"
+        ));
     }
 }

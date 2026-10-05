@@ -8,17 +8,25 @@ import { Icon } from '@/components/ui/icon';
 import {
   approxRepos,
   automationState,
+  backupKindLabel,
+  backupTimeLine,
   BUDGET_PRESETS,
+  dailyBudgetConfirmLead,
+  EXPORT_SECTION_HINT,
+  exportSavedText,
   formatMinute,
   formatSize,
   formatTokens,
+  fullScanConfirmLines,
   fullScanPanel,
   parseDailyBudget,
   readmeCheckText,
+  recentUsageMetric,
+  runStatusText,
   type AutomationStatus,
   type FullScanPanel,
 } from '@/lib/automation-view';
-import { describeInvokeError } from '@/lib/api';
+import { describeInvokeError, getAiAutomationWithRecent } from '@/lib/api';
 import { cn } from '@/lib/utils';
 
 type Job = { id: string; jobType: string; status: string; errorKind: string | null };
@@ -44,13 +52,6 @@ type BackupStatus = {
   nextAutoAt: string;
   lastRestore: RestoreReport | null;
 };
-const KIND_LABEL: Record<BackupKind, string> = {
-  auto: '自动',
-  manual: '手动',
-  preRestore: '恢复前',
-  preMigrate: '升级前',
-};
-
 function errorText(reason: unknown): string {
   return describeInvokeError(reason);
 }
@@ -96,7 +97,7 @@ function TokenRow(props: { title: string; hint: string; onCopy: () => void; onRe
         <span className="text-xs leading-[1.6] text-on-surface-variant">{props.hint}</span>
       </div>
       <div className="flex items-center gap-2">
-        <Button size="sm" onClick={props.onCopy}>复制令牌</Button>
+        <Button size="sm" onClick={props.onCopy}>复制</Button>
         <Button
           size="sm"
           variant="text"
@@ -124,7 +125,7 @@ function Notice(props: { tone?: 'info' | 'warn'; children: ReactNode }) {
   );
 }
 
-/** 「全量整理 · 不限额」：按 fullScanPanel 的 kind 画。确认面板不调用命令，只有「确认开始」才开始。 */
+/** 「一次性全部整理」：按 fullScanPanel 的 kind 画。确认面板不调用命令，只有「确认开始」才开始。 */
 function FullScanPanelView(props: {
   panel: FullScanPanel;
   confirming: boolean;
@@ -146,7 +147,7 @@ function FullScanPanelView(props: {
         </span>
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-2">
-            <h3 className="m-0 text-base font-semibold text-foreground">全量整理 · 不限额</h3>
+            <h3 className="m-0 text-base font-semibold text-foreground">一次性全部整理</h3>
             {panel.kind === 'running' ? (
               <span className="hue-tile ml-auto inline-flex h-5 shrink-0 items-center rounded-full px-2 text-[11px] font-medium" style={{ '--h': panel.paused ? 4 : 148 } as CSSProperties}>
                 {panel.paused ? '已暂停' : '进行中'}
@@ -154,7 +155,7 @@ function FullScanPanelView(props: {
             ) : null}
           </div>
           <p className="mt-1 mb-0 text-[13px] leading-[1.6] text-on-surface-variant">
-            第一次用、想一口气把全部收藏整理完，就用它。这一轮不受每天额度限制，整理完自动回到日常的增量整理。
+            第一次用、想一口气把全部收藏整理完，就用它。这一轮不受每天额度限制，整理完自动回到每天自动整理。
           </p>
         </div>
       </div>
@@ -169,7 +170,7 @@ function FullScanPanelView(props: {
 
       {panel.kind === 'nothing' ? (
         <>
-          <p className="m-0 text-sm leading-[1.7] text-foreground">全部收藏都整理好了。以后新收藏会在日常的增量整理里自动处理。</p>
+          <p className="m-0 text-sm leading-[1.7] text-foreground">全部收藏都整理好了。以后新收藏会在每天自动整理里处理。</p>
           {panel.last ? <p className="mt-2 mb-0 text-xs leading-[1.6] text-subtle">{panel.last}</p> : null}
         </>
       ) : null}
@@ -177,25 +178,22 @@ function FullScanPanelView(props: {
       {panel.kind === 'ready' ? (
         <>
           <p className="m-0 text-sm leading-[1.7] text-foreground">
-            还有 <b className="tabular-nums">{panel.pending}</b> 个收藏没整理，预计要用 约 <b className="tabular-nums">{panel.estimate}</b> token（按每个约 6 千多估算，实际会上下浮动）。
+            {fullScanConfirmLines(panel.pending, panel.estimate)[0]}
           </p>
           {panel.last ? <p className="mt-2 mb-0 text-xs leading-[1.6] text-subtle">{panel.last}</p> : null}
           {props.confirming ? (
             <div className="mt-3 rounded-lg border border-primary/40 bg-accent p-4 text-sm leading-[1.7] text-foreground">
-              <p className="m-0">
-                这会让应用在后台<b>连续调用你配置的 AI 服务</b>，一直整理到这 {panel.pending} 个收藏全部完成，<b>不受每天额度限制，按服务商的价格计费</b>。预计用 <b>约 {panel.estimate} token</b>（按每个约 6 千多估算，实际会上下浮动）。
-              </p>
-              <p className="mt-2 mb-0">
-                这期间旧版的「增量 AI 解析」「生成标签网络」「AI 搜索」等功能也不受每天额度限制。最长运行 48 小时，随时可以点「停止全量整理」；服务商拒绝请求（密钥、余额、地址不对）、失败太多、或用量远超预计（约 4 倍）时会自动停下。整理完会自动回到日常的增量整理。
-              </p>
+              {fullScanConfirmLines(panel.pending, panel.estimate).map((line) => (
+                <p key={line} className="mt-2 mb-0 first:mt-0">{line}</p>
+              ))}
               <div className="mt-3 flex flex-wrap gap-2">
-                <Button variant="primary" loading={props.starting} onClick={props.onStart}>确认开始全量整理</Button>
+                <Button variant="primary" loading={props.starting} onClick={props.onStart}>确认开始</Button>
                 <Button disabled={props.starting} onClick={props.onCancel}>取消</Button>
               </div>
             </div>
           ) : (
             <div className="mt-3">
-              <Button variant={props.startPrimary ? 'primary' : 'default'} onClick={props.onAsk}>开始全量整理</Button>
+              <Button variant={props.startPrimary ? 'primary' : 'default'} onClick={props.onAsk}>开始一次性全部整理</Button>
             </div>
           )}
         </>
@@ -210,7 +208,7 @@ function FullScanPanelView(props: {
               aria-valuenow={panel.percent}
               aria-valuemin={0}
               aria-valuemax={100}
-              aria-label="全量整理进度"
+              aria-label="一次性全部整理进度"
               aria-valuetext={`已整理 ${panel.done} / ${panel.total} 个`}
               style={{ width: `${panel.percent}%` }}
             />
@@ -227,7 +225,7 @@ function FullScanPanelView(props: {
             </p>
           ) : null}
           <div className="mt-3">
-            <Button loading={props.stopping} onClick={props.onStop}>停止全量整理</Button>
+            <Button loading={props.stopping} onClick={props.onStop}>停止</Button>
           </div>
         </>
       ) : null}
@@ -261,11 +259,11 @@ export function ToolboxPage() {
   }
 
   /** 导到「下载」文件夹（原来写死在 /tmp，普通人找不到、重启就没了）。 */
-  async function exportLibrary(command: 'export_library_markdown' | 'export_library_csv', fileName: string, label: string) {
+  async function exportLibrary(command: 'export_library_markdown' | 'export_library_csv', fileName: string) {
     try {
       const destination = await join(await downloadDir(), fileName);
-      await invoke(command, { destination });
-      say(`${label} 已导出到「下载」文件夹：${fileName}`);
+      const count = await invoke<number>(command, { destination });
+      say(exportSavedText(count, fileName));
     } catch (reason: unknown) {
       say(errorText(reason));
     }
@@ -277,7 +275,7 @@ export function ToolboxPage() {
     invoke<ApiStatus>('get_local_api_status').then(setApi).catch((reason: unknown) => say(errorText(reason)));
     invoke<BackupStatus>('get_backup_status').then(setStatus).catch((reason: unknown) => say(errorText(reason)));
     invoke<BackupInfo[]>('list_backups').then(setBackups).catch((reason: unknown) => say(errorText(reason)));
-    invoke<AutomationStatus>('get_ai_automation')
+    getAiAutomationWithRecent()
       .then((next) => {
         setAutomation(next);
         setBudgetInput((current) => (budgetTouched.current ? current : String(next.dailyBudgetTokens)));
@@ -286,15 +284,16 @@ export function ToolboxPage() {
       .catch((reason: unknown) => say(errorText(reason)));
   }
 
+  /** 设置额度、开始 / 停止一次性全部整理后拿到的状态里没有「最近 24 小时整理了几个」：沿用上一次读到的（这几个动作不会改它）。 */
   function applyAutomation(next: AutomationStatus) {
-    setAutomation(next);
+    setAutomation((previous) => ({ ...next, succeeded24h: previous?.succeeded24h ?? null }));
     budgetTouched.current = false;
     setBudgetInput(String(next.dailyBudgetTokens));
     setBudgetLoaded(true);
   }
 
   function refreshAutomation() {
-    return invoke<AutomationStatus>('get_ai_automation').then((next) => {
+    return getAiAutomationWithRecent().then((next) => {
       setAutomation(next);
       setBudgetLoaded(true);
     });
@@ -341,9 +340,9 @@ export function ToolboxPage() {
         setEnqueueNote(
           count > 0
             ? unlimited
-              ? `已排队 ${count} 个，全量整理正在处理。`
-              : `已排队 ${count} 个。是否开始整理，取决于上面的每天额度。`
-            : '没有需要排队的仓库了。',
+              ? `已加入整理 ${count} 个，一次性全部整理正在处理。`
+              : `已加入整理 ${count} 个。是否开始整理，取决于上面的每天额度。`
+            : '没有还要整理的工具了。',
         );
         return refreshAutomation();
       })
@@ -364,7 +363,7 @@ export function ToolboxPage() {
       .then((next) => {
         applyAutomation(next);
         setPendingFullScan(false);
-        say('全量整理已开始');
+        say('一次性全部整理已开始');
       })
       .catch((reason: unknown) => say(errorText(reason)))
       .finally(() => {
@@ -380,7 +379,7 @@ export function ToolboxPage() {
     void invoke<AutomationStatus>('stop_full_scan')
       .then((next) => {
         applyAutomation(next);
-        say('已停止全量整理，剩下的会按每天额度接着整理');
+        say('已停止一次性全部整理，剩下的会按每天额度接着整理');
       })
       .catch((reason: unknown) => say(errorText(reason)))
       .finally(() => {
@@ -409,7 +408,7 @@ export function ToolboxPage() {
     if (fullScanPanel(automation).kind !== 'ready') setPendingFullScan(false);
   }, [automation]);
 
-  // 全量整理进行中：页面开着时每 5 秒刷新一次进度（整理完 / 被停下后 unlimited 变回 false，轮询自己停）
+  // 一次性全部整理进行中：页面开着时每 5 秒刷新一次进度（整理完 / 被停下后 unlimited 变回 false，轮询自己停）
   const scanning = automation?.unlimited === true;
   useEffect(() => {
     if (!scanning) return undefined;
@@ -451,7 +450,7 @@ export function ToolboxPage() {
 
   return (
     <section className="flex h-full flex-col gap-4 overflow-auto px-5 pt-4 pb-6 max-[899px]:px-4">
-      <PageHeader title="设置 · 工具箱" subtitle="AI 自动整理、备份和给其他工具用的接口都在这里。" />
+      <PageHeader title="设置 · 自动整理与备份" subtitle="自动整理、本机备份，以及让微信工作台把链接送进「收集」，都在这里。" />
       {status?.lastRestore ? <Notice>{restoreBanner(status.lastRestore)}</Notice> : null}
       {restartReady ? (
         <Notice>
@@ -465,8 +464,8 @@ export function ToolboxPage() {
       <Section
         icon="auto_awesome"
         hue={222}
-        title="AI 自动整理"
-        hint="让 AI 帮你给收藏写中文说明（它能做什么、适合解决什么、怎么试），整理好的会出现在「今日」和「资料库」里。用的是你自己配置的 AI 服务，按服务商的价格计费。"
+        title="自动整理"
+        hint="让 AI 帮你给收藏写中文说明（它能做什么、适合解决什么、怎么试），整理好的会出现在「今日」和「资料库」里。用的是你自己配置的 AI 服务，具体花多少钱以你服务商的账单为准。"
         actions={
           <span className="hue-tile inline-flex h-6 shrink-0 items-center gap-1.5 rounded-full px-2.5 text-xs font-medium" style={{ '--h': state.hue } as CSSProperties}>
             <span className="size-1.5 rounded-full" style={{ background: `hsl(${state.hue} 70% 45%)` }} />
@@ -495,12 +494,12 @@ export function ToolboxPage() {
         />
         {readmeLine ? <p className="mt-0 mb-3 text-xs leading-[1.6] text-subtle">{readmeLine}</p> : null}
 
-        <b className="mb-1 block text-[13px] font-medium text-foreground">增量整理（日常）</b>
+        <b className="mb-1 block text-[13px] font-medium text-foreground">每天自动整理</b>
         <p className="mt-0 mb-2 text-xs leading-[1.6] text-on-surface-variant">
-          全量整理完以后用它：只整理新收藏的、还没整理的和说明过期的，没变的不会重复花钱。每天最多用你设定的额度，用完第二天自动继续。
+          一次性全部整理完以后用它：只整理新收藏的、还没有说明的，以及说明是用旧方法写的，没变的不会重复花钱。每天最多用你设定的额度，用完第二天自动继续。
         </p>
         {automation?.unlimited === true ? (
-          <p className="mt-0 mb-2 text-xs leading-[1.6] text-on-surface-variant">全量整理进行中，这一轮不受每天额度限制；整理完才按下面的额度。</p>
+          <p className="mt-0 mb-2 text-xs leading-[1.6] text-on-surface-variant">一次性全部整理进行中，这一轮不受每天额度限制；整理完才按下面的额度。</p>
         ) : null}
         <div className="grid grid-cols-2 gap-2 min-[1000px]:grid-cols-4">
           {BUDGET_PRESETS.map((preset) => {
@@ -528,7 +527,7 @@ export function ToolboxPage() {
         {pendingBudget !== null ? (
           <div className="mt-3 rounded-lg border border-primary/40 bg-accent p-4 text-sm leading-[1.7] text-foreground">
             <p className="m-0">
-              这会让应用在后台调用你配置的 AI 服务整理收藏，<b>按服务商的价格计费</b>。每天最多使用 <b>{formatTokens(pendingBudget)} token</b>，大约整理 {approxRepos(pendingBudget)} 个仓库；用到额度就停，失败的重试也按估计计入。旧版的「增量 AI 解析」「生成标签网络」「AI 搜索」等功能共用这个额度，用完它们也会停。随时可以暂停或关闭。
+              {dailyBudgetConfirmLead(pendingBudget)}（约 {formatTokens(pendingBudget)} token，具体花多少钱以你服务商的账单为准）。用到额度就停。随时可以暂停或关闭。
             </p>
             <div className="mt-3 flex gap-2">
               <Button variant="primary" onClick={() => saveBudget(pendingBudget)}>确认开启</Button>
@@ -540,7 +539,7 @@ export function ToolboxPage() {
         <div className="mt-2.5">
           {customOpen ? (
             <div className="flex flex-wrap items-center gap-2">
-              <label className="text-[13px] text-on-surface-variant" htmlFor="daily-budget">自定义每天 token 数</label>
+              <label className="text-[13px] text-on-surface-variant" htmlFor="daily-budget">自定义每天额度（token）</label>
               <input
                 id="daily-budget"
                 className="h-8 w-36 rounded-md border border-input bg-card px-2.5 text-sm outline-none focus:border-primary"
@@ -555,7 +554,7 @@ export function ToolboxPage() {
                 }}
               />
               <Button disabled={!budgetLoaded} onClick={requestSaveCustom}>保存</Button>
-              <span className="text-xs text-subtle">约 {approxRepos(Number(budgetInput) || 0)} 个仓库 / 天</span>
+              <span className="text-xs text-subtle">约 {approxRepos(Number(budgetInput) || 0)} 个工具 / 天</span>
             </div>
           ) : (
             <Button variant="text" onClick={() => setCustomOpen(true)}>自定义额度</Button>
@@ -564,21 +563,21 @@ export function ToolboxPage() {
 
         {automation ? (
           <div className="mt-4 grid grid-cols-3 gap-2.5 max-[699px]:grid-cols-1">
-            <Metric label="24 小时内已用" value={`${formatTokens(automation.tokens24h)} token`} sub={`约整理了 ${approxRepos(automation.tokens24h)} 个`} />
+            <Metric {...recentUsageMetric(automation)} />
             <Metric
               label="24 小时内还剩"
-              value={automation.unlimited === true ? '不限额' : current > 0 ? `${formatTokens(automation.budgetRemaining)} token` : '—'}
-              sub={automation.unlimited === true ? '全量整理中' : current > 0 ? `约还能整理 ${approxRepos(automation.budgetRemaining)} 个` : '没有开启额度'}
+              value={automation.unlimited === true ? '不受每天额度限制' : current > 0 ? `${formatTokens(automation.budgetRemaining)} token` : '—'}
+              sub={automation.unlimited === true ? '一次性全部整理中' : current > 0 ? `约还能整理 ${approxRepos(automation.budgetRemaining)} 个` : '没有开启每天额度'}
             />
-            <Metric label="排队中" value={`${automation.queued} 个`} sub={`进行中 ${automation.running} · 失败 ${automation.failed}${automation.model ? ` · 模型 ${automation.model}` : ''}`} />
+            <Metric label="等待整理" value={`${automation.queued} 个`} sub={`进行中 ${automation.running} · 失败 ${automation.failed}${automation.model ? ` · 模型 ${automation.model}` : ''}`} />
           </div>
         ) : (
           <div className="mt-4 flex items-center gap-2 text-sm text-on-surface-variant"><Spinner /> 读取中</div>
         )}
 
         <div className="mt-4 flex flex-wrap items-center gap-2 border-t border-border pt-3.5">
-          <Button onClick={() => enqueueCards('missing')}>整理新增和还没整理的仓库</Button>
-          <Button onClick={() => enqueueCards('outdated')}>把旧版说明排队重做</Button>
+          <Button onClick={() => enqueueCards('missing')}>给还没有说明的收藏写说明</Button>
+          <Button onClick={() => enqueueCards('outdated')}>重写旧的中文说明（会花钱）</Button>
           {automation && !automation.paused && automation.enabled ? <Button variant="text" onClick={pauseAutomation}>暂停</Button> : null}
           {enqueueNote ? <span className="text-xs text-on-surface-variant">{enqueueNote}</span> : null}
         </div>
@@ -588,13 +587,13 @@ export function ToolboxPage() {
       <Section
         icon="backup"
         hue={148}
-        title="资料库备份"
-        hint={`每天自动备份一次。上次 ${status ? (status.lastAutoAt ? formatMinute(status.lastAutoAt) : '还没有') : '读取中'}，下次 ${status ? formatMinute(status.nextAutoAt) : '读取中'}。`}
+        title="本机备份（自动，存在这台电脑）"
+        hint={status ? backupTimeLine(status.lastAutoAt) : '读取中'}
         actions={<Button disabled={backingUp} loading={backingUp} onClick={backupNow}>现在备份</Button>}
       >
         {confirmName ? (
           <Notice tone="warn">
-            <span className="min-w-0 flex-1">恢复会把当前资料库换成这一份。当前的库会先另存一份「恢复前」备份。需要重启应用才会生效。继续吗？</span>
+            <span className="min-w-0 flex-1">恢复会把当前资料库换成这一份。当前的资料库会先另存一份「恢复前自动留的」备份。需要重启应用才会生效。继续吗？</span>
             <Button onClick={confirmRestore}>继续恢复</Button>
             <Button variant="text" onClick={() => setConfirmName(null)}>取消</Button>
           </Notice>
@@ -604,7 +603,7 @@ export function ToolboxPage() {
             <li key={item.fileName} className="flex items-center gap-3 rounded-lg border border-border px-3 py-2 text-sm">
               <span className="min-w-0 flex-1 truncate text-foreground">
                 {formatMinute(item.createdAt)}
-                <span className="ml-2 text-xs text-on-surface-variant">{KIND_LABEL[item.kind]} · {formatSize(item.bytes)} · {item.repositoryCount === null ? '仓库数未知' : `${item.repositoryCount} 个仓库`}</span>
+                <span className="ml-2 text-xs text-on-surface-variant">{backupKindLabel(item.kind)} · {formatSize(item.bytes)} · {item.repositoryCount === null ? '工具数未知' : `${item.repositoryCount} 个工具`}</span>
               </span>
               <Button size="sm" onClick={() => setConfirmName(item.fileName)}>恢复到这一份…</Button>
             </li>
@@ -617,8 +616,8 @@ export function ToolboxPage() {
       <Section
         icon="hub"
         hue={268}
-        title="给其他工具用的接口"
-        hint="开启后，微信工作台这类工具可以通过本机把链接送进「收集」。只在这台电脑上可用，需要令牌，默认关闭。"
+        title="让微信工作台把链接送进「收集」"
+        hint="默认关闭，需要时再开启。"
         actions={
           <Button
             onClick={() => void invoke<ApiStatus>('set_local_api_enabled', { enabled: !api?.enabled }).then((next) => setApi(next)).catch((reason: unknown) => say(errorText(reason)))}
@@ -628,15 +627,15 @@ export function ToolboxPage() {
         }
       >
         <p className="m-0 text-sm text-on-surface-variant">
-          现在：{api?.enabled ? '已开启' : '关闭'}{api?.listening ? '，正在监听' : ''}（只监听 127.0.0.1:{api?.port ?? 39217}）
+          现在：{api?.enabled ? '已开启' : '已关闭'}。开启后，只有这台电脑上的程序能连。
         </p>
         {api?.enabled ? (
           <div className="mt-3 flex flex-col gap-2.5">
             <TokenRow
-              title="微信工作台用的令牌"
-              hint="只能往「收集」里放链接，读不到你的资料库。复制后粘进微信工作台的设置里就行。"
-              onCopy={() => void invoke<string>('get_local_api_capture_token').then((token) => navigator.clipboard.writeText(token)).then(() => say('收集专用令牌已复制')).catch((reason: unknown) => say(errorText(reason)))}
-              onReset={() => void invoke<string>('rotate_local_api_capture_token').then(() => say('收集专用令牌已重置，旧的立即失效，要把新的粘回微信工作台')).catch((reason: unknown) => say(errorText(reason)))}
+              title="微信工作台的口令"
+              hint="复制后粘到微信工作台的设置里。它只能往「收集」里放链接，看不到你的资料库。"
+              onCopy={() => void invoke<string>('get_local_api_capture_token').then((token) => navigator.clipboard.writeText(token)).then(() => say('微信工作台的口令已复制')).catch((reason: unknown) => say(errorText(reason)))}
+              onReset={() => void invoke<string>('rotate_local_api_capture_token').then(() => say('微信工作台的口令已重置，旧的立刻失效，要把新的粘回微信工作台')).catch((reason: unknown) => say(errorText(reason)))}
             />
             {/* 完整令牌是给懂行的人用的，默认收起，别和「微信工作台用的令牌」摆在同一个分量上 */}
             <details className="group">
@@ -647,7 +646,7 @@ export function ToolboxPage() {
               <div className="mt-2">
                 <TokenRow
                   title="完整令牌"
-                  hint="能读你的资料库，只给你信得过的本机工具。调用时加请求头 Authorization: Bearer 令牌。"
+                  hint="能读你的资料库，只给你信得过的本机程序。备注：调用时加请求头 Authorization: Bearer，后面接这串口令。"
                   onCopy={() => void invoke<string>('get_local_api_token').then((token) => navigator.clipboard.writeText(token)).then(() => say('完整令牌已复制')).catch((reason: unknown) => say(errorText(reason)))}
                   onReset={() => void invoke<string>('rotate_local_api_token').then(() => { say('完整令牌已重置，旧的立即失效'); load(); }).catch((reason: unknown) => say(errorText(reason)))}
                 />
@@ -658,32 +657,52 @@ export function ToolboxPage() {
       </Section>
 
       {/* ───────── 导出 ───────── */}
-      <Section icon="ios_share" hue={28} title="导出资料库" hint="把资料库导成文件，方便存档或给别的工具读。文件会保存在「下载」文件夹里，同名的会被覆盖。">
+      <Section icon="ios_share" hue={28} title="导出成文档 / 表格" hint={EXPORT_SECTION_HINT}>
         <div className="flex flex-wrap gap-2">
-          <Button onClick={() => void exportLibrary('export_library_markdown', 'fox-stars-lab-library.md', 'Markdown')}>导出 Markdown</Button>
-          <Button onClick={() => void exportLibrary('export_library_csv', 'fox-stars-lab-library.csv', 'CSV')}>导出 CSV</Button>
+          <Button onClick={() => void exportLibrary('export_library_markdown', 'fox-stars-lab-library.md')}>导出成文档（Markdown）</Button>
+          <Button onClick={() => void exportLibrary('export_library_csv', 'fox-stars-lab-library.csv')}>导出成表格（CSV，可用 Excel 打开）</Button>
         </div>
       </Section>
 
-      {/* ───────── 开发者信息（默认收起） ───────── */}
-      <details className="group rounded-lg border border-border bg-card px-5 py-3.5">
-        <summary className="flex cursor-pointer list-none items-center gap-2 text-sm font-medium text-on-surface-variant [&::-webkit-details-marker]:hidden">
-          <Icon name="chevron_right" size={18} className="transition-transform group-open:rotate-90" />
-          运行状态（排查问题时用）
-        </summary>
-        <p className="mt-3 mb-2 text-sm leading-6 text-foreground">{health}</p>
-        <p className="m-0 max-w-2xl text-xs leading-[1.7] text-on-surface-variant">
-          MCP 只读工具读取原来的表；log_usage 只有在 FOX_STARS_LAB_ALLOW_WRITE=1 时才写 usage_log；本地接口默认关闭，网页里的脚本调用不了；web-search 读取的表名和列名没有改。
-        </p>
-        <ul className="mt-3 mb-0 flex list-none flex-col gap-1.5 p-0 text-sm">
-          {jobs.slice(0, 8).map((job) => (
-            <li key={job.id} className="flex items-center justify-between rounded-lg border border-border px-3 py-1.5">
-              <span className="text-on-surface-variant">{job.jobType} · {job.status} {job.errorKind ? `· ${job.errorKind}` : ''}</span>
-              <Button size="sm" variant="text" onClick={() => void invoke('cancel_ai_job', { id: job.id }).then(load)}>取消</Button>
-            </li>
-          ))}
-        </ul>
-      </details>
+      {/* 没有单独的开发者模式开关：对用户只留一句结论，原始明细折进「开发者信息」。 */}
+      <Section
+        icon="monitor_heart"
+        hue={220}
+        title="运行状态"
+        hint={runStatusText(automation?.failed)}
+        actions={
+          <Button
+            onClick={() => {
+              const lines = [
+                health,
+                ...jobs.slice(0, 8).map((job) => `${job.jobType} · ${job.status}${job.errorKind ? ` · ${job.errorKind}` : ''}`),
+              ];
+              void navigator.clipboard.writeText(lines.filter(Boolean).join('\n')).then(() => say('诊断信息已复制')).catch((reason: unknown) => say(errorText(reason)));
+            }}
+          >
+            复制诊断信息
+          </Button>
+        }
+      >
+        <details className="group">
+          <summary className="flex cursor-pointer list-none items-center gap-1 text-xs text-on-surface-variant [&::-webkit-details-marker]:hidden">
+            <Icon name="chevron_right" size={16} className="transition-transform group-open:rotate-90" />
+            开发者信息
+          </summary>
+          <p className="mt-3 mb-2 text-sm leading-6 text-foreground">{health}</p>
+          <p className="m-0 max-w-2xl text-xs leading-[1.7] text-on-surface-variant">
+            只读查询读取原来的表；写记录需要单独打开；本机入口默认关闭。
+          </p>
+          <ul className="mt-3 mb-0 flex list-none flex-col gap-1.5 p-0 text-sm">
+            {jobs.slice(0, 8).map((job) => (
+              <li key={job.id} className="flex items-center justify-between rounded-lg border border-border px-3 py-1.5">
+                <span className="text-on-surface-variant">{job.jobType} · {job.status} {job.errorKind ? `· ${job.errorKind}` : ''}</span>
+                <Button size="sm" variant="text" onClick={() => void invoke('cancel_ai_job', { id: job.id }).then(load)}>取消</Button>
+              </li>
+            ))}
+          </ul>
+        </details>
+      </Section>
     </section>
   );
 }

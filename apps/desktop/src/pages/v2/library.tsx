@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { LibraryCounts, LibraryDetail, LibraryItem, LibraryPage as LibraryPageResult, ReadingGroup, ScenarioSummary } from '@/lib/contracts';
-import { codexFallbackText, readingGroupLabel } from '@/lib/item-format';
+import { COPY_FAILED_NOTICE, DROP_HINT_LIBRARY, codexFallbackText, copiedNotice, readingGroupLabel } from '@/lib/item-format';
 import {
   confirmLibraryCard,
   copyItemForCodex,
@@ -16,6 +16,7 @@ import {
   clearFilters,
   formOptions,
   hasActiveFilters,
+  libraryEmptyNote,
   nextPageOffset,
   removeIfFilteredOut,
   shouldFallbackToAll,
@@ -399,7 +400,7 @@ export function LibraryPage(props: LibraryPageProps) {
       await navigator.clipboard.writeText(text);
       return true;
     } catch {
-      toast.show({ title: '浏览器不允许自动复制', sub: '请手动选中后按 ⌘C' });
+      toast.show({ title: COPY_FAILED_NOTICE });
       return false;
     }
   }
@@ -419,7 +420,7 @@ export function LibraryPage(props: LibraryPageProps) {
       }
     }
     const copied = await writeClipboard(text);
-    if (copied) toast.show({ title: '已复制，去 Codex 里粘贴', sub: projectName || undefined });
+    if (copied) toast.show({ title: copiedNotice('install'), sub: projectName || undefined });
   }
 
   async function confirmCard(id: string) {
@@ -500,8 +501,8 @@ export function LibraryPage(props: LibraryPageProps) {
     ? cardStateOptions(counts.cardState)
     : [
       { value: 'all' as const, label: '全部 …' },
-      { value: 'done' as const, label: '已整理 …' },
-      { value: 'pending' as const, label: '待整理 …' },
+      { value: 'done' as const, label: 'AI 已整理 …' },
+      { value: 'pending' as const, label: '待 AI 整理 …' },
     ];
   const totalText = counts && typeof counts.total === 'number' && Number.isFinite(counts.total)
     ? String(counts.total)
@@ -521,7 +522,7 @@ export function LibraryPage(props: LibraryPageProps) {
   const detailLoading = Boolean(selectedId) && !shownDetail && detailPhase !== 'error';
   const hideList = layout === 'narrow' && detailOpen;
   const hideDetail = layout === 'narrow' && !detailOpen;
-  // 详情栏要比列表宽或一样宽：封面、标签页、README 都在这里，太窄会被裁
+  // 详情栏要比列表宽或一样宽：封面、标签页、项目说明都在这里，太窄会被裁
   const gridClass = layout === 'wide'
     ? 'grid-cols-[200px_minmax(320px,1fr)_minmax(440px,560px)]'
     : layout === 'medium'
@@ -531,6 +532,7 @@ export function LibraryPage(props: LibraryPageProps) {
   return (
     <section className="flex h-full min-h-0 flex-col gap-3 overflow-auto px-5 pt-4 pb-5 max-[899px]:px-4 max-[899px]:pt-3 max-[899px]:pb-4">
       <PageHeader title="资料库" subtitle={subtitle} />
+      <p className="-mt-1 text-xs text-on-surface-variant">场景是自动猜的，可能不准</p>
       <div className="relative z-20 flex shrink-0 flex-wrap items-center gap-3">
         <div className="relative w-full min-[900px]:min-w-[240px] min-[900px]:flex-1">
           <Icon name="search" size={16} className="pointer-events-none absolute top-1/2 left-3 -translate-y-1/2 text-on-surface-variant" />
@@ -594,7 +596,7 @@ export function LibraryPage(props: LibraryPageProps) {
         <Card className={cn('flex min-h-0 flex-col overflow-hidden', hideList && 'hidden')}>
           {showFallbackHint ? (
             <p className="shrink-0 border-b border-muted px-4 py-2 text-xs text-on-surface-variant">
-              AI 还没整理出理解卡，先显示全部收藏。
+              还没有 AI 整理好的中文说明，先显示全部收藏。
             </p>
           ) : null}
           <div ref={listScrollRef} className="min-h-0 flex-1 overflow-auto">
@@ -607,7 +609,7 @@ export function LibraryPage(props: LibraryPageProps) {
           </div>
           <div className="flex shrink-0 flex-wrap gap-2.5 border-t border-muted px-4 py-2.5 text-xs text-on-surface-variant">
             <span className="inline-flex items-center gap-1"><Kbd>/</Kbd> 搜索</span>
-            <span className="inline-flex items-center gap-1"><Kbd>J</Kbd><Kbd>K</Kbd> 上下</span>
+            <span className="inline-flex items-center gap-1"><Kbd>J</Kbd> / <Kbd>K</Kbd> 下一个 / 上一个</span>
             <span className="inline-flex items-center gap-1"><Kbd>T</Kbd> 想试</span>
             <span className="inline-flex items-center gap-1"><Kbd>U</Kbd> 在用</span>
             <span className="inline-flex items-center gap-1"><Kbd>X</Kbd> 不要了</span>
@@ -632,9 +634,9 @@ export function LibraryPage(props: LibraryPageProps) {
                 if (copied) toast.show({ title: '已复制' });
               });
             }}
-            onCopyPrompt={(text) => {
+            onCopyPrompt={(text, kind) => {
               void writeClipboard(text).then((copied) => {
-                if (copied) toast.show({ title: '已复制，去 Codex 里粘贴' });
+                if (copied) toast.show({ title: copiedNotice(kind) });
               });
             }}
           />
@@ -669,17 +671,19 @@ export function LibraryPage(props: LibraryPageProps) {
       return <ListMessage message={listError ?? '资料库没有读出来。'} onRetry={() => setListReloadKey((key) => key + 1)} />;
     }
     if (items.length === 0) {
+      // 搜了关键词没搜到，和「点了某个筛选、这一类还没有」不是一回事：后者别说成「没有找到，换个说法试试」
+      const empty = libraryEmptyNote(ui);
       return (
         <div className="flex h-full items-center justify-center">
           <EmptyState
-            icon="search_off"
-            title="没有找到"
-            description="换个说法试试，或去「找方案」说说你想做什么"
-            action={(
+            icon={empty.offerSolve ? 'search_off' : 'inbox'}
+            title={empty.title}
+            description={empty.description ?? undefined}
+            action={empty.offerSolve ? (
               <Button variant="default" onClick={() => props.onOpenSolve?.(ui.keyword.trim())}>
                 去找方案
               </Button>
-            )}
+            ) : undefined}
           />
         </div>
       );
@@ -695,6 +699,7 @@ export function LibraryPage(props: LibraryPageProps) {
             item={item}
             selected={item.id === selectedId}
             scenarios={scenarios}
+            dropHint={DROP_HINT_LIBRARY}
             onSelect={() => pickRow(item.id)}
             onWant={() => void changeReading(item.id, 'want')}
             onDrop={() => void changeReading(item.id, 'dropped')}

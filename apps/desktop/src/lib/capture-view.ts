@@ -52,11 +52,11 @@ export function displayLink(url: string): string {
 
 export function describeCommit(commit: CaptureCommit): string {
   if (commit.linksFound === 0) return '没有找到链接。';
-  if (commit.duplicateBatch) return '这段已经收过，没有重复写入。';
-  const parts = [`新收 ${commit.created} 条`];
+  if (commit.duplicateBatch) return '这段已经放进过收集箱，没有重复写入。';
+  const parts = [`新的 ${commit.created} 条`];
   if (commit.alreadyStarred) parts.push(`${commit.alreadyStarred} 条你已经收藏过了`);
   if (commit.alreadyInInbox) parts.push(`${commit.alreadyInInbox} 条已在收集箱`);
-  if (commit.blocked) parts.push(`${commit.blocked} 条是本机或内网地址，没有收`);
+  if (commit.blocked) parts.push(`${commit.blocked} 条是本机或内网地址，没放进收集箱`);
   return `${parts.join('，')}。`;
 }
 
@@ -75,7 +75,7 @@ export function previewSummary(preview: CapturePreview): string | null {
   const blocked = preview.counts.blocked;
   const total = fresh + starred + inbox + blocked;
   if (total <= 0) return null;
-  return `识别到 ${total} 个链接：新的 ${fresh} · 已收藏 ${starred} · 已在收集箱 ${inbox} · 不会收 ${blocked}`;
+  return `识别到 ${total} 个链接：新的 ${fresh} · 已收藏 ${starred} · 已在收集箱 ${inbox} · 不会放进收集箱 ${blocked}`;
 }
 
 export function canCommit(preview: CapturePreview): boolean {
@@ -99,10 +99,10 @@ export function rowStatusTag(row: Pick<CapturePreviewRow, 'status' | 'blockedRea
   if (row.status === 'starred') return { tone: 'gray', text: '你已经收藏了' };
   if (row.status === 'inbox') return { tone: 'gray', text: '已在收集箱' };
   const reason = row.blockedReason?.trim();
-  return reason ? { tone: 'red', text: '不会收', reason } : { tone: 'red', text: '不会收' };
+  return reason ? { tone: 'red', text: '不会放进收集箱', reason } : { tone: 'red', text: '不会放进收集箱' };
 }
 
-/** 收集箱里的 GitHub 仓库条目 → `owner/repo`（用来显示头像）。不是仓库、或链接里认不出来就返回 null。 */
+/** 收集箱里的 GitHub 项目条目 → `owner/repo`（用来显示头像）。不是这类链接、或认不出来就返回 null。 */
 export function githubFullName(item: { itemType: string; normalizedUrl: string }): string | null {
   if (!REPO_KINDS.has(item.itemType)) return null;
   const match = /^https?:\/\/(?:www\.)?github\.com\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+?)(?:\.git)?(?:[/?#]|$)/i.exec(item.normalizedUrl.trim());
@@ -119,14 +119,14 @@ export function kindIcon(kind: string): string {
 export function inboxFilterOptions(counts: InboxPage['counts']): { value: InboxFilter; label: string }[] {
   return [
     { value: 'pending', label: `待处理 ${counts.pending}` },
-    { value: 'ready', label: `已整理 ${counts.ready}` },
     { value: 'failed', label: `失败 ${counts.failed}` },
     { value: 'archived', label: `已归档 ${counts.archived}` },
   ];
 }
 
 export function inboxStatusTag(status: InboxItem['status']): InboxStatusTag {
-  if (status === 'ready') return { tone: 'blue', text: '已整理', spinning: false };
+  // ready 是内部状态，没有页签。界面上跟待处理用同一句。
+  if (status === 'ready') return { tone: 'gray', text: '待处理', spinning: false };
   if (status === 'failed') return { tone: 'red', text: '失败', spinning: false };
   if (status === 'archived') return { tone: 'gray', text: '已归档', spinning: false };
   // 不转圈：目前没有后台会自动处理收集箱，转圈会让人以为它正在忙。以后接上自动整理再按真实状态转。
@@ -185,14 +185,18 @@ export function inboxMeta(context: string, relativeTime: string): string {
   return context || when;
 }
 
+/**
+ * 当前页签里一条都没有时说什么，按页签说：待处理 / 失败 / 已归档各一句。
+ * 内部的 `ready` 状态界面上也叫「待处理」（没有单独的页签），跟待处理说同一句。
+ * 说「没有待处理的链接」而不是「收集箱是空的」：已归档、失败的里面可能还有，收集箱不一定是空的。
+ */
 export function emptyInboxCopy(filter: InboxFilter): { title: string; description?: string } {
-  if (filter === 'pending') {
-    return {
-      title: '收集箱是空的',
-      description: '上面粘贴后点「加入收集箱」，新链接会进来',
-    };
-  }
-  return { title: '这个分类下没有内容' };
+  if (filter === 'failed') return { title: '没有失败的链接。' };
+  if (filter === 'archived') return { title: '还没有归档的链接。' };
+  return {
+    title: '没有待处理的链接。',
+    description: '上面粘贴后点「加入收集箱」，新链接会进来',
+  };
 }
 
 export function canOpenUrl(url: string): boolean {
@@ -241,7 +245,7 @@ export function removeInboxItem(
 /** 后台给的拦截原因里有「云元数据地址」这类词：换成人话。 */
 export function plainBlockedReason(reason: string): string {
   const text = reason.trim();
-  if (/内网|本机|云元数据|localhost|127\.0\.0\.1|metadata/i.test(text)) return '这是你电脑本机或公司内网的地址，不是公开网页，不收';
+  if (/内网|本机|云元数据|localhost|127\.0\.0\.1|metadata/i.test(text)) return '这是你电脑本机或公司内网的地址，不是公开网页，不会放进收集箱';
   return text;
 }
 
@@ -281,7 +285,7 @@ export function inboxExcerpt(item: Pick<InboxItem, 'excerpt' | 'title'>): string
   return text;
 }
 
-/** 收进来时的原话（微信群里那条消息）：折成一行；没有就不显示。 */
+/** 放进收集箱时的原话（微信群里那条消息）：折成一行；没有就不显示。 */
 export function inboxQuote(item: Pick<InboxItem, 'quote'>): string | null {
   const text = (item.quote ?? '').replace(/\s+/g, ' ').trim();
   return text || null;
@@ -292,7 +296,7 @@ export type MentionSummary = {
   starred: number;
   inInbox: number;
   fresh: number;
-  /** 新的项目名，按文章里出现的顺序 */
+  /** 新的名字，按文章里出现的顺序 */
   freshNames: string[];
 };
 
@@ -319,12 +323,12 @@ export function mentionLine(summary: MentionSummary): string {
   return `文中提到 ${summary.total} 个 GitHub 项目：${parts.join('，')}`;
 }
 
-/** 把新项目收进收集箱时交给 `commit_capture_batch` 的文字：每个项目一行网址。 */
+/** 把新的 GitHub 项目放进收集箱时交给 `commit_capture_batch` 的文字：每个链接一行网址。 */
 export function mentionText(summary: MentionSummary): string {
   return summary.freshNames.map((name) => `https://github.com/${name}`).join('\n');
 }
 
-/** 还有没读过的链接吗（GitHub 仓库、已归档的不算）。 */
+/** 还有没读过的链接吗（GitHub 项目、已归档的不算）。 */
 export function hasUnfetched(items: readonly Pick<InboxItem, 'status' | 'itemType' | 'fetchStatus'>[]): boolean {
   return items.some((item) => item.fetchStatus === 'pending' && item.status !== 'archived' && !REPO_KINDS.has(item.itemType));
 }

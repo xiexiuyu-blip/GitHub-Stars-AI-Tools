@@ -13,7 +13,7 @@ export type SubTab = {
   label: string;
 };
 
-/** 主导航只有这 5 项，顺序固定。地图、参考包、工具箱不在这里。 */
+/** 主导航只有这 5 项，顺序固定。「按类型看」（原来叫地图）、参考包、工具箱不在这里。 */
 export const NAV_ITEMS: NavItem[] = [
   { key: 'today', label: '今日', icon: 'home' },
   { key: 'library', label: '资料库', icon: 'folder_special' },
@@ -32,13 +32,13 @@ export const SETTINGS_ITEM: NavItem = {
 export const SUB_TABS: Record<'library' | 'solve' | 'settings', SubTab[]> = {
   library: [
     { key: 'library', label: '资料库' },
-    { key: 'map', label: '地图' },
+    { key: 'map', label: '按类型看' },
   ],
   // 参考包已经在「找方案」页右边了；旧的单独「参考包」页不再放进标签条（只有一项就不显示标签条）
   solve: [{ key: 'solve', label: '找方案' }],
   settings: [
     { key: 'settings', label: '设置' },
-    { key: 'toolbox', label: '工具箱' },
+    { key: 'toolbox', label: '自动整理与备份' },
   ],
 };
 

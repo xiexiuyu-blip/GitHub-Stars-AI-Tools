@@ -1,6 +1,17 @@
 import { describe, expect, it } from 'vitest';
 import type { DiscoverCandidate, DiscoverRefreshReport, DiscoverScenario } from './contracts';
-import { buildEvaluatePrompt, candidateStatus, refreshNotice, scenarioLead, sortCandidates, sortScenarios } from './discover-view';
+import {
+  addedToInboxToast,
+  buildEvaluatePrompt,
+  candidateCountHint,
+  candidateCountText,
+  candidateStatus,
+  discoverEmptyCopy,
+  refreshNotice,
+  scenarioLead,
+  sortCandidates,
+  sortScenarios,
+} from './discover-view';
 
 function scenario(overrides: Partial<DiscoverScenario> = {}): DiscoverScenario {
   return {
@@ -66,24 +77,24 @@ describe('scenarioLead', () => {
   });
 
   it('没找过：明说还没找过', () => {
-    expect(scenarioLead(scenario(), now)).toBe('你在这个方向收藏了 12 个。还没去 GitHub 找过。');
+    expect(scenarioLead(scenario(), now)).toBe('你在这个场景收藏了 12 个。还没去 GitHub 找过。');
   });
 
   it('偏少会说偏少；找过的说多久以前', () => {
     const lead = scenarioLead(scenario({ thin: true, myCount: 3, lastFetchedAt: '2026-10-01T12:00:00Z' }), now);
-    expect(lead).toBe('你在这个方向收藏了 3 个，偏少。上次去 GitHub 找是2 天前。');
+    expect(lead).toBe('你在这个场景收藏了 3 个，偏少（14 个以内）。上次去 GitHub 找是2 天前。');
   });
 });
 
 describe('candidateStatus', () => {
-  it('已在 Stars > 已在收集箱 > 还没收', () => {
+  it('已收藏 > 已在收集箱 > 还没放', () => {
     const none = new Set<string>();
     expect(candidateStatus(candidate({ mine: true, inInbox: true }), none)).toBe('mine');
     expect(candidateStatus(candidate({ inInbox: true }), none)).toBe('inbox');
     expect(candidateStatus(candidate(), none)).toBe('new');
   });
 
-  it('刚在这个页面收进去的也算已在收集箱', () => {
+  it('刚在这个页面放进去的也算已在收集箱', () => {
     expect(candidateStatus(candidate(), new Set(['foo/bar']))).toBe('inbox');
   });
 });
@@ -96,7 +107,7 @@ describe('refreshNotice', () => {
     });
     const fallback = refreshNotice(report({ rateLimitResetAt: '2026-10-03T12:01:00Z' }));
     expect(fallback.tone).toBe('warn');
-    expect(fallback.text).toContain('限流');
+    expect(fallback.text).toBe('GitHub 暂时不让查太频繁，过几分钟再点「重新找找」，已找到的先列在下面');
   });
 
   it('后端带了别的提示就原样给', () => {
@@ -151,7 +162,7 @@ describe('sortCandidates', () => {
     ...flags,
   });
 
-  it('没收的在前，已在收集箱的其次，已在 Stars 里的沉底；同一档保持原来的顺序', () => {
+  it('还没放的在前，已在收集箱的其次，已收藏的沉底；同一档保持原来的顺序', () => {
     const list = [
       make('a/mine1', { mine: true }),
       make('b/new1'),
@@ -162,7 +173,7 @@ describe('sortCandidates', () => {
     expect(sortCandidates(list, new Set()).map((item) => item.fullName)).toEqual(['b/new1', 'e/new2', 'c/inbox1', 'a/mine1', 'd/mine2']);
   });
 
-  it('这次刚收进收集箱的也算「已在收集箱」', () => {
+  it('这次刚放进收集箱的也算「已在收集箱」', () => {
     const list = [make('a/new1'), make('b/new2')];
     expect(sortCandidates(list, new Set(['a/new1'])).map((item) => item.fullName)).toEqual(['b/new2', 'a/new1']);
   });
@@ -171,5 +182,65 @@ describe('sortCandidates', () => {
     const list = [make('a/mine', { mine: true }), make('b/new')];
     sortCandidates(list, new Set());
     expect(list.map((item) => item.fullName)).toEqual(['a/mine', 'b/new']);
+  });
+});
+
+describe('发现页的新文案', () => {
+  it('查得太频繁：后端没给原句时用审定的那句（不说限流、不写秒数），后端给了就原样给', () => {
+    const fallback = refreshNotice(report({ rateLimitResetAt: '2026-10-03T12:01:00Z', message: '  ' }));
+    expect(fallback).toEqual({
+      tone: 'warn',
+      text: 'GitHub 暂时不让查太频繁，过几分钟再点「重新找找」，已找到的先列在下面',
+    });
+    expect(fallback.text).not.toContain('限流');
+    expect(fallback.text).not.toMatch(/\d/);
+    expect(refreshNotice(report({ rateLimitResetAt: '2026-10-03T12:01:00Z', message: 'GitHub 限流了，1 分钟后再试' })).text)
+      .toBe('GitHub 限流了，1 分钟后再试');
+  });
+
+  it('场景右边的个数：有候选写 N 个；没有候选时分「还没找过」和「找过了」，不再都写「—」', () => {
+    const fetchedAt = '2026-10-01T12:00:00Z';
+    expect(candidateCountText(3, null)).toBe('3 个');
+    expect(candidateCountText(3, fetchedAt)).toBe('3 个');
+    expect(candidateCountText(0, null)).toBe('还没找过');
+    expect(candidateCountText(0, fetchedAt)).toBe('没有结果');
+    expect(candidateCountText(-1, null)).toBe('还没找过');
+    expect(candidateCountText(Number.NaN, fetchedAt)).toBe('没有结果');
+    expect(candidateCountText(0, null)).not.toBe('—');
+    expect(candidateCountText(0, fetchedAt)).not.toBe('—');
+  });
+
+  it('个数格子的悬停提示写整句：找过但没有结果和没找过要说得不一样', () => {
+    const fetchedAt = '2026-10-01T12:00:00Z';
+    expect(candidateCountHint(0, fetchedAt)).toBe('找过了，这次没有结果');
+    expect(candidateCountHint(0, null)).toBe('还没去 GitHub 找过');
+    expect(candidateCountHint(12, fetchedAt)).toBe('12 个你还没收藏的候选');
+  });
+
+  it('右边没有候选时的空状态：一个场景都没有 / 找过但没有 / 还没找过，各说各的', () => {
+    expect(discoverEmptyCopy(null)).toEqual({
+      title: '还没有场景',
+      description: '先去「资料库」同步一次收藏，场景会自动分好。',
+    });
+    expect(discoverEmptyCopy(undefined).title).toBe('还没有场景');
+    expect(discoverEmptyCopy({ lastFetchedAt: '2026-10-01T12:00:00Z' })).toEqual({
+      title: '这个场景上没有找到你还没收藏的',
+      description: '可以换个场景，或者过几天再点「重新找找」。',
+    });
+    const never = discoverEmptyCopy({ lastFetchedAt: null });
+    expect(never.title).toBe('这个场景还没去找过');
+    expect(never.description).toContain('去 GitHub 找找');
+    expect(never.description).not.toContain('我');
+    // 场景是启动时按关键词规则分好的，不用先整理收藏
+    expect(discoverEmptyCopy(null).description).not.toContain('第一次整理');
+  });
+
+  it('放进收集箱之后：新放进去的提示要去 GitHub 点 Star 再同步；本来就在收集箱里的只说已经有了', () => {
+    expect(addedToInboxToast(1, 'foo/bar')).toEqual({
+      title: '已放进收集箱。想正式收藏，去 GitHub 点 Star，再回来点「同步」',
+      sub: 'foo/bar',
+    });
+    expect(addedToInboxToast(0, 'foo/bar')).toEqual({ title: '收集箱里已经有了', sub: 'foo/bar' });
+    expect(addedToInboxToast(1, 'foo/bar').title).not.toContain('收进');
   });
 });

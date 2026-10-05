@@ -1,15 +1,49 @@
-/** 「找方案」页的纯视图规则：勾选、提示文案、参考包请求。不碰 React，方便在 node 里测。 */
+/** 「找方案」页的纯视图规则：勾选、提示文案、交接单请求。不碰 React，方便在 node 里测。 */
 
 import type { LocalCapabilityInput, PackFormat, PackRequest } from '@/lib/api';
 import type { RerankFit, RerankResult, ScenarioSummary, SolveHit, SolveResult } from '@/lib/contracts';
+import { formatStars, monthDay } from '@/lib/item-format';
 
 export type MatchBadge = { tone: 'blue' | 'gray'; text: string };
 
-export const formatOptions: readonly { value: PackFormat; label: string }[] = [
-  { value: 'markdown', label: 'Markdown' },
-  { value: 'agents', label: 'AGENTS.md' },
-  { value: 'json', label: 'JSON' },
+/** 交接单的格式选项。value 是传给后端的值，不能改；其余只是给人看的字。 */
+export type FormatOption = {
+  value: PackFormat;
+  /** 完整的一句：名字（说明）。读屏和别处引用时用 */
+  label: string;
+  /** 名字：一眼看出是什么 */
+  name: string;
+  /** 一句说明：什么时候用它 */
+  note: string;
+};
+
+function formatOption(value: PackFormat, name: string, note: string): FormatOption {
+  return { value, name, note, label: `${name}（${note}）` };
+}
+
+export const formatOptions: readonly FormatOption[] = [
+  formatOption('markdown', '文档', 'Markdown，直接粘给 Codex，默认'),
+  formatOption('agents', '长期规则', 'AGENTS.md，存成文件放进工作文件夹'),
+  formatOption('json', '程序用', 'JSON，一般不用选'),
 ];
+
+/**
+ * 复制成功后的提示：复制交接单（找方案）和复制单个工具的话（详情抽屉）粘到 Codex 之后，做的是同一件事，
+ * 所以是同一句。别在别处再写一份。
+ */
+export const COPY_FOR_CODEX_TOAST = '已复制。粘到 Codex 后，它会先查你电脑上有没有，没有就装进独立文件夹，装完告诉你装在哪、怎么卸载。';
+
+/** 「让 Codex 去查别人怎么用」那段话只查资料、不装东西，提示不能说它会装。 */
+export const COPY_FOR_RESEARCH_TOAST = '已复制。粘到 Codex 后，它只会读资料、给你结论，不会安装。';
+
+/**
+ * 详情抽屉里复制「给 Codex 的话」之后的提示。抽屉里同一个回调接了两种话：「帮我装好并试用」（会装东西）
+ * 和「去查别人怎么用」（只读资料）。认得出是后者才说「不会安装」；认不出的一律按会装东西的那句说，
+ * 宁可多提醒，不能把会装东西的说成没事。
+ */
+export function copyPromptToast(text: string): string {
+  return text.includes('请用 web-search 调查') ? COPY_FOR_RESEARCH_TOAST : COPY_FOR_CODEX_TOAST;
+}
 
 /** 默认勾选直接用 preselected，丢掉不在命中里的 id，并保持原顺序。 */
 export function initialPicks(result: SolveResult): string[] {
@@ -80,12 +114,18 @@ export function crossNote(result: SolveResult, scenarios: readonly ScenarioSumma
   const name = (scenarios ?? []).find((item) => item.id === id)?.nameZh?.trim() ?? '';
   if (!name) return null;
   const count = result.suggestedScenarioCount ?? 0;
-  return `你在「${name}」方向收藏了 ${count} 个。想看更多同类的新项目？`;
+  return `你在「${name}」场景收藏了 ${count} 个。想看更多同类的新工具？`;
 }
 
 export function pendingNote(result: SolveResult): string | null {
   if (!Number.isFinite(result.pendingMatches) || result.pendingMatches <= 0) return null;
-  return `另有 ${result.pendingMatches} 个还没整理，整理好后可能对得上。`;
+  return `另有 ${result.pendingMatches} 个待 AI 整理，整理好后可能对得上。`;
+}
+
+/** 一个都没找到时，空状态里引导去「发现」的那句话；有待 AI 整理的，后面接上 pendingNote。 */
+export function emptyResultHint(result: SolveResult): string {
+  const pending = pendingNote(result);
+  return pending ? `去「发现」按这个场景找找看。${pending}` : '去「发现」按这个场景找找看';
 }
 
 /** why 去掉空白后为空，或和一句话完全一样时，不再单独写一行。 */
@@ -176,7 +216,7 @@ function localTerms(intent: string): string[] {
 }
 
 /**
- * 从本机已装的 Skill / MCP 里挑出该写进参考包的：
+ * 从本机已装的 Skill / MCP 里挑出该写进交接单的：
  * 1. 名字和选中的项目对得上的（说明这个工具本机已经装了，Codex 不用再装），排最前；
  * 2. 和任务相关的，最多 limit 个（「本机已有的相关能力」）：任务词（含近义说法）出现在名字里算 3 分、
  *    只出现在一句话里算 1 分，每个任务词只算一次，总分不到 2 的不要（零星提到一次不算相关），按总分从高到低挑，同分按名字排。
@@ -218,11 +258,11 @@ export function pickLocalCapabilities(
   return [...installed, ...scored.slice(0, Math.max(0, limit)).map((entry) => entry.item)];
 }
 
-/** 参考包面板里，一个工具都没勾时的入口。 */
-export const DIRECT_LABEL = '没有合适的？直接交给 Codex';
-/** 已经勾了工具、又觉得都不合适时的入口；勾选的工具留着，「改回挑工具」能回去。 */
-export const DIRECT_FROM_PICKS_LABEL = '都不合适？直接交给 Codex';
-/** 从直接交接单回到勾选工具。 */
+/** 一个工具都没勾，或勾了又都不合适时，进「直接交给 Codex」。两处同一句。 */
+export const DIRECT_LABEL = '不用这些工具，直接交给 Codex';
+/** 和 DIRECT_LABEL 同一句。勾选留着，「改回挑工具」能回去。 */
+export const DIRECT_FROM_PICKS_LABEL = '不用这些工具，直接交给 Codex';
+/** 从直接交给 Codex 回到勾选工具。 */
 export const BACK_TO_PICK_LABEL = '改回挑工具';
 
 /**
@@ -245,7 +285,7 @@ export function buildPackRequest(
     };
   }
   return {
-    title: `参考包：${query}`,
+    title: `交接单：${query}`,
     problem: query,
     items: hits.map((hit, index) => ({
       repoId: hit.id,
@@ -266,13 +306,92 @@ export function todayLocalDate(now: Date): string {
 }
 
 /**
- * 参考包面板里一个工具都没勾时，说一句为什么没替你勾：搜到了但没有特别对口的（默认勾选是空的），
- * 或者一个都没搜到。还没搜、或者是自己取消了默认勾选的，不用解释，返回 null。
+ * 列表顶部那一行，说勾了几个。`pickedCount` 必须是界面上此刻真勾着的个数（右边「已选 N 个」那个数），
+ * 不是后端当初默认勾的个数：AI 精选会改勾，用户也会自己改。
+ * - 直接交给 Codex：勾选没在用，不说。
+ * - 勾选是应用替你勾的（`edited` 为假；AI 精选改勾之后也是）：有勾才说「已替你勾了最对口的 N 个」；
+ *   一个都没勾不说，右边有「没有特别对口的，所以没替你默认勾选」（见 packEmptyNote）。
+ * - 用户自己改过之后（`edited` 为真）：不再说「替你勾」，只说「已勾 N 个」，勾到 0 个也说，免得这一行忽有忽无、把列表顶得上下跳。
  */
-export function packEmptyNote(result: Pick<SolveResult, 'hits' | 'preselected'> | null): string | null {
+export function defaultPickNote(pickedCount: number, direct: boolean, edited = false): string | null {
+  if (direct || !Number.isFinite(pickedCount)) return null;
+  const count = Math.max(0, Math.trunc(pickedCount));
+  if (edited) return `已勾 ${count} 个`;
+  if (count === 0) return null;
+  return `已替你勾了最对口的 ${count} 个，不合适可以取消`;
+}
+
+/** 页面用的：数的是命中里真勾着的（和右边「已选 N 个」同一个数），不是后端当初的 preselected。 */
+export function pickListNote(
+  hits: readonly SolveHit[],
+  picked: readonly string[],
+  direct: boolean,
+  edited: boolean,
+): string | null {
+  return defaultPickNote(orderedPicks(hits, picked).length, direct, edited);
+}
+
+/** 交接单大约多少字。不到一万字写具体的数（四位数也不加千分位：「约 3457 字」），一万字以上写「约 1.2 万字」。 */
+export function packSizeText(length: number): string {
+  if (!Number.isFinite(length) || length < 0) return '';
+  const count = Math.round(length);
+  if (count < 10000) return `约 ${count} 字`;
+  return `约 ${Math.round(count / 1000) / 10} 万字`;
+}
+
+/** 交接单（Markdown）里每个工具的那一行：`- 链接：网址 · ★27.2k · 最近更新 2026-07-01`。后端写给 Codex 读的，k 和日期都是机器好读的写法。 */
+const PACK_LINK_LINE = /^(- 链接：)(\S+)( · ★)([0-9][0-9.]*k?)( · 最近更新 )(\d{4}-\d{2}-\d{2}|未知)$/gm;
+
+/** 「27.2k」「1k」「999」→ 个数。读不懂返回 null。 */
+function starsFromPackText(text: string): number | null {
+  const thousand = text.endsWith('k');
+  const value = Number(thousand ? text.slice(0, -1) : text);
+  if (!Number.isFinite(value) || value < 0) return null;
+  return Math.round(thousand ? value * 1000 : value);
+}
+
+/**
+ * 交接单排版预览里给人看的写法：`★27.2k` → `★2.7 万`（不到一万写原数字：`★1234`），
+ * `最近更新 2026-07-01` → `最近更新 7 月 1 日`（不是今年的带年份）。
+ * 只换工具那一行；复制出去的、「看 Markdown 原文」看到的永远是原文，不经过这里。
+ * 认得出是哪个勾选的工具（按网址对），星数就用它真实的个数，不从「27.2k」倒推；对不上的才按「k」推回个数。
+ */
+export function previewDisplayText(
+  markdown: string,
+  hits: readonly Pick<SolveHit, 'htmlUrl' | 'starsCount'>[],
+  now: Date | number | string = new Date(),
+): string {
+  const starsByUrl = new Map<string, number>();
+  for (const hit of hits) {
+    if (hit.htmlUrl && Number.isFinite(hit.starsCount)) starsByUrl.set(hit.htmlUrl, hit.starsCount);
+  }
+  return markdown.replace(PACK_LINK_LINE, (_line, head: string, url: string, mid: string, stars: string, tail: string, date: string) => {
+    const count = starsByUrl.get(url) ?? starsFromPackText(stars);
+    const starText = count == null ? stars : formatStars(count);
+    const dateText = date === '未知' ? date : monthDay(date, now);
+    return `${head}${url}${mid}${starText}${tail}${dateText}`;
+  });
+}
+
+/** 交接单里有工具已经不在资料库里（多半是你在 GitHub 上取消了收藏）。没有就不说。 */
+export function missingToolsNote(count: number): string | null {
+  if (!Number.isFinite(count) || count <= 0) return null;
+  return `有 ${count} 个工具已不在资料库里（可能你取消了收藏）`;
+}
+
+/**
+ * 交接单面板里一个工具都没勾时，说一句为什么没替你勾：搜到了但没有特别对口的（后端默认勾选是空的），
+ * 或者一个都没搜到。还没搜、或者是自己取消了默认勾选的，不用解释，返回 null。
+ *
+ * AI 精选说「都不合适」、把默认勾选清空了，也是应用没替你勾，一样要说：这时后端的默认勾选不是空的，
+ * 所以要靠 `edited` 区分——传 false 表示勾选是应用清空的、用户没动过。不传按「用户改过」，只看后端有没有默认勾。
+ */
+export function packEmptyNote(result: Pick<SolveResult, 'hits' | 'preselected'> | null, edited = true): string | null {
   if (!result) return null;
   if (result.hits.length === 0) return '收藏里没找到相关的工具。';
-  if (result.preselected.length === 0) return '没有特别对口的，所以没替你默认勾选。看一眼左边的列表自己勾，或者直接交给 Codex。';
+  if (result.preselected.length === 0 || !edited) {
+    return '没有特别对口的，所以没替你默认勾选。看一眼左边的列表自己勾，或者直接交给 Codex。';
+  }
   return null;
 }
 

@@ -4,7 +4,8 @@ use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::fs;
+use std::fs::{self, File};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Serialize)]
@@ -292,7 +293,7 @@ ORDER BY repositories.stars_count DESC
 LIMIT 12
 "#,
         )
-        .map_err(|error| format!("命令面板仓库查询失败：{error}"))?;
+        .map_err(|error| format!("命令面板工具查询失败：{error}"))?;
     let rows = repos
         .query_map(params![pattern], |row| {
             Ok(PaletteHit {
@@ -302,32 +303,11 @@ LIMIT 12
                 subtitle: row.get(2)?,
             })
         })
-        .map_err(|error| format!("命令面板仓库读取失败：{error}"))?;
+        .map_err(|error| format!("命令面板工具读取失败：{error}"))?;
     for row in rows {
         hits.push(row.map_err(|error| format!("命令面板行失败：{error}"))?);
     }
-    let mut categories = connection
-        .prepare(
-            r#"
-SELECT id, name_zh, slug FROM categories
-WHERE (?1 = '' OR name_zh LIKE ?1 ESCAPE '\' OR slug LIKE ?1 ESCAPE '\')
-LIMIT 8
-"#,
-        )
-        .map_err(|error| format!("命令面板分类查询失败：{error}"))?;
-    let rows = categories
-        .query_map(params![pattern], |row| {
-            Ok(PaletteHit {
-                kind: "category".to_owned(),
-                id: row.get(0)?,
-                title: row.get(1)?,
-                subtitle: row.get(2)?,
-            })
-        })
-        .map_err(|error| format!("命令面板分类读取失败：{error}"))?;
-    for row in rows {
-        hits.push(row.map_err(|error| format!("命令面板分类行失败：{error}"))?);
-    }
+    // 分类结果不进命令面板：界面只搜工具。命令名不变。
     Ok(hits)
 }
 
@@ -844,7 +824,7 @@ LEFT JOIN entity_categories ON entity_categories.category_id = categories.id AND
 GROUP BY categories.id
 ORDER BY COUNT(entity_categories.entity_id) DESC, categories.sort_order
 "#
-    ).map_err(|error| format!("地图读取失败：{error}"))?;
+    ).map_err(|error| format!("按类型看读取失败：{error}"))?;
     let rows = statement
         .query_map([], |row| {
             Ok(CategoryBlock {
@@ -853,9 +833,9 @@ ORDER BY COUNT(entity_categories.entity_id) DESC, categories.sort_order
                 count: row.get(2)?,
             })
         })
-        .map_err(|error| format!("地图查询失败：{error}"))?;
+        .map_err(|error| format!("按类型看查询失败：{error}"))?;
     rows.collect::<Result<Vec<_>, _>>()
-        .map_err(|error| format!("地图行读取失败：{error}"))
+        .map_err(|error| format!("按类型看行读取失败：{error}"))
 }
 
 #[derive(Debug, Serialize)]
@@ -984,18 +964,52 @@ pub fn backup_database_file(database_path: &Path, backup_dir: &Path) -> Result<P
     Ok(destination)
 }
 
+/// 导出成 Markdown：全部有效收藏，一行一个，逐行写。返回写了几个。
+/// 一句话取中文一句话，没有就退用中文摘要，再没有（还没有 AI 文档行）就退用 GitHub 简介。
 pub fn export_markdown(path: &Path, destination: &Path) -> Result<usize, String> {
-    let page = list_workspace(path, "", "", "", 50, 0)?;
-    let mut lines = vec!["# Fox Stars Lab 资料库".to_owned(), String::new()];
-    for item in &page.items {
-        lines.push(format!(
-            "- {}：{}",
-            item.full_name,
-            item.one_liner.clone().unwrap_or_default()
-        ));
-    }
-    fs::write(destination, lines.join("\n")).map_err(|error| format!("导出失败：{error}"))?;
-    Ok(page.items.len())
+    let connection = open_db(path)?;
+    let mut statement = connection
+        .prepare(
+            r#"
+SELECT repositories.full_name,
+       COALESCE(
+         NULLIF(trim(repo_ai_documents.one_liner_zh), ''),
+         NULLIF(trim(repo_ai_documents.summary_zh), ''),
+         NULLIF(trim(repositories.description), ''),
+         ''
+       )
+FROM repositories
+LEFT JOIN repo_ai_documents ON repo_ai_documents.repo_id = repositories.id
+WHERE repositories.sync_status = 'active'
+ORDER BY repositories.starred_at DESC
+"#,
+        )
+        .map_err(|error| format!("导出准备失败：{error}"))?;
+    write_export_file(destination, "导出", |out| {
+        writeln!(out, "# Fox Stars Lab 资料库")
+            .map_err(|error| export_write_error("导出", &error))?;
+        writeln!(out).map_err(|error| export_write_error("导出", &error))?;
+        let mut rows = statement
+            .query([])
+            .map_err(|error| format!("导出查询失败：{error}"))?;
+        let mut count = 0_usize;
+        while let Some(row) = rows
+            .next()
+            .map_err(|error| format!("导出读取失败：{error}"))?
+        {
+            let full_name: String = row
+                .get(0)
+                .map_err(|error| format!("导出读取失败：{error}"))?;
+            let one_liner: String = row
+                .get(1)
+                .map_err(|error| format!("导出读取失败：{error}"))?;
+            let flat = one_liner.replace(['\n', '\r'], " ");
+            writeln!(out, "- {full_name}：{flat}")
+                .map_err(|error| export_write_error("导出", &error))?;
+            count += 1;
+        }
+        Ok(count)
+    })
 }
 
 pub fn log_usage(
@@ -1027,20 +1041,124 @@ pub fn log_usage(
     Ok(())
 }
 
+/// UTF-8 的字节顺序标记（BOM），3 个字节。Excel（尤其是 Mac 上双击打开）看到它才认出这是 UTF-8，
+/// 没有它会把中文当成别的编码读成乱码。只给 CSV 写；Markdown 是给人和 AI 读的文本，不加。
+const UTF8_BOM: [u8; 3] = [0xEF, 0xBB, 0xBF];
+
+/// 导出成 CSV：全部有效收藏，逐行写。返回写了几个。一句话取中文一句话，没有就退用中文摘要。
+/// 文件开头是 3 个字节的 UTF-8 BOM（`UTF8_BOM`），后面第一行才是表头：用 Excel 打开中文不会乱码。
 pub fn export_csv(path: &Path, destination: &Path) -> Result<usize, String> {
-    let page = list_workspace(path, "", "", "", 200, 0)?;
-    let mut lines = vec!["full_name,language,reading,one_liner".to_owned()];
-    for item in &page.items {
-        lines.push(format!(
-            "{},{},{},{}",
-            csv_cell(&item.full_name),
-            csv_cell(item.language.as_deref().unwrap_or("")),
-            csv_cell(&item.reading_label),
-            csv_cell(item.one_liner.as_deref().unwrap_or(""))
-        ));
+    let connection = open_db(path)?;
+    let mut statement = connection
+        .prepare(
+            r#"
+SELECT repositories.full_name,
+       IFNULL(repositories.language, ''),
+       annotations.read_status,
+       COALESCE(
+         NULLIF(trim(repo_ai_documents.one_liner_zh), ''),
+         NULLIF(trim(repo_ai_documents.summary_zh), ''),
+         ''
+       )
+FROM repositories
+LEFT JOIN annotations ON annotations.repo_id = repositories.id AND annotations.account_id = repositories.account_id
+LEFT JOIN repo_ai_documents ON repo_ai_documents.repo_id = repositories.id
+WHERE repositories.sync_status = 'active'
+ORDER BY repositories.starred_at DESC
+"#,
+        )
+        .map_err(|error| format!("CSV 导出准备失败：{error}"))?;
+    write_export_file(destination, "CSV 导出", |out| {
+        out.write_all(&UTF8_BOM)
+            .map_err(|error| export_write_error("CSV 导出", &error))?;
+        writeln!(out, "full_name,language,reading,one_liner")
+            .map_err(|error| export_write_error("CSV 导出", &error))?;
+        let mut rows = statement
+            .query([])
+            .map_err(|error| format!("CSV 导出查询失败：{error}"))?;
+        let mut count = 0_usize;
+        while let Some(row) = rows
+            .next()
+            .map_err(|error| format!("CSV 导出读取失败：{error}"))?
+        {
+            let full_name: String = row
+                .get(0)
+                .map_err(|error| format!("CSV 导出读取失败：{error}"))?;
+            let language: String = row
+                .get(1)
+                .map_err(|error| format!("CSV 导出读取失败：{error}"))?;
+            let reading: Option<String> = row
+                .get(2)
+                .map_err(|error| format!("CSV 导出读取失败：{error}"))?;
+            let one_liner: String = row
+                .get(3)
+                .map_err(|error| format!("CSV 导出读取失败：{error}"))?;
+            writeln!(
+                out,
+                "{},{},{},{}",
+                csv_cell(&full_name),
+                csv_cell(&language),
+                csv_cell(&reading_label(reading.as_deref())),
+                csv_cell(&one_liner)
+            )
+            .map_err(|error| export_write_error("CSV 导出", &error))?;
+            count += 1;
+        }
+        Ok(count)
+    })
+}
+
+fn export_write_error(label: &str, error: &std::io::Error) -> String {
+    format!("{label}失败：没能写入文件（{error}）。原来的文件没有被改动。")
+}
+
+/// 导出文件的写法：先写到同一个文件夹里的临时文件，全部写完才改名成目标文件。
+/// 中途出错（读库、写盘都算）就删掉临时文件，原来的目标文件一个字都不动，不会留下半截文件。
+/// 目标文件夹不存在就报一句话，不替用户建文件夹。写的时候是边读边写，不把整个资料库读进内存。
+fn write_export_file(
+    destination: &Path,
+    label: &str,
+    produce: impl FnOnce(&mut dyn Write) -> Result<usize, String>,
+) -> Result<usize, String> {
+    let parent = match destination.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
+        _ => PathBuf::from("."),
+    };
+    if !parent.is_dir() {
+        return Err(format!("{label}失败：目标文件夹不存在，请先建好它再导出。"));
     }
-    fs::write(destination, lines.join("\n")).map_err(|error| format!("CSV 导出失败：{error}"))?;
-    Ok(page.items.len())
+    let Some(file_name) = destination.file_name() else {
+        return Err(format!("{label}失败：目标文件名不对。"));
+    };
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|value| value.as_nanos())
+        .unwrap_or_default();
+    let temp_path = parent.join(format!(
+        ".{}.{}-{nanos}.exporting",
+        file_name.to_string_lossy(),
+        std::process::id()
+    ));
+    let outcome = (|| -> Result<usize, String> {
+        let file = File::create(&temp_path).map_err(|error| export_write_error(label, &error))?;
+        let mut writer = std::io::BufWriter::new(file);
+        let count = produce(&mut writer)?;
+        writer
+            .flush()
+            .map_err(|error| export_write_error(label, &error))?;
+        let file = writer
+            .into_inner()
+            .map_err(|error| export_write_error(label, error.error()))?;
+        file.sync_all()
+            .map_err(|error| export_write_error(label, &error))?;
+        drop(file);
+        fs::rename(&temp_path, destination).map_err(|error| export_write_error(label, &error))?;
+        Ok(count)
+    })();
+    if outcome.is_err() {
+        let _ = fs::remove_file(&temp_path);
+    }
+    outcome
 }
 
 fn csv_cell(value: &str) -> String {
@@ -1292,6 +1410,7 @@ fn chrono_stamp() -> String {
 mod tests {
     use super::*;
     use crate::capture::url_is_safe;
+    use rusqlite::{params, Connection};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn temp_db() -> PathBuf {
@@ -1743,5 +1862,495 @@ mod tests {
             "旧功能的账本行不该出现在任务列表里（也不能被取消）"
         );
         let _ = std::fs::remove_file(&path);
+    }
+
+    fn insert_active(connection: &Connection, id: &str, full_name: &str) {
+        connection
+            .execute(
+                "INSERT INTO repositories(id, account_id, owner, name, full_name, description, language, topics_json, html_url, sync_status, starred_at) VALUES (?1, 'acct', 'fox', ?1, ?2, '', 'Rust', '[]', 'https://github.com/fox/x', 'active', '2026-10-02T00:00:00Z')",
+                params![id, full_name],
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn export_markdown_writes_all_three_hundred_active_tools() {
+        let path = temp_db();
+        with_account(&path);
+        let connection = open_db(&path).unwrap();
+        for index in 0..299 {
+            insert_active(
+                &connection,
+                &format!("extra-{index}"),
+                &format!("fox/extra-{index}"),
+            );
+        }
+        connection
+            .execute(
+                "INSERT INTO repositories(id, account_id, owner, name, full_name, description, language, topics_json, html_url, sync_status, starred_at) VALUES ('gone', 'acct', 'fox', 'gone', 'fox/gone', '', 'Rust', '[]', 'https://github.com/fox/gone', 'removed', '2026-10-02T00:00:00Z')",
+                [],
+            )
+            .unwrap();
+        drop(connection);
+        let destination = path.with_extension("md");
+        let count = export_markdown(&path, &destination).unwrap();
+        let text = std::fs::read_to_string(&destination).unwrap();
+        let items = text.lines().filter(|line| line.starts_with("- ")).count();
+        assert_eq!(count, 300);
+        assert_eq!(items, 300);
+        assert!(!text.contains("fox/gone"));
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&destination);
+    }
+
+    #[test]
+    fn export_csv_count_matches_the_rows_written() {
+        let path = temp_db();
+        with_account(&path);
+        let connection = open_db(&path).unwrap();
+        for index in 0..9 {
+            insert_active(
+                &connection,
+                &format!("csv-{index}"),
+                &format!("fox/csv-{index}"),
+            );
+        }
+        drop(connection);
+        let destination = path.with_extension("csv");
+        let count = export_csv(&path, &destination).unwrap();
+        let text = std::fs::read_to_string(&destination).unwrap();
+        let rows = text.lines().filter(|line| !line.is_empty()).count();
+        assert_eq!(count, 10);
+        assert_eq!(rows, count + 1, "多出来的那一行是表头");
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&destination);
+    }
+
+    #[test]
+    fn export_empty_library_returns_zero_and_keeps_the_header() {
+        let path = temp_db();
+        ensure_ready(&path).unwrap();
+        let connection = open_db(&path).unwrap();
+        connection
+            .execute(
+                "INSERT INTO github_accounts(id, login, token_ref) VALUES ('acct', 'fox', 'test')",
+                [],
+            )
+            .unwrap();
+        drop(connection);
+        let markdown = path.with_extension("md");
+        let csv = path.with_extension("csv");
+        assert_eq!(export_markdown(&path, &markdown).unwrap(), 0);
+        assert_eq!(export_csv(&path, &csv).unwrap(), 0);
+        let markdown_text = std::fs::read_to_string(&markdown).unwrap();
+        assert!(markdown_text.starts_with("# Fox Stars Lab 资料库"));
+        assert_eq!(
+            markdown_text
+                .lines()
+                .filter(|line| line.starts_with("- "))
+                .count(),
+            0
+        );
+        let csv_text = std::fs::read_to_string(&csv).unwrap();
+        assert_eq!(csv_text.lines().filter(|line| !line.is_empty()).count(), 1);
+        // CSV 开头多了 3 个字节的 UTF-8 BOM（U+FEFF），表头本身没变
+        assert!(csv_text.starts_with("\u{feff}full_name,language,reading,one_liner"));
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&markdown);
+        let _ = std::fs::remove_file(&csv);
+    }
+
+    #[test]
+    fn export_csv_keeps_quotes_and_newlines_inside_one_cell() {
+        let path = temp_db();
+        with_account(&path);
+        let connection = open_db(&path).unwrap();
+        connection
+            .execute(
+                "UPDATE repo_ai_documents SET one_liner_zh = ?1 WHERE repo_id = 'repo1'",
+                params!["say \"hi\"\nnext"],
+            )
+            .unwrap();
+        drop(connection);
+        let destination = path.with_extension("csv");
+        assert_eq!(export_csv(&path, &destination).unwrap(), 1);
+        let text = std::fs::read_to_string(&destination).unwrap();
+        assert!(
+            text.contains("\"say \"\"hi\"\"\nnext\""),
+            "引号要加倍，换行留在同一格里：{text}"
+        );
+        let markdown = path.with_extension("md");
+        assert_eq!(export_markdown(&path, &markdown).unwrap(), 1);
+        let markdown_text = std::fs::read_to_string(&markdown).unwrap();
+        assert_eq!(
+            markdown_text
+                .lines()
+                .filter(|line| line.starts_with("- "))
+                .count(),
+            1
+        );
+        assert!(markdown_text.contains("say \"hi\" next"));
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&destination);
+        let _ = std::fs::remove_file(&markdown);
+    }
+
+    fn temp_export_dir() -> PathBuf {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "fsl-export-{}-{}-{nanos}",
+            std::process::id(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn file_names(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn a_failure_midway_keeps_the_old_file_untouched_and_leaves_no_temp_file() {
+        let dir = temp_export_dir();
+        let destination = dir.join("library.md");
+        fs::write(&destination, "旧的内容，一个字都不能少").unwrap();
+        let outcome = write_export_file(&destination, "导出", |out| {
+            writeln!(out, "# 写了一半").unwrap();
+            writeln!(out, "- fox/half：只写了这一行").unwrap();
+            Err("读库读到一半出错了".to_owned())
+        });
+        assert_eq!(outcome, Err("读库读到一半出错了".to_owned()));
+        assert_eq!(
+            fs::read_to_string(&destination).unwrap(),
+            "旧的内容，一个字都不能少"
+        );
+        assert_eq!(
+            file_names(&dir),
+            vec!["library.md".to_owned()],
+            "临时文件不能留下"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_failed_first_export_creates_no_file_at_all() {
+        let dir = temp_export_dir();
+        let destination = dir.join("library.csv");
+        let outcome = write_export_file(&destination, "CSV 导出", |out| {
+            writeln!(out, "full_name,language").unwrap();
+            Err("写到一半磁盘满了".to_owned())
+        });
+        assert!(outcome.is_err());
+        assert!(
+            !destination.exists(),
+            "没有旧文件时，失败也不能凭空留下一个半截文件"
+        );
+        assert!(file_names(&dir).is_empty(), "临时文件不能留下");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_successful_export_replaces_the_old_file_and_leaves_only_the_target() {
+        let path = temp_db();
+        with_account(&path);
+        let dir = temp_export_dir();
+        let destination = dir.join("library.md");
+        fs::write(&destination, "旧内容").unwrap();
+        let count = export_markdown(&path, &destination).unwrap();
+        assert_eq!(count, 1);
+        let text = fs::read_to_string(&destination).unwrap();
+        assert!(text.starts_with("# Fox Stars Lab 资料库"));
+        assert!(text.contains("- fox/tool："));
+        assert!(!text.contains("旧内容"));
+        assert_eq!(file_names(&dir), vec!["library.md".to_owned()]);
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn exporting_into_a_missing_folder_says_so_and_does_not_create_it() {
+        let path = temp_db();
+        with_account(&path);
+        let dir = temp_export_dir();
+        let missing = dir.join("没有这个文件夹");
+        let csv_error = export_csv(&path, &missing.join("library.csv")).unwrap_err();
+        let markdown_error = export_markdown(&path, &missing.join("library.md")).unwrap_err();
+        assert!(csv_error.contains("目标文件夹不存在"), "{csv_error}");
+        assert!(
+            markdown_error.contains("目标文件夹不存在"),
+            "{markdown_error}"
+        );
+        assert!(!missing.exists(), "不替用户建文件夹");
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_library_that_cannot_be_read_leaves_the_old_file_untouched() {
+        // 库里没有 repositories 表：读之前的准备就失败，目标文件一个字都不动
+        let path = temp_db();
+        Connection::open(&path)
+            .unwrap()
+            .execute_batch("CREATE TABLE unrelated(id INTEGER);")
+            .unwrap();
+        let dir = temp_export_dir();
+        let destination = dir.join("library.csv");
+        fs::write(&destination, "旧的表格").unwrap();
+        assert!(export_csv(&path, &destination).is_err());
+        assert!(export_markdown(&path, &dir.join("library.md")).is_err());
+        assert_eq!(fs::read_to_string(&destination).unwrap(), "旧的表格");
+        assert_eq!(file_names(&dir), vec!["library.csv".to_owned()]);
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn one_liner_falls_back_to_the_summary_and_markdown_then_to_the_github_description() {
+        let path = temp_db();
+        with_account(&path);
+        let connection = open_db(&path).unwrap();
+        // 有一句话：用一句话，不用摘要
+        insert_active(&connection, "r-one", "fox/one");
+        connection
+            .execute(
+                "INSERT INTO repo_ai_documents(repo_id, summary_zh, one_liner_zh, readme_zh, keywords_json, suggested_tags_json, model, prompt_version, source_hash, generated_at) VALUES ('r-one', '摘要不该用', '一句话优先', '', '[]', '[]', 'test', 'v1', 'hash', '2026-10-02T00:00:00Z')",
+                [],
+            )
+            .unwrap();
+        // 还没有 AI 文档行：Markdown 退用 GitHub 简介，CSV 里这一格留空
+        insert_active(&connection, "r-bare", "fox/bare");
+        connection
+            .execute(
+                "UPDATE repositories SET description = 'GitHub 上的简介' WHERE id = 'r-bare'",
+                [],
+            )
+            .unwrap();
+        drop(connection);
+        let dir = temp_export_dir();
+        let markdown = dir.join("library.md");
+        let csv = dir.join("library.csv");
+        assert_eq!(export_markdown(&path, &markdown).unwrap(), 3);
+        assert_eq!(export_csv(&path, &csv).unwrap(), 3);
+        let markdown_text = fs::read_to_string(&markdown).unwrap();
+        assert!(markdown_text.contains("- fox/one：一句话优先"));
+        assert!(markdown_text.contains("- fox/tool：这个工具可以批量整理群聊里的链接"));
+        assert!(markdown_text.contains("- fox/bare：GitHub 上的简介"));
+        let csv_text = fs::read_to_string(&csv).unwrap();
+        assert!(csv_text.contains("\"fox/one\",\"Rust\",\"没看\",\"一句话优先\""));
+        assert!(csv_text
+            .contains("\"fox/tool\",\"TypeScript\",\"没看\",\"这个工具可以批量整理群聊里的链接\""));
+        assert!(csv_text.contains("\"fox/bare\",\"Rust\",\"没看\",\"\""));
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // ───────────── 卡 37：CSV 开头的 UTF-8 BOM（Excel 打开中文不乱码） ─────────────
+
+    const CSV_HEADER: &str = "full_name,language,reading,one_liner";
+
+    #[test]
+    fn the_csv_starts_with_a_three_byte_utf8_bom_and_the_markdown_does_not() {
+        let path = temp_db();
+        with_account(&path);
+        let connection = open_db(&path).unwrap();
+        for index in 0..6 {
+            insert_active(
+                &connection,
+                &format!("bom-{index}"),
+                &format!("fox/bom-{index}"),
+            );
+        }
+        drop(connection);
+        let dir = temp_export_dir();
+        let csv = dir.join("library.csv");
+        let markdown = dir.join("library.md");
+        let csv_count = export_csv(&path, &csv).unwrap();
+        let markdown_count = export_markdown(&path, &markdown).unwrap();
+        assert_eq!((csv_count, markdown_count), (7, 7), "行数和加 BOM 之前一样");
+
+        let csv_bytes = fs::read(&csv).unwrap();
+        assert_eq!(csv_bytes[..3], [0xEF, 0xBB, 0xBF], "CSV 的前三个字节是 BOM");
+        let body = std::str::from_utf8(&csv_bytes[3..]).expect("BOM 后面是合法的 UTF-8");
+        assert!(!body.contains('\u{feff}'), "BOM 只写一次，正文里不再有");
+        assert_eq!(
+            body.lines().next(),
+            Some(CSV_HEADER),
+            "BOM 后面第一行是表头"
+        );
+        assert_eq!(
+            body.lines().filter(|line| !line.is_empty()).count(),
+            csv_count + 1,
+            "表头 + 每个工具一行"
+        );
+        assert!(
+            body.contains(
+                "\"fox/tool\",\"TypeScript\",\"没看\",\"这个工具可以批量整理群聊里的链接\""
+            ),
+            "中文原样写进去：{body}"
+        );
+
+        let markdown_bytes = fs::read(&markdown).unwrap();
+        assert_ne!(markdown_bytes[..3], [0xEF, 0xBB, 0xBF], "Markdown 不加 BOM");
+        let markdown_text = String::from_utf8(markdown_bytes).unwrap();
+        assert!(markdown_text.starts_with("# Fox Stars Lab 资料库"));
+        assert!(!markdown_text.contains('\u{feff}'));
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_csv_with_a_bom_still_keeps_quotes_commas_and_newlines_inside_one_cell() {
+        let path = temp_db();
+        with_account(&path);
+        let connection = open_db(&path).unwrap();
+        connection
+            .execute(
+                "UPDATE repo_ai_documents SET one_liner_zh = ?1 WHERE repo_id = 'repo1'",
+                params!["say \"hi\", then\r\nnext line"],
+            )
+            .unwrap();
+        drop(connection);
+        let dir = temp_export_dir();
+        let csv = dir.join("library.csv");
+        assert_eq!(export_csv(&path, &csv).unwrap(), 1);
+        // 整个文件逐字节对：BOM + 表头 + 一行（引号加倍，逗号和换行都留在引号包着的同一格里）
+        let expected = [
+            &[0xEF_u8, 0xBB, 0xBF][..],
+            format!(
+                "{CSV_HEADER}\n\"fox/tool\",\"TypeScript\",\"没看\",\"say \"\"hi\"\", then\r\nnext line\"\n"
+            )
+            .as_bytes(),
+        ]
+        .concat();
+        assert_eq!(fs::read(&csv).unwrap(), expected);
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_empty_library_exports_just_the_bom_and_the_header() {
+        let path = temp_db();
+        ensure_ready(&path).unwrap();
+        let connection = open_db(&path).unwrap();
+        connection
+            .execute(
+                "INSERT INTO github_accounts(id, login, token_ref) VALUES ('acct', 'fox', 'test')",
+                [],
+            )
+            .unwrap();
+        drop(connection);
+        let dir = temp_export_dir();
+        let csv = dir.join("library.csv");
+        assert_eq!(export_csv(&path, &csv).unwrap(), 0);
+        assert_eq!(
+            fs::read(&csv).unwrap(),
+            [
+                &[0xEF_u8, 0xBB, 0xBF][..],
+                format!("{CSV_HEADER}\n").as_bytes()
+            ]
+            .concat()
+        );
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_failed_csv_export_never_leaves_a_bom_only_or_half_written_file() {
+        // 读库的准备就失败：什么文件也不会凭空多出来（也不会有只有 3 个字节 BOM 的文件）
+        let path = temp_db();
+        Connection::open(&path)
+            .unwrap()
+            .execute_batch("CREATE TABLE unrelated(id INTEGER);")
+            .unwrap();
+        let dir = temp_export_dir();
+        let destination = dir.join("library.csv");
+        assert!(export_csv(&path, &destination).is_err());
+        assert!(!destination.exists());
+        assert!(file_names(&dir).is_empty(), "临时文件不能留下");
+        let _ = fs::remove_file(&path);
+
+        // BOM 和表头都已经写进临时文件、读第一行数据时才出错：旧文件一个字都不动，临时文件删干净。
+        // 夹具表不带列类型，工具名存成整数，读成文字时失败
+        let path = temp_db();
+        Connection::open(&path)
+            .unwrap()
+            .execute_batch(
+                "CREATE TABLE repositories(id, account_id, full_name, language, sync_status, starred_at);
+                 CREATE TABLE annotations(repo_id, account_id, read_status);
+                 CREATE TABLE repo_ai_documents(repo_id, one_liner_zh, summary_zh);
+                 INSERT INTO repositories VALUES ('r1', 'acct', 12345, 'Rust', 'active', '2026-10-01T00:00:00Z');",
+            )
+            .unwrap();
+        fs::write(&destination, "旧的表格").unwrap();
+        let error = export_csv(&path, &destination).unwrap_err();
+        assert!(error.starts_with("CSV 导出读取失败："), "{error}");
+        assert_eq!(fs::read_to_string(&destination).unwrap(), "旧的表格");
+        assert_eq!(file_names(&dir), vec!["library.csv".to_owned()]);
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // ───────────── 卡 37：「按类型看」读库出错时用现在的叫法 ─────────────
+
+    #[test]
+    fn the_category_view_errors_say_by_type_not_map() {
+        // 库里没有分类表：准备语句就失败
+        let path = temp_db();
+        Connection::open(&path)
+            .unwrap()
+            .execute_batch("CREATE TABLE unrelated(id INTEGER);")
+            .unwrap();
+        let error = graph_overview(&path).unwrap_err();
+        assert!(error.starts_with("按类型看读取失败："), "{error}");
+        let _ = fs::remove_file(&path);
+
+        // 分类名存成了整数，读成文字时失败：走到「行读取失败」那一句
+        let path = temp_db();
+        Connection::open(&path)
+            .unwrap()
+            .execute_batch(
+                "CREATE TABLE categories(id, slug, name_zh, sort_order);
+                 CREATE TABLE entity_categories(entity_id, category_id, status, is_primary);
+                 INSERT INTO categories VALUES (1, 'coding', 5, 1);",
+            )
+            .unwrap();
+        let error = graph_overview(&path).unwrap_err();
+        assert!(error.starts_with("按类型看行读取失败："), "{error}");
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn the_category_view_error_wording_in_the_source_is_the_new_one() {
+        // 「查询失败」那一句在测试里触发不了（query_map 在语句准备好之后不会单独失败），所以读本文件的源码来确认。
+        // 只看测试模块之前的正式代码；分隔符和旧叫法都用 concat! 拼出来，免得这条测试自己把自己写进被检查的文字里。
+        let source = include_str!("v2_ops.rs");
+        let production = source
+            .split(concat!("#[cfg(test)]\n", "mod tests {"))
+            .next()
+            .unwrap_or(source);
+        for new in [
+            "按类型看读取失败：",
+            "按类型看查询失败：",
+            "按类型看行读取失败：",
+        ] {
+            assert!(production.contains(new), "少了新叫法：{new}");
+        }
+        for old in [
+            concat!("地图", "读取失败"),
+            concat!("地图", "查询失败"),
+            concat!("地图", "行读取失败"),
+        ] {
+            assert!(!source.contains(old), "还有旧叫法：{old}");
+        }
     }
 }

@@ -1,5 +1,5 @@
 import type { LibraryItem, ScenarioSummary } from '@/lib/contracts';
-import { splitRepoName } from '@/lib/item-format';
+import { DROP_HINT, splitRepoName } from '@/lib/item-format';
 import { useRepoCover } from '@/hooks/use-repo-cover';
 import { CoverImage, LangDot, ScenarioChip, StarCount } from '@/components/kit';
 import { Icon } from '@/components/ui/icon';
@@ -7,7 +7,7 @@ import { cn } from '@/lib/utils';
 import { scenarioChipsOf, StatusTag } from './item-row';
 
 /**
- * 「今天值得先看」的卡片：左边是 README 里的截图（没有就是彩色渐变），右边是名字、一句话、标签。
+ * 「今天值得先看」的卡片：左边是项目说明里的截图（没有就是彩色渐变），右边是名字、一句话、标签。
  * 比一行文字更像「一个工具」，一眼能看出它长什么样。
  */
 export function PickCard(props: {
@@ -75,18 +75,18 @@ export function PickCard(props: {
       </div>
       <div className={cn('absolute top-2.5 right-2.5 z-10 items-center gap-0.5 rounded-md border border-border bg-card p-0.5 shadow-sm group-hover:flex', props.selected ? 'flex' : 'hidden')}>
         <HoverIcon label="想试（T）" icon="bookmark_add" onClick={props.onWant} />
-        <HoverIcon label="不要了（X）" icon="close" onClick={props.onDrop} />
+        <HoverIcon label="不要了（X）" title={DROP_HINT} icon="close" onClick={props.onDrop} />
       </div>
     </div>
   );
 }
 
-function HoverIcon(props: { label: string; icon: string; onClick: () => void }) {
+function HoverIcon(props: { label: string; icon: string; title?: string; onClick: () => void }) {
   return (
     <button
       type="button"
       className="inline-grid size-8 place-items-center rounded-md text-on-surface-variant hover:bg-surface-container-low hover:text-foreground"
-      title={props.label}
+      title={props.title ?? props.label}
       aria-label={props.label}
       onClick={(event) => {
         event.stopPropagation();

@@ -18,13 +18,74 @@ const ANTHROPIC_TAG_NETWORK_MAX_TOKENS: u16 = 2400;
 const ANTHROPIC_RECOMMENDATION_MAX_TOKENS: u16 = 1000;
 const ANTHROPIC_SEARCH_PLAN_MAX_TOKENS: u16 = 800;
 const ANTHROPIC_SEARCH_ANSWER_MAX_TOKENS: u16 = 1200;
-const ANTHROPIC_SOLVE_RERANK_MAX_TOKENS: u16 = 1200;
 const ANTHROPIC_EXPLANATION_MAX_TOKENS: u16 = 1000;
 const ANTHROPIC_TRANSLATION_MAX_TOKENS: u16 = 6000;
 /// 服务商因为「max_tokens 比这个模型允许的输出上限还大」拒绝了请求（HTTP 400 / 422）时，错误信息里的固定说法。
 /// 理解卡流水线靠它认出「该把输出额度降一档重试」（`card_pipeline::complete_with_room`）；
 /// 错误文案不回显响应体（可能带密钥），所以只能在看得到响应体的这里认。
 pub(crate) const OUTPUT_LIMIT_REJECTED: &str = "输出长度（max_tokens）超过了这个模型允许的上限";
+
+/// 「找方案」AI 精选的输出上限（OpenAI 兼容和 Anthropic 两条路径都带）。回复只有一段 JSON（16 个候选的判断和一句话理由，约 1k token），
+/// 但思考型模型的思考 token 也算在输出额度里：额度太小会「只有思考、没有正文」（回复看不懂，白花一次）；
+/// 不设上限，失控的模型会一直写到超时。4096 给思考留了余量，又把一次的花费压在「提示词（≤ 6500 字）+ 输出 ≤ 4096」以内。
+/// 原来 Anthropic 路径是 1200，OpenAI 兼容路径没有上限。
+const SOLVE_RERANK_MAX_TOKENS: u16 = 4096;
+/// 「找方案」AI 精选一次请求最多等多久：**从开始连接到读完响应体，合计**（`AiCallOptions::single_request`）。
+/// 思考型模型约 60 token/s（见 `card_chat::call_timeout_seconds`），写满 4096 token 约 70 秒，再加上读提示词的时间，90 秒够用。
+/// 命令（`solve_rerank_v2`）最多等 `solve_rerank::WAIT_SECONDS`（95 秒，比这个略大）：
+/// 工作线程总是（除了数据库、钥匙串偶尔的等待）先自己结束，不会出现「界面已经报超时、后台还在悄悄重试、结果进了缓存」。
+pub(crate) const SOLVE_RERANK_TIMEOUT_SECONDS: u64 = 90;
+/// 「找方案」AI 精选一次搜索最多发一个请求：用户每搜一句就自动调一次，重试会把花费成倍放大
+/// （原来走旧功能的 `execute_json_post`：3 次尝试 × 120 秒，超时也重试）。失败就如实说「这次按本地排序」，要再试由用户再点一次。
+const SOLVE_RERANK_MAX_ATTEMPTS: usize = 1;
+
+/// 一次对话请求的调用选项。`Default` 就是旧功能一直在用的行为：OpenAI 兼容路径不带 `max_tokens`、
+/// 等响应头最多 `AI_REQUEST_TIMEOUT_SECONDS` 秒（读响应体另给一个同样的时限）、最多 `AI_API_MAX_ATTEMPTS` 次尝试（429 / 5xx / 超时都会重试）、
+/// 重定向照常跟随、等了很久才失败的也只留提示词那部分。
+/// 旧功能（`request_openai`、`request_anthropic`、`execute_json_post`……）都用 `Default`，行为和以前一模一样；
+/// 只有「找方案」的 AI 精选用 `AiCallOptions::SOLVE_RERANK`。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct AiCallOptions {
+    /// OpenAI 兼容路径请求体里的 `max_tokens`；`None` 就不带（旧行为）。
+    /// Anthropic 的 `max_tokens` 是必填的，由调用方单独传（`request_anthropic_with`），不看这一项。
+    /// 开着 `bill_slow_failures` 时，它也是「等了很久才失败」那一笔按最坏情形往上补的输出量。
+    pub max_tokens: Option<u32>,
+    /// 等多少秒：`single_request` 关着时是等响应头的时限（读响应体另给一个同样的）；开着时是整个请求的合计时限。
+    pub timeout_secs: u64,
+    /// 最多发几次请求（小于 1 按 1 次算）。1 就是不重试、也不回退到别的请求。
+    pub max_attempts: usize,
+    /// 严格的一次请求：① 整个请求（含读响应体）合计不超过 `timeout_secs`（reqwest 的 blocking 客户端只管「等响应头」
+    /// 和「读响应体」各自一个 `timeout_secs`，响应头在 85 秒到、响应体再慢慢写，总共可以等到 175 秒）；
+    /// ② 关掉 reqwest 自带的协议层重试（HTTP/2 被拒绝的流、GOAWAY 会自动再发）；③ 不跟随重定向（3xx 按失败报告，不会把提示词再发到别处）。
+    pub single_request: bool,
+    /// 等了很久才失败、没拿到可用回复，但服务商多半已经在算（最终超时、等了一阵才回的 5xx、等了一阵才断开的连接、响应体读不完）：
+    /// 账本里这一次至少记 `jobs::TIMEOUT_ATTEMPT_TOKEN_ESTIMATE`（见 `spend_guard::account_slow_failure`）。旧功能不开。
+    pub bill_slow_failures: bool,
+}
+
+impl Default for AiCallOptions {
+    fn default() -> Self {
+        Self {
+            max_tokens: None,
+            timeout_secs: u64::from(AI_REQUEST_TIMEOUT_SECONDS),
+            max_attempts: AI_API_MAX_ATTEMPTS,
+            single_request: false,
+            bill_slow_failures: false,
+        }
+    }
+}
+
+impl AiCallOptions {
+    /// 「找方案」AI 精选：一次搜索最多一个请求（无论回的是 200 空内容、429、500、3xx，还是网络错误、超时，都不重试、不跟随），
+    /// 请求体带 `max_tokens = 4096`，整个请求合计最多等 90 秒，等了很久才失败的按「可能已经计费」记账。
+    pub(crate) const SOLVE_RERANK: Self = Self {
+        max_tokens: Some(SOLVE_RERANK_MAX_TOKENS as u32),
+        timeout_secs: SOLVE_RERANK_TIMEOUT_SECONDS,
+        max_attempts: SOLVE_RERANK_MAX_ATTEMPTS,
+        single_request: true,
+        bill_slow_failures: true,
+    };
+}
 
 const AI_SYSTEM_PROMPT: &str =
     "你是开源项目知识库助手。严格遵守用户消息中的输出格式要求；需要结构化 JSON 时只输出 JSON，需要自然语言时直接回答。";
@@ -590,11 +651,24 @@ pub fn answer_search_results(
 
 /// 「找方案」的 AI 精选：把一段提示词发给模型，原样返回回复文字（要 JSON 的话由调用方解析）。
 /// 额度走 `spend_guard::solve_rerank` 里它自己的那一份，不被后台整理用掉的额度挡住。
+/// **一次调用恰好一个 HTTP 请求**（`AiCallOptions::SOLVE_RERANK`）：200 空内容、429、500、3xx、网络错误、超时，都不重试、不回退到别的请求、
+/// 不跟随重定向，reqwest 自带的协议层重试也关掉；请求体带 `max_tokens = 4096`，整个请求（含读响应体）合计最多等 90 秒。
+/// 等了很久才失败、没拿到可用回复的那一次（最终超时、等了一阵才回的 5xx、等了一阵才断开、响应体读不完），账本里按
+/// `max(1 万, 提示词估计 + 4096)` 记（`spend_guard::account_slow_failure`）；服务商直接拒绝（4xx）、没连上、几秒内的 5xx 整笔退回。
 pub fn complete_solve_rerank(config: &AiRequestConfig, prompt: &str) -> Result<String, String> {
+    complete_solve_rerank_with(config, prompt, &AiCallOptions::SOLVE_RERANK)
+}
+
+/// 同 `complete_solve_rerank`，调用选项由调用方给（测试里把等待时限改成 1 秒用）。
+pub(crate) fn complete_solve_rerank_with(
+    config: &AiRequestConfig,
+    prompt: &str,
+    options: &AiCallOptions,
+) -> Result<String, String> {
     let provider = validate_request_config(config)?;
     crate::spend_guard::solve_rerank(|| match provider.as_str() {
-        "openai" => request_openai(config, prompt),
-        "anthropic" => request_anthropic(config, prompt, ANTHROPIC_SOLVE_RERANK_MAX_TOKENS),
+        "openai" => request_openai_with(config, prompt, options),
+        "anthropic" => request_anthropic_with(config, prompt, SOLVE_RERANK_MAX_TOKENS, options),
         _ => Err("当前仅支持 OpenAI、OpenAI 兼容接口或 Anthropic AI 服务".to_owned()),
     })
 }
@@ -977,10 +1051,20 @@ fn request_error_may_be_billed(error: &reqwest::Error, elapsed: Duration) -> boo
 }
 
 fn request_openai(config: &AiRequestConfig, prompt: &str) -> Result<String, String> {
+    request_openai_with(config, prompt, &AiCallOptions::default())
+}
+
+/// `request_openai` 的完整形态：调用选项由调用方给（旧功能传 `Default`，行为不变）。
+fn request_openai_with(
+    config: &AiRequestConfig,
+    prompt: &str,
+    options: &AiCallOptions,
+) -> Result<String, String> {
     // 旧功能不走队列，和队列共用每日额度：发请求前问一句，成功后记账（见 spend_guard.rs）。
     let _permit = crate::spend_guard::check_before_request(prompt)?;
-    let request = build_openai_chat_request(config, prompt, false);
-    let response = execute_json_post(&request.endpoint, &request.headers, &request.body)?;
+    let request = build_openai_chat_request_with(config, prompt, false, options.max_tokens);
+    let response =
+        execute_json_post_with(&request.endpoint, &request.headers, &request.body, options)?;
 
     if !response.status_success {
         return Err(format_ai_http_error(
@@ -1086,9 +1170,21 @@ fn request_anthropic(
     prompt: &str,
     max_tokens: u16,
 ) -> Result<String, String> {
+    request_anthropic_with(config, prompt, max_tokens, &AiCallOptions::default())
+}
+
+/// `request_anthropic` 的完整形态：调用选项由调用方给（旧功能传 `Default`，行为不变）。
+/// `max_tokens` 单独传（Anthropic 必填）；选项里的 `max_tokens` 只给 OpenAI 兼容路径用。
+fn request_anthropic_with(
+    config: &AiRequestConfig,
+    prompt: &str,
+    max_tokens: u16,
+    options: &AiCallOptions,
+) -> Result<String, String> {
     let _permit = crate::spend_guard::check_before_request(prompt)?;
     let request = build_anthropic_message_request(config, prompt, max_tokens, false);
-    let response = execute_json_post(&request.endpoint, &request.headers, &request.body)?;
+    let response =
+        execute_json_post_with(&request.endpoint, &request.headers, &request.body, options)?;
 
     if !response.status_success {
         return Err(format_ai_http_error(
@@ -1266,10 +1362,39 @@ fn build_openai_chat_request(
     prompt: &str,
     stream: bool,
 ) -> JsonPostRequest {
+    build_openai_chat_request_with(config, prompt, stream, None)
+}
+
+/// `max_tokens` 是 `Some` 才带进请求体；`None`（旧功能）的请求体和以前逐字相同。
+fn build_openai_chat_request_with(
+    config: &AiRequestConfig,
+    prompt: &str,
+    stream: bool,
+    max_tokens: Option<u32>,
+) -> JsonPostRequest {
     let mut headers = vec![("Content-Type", "application/json".to_owned())];
     let api_key = config.api_key.trim();
     if !api_key.is_empty() {
         headers.insert(0, ("Authorization", format!("Bearer {api_key}")));
+    }
+
+    let mut body = serde_json::json!({
+        "model": config.model.trim(),
+        "temperature": 0.2,
+        "stream": stream,
+        "messages": [
+            {
+                "role": "system",
+                "content": AI_SYSTEM_PROMPT
+            },
+            {
+                "role": "user",
+                "content": prompt
+            }
+        ]
+    });
+    if let Some(limit) = max_tokens {
+        body["max_tokens"] = serde_json::json!(limit);
     }
 
     JsonPostRequest {
@@ -1279,22 +1404,7 @@ fn build_openai_chat_request(
             "chat/completions",
         ),
         headers,
-        body: serde_json::json!({
-            "model": config.model.trim(),
-            "temperature": 0.2,
-            "stream": stream,
-            "messages": [
-                {
-                    "role": "system",
-                    "content": AI_SYSTEM_PROMPT
-                },
-                {
-                    "role": "user",
-                    "content": prompt
-                }
-            ]
-        })
-        .to_string(),
+        body: body.to_string(),
     }
 }
 
@@ -2098,13 +2208,41 @@ fn execute_json_post(
     headers: &[(&str, String)],
     body: &str,
 ) -> Result<HttpResponse, String> {
-    let client = reqwest::blocking::Client::builder()
+    execute_json_post_with(url, headers, body, &AiCallOptions::default())
+}
+
+/// `execute_json_post` 的完整形态：等多久、最多几次请求、严不严格由调用选项给；`Default` 就是原来的 120 秒 × 3 次，
+/// `single_request` / `bill_slow_failures` 关着时这里和以前逐行一样。
+/// `single_request`（只有「找方案」AI 精选）：整个请求合计限时、关掉 reqwest 自带的协议层重试、不跟随重定向，一次调用恰好一个请求；
+/// `bill_slow_failures`（同上）：等了很久才失败、没拿到可用回复的那一次，账本里至少记 `TIMEOUT_ATTEMPT_TOKEN_ESTIMATE`（`account_slow_failure`）。
+fn execute_json_post_with(
+    url: &str,
+    headers: &[(&str, String)],
+    body: &str,
+    options: &AiCallOptions,
+) -> Result<HttpResponse, String> {
+    let mut builder = reqwest::blocking::Client::builder()
         .connect_timeout(Duration::from_secs(AI_CONNECT_TIMEOUT_SECONDS.into()))
-        .timeout(Duration::from_secs(AI_REQUEST_TIMEOUT_SECONDS.into()))
+        .timeout(Duration::from_secs(options.timeout_secs));
+    if options.single_request {
+        builder = builder
+            .retry(reqwest::retry::never())
+            .redirect(reqwest::redirect::Policy::none());
+    }
+    let client = builder
         .build()
         .map_err(|error| format!("AI 接口请求初始化失败：{error}"))?;
-    for attempt in 1..=AI_API_MAX_ATTEMPTS {
+    // 至少发一次：次数写成 0 时不能变成「一个请求都没发、预留还留着」
+    let max_attempts = options.max_attempts.max(1);
+    // 等了很久才失败那一笔按最坏情形往上补的输出量：没给输出上限就是 0
+    let output_cap = options.max_tokens.map_or(0, u64::from);
+    for attempt in 1..=max_attempts {
         let mut request = client.post(url);
+        if options.single_request {
+            // blocking 客户端自己的 timeout 只管「等响应头」和「读响应体」各一个时限；
+            // 请求自己的 timeout 才是从开始连接到读完响应体的合计
+            request = request.timeout(Duration::from_secs(options.timeout_secs));
+        }
         for (name, value) in headers {
             request = request.header(*name, value);
         }
@@ -2113,8 +2251,17 @@ fn execute_json_post(
         let response = match request.body(body.to_owned()).send() {
             Ok(response) => response,
             Err(error) => {
-                let may_be_billed = request_error_may_be_billed(&error, sent_at.elapsed());
-                if should_retry_ai_transport_error(&error, attempt) {
+                let elapsed = sent_at.elapsed();
+                // 请求发出去了，一直等到整体时限也没等到回应（只有 `bill_slow_failures` 才单独认）
+                let waited_out = options.bill_slow_failures
+                    && waited_for_response(
+                        error.is_timeout(),
+                        error.is_connect(),
+                        elapsed,
+                        options.timeout_secs,
+                    );
+                let may_be_billed = waited_out || request_error_may_be_billed(&error, elapsed);
+                if should_retry_ai_transport_error_within(&error, attempt, max_attempts) {
                     // 这次可能已经发出去、被计费了：重试成功后账本里也要有它
                     if may_be_billed {
                         crate::spend_guard::account_failed_attempt();
@@ -2122,11 +2269,14 @@ fn execute_json_post(
                     sleep_before_ai_retry(attempt);
                     continue;
                 }
-                if !may_be_billed {
+                if may_be_billed && options.bill_slow_failures {
+                    // 等了很久才失败（最终超时、等了一阵才断开）：服务商多半已经在算，已经写出来的会计费
+                    crate::spend_guard::account_slow_failure(output_cap);
+                } else if !may_be_billed {
                     // 没发出去、或几秒内就被断开：模型没有开始跑，没有计费
                     crate::spend_guard::release_unbilled();
                 }
-                return Err(format_ai_request_error(error));
+                return Err(format_ai_request_error_after(error, options.timeout_secs));
             }
         };
         let answered_after = sent_at.elapsed();
@@ -2135,7 +2285,14 @@ fn execute_json_post(
             Ok(text) => text,
             // 失败状态码的响应体读不出来（网关中途断开）：照样按状态码走重试 / 退回，别因为读不出错误详情就跳过
             Err(_) if !status.is_success() => String::new(),
-            Err(error) => return Err(format!("AI 接口响应读取失败：{error}")),
+            Err(error) => {
+                // 成功的状态行已经收到了（服务商在生成），响应体却没读完（一直等到时限、被断开）：和等不到回应一样，
+                // 服务商多半已经写了不少（只有 `bill_slow_failures` 才单独记）
+                if options.bill_slow_failures {
+                    crate::spend_guard::account_slow_failure(output_cap);
+                }
+                return Err(format!("AI 接口响应读取失败：{error}"));
+            }
         };
         let api_response = HttpResponse {
             status_success: status.is_success(),
@@ -2145,7 +2302,7 @@ fn execute_json_post(
         let failed_may_be_billed = !api_response.status_success
             && response_may_be_billed(api_response.http_code, answered_after);
 
-        if should_retry_ai_response(&api_response, attempt) {
+        if should_retry_ai_response_within(&api_response, attempt, max_attempts) {
             // 限流（429）、几秒内的 5xx 没有计费；等了一阵才回的 5xx 不确定，可能已经计费
             if failed_may_be_billed {
                 crate::spend_guard::account_failed_attempt();
@@ -2154,9 +2311,14 @@ fn execute_json_post(
             continue;
         }
 
-        if !api_response.status_success && !failed_may_be_billed {
-            // 服务商在处理之前就拒绝了（4xx、限流），或几秒内就回了 5xx：这一次没有计费，预留退回去
-            crate::spend_guard::release_unbilled();
+        if !api_response.status_success {
+            if !failed_may_be_billed {
+                // 服务商在处理之前就拒绝了（4xx、限流），或几秒内就回了 5xx：这一次没有计费，预留退回去
+                crate::spend_guard::release_unbilled();
+            } else if options.bill_slow_failures {
+                // 等了一阵才回的 5xx：多半是网关等不到模型、模型还在写，已经写出来的会计费
+                crate::spend_guard::account_slow_failure(output_cap);
+            }
         }
         return Ok(api_response);
     }
@@ -2368,22 +2530,59 @@ fn execute_json_get(url: &str, headers: &[(&str, String)]) -> Result<HttpRespons
 }
 
 fn format_ai_request_error(error: reqwest::Error) -> String {
+    format_ai_request_error_after(error, u64::from(AI_REQUEST_TIMEOUT_SECONDS))
+}
+
+/// 超时的文案写这次请求实际等了多久（`timeout_secs`），不是固定的 120 秒。
+fn format_ai_request_error_after(error: reqwest::Error, timeout_secs: u64) -> String {
     if error.is_timeout() {
         return format!(
-            "AI 接口请求超时，请检查请求地址、模型 ID 或网络连接（已等待 {AI_REQUEST_TIMEOUT_SECONDS} 秒）。"
+            "AI 接口请求超时，请检查请求地址、模型 ID 或网络连接（已等待 {timeout_secs} 秒）。"
         );
     }
 
     format!("AI 接口请求失败：{error}")
 }
 
+/// 请求发出去了（不是连接阶段超时），一直等到整体时限（`timeout_secs`）也没等到回应。传入 `reqwest::Error` 的两个标记和已经等了多久。
+/// 没有连接标记的网络栈上，连接时限（`AI_CONNECT_TIMEOUT_SECONDS` + 1 秒）内的超时仍按「没发出去」算（`transport_error_is_unsent`）；
+/// 但整体时限本身比连接时限还短时（测试里设成 1 秒），到了整体时限就是等到超时，不能被当成连接超时。
+fn waited_for_response(
+    is_timeout: bool,
+    is_connect: bool,
+    elapsed: Duration,
+    timeout_secs: u64,
+) -> bool {
+    if !is_timeout || is_connect {
+        return false;
+    }
+    let connect_window = Duration::from_secs(u64::from(AI_CONNECT_TIMEOUT_SECONDS) + 1)
+        .min(Duration::from_secs(timeout_secs.saturating_sub(1)));
+    elapsed > connect_window
+}
+
 fn should_retry_ai_transport_error(error: &reqwest::Error, attempt: usize) -> bool {
-    attempt < AI_API_MAX_ATTEMPTS
-        && (error.is_timeout() || error.is_connect() || error.is_request())
+    should_retry_ai_transport_error_within(error, attempt, AI_API_MAX_ATTEMPTS)
+}
+
+fn should_retry_ai_transport_error_within(
+    error: &reqwest::Error,
+    attempt: usize,
+    max_attempts: usize,
+) -> bool {
+    attempt < max_attempts && (error.is_timeout() || error.is_connect() || error.is_request())
 }
 
 fn should_retry_ai_response(response: &HttpResponse, attempt: usize) -> bool {
-    if attempt >= AI_API_MAX_ATTEMPTS || response.status_success {
+    should_retry_ai_response_within(response, attempt, AI_API_MAX_ATTEMPTS)
+}
+
+fn should_retry_ai_response_within(
+    response: &HttpResponse,
+    attempt: usize,
+    max_attempts: usize,
+) -> bool {
+    if attempt >= max_attempts || response.status_success {
         return false;
     }
 
@@ -3075,6 +3274,8 @@ mod tests {
     use super::*;
     use std::io::{Read, Write};
     use std::net::TcpListener;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
     use std::thread;
 
     #[test]
@@ -5384,5 +5585,718 @@ mod tests {
         for message in &engine {
             assert!(!is_repository_specific_failure(message), "{message}");
         }
+    }
+
+    // ───────────── 卡 34：「找方案」AI 精选一次调用恰好一个请求 ─────────────
+
+    /// 假服务对每个连进来的请求怎么回。
+    #[derive(Clone, Copy)]
+    enum Reply {
+        /// 状态行 + 内容，回完就断开
+        Full(&'static str, &'static str),
+        /// 声明的内容比实际多 500 字节，只回 `partial` 就断开（响应体读到一半断了）
+        Truncated(&'static str, &'static str),
+        /// 收到完整请求后什么也不回就断开
+        HangUp,
+        /// 收到完整请求后什么也不回，连接一直开着：客户端一直等到自己超时
+        Silent,
+        /// 先回 200 的状态行和响应头（声明的内容比实际多）和 `partial`，然后连接一直开着：响应体一直等到客户端超时
+        Stall(&'static str),
+        /// 先等这么多毫秒再回 200 的响应头和 `partial`，然后连接一直开着（响应头来得慢、响应体又一直等不完）
+        SlowStall(u64, &'static str),
+        /// 307 重定向到同一个服务上的另一个地址（客户端要是跟随，服务会再收到一个请求）
+        Redirect,
+    }
+
+    fn write_response(
+        stream: &mut std::net::TcpStream,
+        status: &str,
+        declared_length: usize,
+        body: &str,
+    ) {
+        let response = format!(
+            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {declared_length}\r\nConnection: close\r\n\r\n{body}"
+        );
+        // 客户端可能已经走了（超时）：写不进去不算错
+        let _ = stream.write_all(response.as_bytes());
+    }
+
+    /// 数请求的假服务：连进来一个就记下它的原文，按脚本回（脚本用完后一直重复最后一条）。
+    /// 和 `spawn_http_sequence_server` 不同，客户端少发请求时它不会干等：`finish` 一叫就停。
+    struct CountingServer {
+        url: String,
+        requests: Arc<Mutex<Vec<String>>>,
+        stop: Arc<AtomicBool>,
+        handle: thread::JoinHandle<()>,
+    }
+
+    impl CountingServer {
+        fn start(script: Vec<Reply>) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").expect("应能启动本地测试 HTTP 服务");
+            let address = listener.local_addr().expect("应能读取本地监听地址");
+            listener.set_nonblocking(true).expect("应能设置非阻塞");
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            let stop = Arc::new(AtomicBool::new(false));
+            let handle = {
+                let requests = Arc::clone(&requests);
+                let stop = Arc::clone(&stop);
+                thread::spawn(move || {
+                    // 测试失败、没来得及叫停时，30 秒后自己也会退出
+                    let deadline = Instant::now() + Duration::from_secs(30);
+                    // 连接一直开着的（Silent / Stall）：到服务停了才放掉
+                    let mut held = Vec::new();
+                    let mut served = 0_usize;
+                    while !stop.load(Ordering::SeqCst) && Instant::now() < deadline {
+                        match listener.accept() {
+                            Ok((mut stream, _)) => {
+                                stream.set_nonblocking(false).expect("应能恢复阻塞");
+                                stream
+                                    .set_read_timeout(Some(Duration::from_secs(2)))
+                                    .expect("应能设置读取超时");
+                                let request = read_http_request(&mut stream);
+                                requests.lock().expect("测试锁").push(request);
+                                let reply = script[served.min(script.len() - 1)];
+                                served += 1;
+                                match reply {
+                                    Reply::Full(status, body) => {
+                                        write_response(&mut stream, status, body.len(), body);
+                                    }
+                                    Reply::Truncated(status, partial) => {
+                                        write_response(
+                                            &mut stream,
+                                            status,
+                                            partial.len() + 500,
+                                            partial,
+                                        );
+                                    }
+                                    Reply::HangUp => {}
+                                    Reply::Silent => held.push(stream),
+                                    Reply::Stall(partial) => {
+                                        write_response(
+                                            &mut stream,
+                                            "200 OK",
+                                            partial.len() + 500,
+                                            partial,
+                                        );
+                                        held.push(stream);
+                                    }
+                                    Reply::SlowStall(delay_ms, partial) => {
+                                        thread::sleep(Duration::from_millis(delay_ms));
+                                        write_response(
+                                            &mut stream,
+                                            "200 OK",
+                                            partial.len() + 500,
+                                            partial,
+                                        );
+                                        held.push(stream);
+                                    }
+                                    Reply::Redirect => {
+                                        let _ = stream.write_all(
+                                            b"HTTP/1.1 307 Temporary Redirect\r\nLocation: /elsewhere\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                                        );
+                                    }
+                                }
+                            }
+                            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                                thread::sleep(Duration::from_millis(2));
+                            }
+                            Err(error) => panic!("接收本地 HTTP 请求失败：{error}"),
+                        }
+                    }
+                })
+            };
+            Self {
+                url: format!("http://{address}/test"),
+                requests,
+                stop,
+                handle,
+            }
+        }
+
+        /// 停服务，返回收到的每个请求的原文。
+        fn finish(self) -> Vec<String> {
+            self.stop.store(true, Ordering::SeqCst);
+            self.handle.join().expect("假服务应正常结束");
+            let requests = self.requests.lock().expect("测试锁");
+            requests.clone()
+        }
+    }
+
+    const RERANK_LATEST: &str = "SELECT status, input_tokens, output_tokens FROM ai_jobs WHERE prompt_version = 'solve-rerank' ORDER BY created_at DESC, rowid DESC LIMIT 1";
+    const OPENAI_EMPTY: &str = r#"{"choices":[{"message":{"content":""}}],"usage":{"prompt_tokens":700,"completion_tokens":50}}"#;
+    const ANTHROPIC_OK: &str = r#"{"content":[{"type":"text","text":"好的"}],"usage":{"input_tokens":700,"output_tokens":50}}"#;
+    const ERROR_BODY: &str = r#"{"error":{"message":"nope"}}"#;
+
+    fn anthropic_loopback_config(url: String) -> AiRequestConfig {
+        AiRequestConfig {
+            provider: "anthropic".to_owned(),
+            api_key: "ant-test".to_owned(),
+            base_url: Some(url),
+            model: "claude-test".to_owned(),
+        }
+    }
+
+    fn rerank_ledger(dir: &crate::spend_guard::testing::Dir) -> (String, i64, i64) {
+        dir.row(RERANK_LATEST)
+    }
+
+    /// 等 1 秒就算超时：测「最终超时」时不用真等 90 秒，其余和 AI 精选的选项一样。
+    fn one_second_wait() -> AiCallOptions {
+        AiCallOptions {
+            timeout_secs: 1,
+            ..AiCallOptions::SOLVE_RERANK
+        }
+    }
+
+    #[test]
+    fn the_rerank_options_are_one_request_with_a_4096_limit_and_a_90_second_wait() {
+        let rerank = AiCallOptions::SOLVE_RERANK;
+        assert_eq!(rerank.max_tokens, Some(4096));
+        assert_eq!(rerank.timeout_secs, 90);
+        assert_eq!(rerank.max_attempts, 1);
+        assert!(rerank.single_request);
+        assert!(rerank.bill_slow_failures);
+        assert_eq!(SOLVE_RERANK_MAX_TOKENS, 4096);
+        assert_eq!(SOLVE_RERANK_TIMEOUT_SECONDS, 90);
+        // 旧功能用的 Default 一点没变：不带 max_tokens、120 秒、最多 3 次、不严格、慢失败不另外补账
+        let old = AiCallOptions::default();
+        assert_eq!(old.max_tokens, None);
+        assert_eq!(old.timeout_secs, 120);
+        assert_eq!(old.timeout_secs, u64::from(AI_REQUEST_TIMEOUT_SECONDS));
+        assert_eq!(old.max_attempts, 3);
+        assert_eq!(old.max_attempts, AI_API_MAX_ATTEMPTS);
+        assert!(!old.single_request);
+        assert!(!old.bill_slow_failures);
+    }
+
+    #[test]
+    fn a_rerank_request_to_an_openai_compatible_service_carries_max_tokens_and_books_real_usage() {
+        let dir = crate::spend_guard::testing::Dir::new();
+        dir.control(SPEND_BUDGET);
+        let _scope = dir.use_in_this_thread();
+        let server = CountingServer::start(vec![Reply::Full("200 OK", SPEND_REPLY)]);
+        let content = complete_solve_rerank(
+            &loopback_config(server.url.clone()),
+            &prompt_of_1000_tokens(),
+        )
+        .expect("AI 精选应能发");
+        assert_eq!(content, "好的");
+        let requests = server.finish();
+        assert_eq!(requests.len(), 1);
+        let body = request_json_body(&requests[0]);
+        assert_eq!(body["max_tokens"], 4096);
+        assert_eq!(body["stream"], false);
+        assert_eq!(body["model"], "custom-model");
+        assert_eq!(
+            rerank_ledger(&dir),
+            ("succeeded".to_owned(), 700, 50),
+            "200 带真实用量：记真实用量"
+        );
+    }
+
+    #[test]
+    fn a_rerank_request_to_anthropic_carries_max_tokens_4096_up_from_1200() {
+        let dir = crate::spend_guard::testing::Dir::new();
+        dir.control(SPEND_BUDGET);
+        let _scope = dir.use_in_this_thread();
+        let server = CountingServer::start(vec![Reply::Full("200 OK", ANTHROPIC_OK)]);
+        let content = complete_solve_rerank(
+            &anthropic_loopback_config(server.url.clone()),
+            &prompt_of_1000_tokens(),
+        )
+        .expect("AI 精选应能发");
+        assert_eq!(content, "好的");
+        let requests = server.finish();
+        assert_eq!(requests.len(), 1);
+        let body = request_json_body(&requests[0]);
+        assert_eq!(body["max_tokens"], 4096);
+        assert_eq!(body["stream"], false);
+        assert_eq!(rerank_ledger(&dir), ("succeeded".to_owned(), 700, 50));
+    }
+
+    #[test]
+    fn the_old_entry_points_still_send_no_output_limit_to_openai_compatible_services() {
+        let config = loopback_config("http://127.0.0.1:9/test".to_owned());
+        for stream in [false, true] {
+            let body: serde_json::Value =
+                serde_json::from_str(&build_openai_chat_request(&config, "提示词", stream).body)
+                    .expect("请求体应是 JSON");
+            let mut keys: Vec<&str> = body
+                .as_object()
+                .expect("请求体应是对象")
+                .keys()
+                .map(String::as_str)
+                .collect();
+            keys.sort_unstable();
+            assert_eq!(
+                keys,
+                vec!["messages", "model", "stream", "temperature"],
+                "旧入口的请求体一个键都不能多"
+            );
+        }
+        // 新入口：同样的请求体，只多一个 max_tokens
+        let with_limit: serde_json::Value = serde_json::from_str(
+            &build_openai_chat_request_with(&config, "提示词", false, Some(4096)).body,
+        )
+        .expect("请求体应是 JSON");
+        assert_eq!(with_limit["max_tokens"], 4096);
+        let without_limit: serde_json::Value = serde_json::from_str(
+            &build_openai_chat_request_with(&config, "提示词", false, None).body,
+        )
+        .expect("请求体应是 JSON");
+        assert!(without_limit.get("max_tokens").is_none());
+        // 真的发出去的旧入口请求也没有
+        let (url, server) = spawn_http_server("200 OK", SPEND_REPLY);
+        request_openai(&loopback_config(url), "提示词").expect("应成功");
+        let request = server.join().expect("假服务应正常结束");
+        assert!(request_json_body(&request).get("max_tokens").is_none());
+    }
+
+    #[test]
+    fn the_old_entry_point_still_retries_a_server_error() {
+        let server = CountingServer::start(vec![
+            Reply::Full("500 Internal Server Error", ERROR_BODY),
+            Reply::Full("200 OK", SPEND_REPLY),
+        ]);
+        let content =
+            request_openai(&loopback_config(server.url.clone()), "提示词").expect("重试以后应成功");
+        assert_eq!(content, "好的");
+        let requests = server.finish();
+        assert_eq!(requests.len(), 2, "旧功能遇到 500 还是会重试");
+        assert!(requests
+            .iter()
+            .all(|request| request_json_body(request).get("max_tokens").is_none()));
+    }
+
+    #[test]
+    fn a_rerank_call_is_exactly_one_request_whatever_comes_back() {
+        // （情形，假服务怎么回，错误里该有的字，账本里这一次的 状态 / 输入 / 输出）
+        let cases: [(&str, Reply, &str, (&str, i64, i64)); 6] = [
+            (
+                "200 空内容",
+                Reply::Full("200 OK", OPENAI_EMPTY),
+                "没有摘要内容",
+                ("succeeded", 700, 50),
+            ),
+            (
+                "429",
+                Reply::Full("429 Too Many Requests", ERROR_BODY),
+                "429",
+                ("cancelled", 0, 0),
+            ),
+            (
+                "500",
+                Reply::Full("500 Internal Server Error", ERROR_BODY),
+                "500",
+                ("cancelled", 0, 0),
+            ),
+            (
+                "400",
+                Reply::Full("400 Bad Request", ERROR_BODY),
+                "400",
+                ("cancelled", 0, 0),
+            ),
+            (
+                // 状态行已经收到（服务商在生成），响应体没读完：和等不到回应一样按「可能已经计费」记，不只是提示词那部分
+                "响应体读到一半断开",
+                Reply::Truncated("200 OK", r#"{"choices":["#),
+                "响应读取失败",
+                ("cancelled", 10_000, 0),
+            ),
+            (
+                "连接被直接断开",
+                Reply::HangUp,
+                "请求失败",
+                ("cancelled", 0, 0),
+            ),
+        ];
+        for (name, reply, expected_error, (status, input, output)) in cases {
+            let dir = crate::spend_guard::testing::Dir::new();
+            dir.control(SPEND_BUDGET);
+            let _scope = dir.use_in_this_thread();
+            let server = CountingServer::start(vec![reply]);
+            let error = complete_solve_rerank(
+                &loopback_config(server.url.clone()),
+                &prompt_of_1000_tokens(),
+            )
+            .expect_err(name);
+            let requests = server.finish();
+            assert_eq!(requests.len(), 1, "{name}：请求数应恰好是 1：{error}");
+            assert!(error.contains(expected_error), "{name}：{error}");
+            assert_eq!(
+                rerank_ledger(&dir),
+                (status.to_owned(), input, output),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_anthropic_rerank_path_is_one_request_too() {
+        for (name, reply, expected_error) in [
+            (
+                "429",
+                Reply::Full("429 Too Many Requests", ERROR_BODY),
+                "429",
+            ),
+            (
+                "500",
+                Reply::Full("500 Internal Server Error", ERROR_BODY),
+                "500",
+            ),
+            ("连接被直接断开", Reply::HangUp, "请求失败"),
+        ] {
+            let dir = crate::spend_guard::testing::Dir::new();
+            dir.control(SPEND_BUDGET);
+            let _scope = dir.use_in_this_thread();
+            let server = CountingServer::start(vec![reply]);
+            let error = complete_solve_rerank(
+                &anthropic_loopback_config(server.url.clone()),
+                &prompt_of_1000_tokens(),
+            )
+            .expect_err(name);
+            assert_eq!(server.finish().len(), 1, "{name}：{error}");
+            assert!(error.contains(expected_error), "{name}：{error}");
+            assert_eq!(
+                rerank_ledger(&dir),
+                ("cancelled".to_owned(), 0, 0),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_rerank_call_that_could_not_even_connect_is_not_billed() {
+        let dir = crate::spend_guard::testing::Dir::new();
+        dir.control(SPEND_BUDGET);
+        let _scope = dir.use_in_this_thread();
+        // 监听后立刻关掉：端口上没人，连接被拒绝（没有任何请求到服务商那里）
+        let address = TcpListener::bind("127.0.0.1:0")
+            .and_then(|listener| listener.local_addr())
+            .expect("应能占一个本地端口");
+        let error = complete_solve_rerank(
+            &loopback_config(format!("http://{address}/test")),
+            &prompt_of_1000_tokens(),
+        )
+        .expect_err("没人监听应失败");
+        assert!(error.contains("请求失败"), "{error}");
+        assert_eq!(rerank_ledger(&dir), ("cancelled".to_owned(), 0, 0));
+        assert_eq!(dir.used(), 0);
+    }
+
+    #[test]
+    fn a_final_timeout_books_at_least_what_the_queue_books_for_one() {
+        let dir = crate::spend_guard::testing::Dir::new();
+        dir.control(SPEND_BUDGET);
+        let _scope = dir.use_in_this_thread();
+        // 假服务收到完整请求后什么也不回：客户端一直等到自己的 1 秒时限
+        let server = CountingServer::start(vec![Reply::Silent]);
+        let started = Instant::now();
+        let error = complete_solve_rerank_with(
+            &loopback_config(server.url.clone()),
+            &prompt_of_1000_tokens(),
+            &one_second_wait(),
+        )
+        .expect_err("一直不回应应超时");
+        let waited = started.elapsed();
+        assert_eq!(server.finish().len(), 1, "超时也不重试：请求数恰好是 1");
+        assert!(waited < Duration::from_secs(8), "{waited:?}");
+        assert!(error.contains("超时"), "{error}");
+        assert!(
+            error.contains("已等待 1 秒"),
+            "文案要写实际等了多久，不是固定的 120 秒：{error}"
+        );
+        let (status, input, output) = rerank_ledger(&dir);
+        assert_ne!(status, "running", "不能留下一条永远 running 的行");
+        assert!(
+            input + output >= crate::jobs::TIMEOUT_ATTEMPT_TOKEN_ESTIMATE,
+            "最终超时至少记 {} token：{input} + {output}",
+            crate::jobs::TIMEOUT_ATTEMPT_TOKEN_ESTIMATE
+        );
+        // 提示词 1000 + 补的 9000 = 1 万整
+        assert_eq!((status.as_str(), input, output), ("cancelled", 10_000, 0));
+        assert_eq!(dir.used(), 10_000);
+    }
+
+    #[test]
+    fn a_final_timeout_while_the_body_never_finishes_is_booked_the_same_way() {
+        let dir = crate::spend_guard::testing::Dir::new();
+        dir.control(SPEND_BUDGET);
+        let _scope = dir.use_in_this_thread();
+        // 先回了 200 的响应头和半截响应体，后面一直没有
+        let server = CountingServer::start(vec![Reply::Stall(r#"{"choices":["#)]);
+        let error = complete_solve_rerank_with(
+            &loopback_config(server.url.clone()),
+            &prompt_of_1000_tokens(),
+            &one_second_wait(),
+        )
+        .expect_err("响应体一直读不完应超时");
+        assert_eq!(server.finish().len(), 1);
+        assert!(error.contains("响应读取失败"), "{error}");
+        assert_eq!(
+            rerank_ledger(&dir),
+            ("cancelled".to_owned(), 10_000, 0),
+            "等到时限还没读完，和等不到回应一样按最终超时记"
+        );
+    }
+
+    #[test]
+    fn a_final_timeout_with_a_long_prompt_is_booked_at_the_worst_case() {
+        let dir = crate::spend_guard::testing::Dir::new();
+        dir.control(r#"{"dailyBudgetTokens":600000,"paused":false}"#);
+        let _scope = dir.use_in_this_thread();
+        let server = CountingServer::start(vec![Reply::Silent]);
+        complete_solve_rerank_with(
+            &loopback_config(server.url.clone()),
+            &"说".repeat(12_000),
+            &one_second_wait(),
+        )
+        .expect_err("一直不回应应超时");
+        assert_eq!(server.finish().len(), 1);
+        assert_eq!(
+            rerank_ledger(&dir),
+            ("cancelled".to_owned(), 12_000 + 4096, 0),
+            "提示词估计 12000 已经超过 1 万：按最坏情形记，提示词 + 把 4096 的输出额度写满"
+        );
+    }
+
+    #[test]
+    fn without_the_rerank_flags_a_short_total_timeout_is_still_refunded_like_before() {
+        // 旧分类按「连接时限（15 秒 + 1）内的超时 = 没发出去」：整体时限只有 1 秒时，这一次会被当成连接超时、整笔退回。
+        // 90 秒的真实时限不会碰到这条；这条测试钉住「没开 bill_slow_failures 时，行为和以前一样」
+        let dir = crate::spend_guard::testing::Dir::new();
+        dir.control(SPEND_BUDGET);
+        let _scope = dir.use_in_this_thread();
+        let server = CountingServer::start(vec![Reply::Silent]);
+        let options = AiCallOptions {
+            timeout_secs: 1,
+            max_attempts: 1,
+            ..AiCallOptions::default()
+        };
+        complete_solve_rerank_with(
+            &loopback_config(server.url.clone()),
+            &prompt_of_1000_tokens(),
+            &options,
+        )
+        .expect_err("一直不回应应超时");
+        assert_eq!(server.finish().len(), 1);
+        assert_eq!(rerank_ledger(&dir), ("cancelled".to_owned(), 0, 0));
+    }
+
+    #[test]
+    fn zero_attempts_still_sends_one_request() {
+        let dir = crate::spend_guard::testing::Dir::new();
+        dir.control(SPEND_BUDGET);
+        let _scope = dir.use_in_this_thread();
+        let server = CountingServer::start(vec![Reply::Full("200 OK", SPEND_REPLY)]);
+        let options = AiCallOptions {
+            max_attempts: 0,
+            ..AiCallOptions::SOLVE_RERANK
+        };
+        let content = complete_solve_rerank_with(
+            &loopback_config(server.url.clone()),
+            &prompt_of_1000_tokens(),
+            &options,
+        )
+        .expect("次数写成 0 也至少发一次");
+        assert_eq!(content, "好的");
+        assert_eq!(server.finish().len(), 1);
+    }
+
+    #[test]
+    fn the_rerank_deadline_covers_slow_headers_and_the_body_together() {
+        // 响应头 0.5 秒才到、响应体又一直等不完；整个请求的时限 1 秒：从开始连接算起 1 秒左右就该结束
+        // （reqwest 的 blocking 客户端自己的 timeout 是响应头、响应体各一个，会等到 1.5 秒）
+        let dir = crate::spend_guard::testing::Dir::new();
+        dir.control(SPEND_BUDGET);
+        let _scope = dir.use_in_this_thread();
+        let server = CountingServer::start(vec![Reply::SlowStall(500, r#"{"choices":["#)]);
+        let started = Instant::now();
+        let error = complete_solve_rerank_with(
+            &loopback_config(server.url.clone()),
+            &prompt_of_1000_tokens(),
+            &one_second_wait(),
+        )
+        .expect_err("响应体一直读不完应超时");
+        let waited = started.elapsed();
+        assert_eq!(server.finish().len(), 1);
+        // 机器很忙、响应头迟到时错误会是「等不到回应」那一种：两种都是超时，都按 1 万记
+        assert!(
+            error.contains("响应读取失败") || error.contains("请求超时"),
+            "{error}"
+        );
+        assert!(
+            waited < Duration::from_millis(1_250),
+            "合计时限 1 秒，不能等到 1.5 秒：{waited:?}"
+        );
+        assert_eq!(rerank_ledger(&dir), ("cancelled".to_owned(), 10_000, 0));
+    }
+
+    #[test]
+    fn the_old_options_give_the_body_its_own_fresh_window() {
+        // 旧功能（Default 的做法）：等响应头一个时限、读响应体再一个时限。钉住它，免得有人把 single_request 的做法顺手扩到旧功能
+        let dir = crate::spend_guard::testing::Dir::new();
+        dir.control(SPEND_BUDGET);
+        let _scope = dir.use_in_this_thread();
+        let server = CountingServer::start(vec![Reply::SlowStall(500, r#"{"choices":["#)]);
+        let options = AiCallOptions {
+            timeout_secs: 1,
+            max_attempts: 1,
+            ..AiCallOptions::default()
+        };
+        let started = Instant::now();
+        let error = complete_solve_rerank_with(
+            &loopback_config(server.url.clone()),
+            &prompt_of_1000_tokens(),
+            &options,
+        )
+        .expect_err("响应体一直读不完应超时");
+        let waited = started.elapsed();
+        assert_eq!(server.finish().len(), 1);
+        assert!(error.contains("响应读取失败"), "{error}");
+        assert!(
+            waited >= Duration::from_millis(1_250),
+            "响应头 0.5 秒到之后，响应体还有自己的 1 秒：{waited:?}"
+        );
+        assert_eq!(
+            rerank_ledger(&dir),
+            ("cancelled".to_owned(), 1000, 0),
+            "旧功能读不完响应体：照旧只留提示词那部分"
+        );
+    }
+
+    #[test]
+    fn a_rerank_call_does_not_follow_a_redirect() {
+        let dir = crate::spend_guard::testing::Dir::new();
+        dir.control(SPEND_BUDGET);
+        let _scope = dir.use_in_this_thread();
+        let server =
+            CountingServer::start(vec![Reply::Redirect, Reply::Full("200 OK", SPEND_REPLY)]);
+        let error = complete_solve_rerank(
+            &loopback_config(server.url.clone()),
+            &prompt_of_1000_tokens(),
+        )
+        .expect_err("3xx 不跟随，按失败报告");
+        assert_eq!(server.finish().len(), 1, "跟随重定向就是第二个请求");
+        assert!(error.contains("307"), "{error}");
+        assert_eq!(
+            rerank_ledger(&dir),
+            ("cancelled".to_owned(), 0, 0),
+            "重定向的那一跳没有跑模型，整笔退回"
+        );
+    }
+
+    #[test]
+    fn the_old_entry_point_still_follows_a_redirect() {
+        let server =
+            CountingServer::start(vec![Reply::Redirect, Reply::Full("200 OK", SPEND_REPLY)]);
+        let content = request_openai(&loopback_config(server.url.clone()), "提示词")
+            .expect("旧功能照常跟随重定向");
+        assert_eq!(content, "好的");
+        let requests = server.finish();
+        assert_eq!(requests.len(), 2);
+        assert!(
+            requests[1].starts_with("POST /elsewhere "),
+            "{}",
+            requests[1]
+        );
+    }
+
+    #[test]
+    fn a_failure_after_a_long_wait_is_booked_like_a_timeout_but_a_rejection_never_is() {
+        // `SlowFailures`：假服务马上就回，要模拟「等了很久才失败」就把「几秒内算快」的时限改成 0
+        for (name, reply, expected_error, expected_ledger) in [
+            (
+                "等了一阵才回 500",
+                Reply::Full("500 Internal Server Error", ERROR_BODY),
+                "500",
+                ("cancelled", 10_000, 0),
+            ),
+            (
+                "等了一阵才回 504",
+                Reply::Full("504 Gateway Timeout", ERROR_BODY),
+                "504",
+                ("cancelled", 10_000, 0),
+            ),
+            (
+                "等了一阵才断开",
+                Reply::HangUp,
+                "请求失败",
+                ("cancelled", 10_000, 0),
+            ),
+            // 4xx 是服务商在处理之前就拒绝的：多慢都不计费
+            (
+                "等了一阵才回 429",
+                Reply::Full("429 Too Many Requests", ERROR_BODY),
+                "429",
+                ("cancelled", 0, 0),
+            ),
+            (
+                "等了一阵才回 401",
+                Reply::Full("401 Unauthorized", ERROR_BODY),
+                "401",
+                ("cancelled", 0, 0),
+            ),
+        ] {
+            let dir = crate::spend_guard::testing::Dir::new();
+            dir.control(SPEND_BUDGET);
+            let _scope = dir.use_in_this_thread();
+            let _slow = SlowFailures::enter();
+            let server = CountingServer::start(vec![reply]);
+            let error = complete_solve_rerank(
+                &loopback_config(server.url.clone()),
+                &prompt_of_1000_tokens(),
+            )
+            .expect_err(name);
+            assert_eq!(server.finish().len(), 1, "{name}");
+            assert!(error.contains(expected_error), "{name}：{error}");
+            let (status, input, output) = expected_ledger;
+            assert_eq!(
+                rerank_ledger(&dir),
+                (status.to_owned(), input, output),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn only_a_wait_past_the_connect_window_counts_as_waiting_for_the_response() {
+        let secs = Duration::from_secs;
+        // 90 秒的时限：连接阶段（15 秒 + 1）内的超时不算「等到超时」，没有连接标记的网络栈上也不会被多记
+        assert!(!waited_for_response(true, false, secs(15), 90));
+        assert!(!waited_for_response(true, false, secs(16), 90));
+        assert!(waited_for_response(true, false, secs(17), 90));
+        assert!(waited_for_response(true, false, secs(90), 90));
+        // 有连接标记的、不是超时的，永远不算
+        assert!(!waited_for_response(true, true, secs(90), 90));
+        assert!(!waited_for_response(false, false, secs(90), 90));
+        // 整体时限本身很短时（测试里 1 秒、2 秒、11 秒）：到了整体时限就是等到超时，不能被当成连接超时
+        assert!(waited_for_response(true, false, secs(1), 1));
+        assert!(waited_for_response(
+            true,
+            false,
+            Duration::from_millis(1_500),
+            2
+        ));
+        assert!(!waited_for_response(
+            true,
+            false,
+            Duration::from_millis(900),
+            2
+        ));
+        assert!(waited_for_response(
+            true,
+            false,
+            Duration::from_millis(10_500),
+            11
+        ));
+        assert!(!waited_for_response(true, false, secs(10), 11));
+        // 时限为 0 不会下溢
+        assert!(waited_for_response(
+            true,
+            false,
+            Duration::from_millis(1),
+            0
+        ));
     }
 }
