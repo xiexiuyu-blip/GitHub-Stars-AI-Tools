@@ -6,10 +6,10 @@
 
 # 卡 44 · 理解卡：能力名 / 关键词 / 「怎么试」超长时不再留半截话（后端，只改 card_pipeline.rs）
 
-> 状态：待派发｜执行者：Codex｜只改 `card_pipeline.rs` 一个文件。**不改提示词、不升 `PROMPT_VERSION`**，已经整理好的老卡不动。
+> 状态：已合并（2026-10-05，一轮；总控 18 种改坏检查全部抓住；已进集成线、**尚未发布**——整理跑完前不发布含 Rust 的版本）｜执行者：Codex｜只改 `card_pipeline.rs` 一个文件。**不改提示词、不升 `PROMPT_VERSION`**，已经整理好的老卡不动。
 
 ## Fox 能看到的效果
-资料库里「能做什么」的小标签、关键词、「怎么试」里，不再出现「兼容 OpenAI、Anthropic、Gemi」「Excel/PPT/CSV 直转 Markdow」「decision intelligenc」这种被拦腰砍断的话。以后新整理的卡、以及点「润色」重新整理的卡：该断的地方断在顿号 / 逗号 / 英文单词之前；实在要硬截，就补一个「…」，让人一眼看出是缩写过的。（老卡不会自动变；哪张碍眼，点那张的「润色」。）
+资料库里「能做什么」的小标签、关键词、「怎么试」里，不再出现「兼容 OpenAI、Anthropic、Gemi」「Excel/PPT/CSV 直转 Markdow」「decision intelligenc」这种被拦腰砍断的话。以后新整理（或重新整理）的卡：该断的地方断在顿号 / 逗号 / 英文单词之前；实在要硬截，就补一个「…」，让人一眼看出是缩写过的。（老卡不会自动变；目前界面里也没有「单张重做」的按钮，那是后面另一张卡的事，不在本卡范围。）
 
 ## 为什么有这张卡
 总控读了 v3 全量整理的前 262 张真卡：
@@ -76,7 +76,10 @@
 | `scientific-illustrator`（22 字） | `scientific` |
 | `abcdefghijklmnopqrstuvwxy`（25 字，没有边界） | 丢弃 |
 | `abcdefghijklmnopqrst`（恰好 20 字） | 原样保留 |
-| `decision intelligence` 和 `decision platform` 同时出现 | 只留一个 `decision`（去重） |
+| `decision intelligence`（21 字）和 `decision methodologies`（22 字）同时出现 | 都断成 `decision`，只留一个（去重） |
+| `decision platform`（17 字，没超长） | 原样保留 |
+
+> 勘误（总控，2026-10-05）：本卡最初把第 6 条写成「`decision intelligence` 和 `decision platform` 同时出现 → 只留一个 `decision`」，这是错的：`decision platform` 只有 17 字，没超过 20 字，不该被截。Codex 发现后按规则保守处理（没超长的原样保留），并用 `decision methodologies` 做真正会截成同一个词的去重夹具。上表已改正。
 
 ## 测试（每一条都要能「改坏就失败」）
 1. `truncate_text`：上面第 1 节的 4 条 + `a`×40 逐字断言；`truncate_text` 既有测试一个不改、不删、不放宽。
