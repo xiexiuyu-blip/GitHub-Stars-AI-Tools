@@ -33,11 +33,11 @@ export function itemMeta(item: CommunityItem): string {
   return parts.join(' · ');
 }
 
-/** issue 的状态标签：open → 「还开着」、closed → 「已解决」，别的（HN 或不认识的）不显示。 */
+/** issue 的状态标签：open → 「还没解决」、closed → 「已解决」，别的（HN 或不认识的）不显示。 */
 export function stateLabel(item: CommunityItem): string | null {
   if (item.source !== 'github_issue') return null;
-  if (item.state === 'open') return '还开着';
-  if (item.state === 'closed') return '已关闭';
+  if (item.state === 'open') return '还没解决';
+  if (item.state === 'closed') return '已解决';
   return null;
 }
 

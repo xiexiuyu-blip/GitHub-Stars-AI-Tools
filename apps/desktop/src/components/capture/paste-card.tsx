@@ -42,7 +42,7 @@ export function PasteCard(props: {
           aria-label="备注"
           className="h-8 w-full max-w-[280px] rounded-md border border-input bg-card px-2.5 text-sm text-foreground placeholder:text-on-surface-variant disabled:opacity-60"
           disabled={props.disabled}
-          placeholder="备注，比如：某某群 10/03"
+          placeholder="备注，比如：某某群 10 月 3 日"
           value={props.note}
           onChange={(event) => props.onNote(event.target.value)}
         />

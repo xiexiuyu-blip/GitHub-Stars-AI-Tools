@@ -139,7 +139,7 @@ export function CapturePage() {
         if (!active || gen !== inboxGen.current) return;
         setInbox(page);
         setInboxPhase('ready');
-        // 收进来的链接（X、公众号、视频、网页）只有网址：后台去读公开的标题和摘要，读完静默刷新
+        // 放进收集箱的链接（X、公众号、视频、网页）只有网址：后台去读公开的标题和摘要，读完静默刷新
         if (hasUnfetched(page.items)) void runFetchRef.current();
       })
       .catch((reason: unknown) => {
@@ -186,7 +186,7 @@ export function CapturePage() {
   }
   runFetchRef.current = runFetch;
 
-  /** 把文章里提到、还没收藏也没在收集箱里的 GitHub 项目收进收集箱。 */
+  /** 把文章里提到、还没收藏也没在收集箱里的 GitHub 项目放进收集箱。 */
   async function collectRepos(item: InboxItem) {
     const summary = mentionSummary(item.githubRepos);
     if (!summary || summary.fresh === 0 || collectingId) return;
@@ -360,7 +360,7 @@ export function CapturePage() {
     <section className="flex h-full min-h-0 flex-col gap-3 overflow-auto px-5 pt-4 pb-5">
       <PageHeader
         title="收集"
-        subtitle="把群聊、帖子整段粘贴进来，我来找出里面的链接，并告诉你哪些是新的。"
+        subtitle="把群聊、帖子整段粘贴进来，会找出里面的链接，并标出哪些是新的。"
       />
       <PasteCard
         text={text}

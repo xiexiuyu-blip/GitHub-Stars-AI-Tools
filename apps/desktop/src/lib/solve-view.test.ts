@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import type { RerankResult, ScenarioSummary, SolveHit, SolveResult } from '@/lib/contracts';
+import type { RerankFit, RerankResult, ScenarioSummary, SolveHit, SolveResult } from '@/lib/contracts';
+// 源码原文：检查「界面上不再有旧叫法」「提示只写在一处」用（Vite 的 ?raw，不用 node 的类型）
+import formatPickerSource from '../components/solve/format-picker.tsx?raw';
+import hitDrawerSource from '../components/solve/hit-drawer.tsx?raw';
+import hitRowSource from '../components/solve/solve-hit-row.tsx?raw';
+import solvePageSource from '../pages/v2/solve.tsx?raw';
+import solveViewSource from './solve-view.ts?raw';
+import { buildCommunityPrompt, buildInstallPrompt } from './codex-prompts';
 import {
   applyRerank,
   promotedHits,
@@ -7,19 +14,27 @@ import {
   rerankCandidateIds,
   BACK_TO_PICK_LABEL,
   buildPackRequest,
+  COPY_FOR_CODEX_TOAST,
+  COPY_FOR_RESEARCH_TOAST,
+  copyPromptToast,
   crossNote,
   DIRECT_FROM_PICKS_LABEL,
+  defaultPickNote,
   DIRECT_LABEL,
+  emptyResultHint,
   formatOptions,
   gapNote,
   initialPicks,
   makeMain,
+  missingToolsNote,
+  pickListNote,
   pickLocalCapabilities,
   matchBadge,
   noIntentNote,
   orderedPicks,
   packEmptyNote,
   packPlaceholder,
+  packSizeText,
   pendingNote,
   RERANK_FIT_LABEL,
   RERANK_TOGGLE_LABEL,
@@ -61,6 +76,13 @@ function result(partial: Partial<SolveResult> = {}): SolveResult {
     suggestedScenarioCount: partial.suggestedScenarioCount ?? null,
     pendingMatches: partial.pendingMatches ?? 0,
   };
+}
+
+/** 源码去掉注释，剩下的才是会显示给人看的字（和写死的字符串）。注释里讲数据模型，可以说「仓库」「项目」。 */
+function uiText(source: string): string {
+  return source
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/(^|[^:])\/\/[^\n]*/g, '$1');
 }
 
 const scenario: ScenarioSummary = {
@@ -221,7 +243,7 @@ describe('crossNote', () => {
     expect(crossNote(result({
       suggestedScenarioId: 'xhs',
       suggestedScenarioCount: 4,
-    }), [scenario])).toBe('你在「小红书」方向收藏了 4 个。想看更多同类的新项目？');
+    }), [scenario])).toBe('你在「小红书」场景收藏了 4 个。想看更多同类的新工具？');
   });
 
   it('没有建议场景时返回空', () => {
@@ -237,13 +259,13 @@ describe('crossNote', () => {
     expect(crossNote(result({
       suggestedScenarioId: 'xhs',
       suggestedScenarioCount: null,
-    }), [scenario])).toBe('你在「小红书」方向收藏了 0 个。想看更多同类的新项目？');
+    }), [scenario])).toBe('你在「小红书」场景收藏了 0 个。想看更多同类的新工具？');
   });
 });
 
 describe('pendingNote', () => {
   it('还有在整理的就提示数量', () => {
-    expect(pendingNote(result({ pendingMatches: 2 }))).toBe('另有 2 个还没整理，整理好后可能对得上。');
+    expect(pendingNote(result({ pendingMatches: 2 }))).toBe('另有 2 个待 AI 整理，整理好后可能对得上。');
   });
 
   it('没有或不是正数时不提示', () => {
@@ -260,7 +282,7 @@ describe('buildPackRequest', () => {
       hit({ id: '3', why: '再备' }),
     ];
     const request = buildPackRequest('做小红书封面', hits);
-    expect(request.title).toBe('参考包：做小红书封面');
+    expect(request.title).toBe('交接单：做小红书封面');
     expect(request.problem).toBe('做小红书封面');
     expect(request.localCapabilities).toEqual([]);
     expect(request.items).toEqual([
@@ -294,7 +316,7 @@ describe('buildPackRequest', () => {
     const request = buildPackRequest('做小红书封面', [hit({ id: '1' })]);
     expect(request.mode).toBeUndefined();
     expect(Object.prototype.hasOwnProperty.call(request, 'mode')).toBe(false);
-    expect(request.title).toBe('参考包：做小红书封面');
+    expect(request.title).toBe('交接单：做小红书封面');
   });
 
   it('直接模式带上本机能力，而且不和调用方共用数组', () => {
@@ -306,13 +328,10 @@ describe('buildPackRequest', () => {
     expect(request.localCapabilities).not.toBe(local);
   });
 
-  it('直接交给 Codex 的按钮文案', () => {
-    expect(DIRECT_LABEL).toBe('没有合适的？直接交给 Codex');
-  });
-
-  it('勾了工具之后的直接交接入口文案，和没勾时的不同', () => {
-    expect(DIRECT_FROM_PICKS_LABEL).toBe('都不合适？直接交给 Codex');
-    expect(DIRECT_FROM_PICKS_LABEL).not.toBe(DIRECT_LABEL);
+  it('三个直接交给 Codex 的按钮用同一句', () => {
+    expect(DIRECT_LABEL).toBe('不用这些工具，直接交给 Codex');
+    expect(DIRECT_FROM_PICKS_LABEL).toBe('不用这些工具，直接交给 Codex');
+    expect(DIRECT_FROM_PICKS_LABEL).toBe(DIRECT_LABEL);
   });
 
   it('改回挑工具的按钮文案', () => {
@@ -454,7 +473,11 @@ describe('packPlaceholder 和 formatOptions', () => {
 
   it('格式选项的值和文案', () => {
     expect(formatOptions.map((item) => item.value)).toEqual(['markdown', 'agents', 'json']);
-    expect(formatOptions.map((item) => item.label)).toEqual(['Markdown', 'AGENTS.md', 'JSON']);
+    expect(formatOptions.map((item) => item.label)).toEqual([
+      '文档（Markdown，直接粘给 Codex，默认）',
+      '长期规则（AGENTS.md，存成文件放进工作文件夹）',
+      '程序用（JSON，一般不用选）',
+    ]);
   });
 });
 
@@ -553,6 +576,234 @@ describe('pickLocalCapabilities', () => {
 
   it('仓库全名或短名（不分大小写）都能对上', () => {
     expect(pickLocalCapabilities(all, [{ fullName: 'Foo/AI-Draw' }], []).map((item) => item.name)).toEqual(['ai-draw']);
+  });
+});
+
+describe('交接单文案', () => {
+  it('buildPackRequest 的标题前缀是交接单，直接模式仍是直接交给 Codex', () => {
+    expect(buildPackRequest('做小红书封面', [hit({ id: '1' })]).title).toBe('交接单：做小红书封面');
+    expect(buildPackRequest('做小红书封面', [hit({ id: '1' })], [], true).title).toBe('直接交给 Codex：做小红书封面');
+  });
+
+  it('统一后的按钮常量', () => {
+    expect(DIRECT_LABEL).toBe('不用这些工具，直接交给 Codex');
+    expect(DIRECT_FROM_PICKS_LABEL).toBe(DIRECT_LABEL);
+    expect(BACK_TO_PICK_LABEL).toBe('改回挑工具');
+  });
+
+  it('格式选项只改显示文字，value 仍是 markdown / agents / json', () => {
+    expect(formatOptions.map((item) => [item.value, item.label])).toEqual([
+      ['markdown', '文档（Markdown，直接粘给 Codex，默认）'],
+      ['agents', '长期规则（AGENTS.md，存成文件放进工作文件夹）'],
+      ['json', '程序用（JSON，一般不用选）'],
+    ]);
+  });
+
+  it('列表顶部那一行：有默认勾选才说，没有或直接模式不说', () => {
+    expect(defaultPickNote(2, false)).toBe('已替你勾了最对口的 2 个，不合适可以取消');
+    expect(defaultPickNote(0, false)).toBeNull();
+    expect(defaultPickNote(2, true)).toBeNull();
+  });
+});
+
+describe('格式选项：名字和一句说明', () => {
+  it('每项的完整一句就是「名字（说明）」，value 和顺序不变', () => {
+    expect(formatOptions.map((item) => item.value)).toEqual(['markdown', 'agents', 'json']);
+    for (const option of formatOptions) {
+      expect(option.name.length).toBeGreaterThan(0);
+      expect(option.note.length).toBeGreaterThan(0);
+      expect(option.label).toBe(`${option.name}（${option.note}）`);
+      expect(option.name).not.toContain('（');
+    }
+    expect(formatOptions.map((item) => item.name)).toEqual(['文档', '长期规则', '程序用']);
+    expect(formatOptions.map((item) => item.note)).toEqual([
+      'Markdown，直接粘给 Codex，默认',
+      'AGENTS.md，存成文件放进工作文件夹',
+      'JSON，一般不用选',
+    ]);
+  });
+});
+
+describe('列表顶部那一行：N 和界面上勾着的个数对得上', () => {
+  const hits = ['a', 'b', 'c', 'd'].map((id) => hit({ id }));
+  // 后端默认勾了 a、b 两个
+  const found = result({ hits, preselected: ['a', 'b'] });
+  const aiFits = (items: Array<{ repoId: string; fit: RerankFit }>): RerankResult => rerank({
+    items: items.map((item) => ({ ...item, reason: '理由' })),
+  });
+  const countOnScreen = (picked: readonly string[]) => orderedPicks(found.hits, picked).length;
+
+  it('AI 精选之前：就是后端默认勾的个数', () => {
+    const picked = initialPicks(found);
+    expect(picked).toEqual(['a', 'b']);
+    expect(pickListNote(found.hits, picked, false, false)).toBe('已替你勾了最对口的 2 个，不合适可以取消');
+    expect(countOnScreen(picked)).toBe(2);
+  });
+
+  it('AI 精选改勾之后：N 跟着现在勾着的个数变，不再写后端当初的 2', () => {
+    // 变少
+    const one = rerankPicks(aiFits([{ repoId: 'c', fit: 'best' }, { repoId: 'a', fit: 'maybe' }]), found.hits);
+    expect(one).toEqual(['c']);
+    expect(pickListNote(found.hits, one ?? [], false, false)).toBe('已替你勾了最对口的 1 个，不合适可以取消');
+    // 变多（最多 3 个）
+    const three = rerankPicks(aiFits([
+      { repoId: 'a', fit: 'best' },
+      { repoId: 'b', fit: 'best' },
+      { repoId: 'c', fit: 'good' },
+      { repoId: 'd', fit: 'good' },
+    ]), found.hits);
+    expect(three).toEqual(['a', 'b', 'c']);
+    expect(pickListNote(found.hits, three ?? [], false, false)).toBe('已替你勾了最对口的 3 个，不合适可以取消');
+    // 每一种 N 都等于右边「已选 N 个」那个数
+    expect(countOnScreen(one ?? [])).toBe(1);
+    expect(countOnScreen(three ?? [])).toBe(3);
+  });
+
+  it('AI 说一个都不合适：勾选清空，顶上这一行不说；右边说「没有特别对口的，所以没替你默认勾选」', () => {
+    const none = rerankPicks(rerank({ noneFit: true, items: [{ repoId: 'a', fit: 'best', reason: '写了也不信' }] }), found.hits);
+    expect(none).toEqual([]);
+    expect(pickListNote(found.hits, none ?? [], false, false)).toBeNull();
+    // 后端当初默认勾了 a、b，是 AI 把它们清空的（用户没动过）：不是用户取消的，要解释
+    expect(packEmptyNote(found, false)).toBe('没有特别对口的，所以没替你默认勾选。看一眼左边的列表自己勾，或者直接交给 Codex。');
+    // 后端本来就没默认勾：一直是这句
+    expect(packEmptyNote({ hits: found.hits, preselected: [] })).toContain('没有特别对口的，所以没替你默认勾选');
+    expect(packEmptyNote({ hits: found.hits, preselected: [] }, false)).toContain('没有特别对口的，所以没替你默认勾选');
+  });
+
+  it('用户自己把默认勾的取消光：右边不解释（不传 edited 也按用户改过算）', () => {
+    expect(packEmptyNote(found, true)).toBeNull();
+    expect(packEmptyNote(found)).toBeNull();
+    expect(pickListNote(found.hits, [], false, true)).toBe('已勾 0 个');
+  });
+
+  it('AI 精选没成功：勾选不动，N 还是默认勾的', () => {
+    const picked = initialPicks(found);
+    expect(rerankPicks(rerank({ status: 'failed' }), found.hits)).toBeNull();
+    expect(pickListNote(found.hits, picked, false, false)).toBe('已替你勾了最对口的 2 个，不合适可以取消');
+  });
+
+  it('用户手动改勾之后：不再说「替你勾」，改成「已勾 N 个」，N 跟着变', () => {
+    const afterAi = rerankPicks(aiFits([{ repoId: 'c', fit: 'best' }]), found.hits) ?? [];
+    const added = togglePick(afterAi, 'a');
+    expect(pickListNote(found.hits, added, false, true)).toBe('已勾 2 个');
+    const removedOne = togglePick(added, 'c');
+    expect(pickListNote(found.hits, removedOne, false, true)).toBe('已勾 1 个');
+    const removedAll = togglePick(removedOne, 'a');
+    expect(pickListNote(found.hits, removedAll, false, true)).toBe('已勾 0 个');
+    for (const picked of [added, removedOne, removedAll]) {
+      expect(pickListNote(found.hits, picked, false, true)).not.toContain('替你勾');
+    }
+  });
+
+  it('直接交给 Codex 时不说，不管改没改过', () => {
+    expect(pickListNote(found.hits, ['a', 'b'], true, false)).toBeNull();
+    expect(pickListNote(found.hits, ['a', 'b'], true, true)).toBeNull();
+  });
+
+  it('只数命中里真有的，不在命中里的 id 不算', () => {
+    expect(pickListNote(found.hits, ['a', 'gone', 'a'], false, false)).toBe('已替你勾了最对口的 1 个，不合适可以取消');
+    expect(pickListNote(found.hits, ['gone'], false, true)).toBe('已勾 0 个');
+  });
+
+  it('defaultPickNote 本身：坏数字不说，改过的写已勾', () => {
+    expect(defaultPickNote(Number.NaN, false)).toBeNull();
+    expect(defaultPickNote(Number.NaN, false, true)).toBeNull();
+    expect(defaultPickNote(-1, false)).toBeNull();
+    expect(defaultPickNote(3, false, true)).toBe('已勾 3 个');
+    expect(defaultPickNote(3, true, true)).toBeNull();
+  });
+});
+
+describe('界面上残留的旧叫法已换成统一用词', () => {
+  it('没找到时引导去「发现」的那句说场景；有待 AI 整理的接在后面', () => {
+    expect(emptyResultHint(result({ pendingMatches: 0 }))).toBe('去「发现」按这个场景找找看');
+    expect(emptyResultHint(result({ pendingMatches: 3 }))).toBe(
+      '去「发现」按这个场景找找看。另有 3 个待 AI 整理，整理好后可能对得上。',
+    );
+  });
+
+  it('交接单大小：不到一万字写具体数，一万字以上写「约 X 万字」', () => {
+    expect(packSizeText(0)).toBe('约 0 字');
+    expect(packSizeText(850)).toBe('约 850 字');
+    expect(packSizeText(9999)).toBe('约 9,999 字');
+    expect(packSizeText(10000)).toBe('约 1 万字');
+    expect(packSizeText(12345)).toBe('约 1.2 万字');
+    expect(packSizeText(12950)).toBe('约 1.3 万字');
+    expect(packSizeText(99999)).toBe('约 10 万字');
+    expect(packSizeText(123456)).toBe('约 12.3 万字');
+    expect(packSizeText(Number.NaN)).toBe('');
+    expect(packSizeText(-5)).toBe('');
+    // 一万字以上不再写成带逗号的「12,345」
+    expect(packSizeText(12345)).not.toContain(',');
+  });
+
+  it('交接单里有工具已不在资料库里：写工具和资料库，不写项目 / 库', () => {
+    expect(missingToolsNote(2)).toBe('有 2 个工具已不在资料库里（可能你取消了收藏）');
+    expect(missingToolsNote(0)).toBeNull();
+    expect(missingToolsNote(Number.NaN)).toBeNull();
+  });
+
+  it('找方案页的接线：用上面这些函数，不再自己拼数字和句子', () => {
+    const page = uiText(solvePageSource);
+    // 列表顶部那一行数的是界面上勾着的（picked），不是后端的 preselected
+    expect(page).toContain('pickListNote(result.hits, picked, direct, picksEdited)');
+    expect(page).not.toContain('result.preselected.length');
+    // 用户改过勾选才算改过：点勾选、设主参考都走 updatePicked
+    expect(page).toContain('setPicksEdited(true)');
+    expect(page).toContain('setPicksEdited(false)');
+    expect(page).toContain('packEmptyNote(result, picksEdited)');
+    // 大小、缺失提示、空状态提示、格式列表
+    expect(page).toContain('packSizeText(pack.content.length)');
+    expect(page).not.toContain("toLocaleString('zh-CN')");
+    expect(page).toContain('missingToolsNote(pack.missing.length)');
+    expect(page).toContain('emptyResultHint(props.result)');
+    expect(page).toContain('<FormatPicker');
+    expect(page).not.toContain('Segmented');
+  });
+
+  it('界面源码（注释除外）里不再出现旧叫法', () => {
+    const banned = ['参考包', '参考项目', '任务交接', '直接交接单', '工作目录说明', '仓库', '项目', '方向', '待整理', '还没整理', '理解卡', '知识库', '您'];
+    const files: Array<[string, string]> = [
+      ['pages/v2/solve.tsx', solvePageSource],
+      ['lib/solve-view.ts', solveViewSource],
+      ['components/solve/solve-hit-row.tsx', hitRowSource],
+      ['components/solve/hit-drawer.tsx', hitDrawerSource],
+      ['components/solve/format-picker.tsx', formatPickerSource],
+    ];
+    for (const [file, source] of files) {
+      const text = uiText(source);
+      expect(text.length, `${file} 读不到`).toBeGreaterThan(100);
+      for (const term of banned) {
+        expect(text, `${file} 里还有旧叫法「${term}」`).not.toContain(term);
+      }
+    }
+  });
+});
+
+describe('复制成功的提示', () => {
+  it('复制交接单和复制单个工具的话，用同一句（审读第 5 条）', () => {
+    expect(COPY_FOR_CODEX_TOAST).toBe('已复制。粘到 Codex 后，它会先查你电脑上有没有，没有就装进独立文件夹，装完告诉你装在哪、怎么卸载。');
+  });
+
+  it('「去查别人怎么用」那段话只读资料：提示不能说它会装东西；认不出的话按会装东西的那句说', () => {
+    const target = { fullName: 'fox/cover-kit', htmlUrl: 'https://github.com/fox/cover-kit', form: 'cli', scenarioName: '小红书' };
+    expect(copyPromptToast(buildInstallPrompt(target))).toBe(COPY_FOR_CODEX_TOAST);
+    expect(copyPromptToast(buildCommunityPrompt(target, new Date(2026, 9, 5)))).toBe(COPY_FOR_RESEARCH_TOAST);
+    expect(copyPromptToast('一段没见过的话')).toBe(COPY_FOR_CODEX_TOAST);
+    expect(COPY_FOR_RESEARCH_TOAST).toContain('不会安装');
+    expect(COPY_FOR_RESEARCH_TOAST).not.toContain('装进');
+  });
+
+  it('找方案页和详情抽屉都用这个常量，没有各抄一份，也不再有旧提示', () => {
+    const page = solvePageSource;
+    const drawer = hitDrawerSource;
+    expect(page).toContain('COPY_FOR_CODEX_TOAST');
+    expect(drawer).toContain('COPY_FOR_CODEX_TOAST');
+    expect(drawer).toContain('copyPromptToast');
+    for (const [name, text] of [['solve.tsx', page], ['hit-drawer.tsx', drawer]] as const) {
+      expect(text, `${name} 里还有旧提示`).not.toContain('已复制，去 Codex 里粘贴');
+      expect(text, `${name} 里又写了一份提示原文`).not.toContain('粘到 Codex 后');
+    }
   });
 });
 

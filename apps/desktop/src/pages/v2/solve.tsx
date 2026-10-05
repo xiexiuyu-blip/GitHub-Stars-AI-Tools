@@ -7,18 +7,23 @@ import {
   promotedHits,
   BACK_TO_PICK_LABEL,
   buildPackRequest,
+  COPY_FOR_CODEX_TOAST,
   crossNote,
   DIRECT_FROM_PICKS_LABEL,
   DIRECT_LABEL,
+  emptyResultHint,
   formatOptions,
   gapNote,
   initialPicks,
   makeMain,
+  missingToolsNote,
   noIntentNote,
+  pickListNote,
   pickLocalCapabilities,
   orderedPicks,
   packEmptyNote,
   packPlaceholder,
+  packSizeText,
   pendingNote,
   RERANK_TOGGLE_LABEL,
   rerankCandidateIds,
@@ -29,13 +34,14 @@ import {
 } from '@/lib/solve-view';
 import { loadSolveDraft, saveSolveDraft, type SolveRerankPhase } from '@/lib/solve-draft';
 import { useCopy } from '@/hooks/use-copy';
-import { Button, Card, CardHeader, EmptyState, PageHeader, Segmented, Spinner } from '@/components/kit';
+import { Button, Card, CardHeader, EmptyState, PageHeader, Spinner } from '@/components/kit';
 import { Icon } from '@/components/ui/icon';
 import { cn } from '@/lib/utils';
+import { FormatPicker } from '@/components/solve/format-picker';
 import { HitDrawer } from '@/components/solve/hit-drawer';
 import { SolveHitRow } from '@/components/solve/solve-hit-row';
 
-// README 渲染器比较大，只有用到参考包预览时才加载
+// README 渲染器比较大，只有用到交接单预览时才加载
 const ReadmeRenderer = lazy(() => import('@/components/readme-renderer').then((module) => ({ default: module.ReadmeRenderer })));
 
 const EXAMPLES = ['做小红书封面', '给公众号文章配图', '短视频加字幕', '做 PPT 和文档', '做电商详情页图片'];
@@ -107,7 +113,10 @@ export function SolvePage(props: {
   // 切到别的页面再回来：接着上次的问题、结果和勾选，不要白做一遍
   const draft = openingQuery ? null : loadSolveDraft();
   const restored = restoredRerank(draft);
+  // 用户自己改过勾选：AI 精选之后不再替他重勾。ref 给异步回调读最新值，state 给列表顶部那一行用（见 pickListNote）。
+  // 从草稿恢复的，分不清是默认的还是改过的，当作改过（只说「已勾 N 个」，不会说错成「替你勾」）。
   const picksTouched = useRef(draft !== null);
+  const [picksEdited, setPicksEdited] = useState(draft !== null);
   const aiEnabledRef = useRef(readAiEnabled());
   const rerankUsefulRef = useRef(restored.phase === 'done' && (restored.rerank?.status === 'ok' || restored.rerank?.status === 'cached'));
   const [query, setQuery] = useState(props.initialQuestion || draft?.query || '');
@@ -169,6 +178,7 @@ export function SolvePage(props: {
     const seq = ++searchSeq.current;
     rerankSeq.current += 1;
     picksTouched.current = false;
+    setPicksEdited(false);
     rerankUsefulRef.current = false;
     setActiveQuery(text);
     setPhase('loading');
@@ -217,7 +227,7 @@ export function SolvePage(props: {
     };
   }, []);
 
-  // 本机已经装了哪些 Skill / MCP（只读名字）：参考包里要标「本机已装」，Codex 才不会重复装
+  // 本机已经装了哪些 Skill / MCP（只读名字）：交接单里要标「本机已装」，Codex 才不会重复装
   useEffect(() => {
     let cancelled = false;
     void scanLocalCapabilities().then((items) => {
@@ -293,12 +303,13 @@ export function SolvePage(props: {
     if (!pack?.content || (!direct && selectedHits.length === 0)) return;
     const detail = direct
       ? '直接交给 Codex'
-      : `${Number.isFinite(pack.itemCount) ? pack.itemCount : selectedHits.length} 个参考项目`;
-    if (await copy(pack.content, '已复制，去 Codex 里粘贴', detail)) setCopied(true);
+      : `${Number.isFinite(pack.itemCount) ? pack.itemCount : selectedHits.length} 个工具`;
+    if (await copy(pack.content, COPY_FOR_CODEX_TOAST, detail)) setCopied(true);
   }
 
   function updatePicked(update: (current: string[]) => string[]) {
     picksTouched.current = true;
+    setPicksEdited(true);
     setDirect(false);
     setPicked(update);
   }
@@ -324,17 +335,23 @@ export function SolvePage(props: {
     setPackAttempt((current) => current + 1);
   }
 
-  // 没有结果时「找」是唯一的主按钮；有结果后改成次要，主按钮只留给「复制给 Codex」。
+  // 没有结果时「找」是唯一的主按钮；有结果后改成次要，主按钮只留给「复制交接单给 Codex」。
   const findButton = hasResult ? (
     <Button type="submit" variant="default" className="h-12 rounded-xl px-6 text-base" disabled={!query.trim()}>找</Button>
   ) : (
     <Button type="submit" variant="primary" className="h-12 rounded-xl px-6 text-base" disabled={!query.trim()}>找</Button>
   );
 
+  // N 数的是界面上此刻真勾着的（和右边「已选 N 个」同一个数）：AI 精选改勾之后、用户自己改过之后都跟着变。
+  const pickNote = result ? pickListNote(result.hits, picked, direct, picksEdited) : null;
+  // 一个都没勾、又不是用户自己取消的（后端没默认勾，或 AI 精选说都不合适）：右边说一句为什么没替你勾
+  const emptyNote = packEmptyNote(result, picksEdited);
+  const missingNote = pack ? missingToolsNote(pack.missing.length) : null;
+
   const copyButton = (
     <Button variant={hasResult ? 'primary' : 'default'} disabled={!canCopy} onClick={() => void copyToCodex()}>
       <Icon name={copied ? 'check' : 'content_copy'} size={16} />
-      {copied ? '已复制' : '复制给 Codex'}
+      {copied ? '已复制' : '复制交接单给 Codex'}
     </Button>
   );
 
@@ -342,7 +359,7 @@ export function SolvePage(props: {
     <section className="flex h-full min-h-0 flex-col gap-3 overflow-auto px-5 pt-4 pb-5 max-[899px]:px-4 max-[899px]:pt-3 max-[899px]:pb-4">
       <PageHeader
         title="找方案"
-        subtitle="说一句你想做的事，从你收藏的里面挑出能用的，再整理成给 Codex 的参考包。"
+        subtitle="说一句你想做的事，从你收藏的里面挑出能用的，再整理成给 Codex 的交接单。"
       />
       <Card className="flex shrink-0 flex-col gap-3 p-4">
         <form className="flex gap-2" onSubmit={onSubmit}>
@@ -381,15 +398,18 @@ export function SolvePage(props: {
           ))}
         </div>
       </Card>
-      <div className="grid min-h-[420px] flex-1 grid-cols-1 grid-rows-[minmax(240px,1fr)_minmax(280px,1fr)] gap-3 min-[900px]:grid-cols-[minmax(0,1fr)_minmax(340px,460px)] min-[900px]:grid-rows-[minmax(0,1fr)]">
+      <div className="grid min-h-[420px] flex-1 grid-cols-1 grid-rows-[minmax(240px,1fr)_minmax(460px,1fr)] gap-3 min-[900px]:grid-cols-[minmax(0,1fr)_minmax(340px,460px)] min-[900px]:grid-rows-[minmax(0,1fr)]">
         <Card className="flex min-h-0 flex-col overflow-hidden">
           <CardHeader
             title="你收藏里最相关的"
             count={result ? result.hits.length : undefined}
             actions={result && result.hits.length > 0 ? (
-              <span className="text-xs text-on-surface-variant">勾选的会放进参考包；点一行看详情</span>
+              <span className="text-xs text-on-surface-variant">勾选的会写进交接单；点一行看详情</span>
             ) : undefined}
           />
+          {pickNote ? (
+            <p className="m-0 shrink-0 border-b border-muted px-4 py-2 text-xs leading-5 text-on-surface-variant">{pickNote}</p>
+          ) : null}
           <div className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-1 border-b border-muted px-4 py-1.5">
             {rerankStatus ? <span className="text-xs text-on-surface-variant">{rerankStatus}</span> : null}
             <Button variant="text" size="sm" aria-pressed={aiEnabled} onClick={toggleAi}>{RERANK_TOGGLE_LABEL(aiEnabled)}</Button>
@@ -423,10 +443,10 @@ export function SolvePage(props: {
         </Card>
         <Card className="flex min-h-0 flex-col overflow-hidden">
           <div className="flex min-h-12 shrink-0 flex-wrap items-center gap-2.5 border-b border-muted px-4 py-2">
-            <h3 className="m-0 text-base font-semibold whitespace-nowrap text-foreground">参考包</h3>
+            <h3 className="m-0 text-base font-semibold whitespace-nowrap text-foreground">交接单</h3>
             <span className="text-xs font-medium text-on-surface-variant">
               {direct ? '不选工具 · 直接交给 Codex' : `已选 ${selectedHits.length} 个`}
-              {(direct || selectedHits.length > 0) && pack?.content ? ` · 约 ${pack.content.length.toLocaleString('zh-CN')} 字` : ''}
+              {(direct || selectedHits.length > 0) && pack?.content ? ` · ${packSizeText(pack.content.length)}` : ''}
             </span>
             <div className="min-w-2 flex-1" />
             {format !== 'json' && (direct || selectedHits.length > 0) ? (
@@ -437,14 +457,9 @@ export function SolvePage(props: {
             {direct ? (
               <Button variant="text" size="sm" onClick={() => setDirect(false)}>{BACK_TO_PICK_LABEL}</Button>
             ) : null}
-            <Segmented
-              options={formatOptions}
-              value={format}
-              onChange={setFormat}
-              ariaLabel="格式"
-            />
           </div>
-          {loadingPack && pack ? <div className="h-0.5 shrink-0 animate-pulse bg-primary/60" role="status" aria-label="正在更新参考包" /> : null}
+          <FormatPicker options={formatOptions} value={format} onChange={setFormat} />
+          {loadingPack && pack ? <div className="h-0.5 shrink-0 animate-pulse bg-primary/60" role="status" aria-label="正在更新交接单" /> : null}
           {pack && pack.warnings.length > 0 ? (
             <div className="shrink-0 space-y-1 px-4 pt-2.5">
               {pack.warnings.map((warning, index) => (
@@ -452,14 +467,14 @@ export function SolvePage(props: {
               ))}
             </div>
           ) : null}
-          {pack && pack.missing.length > 0 ? (
-            <p className="m-0 shrink-0 px-4 pt-2.5 text-xs text-on-surface-variant">有 {pack.missing.length} 个项目已不在库里，已跳过</p>
+          {missingNote ? (
+            <p className="m-0 shrink-0 px-4 pt-2.5 text-xs text-on-surface-variant">{missingNote}</p>
           ) : null}
           {!direct && selectedHits.length === 0 ? (
             result ? (
               <div className="flex min-h-[180px] flex-1 flex-col overflow-auto bg-background px-4 py-3.5 max-[899px]:max-h-[70vh] min-[900px]:max-h-none">
                 <pre className="m-0 font-mono text-xs leading-[1.7] break-words whitespace-pre-wrap text-foreground [overflow-wrap:anywhere]">{packPlaceholder(format)}</pre>
-                {packEmptyNote(result) ? <p className="m-0 pt-2 text-xs leading-[1.7] text-on-surface-variant">{packEmptyNote(result)}</p> : null}
+                {emptyNote ? <p className="m-0 pt-2 text-xs leading-[1.7] text-on-surface-variant">{emptyNote}</p> : null}
                 <div className="pt-2">
                   <Button variant="text" onClick={() => setDirect(true)}>{DIRECT_LABEL}</Button>
                 </div>
@@ -475,7 +490,7 @@ export function SolvePage(props: {
           ) : pack ? (
             <PackPreview content={pack.content} format={format} raw={showRaw} />
           ) : (
-            <div className="flex flex-1 items-center justify-center" role="status" aria-label="正在整理参考包">
+            <div className="flex flex-1 items-center justify-center" role="status" aria-label="正在整理交接单">
               <Spinner />
             </div>
           )}
@@ -509,7 +524,7 @@ export function SolvePage(props: {
   );
 }
 
-/** 参考包预览：Markdown / AGENTS.md 排成正常文档，JSON 和「看原文」显示等宽原文（复制的永远是原文）。 */
+/** 交接单预览：Markdown / AGENTS.md 排成正常文档，JSON 和「看原文」显示等宽原文（复制的永远是原文）。 */
 function PackPreview(props: { content: string; format: PackFormat; raw: boolean }) {
   if (props.format === 'json' || props.raw) {
     return <pre className={PREVIEW_CLASS}>{props.content}</pre>;
@@ -520,7 +535,7 @@ function PackPreview(props: { content: string; format: PackFormat; raw: boolean 
         <ReadmeRenderer
           markdown={props.content}
           repositoryFullName=""
-          sourcePath="参考包.md"
+          sourcePath="交接单.md"
           className="readme-rendered min-w-0 text-sm text-foreground"
           singleTilde={false}
         />
@@ -606,16 +621,12 @@ function ResultBody(props: {
     return <p className="m-0 px-4 py-8 text-center text-sm text-on-surface-variant">输入想做的事，回车开始找。</p>;
   }
   if (props.result.hits.length === 0) {
-    const pending = pendingNote(props.result);
-    const description = pending
-      ? `去「发现」按这个方向找找看。${pending}`
-      : '去「发现」按这个方向找找看';
     return (
       <div className="flex h-full items-center">
         <EmptyState
           icon="search_off"
           title="你的收藏里没有直接对得上的"
-          description={description}
+          description={emptyResultHint(props.result)}
           action={(
             <Button variant="default" onClick={() => props.onOpenDiscover(props.result?.suggestedScenarioId ?? null)}>去发现</Button>
           )}
@@ -685,7 +696,7 @@ function readHits(hits: SolveResult['hits']): SolveResult['hits'] {
 
 function readPack(output: PackOutput): PackOutput {
   if (!output || typeof output.content !== 'string') {
-    throw new Error('参考包的结果不完整');
+    throw new Error('交接单的结果不完整');
   }
   return {
     format: output.format,

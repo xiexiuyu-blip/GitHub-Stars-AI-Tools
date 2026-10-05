@@ -16,7 +16,7 @@ import type {
   SolveResult,
   TodayView,
 } from '@/lib/contracts';
-import type { AutomationStatus } from '@/lib/automation-view';
+import { withRecentDone, type AiQueueStatus, type AutomationStatus } from '@/lib/automation-view';
 import type { GitHubAuthState } from '@/types';
 
 /**
@@ -210,6 +210,20 @@ export function getAiAutomation(): Promise<AutomationStatus> {
   return call<AutomationStatus>('get_ai_automation');
 }
 
+/** 自动整理队列的状态（现成命令）。界面只用它的 `succeeded24h`：最近 24 小时整理成功的个数。只读，不花钱。 */
+export function getAiQueueStatus(): Promise<AiQueueStatus> {
+  return call<AiQueueStatus>('get_ai_queue_status');
+}
+
+/**
+ * 自动整理状态 + 最近 24 小时整理成功的个数。个数读不到（命令不存在、出错）就带 null：状态照常能用，
+ * 界面把「整理了 N 个」整句去掉，不拿 token 除一除去估。状态本身读不到仍然抛错，和 `getAiAutomation` 一样。
+ */
+export async function getAiAutomationWithRecent(): Promise<AutomationStatus> {
+  const [status, queue] = await Promise.all([getAiAutomation(), getAiQueueStatus().catch(() => null)]);
+  return withRecentDone(status, queue);
+}
+
 export function getGithubAuthState(): Promise<GitHubAuthState> {
   return call<GitHubAuthState>('get_github_auth_state');
 }
@@ -223,7 +237,7 @@ export function plainTechnicalError(raw: string): string | null {
   if (/writeText|clipboard/i.test(raw)) return '复制没成功，请再点一次。';
   if (/Failed to fetch|NetworkError|Load failed|network request failed/i.test(raw)) return '网络没连上，稍后再试一次。';
   if (/Cannot read propert|is not a function|is not an object|is not iterable|undefined is not|null is not|is not defined|Unexpected token|JSON\.parse|not valid JSON/i.test(raw)) {
-    return '页面出了点小问题，已有的资料都在。稍后再试一次；还不行，把这句话截图告诉我。';
+    return '页面出了点小问题。你的资料都还在。点「重试」；还不行就重启应用，再不行把这条截图发给开发者。';
   }
   return null;
 }
@@ -257,8 +271,86 @@ function readErrorMessage(reason: unknown): string {
 }
 
 function isMissingCommand(raw: string): boolean {
-  return /not found/i.test(raw)
+  // 只认「这个命令不存在」。业务上的 404 不是命令缺失。
+  return /command\s+\S+\s+not found/i.test(raw)
     || raw.includes('没有这个命令')
     || raw.includes('命令不存在')
     || raw.includes('未知命令');
+}
+
+/* ───────── 应用更新 ───────── */
+
+export type UpdaterFailure = 'network' | 'not-found' | 'signature' | 'permission' | 'unknown';
+
+/**
+ * 按原因把应用更新的报错分开（更新插件抛出来的是英文原文，只看关键词）。
+ * 顺序有讲究：先签名，再网络，最后才看「文件没找到」。网络失败的报错里常常带着请求地址（含 latest.json），
+ * 如果先看 latest.json，断网也会被说成「更新文件没找到」。
+ */
+export function classifyUpdaterError(error: unknown): UpdaterFailure {
+  const raw = readErrorMessage(error).toLowerCase();
+  if (/signature|pubkey|public key|minisign/.test(raw)) return 'signature';
+  if (/network|dns|timed out|timeout|failed to fetch|error sending request|error trying to connect|connection (refused|reset|closed|aborted)|could not resolve|failed to lookup|offline|unreachable|\btls\b|certificate/.test(raw)) {
+    return 'network';
+  }
+  if (/valid release json|latest\.json|\b404\b|not found/.test(raw)) return 'not-found';
+  if (/permission|operation not permitted|access denied|read-only/.test(raw)) return 'permission';
+  return 'unknown';
+}
+
+/** 认不出原因时的兜底：不乱说「文件没找到」，只说这次没成、不影响资料、下一步怎么办。 */
+export const UPDATE_FAILED_FALLBACK = '这次没检查成功。不影响你的资料，稍后再试；一直不行就把这条截图发给开发者。';
+export const UPDATE_INSTALL_FAILED_FALLBACK = '这次没更新成功。不影响你的资料和现在用的版本，稍后再试；一直不行就把这条截图发给开发者。';
+
+/** 检查更新、或下载安装更新失败：每种原因一句话，写清下一步。 */
+export function describeUpdaterError(error: unknown, phase: 'check' | 'install' = 'check'): string {
+  switch (classifyUpdaterError(error)) {
+    case 'network':
+      return '没连上更新服务器。检查一下网络，稍后再试一次。';
+    case 'not-found':
+      return '更新文件没找到。可能新版本还没发布好，请稍后再试；一直不行，就到项目的 GitHub 页面手动下载新版本。';
+    case 'signature':
+      return '更新文件校验没通过，没有安装，现在用的版本和你的资料都不受影响。请稍后再试；一直不行，就到项目的 GitHub 页面手动下载新版本。';
+    case 'permission':
+      return '更新文件没能写进应用所在的位置。请把应用放在「应用程序」文件夹里再试一次；还不行就手动下载新版本。';
+    case 'unknown':
+    default:
+      return phase === 'install' ? UPDATE_INSTALL_FAILED_FALLBACK : UPDATE_FAILED_FALLBACK;
+  }
+}
+
+/** 更新已经装好，但应用没能自己重新启动：和「更新失败」是两回事，下一步是重启，不是重试更新。 */
+export const UPDATE_RELAUNCH_FAILED = '更新已经装好了，但应用没能自己重新启动。请再点一次「重启应用」，或者手动退出后重新打开。';
+
+/** 更新已经装好，也发出了重启请求，但窗口一直没关。 */
+export const UPDATE_WINDOW_STILL_OPEN = '更新已安装，但当前窗口仍未关闭。请再次点击「重启应用」，或手动退出后重新打开。';
+
+export type UpdateStatusInput = {
+  status: string;
+  availableVersion: string | null;
+  currentVersion: string;
+  errorMessage: string | null;
+};
+
+/** 「应用更新」面板里状态那一句。当前版本还没读到时，不说「已是最新版本」：不知道版本，就不能下这个结论。 */
+export function describeUpdateStatus(input: UpdateStatusInput): string {
+  switch (input.status) {
+    case 'checking':
+      return '正在检查更新…';
+    case 'available':
+      return `发现新版本 ${input.availableVersion ?? ''}，可查看说明后立即安装。`;
+    case 'not-available':
+      return input.currentVersion ? '已是最新版本。' : '还没读到当前版本，先不判断是不是最新。';
+    case 'downloading':
+      return '正在下载并安装更新，请保持应用打开。';
+    case 'installed':
+      return input.errorMessage ?? '更新已安装，正在准备重启应用。';
+    case 'relaunching':
+      return '更新已安装，正在重启应用。';
+    case 'error':
+      return input.errorMessage ?? UPDATE_FAILED_FALLBACK;
+    case 'idle':
+    default:
+      return '应用会在启动时静默检查更新，也可以在这里手动检查。';
+  }
 }

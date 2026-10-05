@@ -1,6 +1,6 @@
 import type { LibraryCounts, LibraryFilters, ReadingGroup, ScenarioSummary } from '@/lib/contracts';
 
-/** 资料库页面上的筛选。默认只看已整理，按收藏时间新到旧。 */
+/** 资料库页面上的筛选。默认看全部，按收藏时间新到旧。 */
 export type LibraryUiState = {
   scenario: string | null;
   reading: ReadingGroup | null;
@@ -28,6 +28,7 @@ export type CardStateOption = {
   label: string;
 };
 
+/** 类型的短名字：行内小标签、找方案的命中行、复制给 Codex 的正文都用这一套，别把解释写进去。 */
 const FORM_LABELS: Record<string, string> = {
   skill: '技能',
   mcp: 'MCP',
@@ -40,11 +41,37 @@ const FORM_LABELS: Record<string, string> = {
   other: '其他',
 };
 
-/** 项目的「形态」写成中文标签。没填或者是「其他」（没有信息量）返回 null，界面就不画这个标签；不认识的原样给。 */
+/** 类型的长写法（带解释）：只给资料库的筛选面板和详情页的「类型」一行用，行内小标签别用。 */
+const FORM_HINT_LABELS: Record<string, string> = {
+  skill: '技能包（装进 Codex 用）',
+  mcp: 'MCP 插件（给 AI 接外部工具）',
+  cli: '命令行工具（要让 Codex 帮你装）',
+  app: '应用',
+  library: '开发用代码库（一般用不上）',
+  api: '接口（程序之间对接）',
+  service: '在线服务',
+  collection: '资源清单',
+  other: '其他',
+};
+
+/** 工具的「类型」写成短名字。没填或者是「其他」（没有信息量）返回 null，界面就不画这个标签；不认识的原样给。 */
 export function formLabel(form: string | null | undefined): string | null {
   const id = form?.trim();
   if (!id || id === 'other') return null;
   return FORM_LABELS[id] ?? id;
+}
+
+/** 同上，但写成带解释的长写法。没填或「其他」同样返回 null；不认识的原样给。 */
+export function formLabelWithHint(form: string | null | undefined): string | null {
+  const id = form?.trim();
+  if (!id || id === 'other') return null;
+  return FORM_HINT_LABELS[id] ?? id;
+}
+
+/** 详情页「类型」一行：「类型：应用」。用长写法，因为这里有地方解释；筛选分组标题已经是「类型」，筛选行上不再加这前缀。 */
+export function formTagLabel(form: string | null | undefined): string | null {
+  const label = formLabelWithHint(form);
+  return label ? `类型：${label}` : null;
 }
 
 export function createLibraryUiState(): LibraryUiState {
@@ -52,14 +79,14 @@ export function createLibraryUiState(): LibraryUiState {
     scenario: null,
     reading: null,
     form: null,
-    // 默认看全部：还没整理的项目也是你的收藏，搜关键词、按场景找都不该漏掉它们
+    // 默认看全部：还没整理的收藏也要能搜到，搜关键词、按场景找都不该漏掉
     cardState: 'all',
     keyword: '',
     sort: 'starred',
   };
 }
 
-/** 从别的页面带着条件进资料库（比如今日里的「去资料库看全部待整理」）。 */
+/** 从别的页面带着条件进资料库（比如今日里的「去资料库看全部待 AI 整理」）。 */
 export type LibraryPreset = { cardState?: 'done' | 'pending'; reading?: ReadingGroup | null };
 
 export function withInitial(
@@ -76,7 +103,7 @@ export function withInitial(
   return state;
 }
 
-/** 空关键词不传。offset 是页码乘每页条数。场景、状态、形态为空时不传。 */
+/** 空关键词不传。offset 是页码乘每页条数。场景、状态、类型为空时不传。 */
 export function toFilters(state: LibraryUiState, page: number, pageSize: number): LibraryFilters {
   const safePage = Number.isFinite(page) && page > 0 ? Math.floor(page) : 0;
   const safeSize = Number.isFinite(pageSize) && pageSize > 0 ? Math.floor(pageSize) : 0;
@@ -108,7 +135,7 @@ export function toggleForm(state: LibraryUiState, value: string): LibraryUiState
   return { ...state, form: state.form === value ? null : value };
 }
 
-/** 清掉场景、状态、形态和关键词，整理状态回到默认。排序保留。 */
+/** 清掉场景、状态、类型和关键词，整理状态回到默认。排序保留。 */
 export function clearFilters(state: LibraryUiState): LibraryUiState {
   return {
     scenario: null,
@@ -120,7 +147,7 @@ export function clearFilters(state: LibraryUiState): LibraryUiState {
   };
 }
 
-/** 决定是否显示「清除筛选」。整理状态不是默认的「已整理」也算有筛选。 */
+/** 决定是否显示「清除筛选」。整理状态不是默认的「全部」也算有筛选。 */
 export function hasActiveFilters(state: LibraryUiState): boolean {
   return Boolean(state.scenario)
     || Boolean(state.reading)
@@ -146,11 +173,11 @@ export function visibleScenarios(
   }));
 }
 
-/** 形态按个数从多到少；个数相同按名称的字符码排序。未知形态原样显示。 */
+/** 类型按个数从多到少；个数相同按 id 的字符码排序。未知类型原样显示。筛选面板里写长写法（带解释）。 */
 export function formOptions(forms: Readonly<Record<string, number>> | null | undefined): FormFilterRow[] {
   const rows = Object.entries(forms ?? {}).map(([id, count]) => ({
     id,
-    label: FORM_LABELS[id] ?? id,
+    label: FORM_HINT_LABELS[id] ?? id,
     count: asCount(count),
   }));
   rows.sort((a, b) => {
@@ -162,7 +189,7 @@ export function formOptions(forms: Readonly<Record<string, number>> | null | und
   return rows;
 }
 
-/** 「全部」是已整理加待整理：这两个数本身已经按其他筛选联动过，不按卡片状态再筛一次。 */
+/** 「全部」是 AI 已整理加待 AI 整理：这两个数本身已经按其他筛选联动过，不按卡片状态再筛一次。 */
 export function cardStateOptions(
   cardState: { done?: number; pending?: number } | null | undefined,
 ): CardStateOption[] {
@@ -170,8 +197,8 @@ export function cardStateOptions(
   const pending = asCount(cardState?.pending);
   return [
     { value: 'all', label: `全部 ${done + pending}` },
-    { value: 'done', label: `已整理 ${done}` },
-    { value: 'pending', label: `待整理 ${pending}` },
+    { value: 'done', label: `AI 已整理 ${done}` },
+    { value: 'pending', label: `待 AI 整理 ${pending}` },
   ];
 }
 
@@ -192,8 +219,8 @@ export function nextPageOffset(loaded: number, total: number, pageSize: number):
 }
 
 /**
- * 刚装好、还没有理解卡时，资料库不要停在空白的「已整理」。
- * 只在：已整理是 0、还有待整理、用户没动过三选项、当前仍是默认「已整理」时为真。
+ * 刚装好、还没有中文说明时，资料库不要停在空白的「AI 已整理」。
+ * 只在：AI 已整理是 0、还有待 AI 整理、用户没动过三选项、当前仍是「AI 已整理」时为真。
  */
 export function shouldFallbackToAll(
   counts: { cardState?: { done?: number; pending?: number } | null } | null | undefined,

@@ -2,7 +2,8 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { FormEvent, useEffect, useMemo, useRef, useState } from 'react';
 import { getAiConfigMessage, toBackendAiRequestConfig } from '@/lib/ai-config';
-import { plainTechnicalError } from '@/lib/api';
+import { formatSyncComplete } from '@/lib/automation-view';
+import { getTodayView, plainTechnicalError } from '@/lib/api';
 import { emptyRepositoryFilters, getRepositoryStats } from '@/lib/repository';
 import { optionalRequestText } from '@/lib/format';
 import type {
@@ -104,6 +105,7 @@ export function useStarsWorkspace() {
   const [lastGithubRecommendationRepositoryIds, setLastGithubRecommendationRepositoryIds] = useState<string[]>([]);
   const [lastStarRecommendationCandidateFullName, setLastStarRecommendationCandidateFullName] = useState<string | null>(null);
   const [syncSummary, setSyncSummary] = useState<StarSyncSummary | null>(null);
+  const [lastSyncedAt, setLastSyncedAt] = useState<string | null>(null);
   const [readmeSummary, setReadmeSummary] = useState<ReadmeFetchSummary | null>(null);
   const [repositoryPage, setRepositoryPage] = useState<RepositoryListPage | null>(null);
   const [repositoryLanguages, setRepositoryLanguages] = useState<string[]>([]);
@@ -186,6 +188,20 @@ export function useStarsWorkspace() {
     return () => {
       unlistenProgress?.();
       unlistenAiStream?.();
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    void getTodayView()
+      .then((view) => {
+        if (!cancelled) {
+          setLastSyncedAt(view.syncedAt);
+        }
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
     };
   }, []);
 
@@ -377,13 +393,13 @@ export function useStarsWorkspace() {
       } : null);
       setGithubRecommendationError(null);
     } catch (reason) {
-      setGithubRecommendationError(`推荐候选恢复失败：${toErrorMessage(reason)}`);
+      setGithubRecommendationError('上次找到的候选没读出来。你的资料都还在。再找一次；还不行就重启应用，再不行把这条截图发给开发者。');
     }
   }
 
   function refreshRepositoryWorkspaceInBackground(accountId: string) {
     void refreshRepositoryWorkspace(accountId).catch((reason) => {
-      setError(`GitHub 已连接，但本地数据刷新失败：${toErrorMessage(reason)}`);
+      setError('GitHub 已连接，但这台电脑上的资料没读出来。你的资料都还在。点「同步」再试；还不行就重启应用，再不行把这条截图发给开发者。');
     });
   }
 
@@ -394,7 +410,7 @@ export function useStarsWorkspace() {
   async function retryLastAiSearch() {
     const action = lastAiSearchRetryRef.current;
     if (!action) {
-      throw new Error('没有可重试的 AI 搜索。');
+      throw new Error('没有可重试的搜索。');
     }
 
     setIsRetryingAiSearch(true);
@@ -448,7 +464,7 @@ export function useStarsWorkspace() {
     setTaskProgress(buildRunningTaskProgress(
       'connect-github',
       'auth',
-      '正在验证 GitHub Token',
+      '正在验证 GitHub 令牌',
       null,
       'auth',
     ));
@@ -458,7 +474,7 @@ export function useStarsWorkspace() {
       setAuthState({ hasToken: true, user });
       setToken('');
       refreshRepositoryWorkspaceInBackground(String(user.id));
-      setAuthMessage('GitHub 账号已连接，可以同步 Stars。');
+      setAuthMessage('GitHub 账号已连接，可以同步收藏。');
       setTaskProgress(buildSucceededTaskProgress('connect-github', 'auth', `GitHub 账号 @${user.login} 已连接。`));
     } catch (reason) {
       const message = toErrorMessage(reason);
@@ -476,7 +492,7 @@ export function useStarsWorkspace() {
   async function connectWithToken(rawToken: string) {
     const trimmed = rawToken.trim();
     if (!trimmed) {
-      const message = '请输入 GitHub Personal Access Token';
+      const message = '请输入 GitHub 令牌';
       setError(message);
       throw new Error(message);
     }
@@ -486,7 +502,7 @@ export function useStarsWorkspace() {
     setTaskProgress(buildRunningTaskProgress(
       'connect-github',
       'auth',
-      '正在验证 GitHub Token',
+      '正在验证 GitHub 令牌',
       null,
       'auth',
     ));
@@ -495,7 +511,7 @@ export function useStarsWorkspace() {
       setAuthState({ hasToken: true, user });
       setToken('');
       refreshRepositoryWorkspaceInBackground(String(user.id));
-      setAuthMessage('GitHub 账号已连接，可以同步 Stars。');
+      setAuthMessage('GitHub 账号已连接，可以同步收藏。');
       setTaskProgress(buildSucceededTaskProgress('connect-github', 'auth', `GitHub 账号 @${user.login} 已连接。`));
       return user;
     } catch (reason) {
@@ -516,7 +532,7 @@ export function useStarsWorkspace() {
     try {
       await invoke('clear_github_token');
       resetWorkspaceAfterGitHubDisconnect();
-      setAuthMessage('GitHub 连接已移除，本地 Star 数据不会被删除。');
+      setAuthMessage('GitHub 连接已移除，这台电脑上的收藏不会被删除。');
     } catch (reason) {
       setError(toErrorMessage(reason));
     } finally {
@@ -538,14 +554,14 @@ export function useStarsWorkspace() {
         await invoke('clear_github_token');
         didClearToken = true;
       } catch (reason) {
-        failures.push(`GitHub Token 清理失败：${toErrorMessage(reason)}`);
+        failures.push(`GitHub 令牌没能清掉：${toErrorMessage(reason)}`);
       }
 
       try {
         await invoke('clear_local_database');
         didClearDatabase = true;
       } catch (reason) {
-        failures.push(`本地数据库清理失败：${toErrorMessage(reason)}`);
+        failures.push(`本机资料没能清掉：${toErrorMessage(reason)}`);
       }
 
       if (didClearToken) {
@@ -553,6 +569,7 @@ export function useStarsWorkspace() {
       }
       setToken('');
       setSyncSummary(null);
+      setLastSyncedAt(null);
       setReadmeSummary(null);
       setBatchAiSummary(null);
       setGithubRecommendationResponse(null);
@@ -579,11 +596,11 @@ export function useStarsWorkspace() {
         throw new Error(failures.join('；'));
       }
 
-      setAuthMessage('本机数据已清空，应用已回到新安装状态。');
-      setTaskProgress(buildSucceededTaskProgress('clear-local-data', 'storage', '本机数据已清空。'));
+      setAuthMessage('本机资料已清空，应用已回到刚安装的样子。');
+      setTaskProgress(buildSucceededTaskProgress('clear-local-data', 'storage', '本机资料已清空。'));
     } catch (reason) {
       const message = toErrorMessage(reason);
-      setError(`本机数据清空失败：${message}`);
+      setError(`本机资料没能清空。你在 GitHub 上的收藏不受影响。${message}`);
       setTaskProgress(buildFailedTaskProgress('clear-local-data', 'storage', message));
       throw reason;
     } finally {
@@ -591,28 +608,36 @@ export function useStarsWorkspace() {
     }
   }
 
+  async function refreshLastSyncedAt() {
+    try {
+      const view = await getTodayView();
+      setLastSyncedAt(view.syncedAt);
+    } catch {
+      // 读不到就留着上次成功的时间。从没读到过时仍是空，顶栏写「还没同步过」。
+    }
+  }
+
   async function handleSyncStars(options?: { throwOnError?: boolean }) {
     setIsSyncingStars(true);
     setError(null);
     setAuthMessage(null);
-    setTaskProgress(buildRunningTaskProgress('sync-stars', 'sync', '正在准备同步 GitHub Stars'));
+    setTaskProgress(buildRunningTaskProgress('sync-stars', 'sync', '正在准备同步收藏'));
 
     try {
       const summary = await invoke<StarSyncSummary>('sync_github_stars');
       setSyncSummary(summary);
       setReadmeSummary(null);
       await refreshRepositoryWorkspace();
-      setAuthMessage(
-        `同步完成：当前 ${summary.activeCount} 个，新增 ${summary.createdCount} 个，更新 ${summary.updatedCount} 个，移除 ${summary.removedCount} 个，扫描 ${summary.scannedCount} 个。`,
-      );
+      await refreshLastSyncedAt();
+      setAuthMessage(formatSyncComplete(summary));
     } catch (reason) {
       const message = toErrorMessage(reason);
-      const displayMessage = `同步未完成：${message}。本地已有数据不会被删除，可检查网络或 Token 后重试。`;
+      const displayMessage = '同步没完成。你的资料都还在。点「重试」；还不行就重启应用，再不行把这条截图发给开发者。';
       setError(displayMessage);
       setTaskProgress(buildFailedTaskProgress('sync-stars', 'sync', displayMessage));
       if (isGitHubConnectionUnavailableError(message)) {
         resetWorkspaceAfterGitHubDisconnect();
-        setAuthMessage('GitHub Token 已失效，已断开连接。请重新连接账号后再同步。');
+        setAuthMessage('令牌已失效，已断开连接。请重新输入令牌后再同步。');
       } else {
         await refreshRepositoryWorkspace();
       }
@@ -653,7 +678,7 @@ export function useStarsWorkspace() {
     }
 
     resetWorkspaceAfterGitHubDisconnect();
-    setAuthMessage('GitHub Token 已失效，已断开连接。请重新连接账号后再继续。');
+    setAuthMessage('令牌已失效，已断开连接。请重新输入令牌后再继续。');
     return true;
   }
 
@@ -668,7 +693,7 @@ export function useStarsWorkspace() {
     setIsFetchingReadmes(true);
     setError(null);
     setAuthMessage(null);
-    setTaskProgress(buildRunningTaskProgress('fetch-readmes', 'readme', '正在准备抓取并解析 README'));
+    setTaskProgress(buildRunningTaskProgress('fetch-readmes', 'readme', '正在准备下载项目说明'));
 
     try {
       const summary = await invoke<ReadmeFetchSummary>('fetch_repository_readmes', {
@@ -679,7 +704,7 @@ export function useStarsWorkspace() {
       });
       setReadmeSummary(summary);
       await refreshRepositoryWorkspace();
-      const readmeMessage = `README 已处理 ${summary.totalCount} 个仓库：更新 ${summary.fetchedCount}，跳过 ${summary.skippedCount}，缺失 ${summary.missingCount}，失败 ${summary.failedCount}。`;
+      const readmeMessage = `项目说明已处理 ${summary.totalCount} 个：更新 ${summary.fetchedCount}，跳过 ${summary.skippedCount}，缺失 ${summary.missingCount}，失败 ${summary.failedCount}。`;
       setAuthMessage(readmeMessage);
       const readmeFailureMessage = buildReadmeFailureMessage(summary);
       if (readmeFailureMessage) {
@@ -698,11 +723,11 @@ export function useStarsWorkspace() {
       if (options?.autoGenerateAi) {
         const aiConfig = options.aiConfig;
         if (!aiConfig) {
-          const message = '请先在设置中配置 AI 服务。';
-          const warningMessage = `README 已缓存，但 AI 分析未启动：${message}`;
+          const message = '请先到「设置 → AI 设置」选一个服务商。';
+          const warningMessage = `项目说明已下载，但还没开始整理：${message}`;
           setError(message);
           setTaskProgress(buildFailedTaskProgress('batch-generate-ai-documents', 'ai', message));
-          setAuthMessage(`${readmeMessage} AI 分析未启动：${message}`);
+          setAuthMessage(`${readmeMessage} 还没开始整理：${message}`);
           if (options.throwOnFailure) {
             throw new ReadmePostProcessWarning(warningMessage);
           }
@@ -711,10 +736,10 @@ export function useStarsWorkspace() {
 
         const aiConfigMessage = getAiConfigMessage(aiConfig);
         if (aiConfigMessage) {
-          const warningMessage = `README 已缓存，但 AI 分析未启动：${aiConfigMessage}`;
+          const warningMessage = `项目说明已下载，但还没开始整理：${aiConfigMessage}`;
           setError(aiConfigMessage);
           setTaskProgress(buildFailedTaskProgress('batch-generate-ai-documents', 'ai', aiConfigMessage));
-          setAuthMessage(`${readmeMessage} AI 分析未启动：${aiConfigMessage}`);
+          setAuthMessage(`${readmeMessage} 还没开始整理：${aiConfigMessage}`);
           if (options.throwOnFailure) {
             throw new ReadmePostProcessWarning(warningMessage);
           }
@@ -729,9 +754,9 @@ export function useStarsWorkspace() {
           });
         } catch (reason) {
           const message = toErrorMessage(reason);
-          const warningMessage = `README 已缓存，但 AI 分析失败：${message}`;
+          const warningMessage = `项目说明已下载，但这次没整理成功。你的资料都还在。点「重试」；还不行就重启应用，再不行把这条截图发给开发者。`;
           setError(warningMessage);
-          setAuthMessage(`${readmeMessage} AI 分析失败：${message}`);
+          setAuthMessage(`${readmeMessage} 这次没整理成功。你的资料都还在。`);
           if (options.throwOnFailure) {
             throw new ReadmePostProcessWarning(warningMessage);
           }
@@ -762,7 +787,7 @@ export function useStarsWorkspace() {
     setTaskProgress(buildRunningTaskProgress(
       'export-annotation-gist',
       'backup',
-      '正在导出注解到 GitHub Gist',
+      '正在把标记上传到 GitHub（私密 Gist）',
       'GitHub Gist',
       'save',
     ));
@@ -770,8 +795,8 @@ export function useStarsWorkspace() {
     try {
       const summary = await invoke<GistAnnotationExportSummary>('export_annotation_gist');
       setGistIdDraft(summary.gistId);
-      setAuthMessage(`注解已导出到 Gist ${summary.gistId}：${summary.tagCount} 个标签，${summary.repositoryCount} 条仓库注解。`);
-      setTaskProgress(buildSucceededTaskProgress('export-annotation-gist', 'backup', '注解已导出到 GitHub Gist。'));
+      setAuthMessage(`标记已上传到 GitHub（私密 Gist ${summary.gistId}）：${summary.tagCount} 个标签，${summary.repositoryCount} 条工具的标记。`);
+      setTaskProgress(buildSucceededTaskProgress('export-annotation-gist', 'backup', '标记已上传到 GitHub。'));
     } catch (reason) {
       const message = toErrorMessage(reason);
       setError(message);
@@ -789,7 +814,7 @@ export function useStarsWorkspace() {
     setTaskProgress(buildRunningTaskProgress(
       'export-repository-library-gist',
       'backup',
-      '正在导出所有仓库到 GitHub Gist',
+      '正在把整个清单上传到 GitHub（私密 Gist）',
       'GitHub Gist',
       'save',
     ));
@@ -797,8 +822,8 @@ export function useStarsWorkspace() {
     try {
       const summary = await invoke<GistRepositoryLibraryExportSummary>('export_repository_library_gist');
       setGistIdDraft(summary.gistId);
-      setAuthMessage(`仓库清单已导出到 Gist ${summary.gistId}：${summary.repositoryCount} 个仓库，${summary.tagCount} 个标签。`);
-      setTaskProgress(buildSucceededTaskProgress('export-repository-library-gist', 'backup', '所有仓库已导出到 GitHub Gist。'));
+      setAuthMessage(`清单已上传到 GitHub（私密 Gist ${summary.gistId}）：${summary.repositoryCount} 个工具，${summary.tagCount} 个标签。`);
+      setTaskProgress(buildSucceededTaskProgress('export-repository-library-gist', 'backup', '整个清单已上传到 GitHub。'));
     } catch (reason) {
       const message = toErrorMessage(reason);
       setError(message);
@@ -831,7 +856,7 @@ export function useStarsWorkspace() {
     setTaskProgress(buildRunningTaskProgress(
       'import-annotation-gist',
       'backup',
-      '正在从 GitHub Gist 导入注解',
+      '正在从 GitHub（私密 Gist）导入标记',
       `Gist ${gistId}`,
       'fetch',
     ));
@@ -845,9 +870,9 @@ export function useStarsWorkspace() {
         await loadAnnotationWorkspace(selectedRepository);
       }
       setAuthMessage(
-        `注解已导入：${summary.tagCount} 个标签，${summary.repositoryCount} 条仓库注解，跳过 ${summary.skippedRepositoryCount} 条本地不存在或已取消 Star 的仓库。`,
+        `标记已导入：${summary.tagCount} 个标签，${summary.repositoryCount} 条工具的标记，跳过 ${summary.skippedRepositoryCount} 条这台电脑上没有、或你已取消收藏的工具。`,
       );
-      setTaskProgress(buildSucceededTaskProgress('import-annotation-gist', 'backup', '注解已从 GitHub Gist 导入。'));
+      setTaskProgress(buildSucceededTaskProgress('import-annotation-gist', 'backup', '标记已从 GitHub 导入。'));
     } catch (reason) {
       const message = toErrorMessage(reason);
       setError(message);
@@ -876,7 +901,7 @@ export function useStarsWorkspace() {
     setTaskProgress(buildRunningTaskProgress(
       'import-repository-library-gist',
       'backup',
-      '正在从 GitHub Gist 导入所有仓库',
+      '正在从 GitHub（私密 Gist）导入整个清单',
       `Gist ${gistId}`,
       'fetch',
     ));
@@ -890,9 +915,9 @@ export function useStarsWorkspace() {
         await loadAnnotationWorkspace(selectedRepository);
       }
       setAuthMessage(
-        `仓库清单已导入：新增 ${summary.createdRepositoryCount} 个仓库，更新 ${summary.updatedRepositoryCount} 个仓库，恢复 ${summary.tagCount} 个标签。`,
+        `清单已导入：新增 ${summary.createdRepositoryCount} 个工具，更新 ${summary.updatedRepositoryCount} 个工具，恢复 ${summary.tagCount} 个标签。`,
       );
-      setTaskProgress(buildSucceededTaskProgress('import-repository-library-gist', 'backup', '所有仓库已从 GitHub Gist 导入。'));
+      setTaskProgress(buildSucceededTaskProgress('import-repository-library-gist', 'backup', '整个清单已从 GitHub 导入。'));
     } catch (reason) {
       const message = toErrorMessage(reason);
       setError(message);
@@ -938,7 +963,7 @@ export function useStarsWorkspace() {
       setAnnotation(nextAnnotation);
       await loadRepositories(repositoryFilters);
       setNewTagName('');
-      setAnnotationMessage(`标签"${createdTag.name}"已创建并应用到当前仓库。`);
+      setAnnotationMessage(`标签「${createdTag.name}」已创建，并标到当前工具上。`);
     } catch (reason) {
       setError(toErrorMessage(reason));
     } finally {
@@ -1050,7 +1075,7 @@ export function useStarsWorkspace() {
       });
       setAnnotation(nextAnnotation);
       await loadRepositories(repositoryFilters);
-      setAnnotationMessage('仓库标签已更新。');
+      setAnnotationMessage('这个工具的标签已更新。');
     } catch (reason) {
       setError(toErrorMessage(reason));
     } finally {
@@ -1089,7 +1114,7 @@ export function useStarsWorkspace() {
 
       const currentTagIds = new Set(annotation.tags.map((item) => item.id));
       if (currentTagIds.has(targetTag.id)) {
-        setAnnotationMessage(`标签"${targetTag.name}"已应用到当前仓库。`);
+        setAnnotationMessage(`标签「${targetTag.name}」已标到当前工具上。`);
         return;
       }
 
@@ -1103,7 +1128,7 @@ export function useStarsWorkspace() {
       });
       setAnnotation(nextAnnotation);
       await loadRepositories(repositoryFilters);
-      setAnnotationMessage(`标签"${targetTag.name}"已应用到当前仓库。`);
+      setAnnotationMessage(`标签「${targetTag.name}」已标到当前工具上。`);
     } catch (reason) {
       setError(toErrorMessage(reason));
     } finally {
@@ -1133,7 +1158,7 @@ export function useStarsWorkspace() {
       setNoteDraft(nextAnnotation.noteMarkdown);
       setReadingStatusDraft(nextAnnotation.readingStatus);
       await loadRepositories(repositoryFilters);
-      setAnnotationMessage('笔记和选型状态已保存。');
+      setAnnotationMessage('笔记和我的状态已保存。');
     } catch (reason) {
       setError(toErrorMessage(reason));
     } finally {
@@ -1153,7 +1178,7 @@ export function useStarsWorkspace() {
     setTaskProgress(buildRunningTaskProgress(
       'fetch-repository-readme',
       'readme',
-      `正在准备抓取 ${selectedRepository.fullName} 的 README`,
+      `正在准备下载 ${selectedRepository.fullName} 的项目说明`,
       selectedRepository.fullName,
     ));
 
@@ -1167,7 +1192,7 @@ export function useStarsWorkspace() {
       setRepositoryDetail(nextRepositoryDetail);
       await refreshRepositoryWorkspace();
       setRepositoryReadmeError(null);
-      setAnnotationMessage('README 已缓存。');
+      setAnnotationMessage('项目说明已下载。');
     } catch (reason) {
       const message = toErrorMessage(reason);
       setError(message);
@@ -1204,7 +1229,7 @@ export function useStarsWorkspace() {
       repositoryId: selectedRepository.id,
       stage: 'prepare',
       status: 'started',
-      message: `正在准备解析 ${selectedRepository.fullName}`,
+      message: `正在准备整理 ${selectedRepository.fullName}`,
       text: '',
       startedAt: now,
       updatedAt: now,
@@ -1212,7 +1237,7 @@ export function useStarsWorkspace() {
     setTaskProgress(buildRunningTaskProgress(
       'generate-ai-document',
       'ai',
-      `正在准备解析 ${selectedRepository.fullName}`,
+      `正在准备整理 ${selectedRepository.fullName}`,
       selectedRepository.fullName,
     ));
 
@@ -1229,9 +1254,9 @@ export function useStarsWorkspace() {
       await refreshRepositoryWorkspace();
       setRepositoryAiError(null);
       setRepositoryAiStream((current) => current?.requestId === requestId
-        ? { ...current, status: 'finished', stage: 'done', message: 'AI 解析已生成。', updatedAt: new Date().toISOString() }
+        ? { ...current, status: 'finished', stage: 'done', message: '中文说明已写好。', updatedAt: new Date().toISOString() }
         : current);
-      setAnnotationMessage('AI 摘要已生成。');
+      setAnnotationMessage('中文说明已写好。');
     } catch (reason) {
       const message = toErrorMessage(reason);
       setError(message);
@@ -1258,7 +1283,7 @@ export function useStarsWorkspace() {
     setIsBatchGeneratingAiDocuments(true);
     setError(null);
     setAuthMessage(null);
-    setTaskProgress(buildRunningTaskProgress('batch-generate-ai-documents', 'ai', '正在检查需要更新的 README'));
+    setTaskProgress(buildRunningTaskProgress('batch-generate-ai-documents', 'ai', '正在检查还没有中文说明的收藏'));
 
     try {
       const summary = await invoke<BatchAiDocumentSummary>('batch_generate_repository_ai_documents', {
@@ -1275,8 +1300,8 @@ export function useStarsWorkspace() {
         await loadAnnotationWorkspace(selectedRepository);
       }
       setAuthMessage(summary.totalCount === 0
-        ? 'AI 解析已是最新，无需重复处理。'
-        : `AI 增量处理完成：生成 ${summary.generatedCount} 个，跳过 ${summary.skippedCount} 个，缺少 README ${summary.missingReadmeCount} 个，失败 ${summary.failedCount} 个。`);
+        ? '中文说明已经是最新的，不用再整理。'
+        : `整理完成：写好 ${summary.generatedCount} 个，跳过 ${summary.skippedCount} 个，还没有项目说明 ${summary.missingReadmeCount} 个，失败 ${summary.failedCount} 个。`);
       const batchAiFailureMessage = buildBatchAiFailureMessage(summary);
       if (batchAiFailureMessage) {
         setError(batchAiFailureMessage);
@@ -1318,7 +1343,7 @@ export function useStarsWorkspace() {
     setIsGeneratingTagNetwork(true);
     setError(null);
     setAuthMessage(null);
-    setTaskProgress(buildRunningTaskProgress('generate-ai-tag-network', 'ai', '正在准备 AI 标签网络生成任务'));
+    setTaskProgress(buildRunningTaskProgress('generate-ai-tag-network', 'ai', '正在准备整理标签'));
 
     try {
       const summary = await invoke<AiTagNetworkSummary>('generate_ai_tag_network', {
@@ -1329,9 +1354,9 @@ export function useStarsWorkspace() {
       });
       await refreshRepositoryWorkspace();
       const partialFailureMessage = summary.failedBatchCount > 0
-        ? `其中 ${summary.failedBatchCount} 个批次失败，已保留成功生成的标签关联，可稍后重试补全。`
+        ? `其中 ${summary.failedBatchCount} 批没成功，已经写好的标签还在，可以稍后再试。`
         : '';
-      setAuthMessage(`AI 标签网络已生成：${summary.tagCount} 个标签，${summary.linkedCount} 条仓库关联。${partialFailureMessage}`);
+      setAuthMessage(`标签已整理：${summary.tagCount} 个标签，关联了 ${summary.linkedCount} 个工具。${partialFailureMessage}`);
       return summary;
     } catch (reason) {
       const message = toErrorMessage(reason);
@@ -1354,7 +1379,7 @@ export function useStarsWorkspace() {
       throw new Error(message);
     }
     if (selectedRepositoryIds.length === 0) {
-      const message = '请先勾选 1 到 8 个仓库作为参考。';
+      const message = '请先勾选 1 到 8 个工具作为参考。';
       setGithubRecommendationError(message);
       setTaskProgress(buildFailedTaskProgress('recommend-github-repositories', 'ai', message));
       throw new Error(message);
@@ -1373,7 +1398,7 @@ export function useStarsWorkspace() {
     setTaskProgress(buildRunningTaskProgress(
       'recommend-github-repositories',
       'ai',
-      `正在根据 ${selectedRepositoryIds.length} 个仓库准备 GitHub 相似发现`,
+      `正在根据 ${selectedRepositoryIds.length} 个工具准备相似发现`,
     ));
 
     try {
@@ -1439,7 +1464,7 @@ export function useStarsWorkspace() {
     setTaskProgress(buildRunningTaskProgress(
       'star-github-recommendation-candidate',
       'sync',
-      `正在加入 ${fullName} 到 GitHub Stars`,
+      `正在把 ${fullName} 加到 GitHub 收藏`,
       fullName,
       'github-star',
     ));
@@ -1470,10 +1495,10 @@ export function useStarsWorkspace() {
     setTaskProgress(buildSucceededTaskProgress(
       'star-github-recommendation-candidate',
       'sync',
-      `${candidate.fullName} 已加入 GitHub Stars，正在同步本地数据。`,
+      `${candidate.fullName} 已在 GitHub 上收藏，正在同步这台电脑上的资料。`,
     ));
     await handleSyncStars().catch((reason) => {
-      const message = `已加入 GitHub Stars，但本地同步暂未完成：${toErrorMessage(reason)}`;
+      const message = '已在 GitHub 上收藏，但这台电脑还没同步完。你的资料都还在。点「重试」；还不行就重启应用，再不行把这条截图发给开发者。';
       setError(message);
     });
   }
@@ -1565,6 +1590,7 @@ export function useStarsWorkspace() {
     showTaskProgress: setTaskProgress,
     status,
     syncSummary,
+    lastSyncedAt,
     tags,
     taskProgress,
     token,
@@ -1610,11 +1636,7 @@ function buildReadmeFailureMessage(summary: ReadmeFetchSummary) {
     return null;
   }
 
-  const firstFailure = summary.failures[0];
-  const firstFailureDetail = firstFailure
-    ? `首个失败仓库：${firstFailure.fullName}，原因：${firstFailure.error}`
-    : '未返回具体失败仓库。';
-  return `README 缓存有 ${summary.failedCount} 个仓库失败，已成功缓存的数据不会回滚。${firstFailureDetail} 请检查网络或 GitHub Token 后重试。`;
+  return `有 ${summary.failedCount} 个项目说明没读出来。你的资料都还在。点「重试」；还不行就重启应用，再不行把这条截图发给开发者。`;
 }
 
 function buildBatchAiFailureMessage(summary: BatchAiDocumentSummary) {
@@ -1622,11 +1644,7 @@ function buildBatchAiFailureMessage(summary: BatchAiDocumentSummary) {
     return null;
   }
 
-  const firstFailure = summary.failures[0];
-  const firstFailureDetail = firstFailure
-    ? `首个失败仓库：${firstFailure.fullName}，原因：${firstFailure.error}`
-    : '未返回具体失败仓库。';
-  return `增量 AI 有 ${summary.failedCount} 个仓库失败，已生成的摘要和本地数据不会回滚。${firstFailureDetail} 可稍后重试、降低本次数量，或换用更大上下文模型。`;
+  return `有 ${summary.failedCount} 个没整理成功，已整理好的都保留着。可以稍后再点一次，或到「设置 → AI 设置」换一个能处理长文章的模型。`;
 }
 
 function buildFailedTaskProgress(

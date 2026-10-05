@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   ABOUT_ME,
+  INSTALL_COPY_HINT,
   buildCommunityPrompt,
   buildInstallPrompt,
   installTarget,
@@ -109,5 +110,40 @@ describe('buildCommunityPrompt', () => {
   it('排除同名项目、给结论', () => {
     expect(text).toContain('排除同名的其他项目');
     expect(text).toContain('值得试 / 观望 / 别试');
+  });
+});
+
+describe('界面上的说明不能改动复制出去的正文', () => {
+  it('类型仍是短名字，不带界面上那种长写法的解释', () => {
+    const shortNames: [string, string][] = [
+      ['skill', '技能'],
+      ['mcp', 'MCP'],
+      ['cli', '命令行'],
+      ['app', '应用'],
+      ['library', '代码库'],
+      ['api', '接口'],
+      ['service', '服务'],
+      ['collection', '合集'],
+    ];
+    for (const [form, name] of shortNames) {
+      const text = buildInstallPrompt({ fullName: 'a/tool', form });
+      expect(text, form).toContain(`类型：${name}）`);
+      expect(text, form).not.toMatch(/类型：[^）\n]*（/);
+    }
+    expect(buildInstallPrompt({ fullName: 'a/b' })).toContain('类型：工具');
+    expect(buildInstallPrompt({ fullName: 'a/b', form: 'other' })).toContain('类型：工具');
+  });
+
+  it('正文仍说「没有风险就直接装」，界面上那句说明（INSTALL_COPY_HINT）讲的和它是同一件事', () => {
+    const text = buildInstallPrompt({ fullName: 'a/skill', form: 'skill' });
+    expect(text).toContain('就直接装，装完告诉我装了什么、装在哪、怎么卸载');
+    expect(text).toContain('遇到这几种情况，先停下来问我');
+    // 界面说明里讲的几件事，正文里都有：先查有没有、直接装进独立环境、要管理员密码 / 付费 / 登录先停下来问
+    expect(INSTALL_COPY_HINT).toContain('先查你电脑上有没有');
+    expect(INSTALL_COPY_HINT).toContain('直接装进独立文件夹');
+    expect(INSTALL_COPY_HINT).toContain('要管理员密码、要付费或登录');
+    expect(text).toContain('是不是已经装过');
+    expect(text).toContain('依赖装进独立环境');
+    expect(text).toContain('要管理员权限、要付费或登录账号');
   });
 });

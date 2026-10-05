@@ -1,11 +1,11 @@
 import type { MouseEvent } from 'react';
 import type { LibraryItem, ReadingGroup, ScenarioSummary } from '@/lib/contracts';
-import { cleanDescription, readingGroupLabel, splitRepoName } from '@/lib/item-format';
+import { DROP_HINT, cleanDescription, readingGroupLabel, splitRepoName } from '@/lib/item-format';
 import { LangDot, RepoAvatar, ScenarioChip, StarCount, Tag } from '@/components/kit';
 import { Icon } from '@/components/ui/icon';
 import { cn } from '@/lib/utils';
 
-/** 一个仓库最多在行上显示几个场景标签。 */
+/** 一个工具最多在行上显示几个场景标签。 */
 const MAX_CHIPS = 2;
 
 export function scenarioChipsOf(item: Pick<LibraryItem, 'scenarioIds'>, scenarios: ScenarioSummary[] | undefined, max = MAX_CHIPS) {
@@ -68,7 +68,7 @@ export function ItemRow(props: {
       </div>
       <div className="absolute top-3 right-3 z-10 hidden items-center gap-0.5 rounded-md border border-border bg-card p-0.5 shadow-sm group-hover:flex">
         <HoverButton label="想试（T）" icon="bookmark_add" onClick={props.onWant} />
-        <HoverButton label="不要了（X）" icon="close" onClick={props.onDrop} />
+        <HoverButton label="不要了（X）" title={DROP_HINT} icon="close" onClick={props.onDrop} />
       </div>
     </div>
   );
@@ -88,7 +88,7 @@ export function StatusTag(props: { group: ReadingGroup }) {
   return <Tag>{readingGroupLabel(props.group)}</Tag>;
 }
 
-function HoverButton(props: { label: string; icon: string; onClick: () => void }) {
+function HoverButton(props: { label: string; icon: string; title?: string; onClick: () => void }) {
   function handleClick(event: MouseEvent<HTMLButtonElement>) {
     event.stopPropagation();
     props.onClick();
@@ -98,7 +98,7 @@ function HoverButton(props: { label: string; icon: string; onClick: () => void }
     <button
       type="button"
       className="inline-grid size-8 place-items-center rounded-md text-on-surface-variant hover:bg-surface-container-low hover:text-foreground"
-      title={props.label}
+      title={props.title ?? props.label}
       aria-label={props.label}
       onClick={handleClick}
     >

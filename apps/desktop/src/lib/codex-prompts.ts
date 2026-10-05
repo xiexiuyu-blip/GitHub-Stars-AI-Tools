@@ -11,6 +11,9 @@
 import { formLabel } from '@/lib/library-filters';
 import { repoNameOf } from '@/lib/repo-assets';
 
+/** 界面上解释「复制出去会发生什么」（安装页里「让 Codex 帮你装」那一块）。复制出去的正文不改。 */
+export const INSTALL_COPY_HINT = '复制一段话，粘给 Codex：它会先查你电脑上有没有、装在哪、要不要花钱；没有风险就直接装进独立文件夹，装完告诉你装了什么、怎么卸载。遇到要管理员密码、要付费或登录的情况，会先停下来问你。';
+
 /** 关于我：每段话开头都带上，Codex 不用每次从零认识 Fox。以后可以做成设置里的「偏好卡」。 */
 export const ABOUT_ME = '我做品牌营销和新媒体运营，不是开发者。请用中文，说人话，少用术语。';
 
@@ -37,7 +40,7 @@ export function workRules(numbers?: readonly number[]): string {
 export type PromptTarget = {
   fullName: string;
   htmlUrl?: string | null;
-  /** 形态：skill / mcp / cli / app / library / service …（决定装到哪） */
+  /** 类型：skill / mcp / cli / app / library / service …（决定装到哪） */
   form?: string | null;
   /** 我想用它做什么（场景名） */
   scenarioName?: string | null;
@@ -52,7 +55,7 @@ function purpose(input: PromptTarget): string {
   return name ? `「${name}」` : '我手头的事';
 }
 
-/** 按形态说清楚「装到哪、怎么装」。Codex 读 Skill 的位置是 ~/.agents/skills，不是 README 里常写的 ~/.claude/skills。 */
+/** 按类型说清楚装到哪。Codex 读 Skill 的位置是 ~/.agents/skills，不是别处常写的 ~/.claude/skills。返回值是复制给 Codex 的正文，不改。 */
 export function installTarget(form: string | null | undefined, repoName: string): string {
   switch (form?.trim()) {
     case 'skill':

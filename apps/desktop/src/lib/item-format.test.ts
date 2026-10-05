@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import type { AutomationStatus } from './automation-view';
 import {
   applyReadingOverrides,
   assembleWeekGroups,
@@ -7,15 +8,22 @@ import {
   cleanDescription,
   clipText,
   codexFallbackText,
+  COPY_FAILED_NOTICE,
+  copiedNotice,
+  displayForYou,
   firstSentences,
   formatStars,
   greetingFor,
   itemsForReadingFilter,
   maturityLabel,
+  maturityTagLabel,
   monthDay,
   pickReason,
   pickWhyLine,
+  readmeBasisLabel,
+  readmeTabLabel,
   readingGroupLabel,
+  regenerateToast,
   relativeDays,
   splitRepoName,
 } from './item-format';
@@ -27,16 +35,21 @@ describe('formatStars', () => {
     expect(formatStars(999)).toBe('999');
   });
 
-  it('1000 与 1200 写成 k 并去掉 .0', () => {
-    expect(formatStars(1000)).toBe('1k');
-    expect(formatStars(1200)).toBe('1.2k');
-    expect(formatStars(1500)).toBe('1.5k');
+  it('不到一万写整数，不再缩成 k', () => {
+    expect(formatStars(1000)).toBe('1000');
+    expect(formatStars(1200)).toBe('1200');
+    expect(formatStars(1500)).toBe('1500');
+    expect(formatStars(9999)).toBe('9999');
   });
 
-  it('12000 去掉 .0，12345 保留一位小数', () => {
-    expect(formatStars(12000)).toBe('12k');
-    expect(formatStars(12345)).toBe('12.3k');
-    expect(formatStars(10000)).toBe('10k');
+  it('一万及以上写成万，一位小数，去掉末尾的 .0', () => {
+    expect(formatStars(10000)).toBe('1 万');
+    expect(formatStars(12000)).toBe('1.2 万');
+    expect(formatStars(12345)).toBe('1.2 万');
+    expect(formatStars(15000)).toBe('1.5 万');
+    expect(formatStars(10500)).toBe('1.1 万');
+    expect(formatStars(10050)).toBe('1 万');
+    expect(formatStars(120000)).toBe('12 万');
   });
 
   it('负数、NaN、无穷大返回破折号', () => {
@@ -82,13 +95,36 @@ describe('relativeDays', () => {
 });
 
 describe('monthDay', () => {
+  const now = new Date(2026, 9, 5, 12, 0, 0);
+
   it('去掉前导零，坏值返回破折号', () => {
-    expect(monthDay('2026-10-03')).toBe('10/3');
-    expect(monthDay('2026-01-09T00:00:00.000Z')).toBe('1/9');
-    expect(monthDay('')).toBe('—');
-    expect(monthDay(null)).toBe('—');
-    expect(monthDay('10/03')).toBe('—');
-    expect(monthDay('2026-13-40')).toBe('—');
+    expect(monthDay('2026-10-03', now)).toBe('10 月 3 日');
+    expect(monthDay('2026-01-09T00:00:00.000Z', now)).toBe('1 月 9 日');
+    expect(monthDay('', now)).toBe('—');
+    expect(monthDay(null, now)).toBe('—');
+    expect(monthDay('10/03', now)).toBe('—');
+    expect(monthDay('2026-13-40', now)).toBe('—');
+  });
+
+  it('只写日期、不写钟点：收藏时间是 GitHub 给的 UTC 时间，钟点和本机时间对不上', () => {
+    expect(monthDay('2026-10-03T18:17:00Z', now)).toBe('10 月 3 日');
+    expect(monthDay('2026-10-03T18:17:00Z', now)).not.toContain('18:17');
+    expect(monthDay('2026-10-03T18:17:00.000+08:00', now)).toBe('10 月 3 日');
+    expect(monthDay('2026-10-03 18:17:00', now)).toBe('10 月 3 日');
+  });
+
+  it('不是今年的带年份，今年的不带', () => {
+    expect(monthDay('2025-10-03T18:17:00Z', now)).toBe('2025 年 10 月 3 日');
+    expect(monthDay('2025-12-31', now)).toBe('2025 年 12 月 31 日');
+    expect(monthDay('2026-01-01', now)).toBe('1 月 1 日');
+    expect(monthDay('2027-01-01', now)).toBe('2027 年 1 月 1 日');
+  });
+
+  it('今年是哪一年看传进来的 now（Date、毫秒数、字符串都行）；读不出来就多写年份，不猜', () => {
+    expect(monthDay('2026-10-03', now.getTime())).toBe('10 月 3 日');
+    expect(monthDay('2026-10-03', '2026-12-01T12:00:00')).toBe('10 月 3 日');
+    expect(monthDay('2026-10-03', '2027-01-02T12:00:00')).toBe('2026 年 10 月 3 日');
+    expect(monthDay('2026-10-03', '不是日期')).toBe('2026 年 10 月 3 日');
   });
 });
 
@@ -150,9 +186,9 @@ describe('greetingFor', () => {
 describe('buildTodayLead', () => {
   it('有推荐、没有推荐，以及负数和非数字', () => {
     expect(buildTodayLead(4, 3)).toBe('这周你收藏了 4 个新工具。先从下面 3 个你可能用得上的看起。');
-    expect(buildTodayLead(0, 0)).toBe('这周你收藏了 0 个新工具。AI 整理好之后，这里会按你常做的事挑出值得先看的。');
-    expect(buildTodayLead(-3, -1)).toBe('这周你收藏了 0 个新工具。AI 整理好之后，这里会按你常做的事挑出值得先看的。');
-    expect(buildTodayLead(Number.NaN, Number.NaN)).toBe('这周你收藏了 0 个新工具。AI 整理好之后，这里会按你常做的事挑出值得先看的。');
+    expect(buildTodayLead(0, 0)).toBe('这周你收藏了 0 个新工具。AI 整理好之后，这里会从还没看过的收藏里，优先挑和你关心的场景有关的。');
+    expect(buildTodayLead(-3, -1)).toBe('这周你收藏了 0 个新工具。AI 整理好之后，这里会从还没看过的收藏里，优先挑和你关心的场景有关的。');
+    expect(buildTodayLead(Number.NaN, Number.NaN)).toBe('这周你收藏了 0 个新工具。AI 整理好之后，这里会从还没看过的收藏里，优先挑和你关心的场景有关的。');
   });
 
   it('不再提全库的「等 AI 整理」数量', () => {
@@ -182,10 +218,31 @@ describe('codexFallbackText', () => {
     expect(withoutHow).not.toContain('上手提示');
     expect(withoutHow).toContain('https://github.com/fox/tool');
   });
+
+  it('复制出去的正文是改文案之前的原样（卡 32 / 33 都写明复制出去的话不改）：逐行对得上', () => {
+    expect(codexFallbackText({
+      fullName: 'fox/tool',
+      htmlUrl: 'https://github.com/fox/tool',
+      oneLiner: '做封面',
+      howToTry: 'npm i tool',
+    })).toBe([
+      '请帮我试用这个工具：fox/tool（https://github.com/fox/tool）',
+      '它是：做封面',
+      '我想用它来：（请先问我想做什么）',
+      'AI 整理的上手提示：npm i tool',
+      '请先阅读 README，确认安装方式和使用前提，再带我一步步装好并跑通一个最小例子。不确定的地方先问我，不要编造安装步骤。',
+    ].join('\n'));
+    expect(codexFallbackText({ fullName: 'fox/tool' })).toBe([
+      '请帮我试用这个工具：fox/tool（https://github.com/fox/tool）',
+      '它是：（暂无说明）',
+      '我想用它来：（请先问我想做什么）',
+      '请先阅读 README，确认安装方式和使用前提，再带我一步步装好并跑通一个最小例子。不确定的地方先问我，不要编造安装步骤。',
+    ].join('\n'));
+  });
 });
 
-describe('仓库名、截断与今日列表', () => {
-  it('splitRepoName 取仓库名首字母', () => {
+describe('名字、截断与今日列表', () => {
+  it('splitRepoName 取名字首字母', () => {
     expect(splitRepoName('Fox/Tool')).toEqual({ owner: 'Fox', repo: 'Tool', initial: 'T' });
     expect(splitRepoName('仅名字')).toEqual({ owner: '', repo: '仅名字', initial: '仅' });
     expect(splitRepoName('   ')).toEqual({ owner: '', repo: '', initial: '?' });
@@ -289,13 +346,176 @@ describe('cleanDescription', () => {
 });
 
 describe('pickReason', () => {
-  it('取所属的第一个方向写成推荐理由', () => {
-    expect(pickReason(['小红书', '抖音·短视频'])).toBe('你常做「小红书」，这个还没看过');
-    expect(pickReason(['  ', '电商'])).toBe('你常做「电商」，这个还没看过');
+  it('取所属的第一个场景写成推荐理由（统一叫「场景」，不叫「方向」）', () => {
+    expect(pickReason(['小红书', '抖音·短视频'])).toBe('它被归在你关心的「小红书」场景，你还没看过');
+    expect(pickReason(['  ', '电商'])).toBe('它被归在你关心的「电商」场景，你还没看过');
+    expect(pickReason(['小红书'])).not.toContain('方向');
   });
 
-  it('没有所属方向就不编', () => {
+  it('没有所属场景就不编', () => {
     expect(pickReason([])).toBeNull();
     expect(pickReason([' ', ''])).toBeNull();
+  });
+});
+
+
+describe('成熟度的新写法', () => {
+  it('可上生产改成可正式使用', () => {
+    expect(maturityLabel('production')).toBe('可正式使用');
+    expect(maturityLabel('Production')).toBe('可正式使用');
+  });
+
+  it('stale 翻译成久未更新，不再原样显示英文', () => {
+    expect(maturityLabel('stale')).toBe('久未更新');
+    expect(maturityLabel(' STALE ')).toBe('久未更新');
+  });
+
+  it('成熟度小标签带分组名；整句话仍然不显示', () => {
+    expect(maturityTagLabel('usable')).toBe('成熟度：可用');
+    expect(maturityTagLabel('mature')).toBe('成熟度：成熟');
+    expect(maturityTagLabel('stale')).toBe('成熟度：久未更新');
+    expect(maturityTagLabel('production')).toBe('成熟度：可正式使用');
+    expect(maturityTagLabel('开源，提供安装脚本和文档，需自行部署。')).toBeNull();
+    expect(maturityTagLabel(null)).toBeNull();
+  });
+});
+
+describe('项目说明（README）的写法', () => {
+  it('依据项目说明：只有简介和读过项目说明是两句，读过的那句带（README）', () => {
+    expect(readmeBasisLabel('只有 GitHub 简介，没有 README：一个短介绍')).toBe('只依据 GitHub 简介，没读到项目说明，别当真');
+    expect(readmeBasisLabel('  只有 GitHub 简介，没有 README：贴着开头')).toBe('只依据 GitHub 简介，没读到项目说明，别当真');
+    expect(readmeBasisLabel('这是读过项目说明后写的中文说明')).toBe('依据项目说明（README）');
+    expect(readmeBasisLabel('')).toBe('依据项目说明（README）');
+    expect(readmeBasisLabel(null)).toBe('依据项目说明（README）');
+    // 只认开头的前缀：句子中间出现不算
+    expect(readmeBasisLabel('先说一句。只有 GitHub 简介，没有 README：不在开头')).toBe('依据项目说明（README）');
+  });
+
+  it('括号只在详情页第一次提到「项目说明」的地方出现一次：说明旁边那句带了，页签就不再带；那句没带（或没有说明）时页签带', () => {
+    const readFromReadme = '读过项目说明后写的中文说明。';
+    const fromIntroOnly = '只有 GitHub 简介，没有 README：只看了简介。';
+    // 有中文说明、依据项目说明：说明旁边那句带括号，页签只写「项目说明」
+    expect(readmeTabLabel(true, readFromReadme)).toBe('项目说明');
+    // 没有中文说明：页面上没有「依据…」那句，页签是第一次出现
+    expect(readmeTabLabel(false, null)).toBe('项目说明（README）');
+    expect(readmeTabLabel(false, readFromReadme)).toBe('项目说明（README）');
+    // 说明只依据简介：那句话是审定的整句、不带括号，页签补上
+    expect(readmeTabLabel(true, fromIntroOnly)).toBe('项目说明（README）');
+
+    const mentions = (hasCard: boolean, summary: string) => {
+      const basis = hasCard ? readmeBasisLabel(summary) : '';
+      return [basis, readmeTabLabel(hasCard, summary)].join('|').split('项目说明（README）').length - 1;
+    };
+    expect(mentions(true, readFromReadme)).toBe(1);
+    expect(mentions(false, readFromReadme)).toBe(1);
+    expect(mentions(true, fromIntroOnly)).toBe(1);
+  });
+});
+
+describe('灵感里的 Fox 显示成你', () => {
+  it('单独的 Fox 换成你，大小写敏感，可以出现多次', () => {
+    expect(displayForYou('给 Fox 的灵感')).toBe('给你的灵感');
+    expect(displayForYou('Fox 先看，再给 Fox 用')).toBe('你先看，再给你用');
+    expect(displayForYou('fox 不换')).toBe('fox 不换');
+    expect(displayForYou('FOX 不换')).toBe('FOX 不换');
+    expect(displayForYou('  ')).toBe('');
+    expect(displayForYou(null)).toBe('');
+    expect(displayForYou(undefined)).toBe('');
+  });
+
+  it('词里面带 Fox 的不动（Firefox 插件、Foxmail 之类）', () => {
+    expect(displayForYou('Firefox 插件，给 Fox 用')).toBe('Firefox 插件，给你用');
+    expect(displayForYou('Foxmail 的替代品')).toBe('Foxmail 的替代品');
+    expect(displayForYou('FoxitReader 打开 PDF')).toBe('FoxitReader 打开 PDF');
+  });
+
+  it('换成你以后，中文和你之间不留空格；英文单词旁的空格保留', () => {
+    expect(displayForYou('适合 Fox 做小红书封面')).toBe('适合你做小红书封面');
+    expect(displayForYou('Notion 同步，Fox 可以直接用')).toBe('Notion 同步，你可以直接用');
+    expect(displayForYou('Fox, try it')).toBe('你, try it');
+  });
+});
+
+describe('复制给 Codex 之后的提示（按钮上的字见详情页和发现页卡片的渲染测试）', () => {
+  it('复制成功的提示：装软件的那种说清装在哪、怎么卸载；只评估的说明不会安装', () => {
+    const install = copiedNotice('install');
+    expect(install).toBe('已复制。粘到 Codex 后，它会先查你电脑上有没有，没有就装进独立文件夹，装完告诉你装在哪、怎么卸载。');
+    expect(install).toContain('装进独立文件夹');
+    expect(install).toContain('怎么卸载');
+    const evaluate = copiedNotice('evaluate');
+    expect(evaluate).toBe('已复制。它只会读资料、给你结论，不会安装。');
+    expect(evaluate).toContain('不会安装');
+    expect(evaluate).not.toContain('卸载');
+  });
+
+  it('让 Codex 去查别人怎么用不装东西，提示不能说「会装进独立文件夹」', () => {
+    const community = copiedNotice('community');
+    expect(community).toBe('已复制，去 Codex 里粘贴');
+    expect(community).not.toContain('装进');
+    expect(community).not.toContain('卸载');
+  });
+
+  it('复制不了的提示是桌面应用的说法，不提「浏览器」', () => {
+    expect(COPY_FAILED_NOTICE).toBe('没能自动复制，请手动选中后按 ⌘C');
+    expect(COPY_FAILED_NOTICE).not.toContain('浏览器');
+  });
+});
+
+describe('regenerateToast：点「不对，请 AI 重写」之后的提示', () => {
+  function status(overrides: Partial<AutomationStatus> = {}): AutomationStatus {
+    return {
+      enabled: true,
+      dailyBudgetTokens: 100_000,
+      paused: false,
+      pauseReason: null,
+      tokens24h: 0,
+      budgetRemaining: 100_000,
+      queued: 0,
+      running: 0,
+      failed: 0,
+      providerConfigured: true,
+      model: 'gpt-x',
+      ...overrides,
+    };
+  }
+
+  it('自动整理没开：说清已记下但不会重写，开启后才会重写，保留「去开启」', () => {
+    expect(regenerateToast(status({ enabled: false, dailyBudgetTokens: 0, budgetRemaining: 0 }))).toEqual({
+      title: '已记下，但自动整理没开，不会重写。',
+      sub: '开启后才会重写。',
+      actionLabel: '去开启',
+    });
+  });
+
+  it('没开的时候不许说「会在后台重新整理」「好了会自动更新」（那是不会兑现的承诺）', () => {
+    const note = regenerateToast(status({ enabled: false }));
+    expect(`${note.title}${note.sub}`).not.toContain('后台重新整理');
+    expect(`${note.title}${note.sub}`).not.toContain('自动更新');
+  });
+
+  it('没配置服务 / 暂停 / 一次性全部整理，开关关着也各说各的，不套用「没开」那句', () => {
+    expect(regenerateToast(status({ providerConfigured: false, enabled: false }))).toEqual({
+      title: '已加入整理队列',
+      sub: '还没配置 AI 服务，配置好才会重新整理',
+      actionLabel: '去设置 AI',
+    });
+    const paused = regenerateToast(status({ paused: true, enabled: false }));
+    expect(paused.title).toBe('已加入整理队列');
+    expect(paused.sub).toContain('暂停');
+    expect(paused.actionLabel).toBe('继续整理');
+    const fullScan = regenerateToast(status({ unlimited: true, enabled: false }));
+    expect(fullScan.title).toBe('已加入整理队列');
+    expect(fullScan.sub).toContain('一次性全部整理');
+    expect(fullScan.actionLabel).toBeNull();
+  });
+
+  it('开着的时候照原来的提示：读不到状态只说已加入；额度用完说明天；正常在跑说会在后台重新整理', () => {
+    expect(regenerateToast(null)).toEqual({ title: '已加入整理队列', actionLabel: null });
+    expect(regenerateToast(status({ budgetRemaining: 0 })).sub).toContain('明天');
+    expect(regenerateToast(status({ queued: 2 }))).toEqual({
+      title: '已加入整理队列',
+      sub: '会在后台重新整理，好了会自动更新',
+      actionLabel: null,
+    });
   });
 });
