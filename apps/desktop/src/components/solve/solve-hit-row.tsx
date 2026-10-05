@@ -7,7 +7,7 @@ import { Icon } from '@/components/ui/icon';
 import { cn } from '@/lib/utils';
 
 /**
- * 找方案结果里的一行。点这一行（名字、简介任意位置）在右边滑出详情；左边的圆圈只管「放不放进参考包」。
+ * 找方案结果里的一行。点这一行（名字、简介任意位置）在右边滑出详情；左边的圆圈只管「放不放进交接单」。
  * 已勾选的里排第一的是「主参考」，其余可以点「设为主参考」。
  */
 export function SolveHitRow(props: {
@@ -45,8 +45,8 @@ export function SolveHitRow(props: {
         type="button"
         className="grid size-8 shrink-0 place-items-center rounded-full focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-primary"
         aria-pressed={props.pressed}
-        aria-label={props.pressed ? `从参考包移除 ${hit.fullName}` : `选入参考包 ${hit.fullName}`}
-        title={props.pressed ? '从参考包移除' : '放进参考包'}
+        aria-label={props.pressed ? `从交接单移除 ${hit.fullName}` : `加入交接单 ${hit.fullName}`}
+        title={props.pressed ? '从交接单移除' : '加入交接单'}
         onClick={(event) => {
           event.stopPropagation();
           props.onToggle();
@@ -67,8 +67,9 @@ export function SolveHitRow(props: {
           <span className="text-left text-sm font-semibold break-words text-foreground [overflow-wrap:anywhere]">{hit.fullName}</span>
           <StarCount value={hit.starsCount} />
           {props.pressed && props.isMain ? <Tag tone="blue">主参考</Tag> : null}
+          {props.pressed && props.isMain ? <span className="text-xs text-on-surface-variant">Codex 会优先用它，其余是备选</span> : null}
           {form ? <Tag>{form}</Tag> : null}
-          {hit.hasCard === false ? <Tag>待整理</Tag> : null}
+          {hit.hasCard === false ? <Tag>待 AI 整理</Tag> : null}
           {badge ? <Tag tone={badge.tone}>{badge.text}</Tag> : null}
           {props.ai ? <Tag tone={props.ai.fit === 'best' ? 'blue' : 'gray'}>{RERANK_FIT_LABEL[props.ai.fit]}</Tag> : null}
           {chips.map((scenario) => (
@@ -85,10 +86,7 @@ export function SolveHitRow(props: {
           <div className="mt-0.5 text-xs leading-5 text-on-surface-variant">{props.ai.reason}</div>
         ) : null}
         {related ? (
-          <div className="mt-0.5 text-xs leading-5 text-on-surface-variant">
-            <b className="font-medium">为什么相关</b>
-            {` ${related}`}
-          </div>
+          <div className="mt-0.5 text-xs leading-5 text-on-surface-variant">{related}</div>
         ) : null}
         {props.pressed && !props.isMain && props.onMakeMain ? (
           <button
