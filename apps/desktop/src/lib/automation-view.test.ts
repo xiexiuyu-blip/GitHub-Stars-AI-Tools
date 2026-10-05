@@ -38,6 +38,7 @@ import {
   fullScanPanel,
   fullScanPending,
   fullScanProgress,
+  fullScanSpendIn24h,
   GIST_BACKUP_LIBRARY,
   GIST_BACKUP_MARKS,
   GIST_IMPORT_WARNING,
@@ -330,11 +331,11 @@ function lastScan(overrides: Partial<LastFullScan> = {}): LastFullScan {
 }
 
 describe('estimateFullScanTokens', () => {
-  it('按每个 6500 token 估算（真实记录：成功的卡平均约 5.7–6.3 千，略高一点留给偶尔的重试），向最接近的整数取整', () => {
-    expect(FULL_SCAN_TOKENS_PER_REPO).toBe(6500);
-    expect(estimateFullScanTokens(388)).toBe(2_522_000);
-    expect(estimateFullScanTokens(1)).toBe(6500);
-    expect(estimateFullScanTokens(1.2)).toBe(7800);
+  it('按每个 7500 token 估算（v3 第一批 5 张平均约 7.3 千，和后台刹车线保持一致），向最接近的整数取整', () => {
+    expect(FULL_SCAN_TOKENS_PER_REPO).toBe(7500);
+    expect(estimateFullScanTokens(388)).toBe(2_910_000);
+    expect(estimateFullScanTokens(1)).toBe(7500);
+    expect(estimateFullScanTokens(1.2)).toBe(9000);
   });
 
   it('不是有限数或 ≤ 0 时返回 0', () => {
@@ -425,12 +426,12 @@ describe('fullScanPanel', () => {
     expect(panel.last).toBe('上次整理现有收藏：10 月 4 日 12:30 完成，整理了 388 个，用了约 201.8 万 token。');
   });
 
-  it('有要整理的是 ready：388 个约 250 万 token', () => {
+  it('有要整理的是 ready：388 个约 290 万 token', () => {
     const panel = fullScanPanel(status({ needsOrganizing: 388, lastFullScan: lastScan() }));
     expect(panel).toMatchObject({
       kind: 'ready',
       pending: 388,
-      estimate: '250 万',
+      estimate: '290 万',
       last: '上次整理现有收藏：10 月 4 日 12:30 被停止，已整理 120 / 388 个，用了约 62 万 token。',
     });
   });
@@ -535,29 +536,45 @@ describe('fullScanPanel', () => {
       kind: 'ready',
       title: '第一步：把现有收藏整理一遍',
       description: '只在第一次用、或说明的格式升级之后做一次：一口气把现有收藏整理完，不受每天额度限制。整理完，以后就只剩下面的「每天自动整理」。',
-      body: '需要整理 12 个，预计约 8 万 token（具体花多少钱以你服务商的账单为准）。',
+      body: '需要整理 12 个，预计约 9 万 token（具体花多少钱以你服务商的账单为准）。',
       buttonLabel: '现在整理全部 12 个',
       pending: 12,
-      estimate: '8 万',
+      estimate: '9 万',
       last: lastFullScanText(overrides.lastFullScan),
     });
   });
 
   it.each([
-    { activeRepos: 12, needsOrganizingMissing: 2, needsOrganizingOutdated: 9, lastFullScan: null },
+    { activeRepos: 12, needsOrganizingMissing: 2, needsOrganizingOutdated: 3, lastFullScan: null },
     { lastFullScan: lastScan() },
     { activeRepos: 12, needsOrganizingMissing: 12, lastFullScan: lastScan() },
-  ])('有新版说明，或分项缺失但有上次记录，显示后续手动整理：%j', (overrides) => {
+  ])('新版说明过半，或分项缺失但有上次记录，显示后续手动整理：%j', (overrides) => {
     expect(fullScanPanel(status({ ...overrides, awaiting: 12 }))).toEqual({
       kind: 'ready',
       title: '现在就整理 12 个',
       description: '不想等每天自动整理的时候用：这一轮不受每天额度限制，整理完自动回到每天自动整理。',
-      body: '有 12 个收藏在等整理，预计约 8 万 token（具体花多少钱以你服务商的账单为准）。',
+      body: '有 12 个收藏在等整理，预计约 9 万 token（具体花多少钱以你服务商的账单为准）。',
       buttonLabel: '现在整理 12 个',
       pending: 12,
-      estimate: '8 万',
+      estimate: '9 万',
       last: lastFullScanText(overrides.lastFullScan),
     });
+  });
+
+  it.each([
+    [500, 0, 496, '第一步：把现有收藏整理一遍', '现在整理全部 496 个'],
+    [12, 0, 7, '第一步：把现有收藏整理一遍', '现在整理全部 7 个'],
+    [12, 0, 6, '现在就整理 6 个', '现在整理 6 个'],
+    [520, 20, 0, '现在就整理 20 个', '现在整理 20 个'],
+    [12, 10, 10, '第一步：把现有收藏整理一遍', '现在整理全部 20 个'],
+  ] as const)('第一步按新版说明是否达到一半判断（现有 %i 个，没有 %i 个，旧版 %i 个）', (total, missing, outdated, title, buttonLabel) => {
+    expect(fullScanPanel(status({
+      activeRepos: total,
+      needsOrganizingMissing: missing,
+      needsOrganizingOutdated: outdated,
+      awaiting: missing + outdated,
+      lastFullScan: lastScan(),
+    }))).toMatchObject({ kind: 'ready', title, buttonLabel });
   });
 
   it.each([
@@ -992,6 +1009,34 @@ describe('spentByEarlierFullScan：「这是之前一次性整理用的」只在
   });
 });
 
+describe('fullScanSpendIn24h', () => {
+  it.each([
+    [20_000, 10_000, 10_000],
+    [19_999, 10_000, 0],
+    [10_000, 0, 10_000],
+    [10_000, 10_000, 0],
+  ])('总用量 %i、每天用量 %i 时返回整理花费 %i，差值至少 1 万才说', (tokens24h, dailyTokensUsed, expected) => {
+    expect(fullScanSpendIn24h({ tokens24h, dailyTokensUsed })).toBe(expected);
+  });
+
+  it.each([
+    {},
+    { dailyTokensUsed: null },
+    { dailyTokensUsed: Number.NaN },
+    { dailyTokensUsed: Number.POSITIVE_INFINITY },
+    { dailyTokensUsed: Number.NEGATIVE_INFINITY },
+    { dailyTokensUsed: -1 },
+    { dailyTokensUsed: 40_001 },
+    { dailyTokensUsed: 100_000 },
+  ])('每天用量缺失或不可用时不推测整理花费：%j', (overrides) => {
+    expect(fullScanSpendIn24h({ tokens24h: 40_000, ...overrides })).toBe(0);
+  });
+
+  it.each([Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, -1])('总用量 %s 不可用时不推测整理花费', (tokens24h) => {
+    expect(fullScanSpendIn24h({ tokens24h, dailyTokensUsed: 0 })).toBe(0);
+  });
+});
+
 describe('recentUsageLine / recentUsageMetric', () => {
   const now = new Date(2026, 9, 5, 12, 0, 0);
   const hoursAgo = (hours: number) => new Date(now.getTime() - hours * 60 * 60 * 1000).toISOString();
@@ -1074,6 +1119,74 @@ describe('recentUsageLine / recentUsageMetric', () => {
   it('今日 / 资料库横幅（每天整理中）带上真实个数', () => {
     const hint = automationHint(status({ queued: 2, tokens24h: 40_000, succeeded24h: 7 }), 7);
     expect(hint?.detail).toBe('最近 24 小时整理了 7 个（已用约 4 万 token，含失败重试）。');
+  });
+
+  it.each([
+    [30_000, '最近 24 小时整理了 7 个（已用约 4 万 token，含失败重试；其中约 1 万 token 是整理现有收藏用的，不占每天额度）。', '已用约 4 万 token，含失败重试；其中约 1 万 token 是整理现有收藏用的，不占每天额度'],
+    [30_001, '最近 24 小时整理了 7 个（已用约 4 万 token，含失败重试）。', '已用约 4 万 token，含失败重试'],
+  ])('每天用量 %i：差值刚好 1 万显示小字，9999 不显示', (dailyTokensUsed, line, sub) => {
+    const usage = status({ tokens24h: 40_000, dailyTokensUsed, succeeded24h: 7 });
+    expect(recentUsageLine(usage, now)).toBe(line);
+    expect(recentUsageMetric(usage, now)).toEqual({ label: '24 小时内整理了', value: '7 个', sub });
+  });
+
+  it.each([
+    {},
+    { dailyTokensUsed: null },
+    { dailyTokensUsed: Number.NaN },
+    { dailyTokensUsed: Number.POSITIVE_INFINITY },
+    { dailyTokensUsed: Number.NEGATIVE_INFINITY },
+    { dailyTokensUsed: -1 },
+    { dailyTokensUsed: 40_001 },
+    { dailyTokensUsed: 100_000 },
+  ])('没有可靠的每天用量时，整句和指标均不加新小字：%j', (overrides) => {
+    const usage = status({ tokens24h: 40_000, ...overrides });
+    expect(recentUsageLine(usage, now)).toBe('最近 24 小时已用约 4 万 token。');
+    expect(recentUsageMetric(usage, now)).toEqual({ label: '24 小时内已用', value: '4 万 token', sub: '' });
+    expect(recentUsageLine({ ...usage, succeeded24h: 7 }, now)).toBe('最近 24 小时整理了 7 个（已用约 4 万 token，含失败重试）。');
+    expect(recentUsageMetric({ ...usage, succeeded24h: 7 }, now)).toEqual({
+      label: '24 小时内整理了', value: '7 个', sub: '已用约 4 万 token，含失败重试',
+    });
+  });
+
+  it('每天额度开着且读到 465 个：逐字说明其中约 261.8 万不占每天额度', () => {
+    const usage = status({ dailyBudgetTokens: 600_000, tokens24h: 2_660_000, dailyTokensUsed: 42_000, succeeded24h: 465 });
+    expect(recentUsageLine(usage, now)).toBe('最近 24 小时整理了 465 个（已用约 266 万 token，含失败重试；其中约 261.8 万 token 是整理现有收藏用的，不占每天额度）。');
+    expect(recentUsageMetric(usage, now)).toEqual({
+      label: '24 小时内整理了',
+      value: '465 个',
+      sub: '已用约 266 万 token，含失败重试；其中约 261.8 万 token 是整理现有收藏用的，不占每天额度',
+    });
+  });
+
+  it('每天额度开着但读不到个数：整句括号和指标小字仍说明不占每天额度的部分', () => {
+    const usage = status({ dailyBudgetTokens: 600_000, tokens24h: 2_660_000, dailyTokensUsed: 42_000 });
+    expect(recentUsageLine(usage, now)).toBe('最近 24 小时已用约 266 万 token（其中约 261.8 万 token 是整理现有收藏用的，不占每天额度）。');
+    expect(recentUsageMetric(usage, now)).toEqual({
+      label: '24 小时内已用',
+      value: '266 万 token',
+      sub: '其中约 261.8 万 token 是整理现有收藏用的，不占每天额度',
+    });
+  });
+
+  it.each([465, undefined])('整理进行中也说明不占每天额度的部分（个数 %s）', (succeeded24h) => {
+    const usage = status({ unlimited: true, dailyBudgetTokens: 600_000, tokens24h: 2_660_000, dailyTokensUsed: 42_000, succeeded24h });
+    const note = '其中约 261.8 万 token 是整理现有收藏用的，不占每天额度';
+    expect(recentUsageLine(usage, now)).toContain(note);
+    expect(recentUsageMetric(usage, now).sub).toContain(note);
+  });
+
+  it('旧句优先：每天额度为 0 且上一轮刚结束时，有用量差值也沿用原文', () => {
+    const usage = status({
+      enabled: false, dailyBudgetTokens: 0, tokens24h: 3_083_000, dailyTokensUsed: 100_000,
+      lastFullScan: lastScan({ finishedAt: hoursAgo(2) }),
+    });
+    expect(recentUsageLine(usage, now)).toBe('最近 24 小时已用约 308.3 万 token（这是之前整理现有收藏用的，不占每天额度）。');
+    expect(recentUsageMetric(usage, now)).toEqual({ label: '24 小时内已用', value: '308.3 万 token', sub: '这是之前整理现有收藏用的，不占每天额度' });
+    expect(recentUsageLine({ ...usage, succeeded24h: 513 }, now)).toBe('最近 24 小时整理了 513 个（已用约 308.3 万 token，含失败重试；这是之前整理现有收藏用的，不占每天额度）。');
+    expect(recentUsageMetric({ ...usage, succeeded24h: 513 }, now)).toEqual({
+      label: '24 小时内整理了', value: '513 个', sub: '已用约 308.3 万 token，含失败重试；这是之前整理现有收藏用的，不占每天额度',
+    });
   });
 });
 

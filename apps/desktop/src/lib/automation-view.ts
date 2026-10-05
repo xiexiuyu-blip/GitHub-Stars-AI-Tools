@@ -92,8 +92,8 @@ export type LastReadmeCheck = {
 /** 整理一个工具大约用多少 token（2026-10-04 真实记录：输入约 4300 + 输出约 1500，成功的卡平均约 5.7–6.3 千，取 6000）。只用来估「约整理多少个」。 */
 export const TOKENS_PER_REPO = 6000;
 
-/** 一次性全部整理的估算：2026-10-04 真实记录里成功的卡平均约 5.7–6.3 千 token（含思考），偶尔被截断要重试，取 6500（略高于平均）。只用于这一轮的预计花费，不用于每天额度折算。 */
-export const FULL_SCAN_TOKENS_PER_REPO = 6500;
+/** 真实记录：v3 说明第一批 5 张平均约 7.3 千（含思考）；后台刹车线 `FULL_SCAN_TOKENS_PER_CARD` 也是 7500，两处保持一致。只用于这一轮的预计花费，不用于每天额度折算。 */
+export const FULL_SCAN_TOKENS_PER_REPO = 7500;
 
 /** 额度档位：名字 + 每天约整理多少个。0 是关闭。 */
 export const BUDGET_PRESETS: ReadonlyArray<{ tokens: number; title: string; hint: string }> = [
@@ -346,7 +346,7 @@ export function fullScanPanel(status: AutomationStatus | null): FullScanPanel {
     last,
   };
   const counts = organizeCounts(status);
-  const firstStep = counts ? counts.organized === 0 : status.lastFullScan == null;
+  const firstStep = counts ? counts.organized * 2 < counts.total : status.lastFullScan == null;
   const estimate = roundedEstimate(estimateFullScanTokens(pending));
   return {
     kind: 'ready',
@@ -575,7 +575,7 @@ export function dailyBudgetConfirmLead(tokens: number): string {
 }
 
 /** 「最近 24 小时」那几句话要用到的字段。`succeeded24h` 不在 get_ai_automation 里，见 `withRecentDone`。 */
-export type RecentUsage = Pick<AutomationStatus, 'tokens24h' | 'dailyBudgetTokens' | 'unlimited' | 'lastFullScan'> & {
+export type RecentUsage = Pick<AutomationStatus, 'tokens24h' | 'dailyTokensUsed' | 'dailyBudgetTokens' | 'unlimited' | 'lastFullScan'> & {
   succeeded24h?: number | null;
 };
 
@@ -612,6 +612,21 @@ export function spentByEarlierFullScan(status: Pick<RecentUsage, 'tokens24h' | '
   return now.getTime() - finished <= DAY_MS;
 }
 
+/** 最近 24 小时整理现有收藏用的 token。两个用量都可靠、每天用量非负且差值至少 1 万时才说。 */
+export function fullScanSpendIn24h(status: Pick<RecentUsage, 'tokens24h' | 'dailyTokensUsed'>): number {
+  const { tokens24h, dailyTokensUsed } = status;
+  if (!Number.isFinite(tokens24h) || dailyTokensUsed == null || !Number.isFinite(dailyTokensUsed) || dailyTokensUsed < 0) return 0;
+  const spent = tokens24h - dailyTokensUsed;
+  return spent >= 10_000 ? spent : 0;
+}
+
+/** 先保留上一轮整理的原提示，再根据后台用量差值说明不占每天额度的部分。 */
+function recentUsageNote(status: RecentUsage, now: Date): string | null {
+  if (spentByEarlierFullScan(status, now)) return EARLIER_FULL_SCAN_NOTE;
+  const spent = fullScanSpendIn24h(status);
+  return spent > 0 ? `其中约 ${formatTokens(spent)} token 是整理现有收藏用的，不占每天额度` : null;
+}
+
 /**
  * 今日 / 资料库横幅里「最近 24 小时」那一句：整理了几个是后台算好的真数，token 放进括号。
  * 读不到个数时整句不写个数，只说花了多少 token，不拿 token 除一除去估。
@@ -619,7 +634,7 @@ export function spentByEarlierFullScan(status: Pick<RecentUsage, 'tokens24h' | '
 export function recentUsageLine(status: RecentUsage, now = new Date()): string {
   const tokens = formatTokens(status.tokens24h);
   const done = recentDoneCount(status.succeeded24h);
-  const note = spentByEarlierFullScan(status, now) ? EARLIER_FULL_SCAN_NOTE : null;
+  const note = recentUsageNote(status, now);
   if (done !== null) {
     return `最近 24 小时整理了 ${done} 个（已用约 ${tokens} token，含失败重试${note ? `；${note}` : ''}）。`;
   }
@@ -630,7 +645,7 @@ export function recentUsageLine(status: RecentUsage, now = new Date()): string {
 export function recentUsageMetric(status: RecentUsage, now = new Date()): { label: string; value: string; sub: string } {
   const tokens = formatTokens(status.tokens24h);
   const done = recentDoneCount(status.succeeded24h);
-  const note = spentByEarlierFullScan(status, now) ? EARLIER_FULL_SCAN_NOTE : null;
+  const note = recentUsageNote(status, now);
   if (done !== null) {
     return {
       label: '24 小时内整理了',
