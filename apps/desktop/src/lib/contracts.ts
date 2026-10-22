@@ -31,8 +31,8 @@ export type LibraryFilters = {
   cardState?: 'done' | 'pending' | 'all';
   form?: string | null;
   keyword?: string;
-  /** starred = 按收藏时间新到旧（默认）；stars = 按星数；updated = 按最近更新 */
-  sort?: 'starred' | 'stars' | 'updated';
+  /** starred = 按收藏时间新到旧（默认）；stars = 按星数；updated = 按最近更新；relevance = 按相关度（有关键词时用） */
+  sort?: 'starred' | 'stars' | 'updated' | 'relevance';
   limit?: number;
   offset?: number;
 };
@@ -61,6 +61,10 @@ export type LibraryItem = {
   confidence: number | null;
   /** 理解卡是否被 Fox 确认过；没有卡为 null */
   cardReview: 'suggested' | 'confirmed' | null;
+  /** 命中原因。只有带关键词的相关度排序才有值（项目名、中文说明、英文简介、话题）；其它情况是空数组。 */
+  matchReasons?: string[];
+  /** 相关度总分。只有带关键词的相关度排序才有值；其它情况是 null。 */
+  matchScore?: number | null;
 };
 
 export type LibraryCounts = {

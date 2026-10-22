@@ -109,7 +109,7 @@ export function withInitial(
   return state;
 }
 
-/** 空关键词不传。offset 是页码乘每页条数。场景、状态、类型为空时不传。 */
+/** 空关键词不传。有关键词且排序还是默认的收藏时间时，改发 relevance。offset 是页码乘每页条数。场景、状态、类型为空时不传。 */
 export function toFilters(state: LibraryUiState, page: number, pageSize: number): LibraryFilters {
   const safePage = Number.isFinite(page) && page > 0 ? Math.floor(page) : 0;
   const safeSize = Number.isFinite(pageSize) && pageSize > 0 ? Math.floor(pageSize) : 0;
@@ -124,6 +124,8 @@ export function toFilters(state: LibraryUiState, page: number, pageSize: number)
   if (state.form) filters.form = state.form;
   const keyword = state.keyword.trim();
   if (keyword) filters.keyword = keyword;
+  // 用户没另选排序时，搜索按相关度。选了星数或最近更新就保持原样。
+  if (keyword && state.sort === 'starred') filters.sort = 'relevance';
   return filters;
 }
 
