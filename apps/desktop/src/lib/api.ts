@@ -280,6 +280,9 @@ function isMissingCommand(raw: string): boolean {
 
 /* ───────── 应用更新 ───────── */
 
+// 这个版本由开发者手动安装，应用内更新关着；要重新打开更新，必须同时给 tauri.conf.json 配上自己的端点和签名，而不是只改这个开关。
+export const IN_APP_UPDATES_ENABLED: boolean = false;
+
 export type UpdaterFailure = 'network' | 'not-found' | 'signature' | 'permission' | 'unknown';
 
 /**
@@ -351,6 +354,6 @@ export function describeUpdateStatus(input: UpdateStatusInput): string {
       return input.errorMessage ?? UPDATE_FAILED_FALLBACK;
     case 'idle':
     default:
-      return '应用会在启动时静默检查更新，也可以在这里手动检查。';
+      return '这个版本不会自动检查更新。有新版本时，会由开发者重新安装；你的资料不受影响。';
   }
 }

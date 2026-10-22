@@ -15,6 +15,7 @@ import {
   getGithubAuthState,
   getLibraryDetail,
   getTodayView,
+  IN_APP_UPDATES_ENABLED,
   listInbox,
   listLibraryView,
   listScenarios,
@@ -424,6 +425,10 @@ describe('describeUpdateStatus：应用更新面板里状态那一句', () => {
     expect(describeUpdateStatus({ ...base, status: 'available', availableVersion: '1.6.0' })).toBe('发现新版本 1.6.0，可查看说明后立即安装。');
     expect(describeUpdateStatus({ ...base, status: 'downloading' })).toContain('请保持应用打开');
     expect(describeUpdateStatus({ ...base, status: 'relaunching' })).toContain('正在重启');
-    expect(describeUpdateStatus(base)).toContain('静默检查更新');
+    expect(describeUpdateStatus(base)).toContain('不会自动检查更新');
+  });
+
+  it('这个版本的应用内更新关着', () => {
+    expect(IN_APP_UPDATES_ENABLED).toBe(false);
   });
 });

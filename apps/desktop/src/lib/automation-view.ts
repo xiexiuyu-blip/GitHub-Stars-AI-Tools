@@ -92,8 +92,8 @@ export type LastReadmeCheck = {
 /** 整理一个工具大约用多少 token（2026-10-04 真实记录：输入约 4300 + 输出约 1500，成功的卡平均约 5.7–6.3 千，取 6000）。只用来估「约整理多少个」。 */
 export const TOKENS_PER_REPO = 6000;
 
-/** 真实记录：v3 说明第一批 5 张平均约 7.3 千（含思考）；后台刹车线 `FULL_SCAN_TOKENS_PER_CARD` 也是 7500，两处保持一致。只用于这一轮的预计花费，不用于每天额度折算。 */
-export const FULL_SCAN_TOKENS_PER_REPO = 7500;
+/** 真实记录：切库后全量整理约 500 张，实测每张约 9 千（含思考）；Rust 的 `FULL_SCAN_TOKENS_PER_CARD` 与前端的 `FULL_SCAN_TOKENS_PER_REPO` 必须一致，改一处要同时改另一处。只用于这一轮的预计花费，不用于每天额度折算。 */
+export const FULL_SCAN_TOKENS_PER_REPO = 9000;
 
 /** 额度档位：名字 + 每天约整理多少个。0 是关闭。 */
 export const BUDGET_PRESETS: ReadonlyArray<{ tokens: number; title: string; hint: string }> = [

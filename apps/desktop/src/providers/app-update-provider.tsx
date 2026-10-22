@@ -8,7 +8,7 @@ import { getVersion } from '@tauri-apps/api/app';
 import { relaunch } from '@tauri-apps/plugin-process';
 import { check, type Update } from '@tauri-apps/plugin-updater';
 import type { DownloadEvent } from '@tauri-apps/plugin-updater';
-import { describeUpdaterError, UPDATE_RELAUNCH_FAILED, UPDATE_WINDOW_STILL_OPEN } from '@/lib/api';
+import { describeUpdaterError, IN_APP_UPDATES_ENABLED, UPDATE_RELAUNCH_FAILED, UPDATE_WINDOW_STILL_OPEN } from '@/lib/api';
 
 export type AppUpdateStatus =
   | 'idle'
@@ -84,6 +84,10 @@ export function AppUpdateProvider({ children }: { children: ReactNode }) {
   }, []);
 
   async function checkForUpdate({ silent = false }: CheckForUpdateOptions = {}) {
+    if (!IN_APP_UPDATES_ENABLED) {
+      return;
+    }
+
     if (installInFlightRef.current || relaunchInFlightRef.current) {
       return;
     }
@@ -104,10 +108,6 @@ export function AppUpdateProvider({ children }: { children: ReactNode }) {
       checkInFlightRef.current = null;
     }
   }
-
-  useEffect(() => {
-    void checkForUpdate({ silent: true });
-  }, []);
 
   async function installUpdate() {
     if (installInFlightRef.current || relaunchInFlightRef.current) {
