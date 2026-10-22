@@ -1,0 +1,1209 @@
+<!doctype html><html><head><meta charset=utf8><meta name=viewport content="width=device-width,initial-scale=1,viewport-fit=cover"><style>:root{color-scheme:light;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}html{scroll-padding-top:env(safe-area-inset-top,0px)}body{margin:0;padding:0;font:14px -apple-system,BlinkMacSystemFont,sans-serif;background:#fff;color:#000}img{max-width:100%}[hidden]:not([hidden=until-found i]){display:none!important}</style></head><body>
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="claude:viewport-fit-sides" content="cover">
+<meta name="color-scheme" content="light dark">
+<title>Starcat 对照</title>
+<style>
+:root{
+  --bg:#f5f3ee; --surface:#ffffff; --surface-2:#efece5; --ink:#1d1c19; --ink-2:#56534b; --ink-3:#85816f; --line:#e2ded3;
+  --him:#a85a00; --him-bg:#fcefd6; --him-line:#efd29a;
+  --us:#1f5fd9; --us-bg:#e8effd; --us-line:#b7cdf5;
+  --even:#566070; --even-bg:#e9ecf1; --even-line:#cfd5de;
+  --free:#16783a; --free-bg:#dff2e5; --cost:#b4400d; --cost-bg:#fce6d8;
+  --ok:#2f9e5b; --slow:#c99a12; --stale:#d9622b; --arch:#8d8a80;
+  --shadow:0 1px 2px rgba(30,25,10,.05),0 10px 30px rgba(30,25,10,.07);
+  color-scheme:light;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --bg:#121211; --surface:#1b1b19; --surface-2:#242421; --ink:#f1efe9; --ink-2:#b9b5aa; --ink-3:#85816f; --line:#34332e;
+    --him:#f5b942; --him-bg:#3a2d12; --him-line:#5b4416;
+    --us:#7aa7ff; --us-bg:#14233f; --us-line:#2a467f;
+    --even:#aab2c0; --even-bg:#262a31; --even-line:#3a404a;
+    --free:#6ccf8e; --free-bg:#132a1c; --cost:#ffa275; --cost-bg:#33190d;
+    --ok:#4fc27f; --slow:#e6b93a; --stale:#f08650; --arch:#9a968a;
+    --shadow:0 1px 2px rgba(0,0,0,.4),0 10px 30px rgba(0,0,0,.35);
+    color-scheme:dark;
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#121211; --surface:#1b1b19; --surface-2:#242421; --ink:#f1efe9; --ink-2:#b9b5aa; --ink-3:#85816f; --line:#34332e;
+  --him:#f5b942; --him-bg:#3a2d12; --him-line:#5b4416;
+  --us:#7aa7ff; --us-bg:#14233f; --us-line:#2a467f;
+  --even:#aab2c0; --even-bg:#262a31; --even-line:#3a404a;
+  --free:#6ccf8e; --free-bg:#132a1c; --cost:#ffa275; --cost-bg:#33190d;
+  --ok:#4fc27f; --slow:#e6b93a; --stale:#f08650; --arch:#9a968a;
+  --shadow:0 1px 2px rgba(0,0,0,.4),0 10px 30px rgba(0,0,0,.35);
+  color-scheme:dark;
+}
+
+*{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+body{
+  margin:0; background:var(--bg); color:var(--ink);
+  font:16px/1.7 -apple-system,BlinkMacSystemFont,"PingFang SC","Hiragino Sans GB","Noto Sans SC","Microsoft YaHei",system-ui,sans-serif;
+  -webkit-font-smoothing:antialiased;
+}
+.wrap{max-width:1120px;margin:0 auto;padding:0 max(16px,env(safe-area-inset-right)) 80px max(16px,env(safe-area-inset-left))}
+img{display:block;max-width:100%;height:auto}
+a{color:var(--us)}
+b,strong{font-weight:700}
+h1,h2,h3,h4,p,ul,ol,figure{margin:0}
+ul,ol{padding:0;list-style:none}
+.num{font-variant-numeric:tabular-nums}
+
+/* ---------- 顶部 ---------- */
+.hero{padding:44px 0 8px}
+.eyebrow{font-size:13px;letter-spacing:.08em;color:var(--ink-3);font-weight:600}
+h1{font-size:clamp(30px,5.4vw,50px);line-height:1.2;font-weight:800;letter-spacing:-.01em;margin-top:10px}
+.lede{margin-top:16px;max-width:42em;color:var(--ink-2);font-size:17px}
+.score{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-top:28px}
+.tile{background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:14px 16px;box-shadow:var(--shadow)}
+.tile b{display:block;font-size:40px;line-height:1.1;font-weight:800;font-variant-numeric:tabular-nums}
+.tile span{font-size:13.5px;color:var(--ink-2)}
+.tile.him{background:var(--him-bg);border-color:var(--him-line)} .tile.him b{color:var(--him)}
+.tile.even{background:var(--even-bg);border-color:var(--even-line)} .tile.even b{color:var(--even)}
+.tile.us{background:var(--us-bg);border-color:var(--us-line)} .tile.us b{color:var(--us)}
+.tldr{margin-top:14px;background:var(--surface);border:1px solid var(--line);border-left:4px solid var(--ink);border-radius:12px;padding:16px 20px;display:grid;gap:6px}
+.tldr h2{font-size:13px;letter-spacing:.08em;color:var(--ink-3)}
+.tldr p{font-size:16px}
+.jump{display:flex;gap:8px;margin:22px 0 0;overflow-x:auto;padding-bottom:4px;scrollbar-width:none}
+.jump::-webkit-scrollbar{display:none}
+.jump a{flex:none;text-decoration:none;color:var(--ink-2);background:var(--surface);border:1px solid var(--line);border-radius:999px;padding:6px 14px;font-size:14px}
+.jump a:hover{color:var(--ink);border-color:var(--ink-3)}
+
+/* ---------- 章节 ---------- */
+section{margin-top:64px;scroll-margin-top:16px}
+.kicker{font-size:13px;letter-spacing:.08em;color:var(--ink-3);font-weight:700}
+h2.t{font-size:clamp(23px,3.4vw,30px);line-height:1.3;font-weight:800;margin-top:4px}
+.sub{margin-top:8px;color:var(--ink-2);max-width:44em}
+
+/* ---------- 定位对照表 ---------- */
+.vs{margin-top:22px;background:var(--surface);border:1px solid var(--line);border-radius:16px;overflow:hidden;box-shadow:var(--shadow)}
+.vs-head,.vs-row{display:grid;grid-template-columns:7.5em 1fr 1fr}
+.vs-head div{padding:12px 16px;font-weight:700;font-size:14px;border-bottom:1px solid var(--line)}
+.vs-head .h-him{color:var(--him);background:var(--him-bg)}
+.vs-head .h-us{color:var(--us);background:var(--us-bg)}
+.vs-row>div{padding:12px 16px;border-bottom:1px solid var(--line);font-size:15px}
+.vs-row:last-child>div{border-bottom:0}
+.vs-row .lab{color:var(--ink-3);font-size:13.5px;font-weight:600}
+
+/* ---------- 截图 ---------- */
+.shots{display:grid;gap:22px;margin-top:26px}
+.shot{position:relative;border-radius:14px;overflow:hidden;border:1px solid var(--line);box-shadow:var(--shadow);background:#161614}
+.shot a{display:block}
+.shot .who{position:absolute;left:12px;top:12px;font-size:13px;font-weight:700;padding:3px 11px;border-radius:999px;color:#fff;box-shadow:0 2px 8px rgba(0,0,0,.35)}
+.who.him{background:#c47a0a}.who.us{background:#2f6df0}
+.cap{margin-top:9px;font-size:14px;color:var(--ink-2)}
+.cap em{font-style:normal;color:var(--ink-3)}
+
+.usage{margin-top:26px;background:var(--surface);border:1px solid var(--line);border-radius:16px;padding:20px 22px;display:grid;grid-template-columns:auto 1fr;gap:10px 28px;align-items:center;box-shadow:var(--shadow)}
+.usage .big{font-size:46px;font-weight:800;line-height:1;font-variant-numeric:tabular-nums}
+.usage .big small{font-size:20px;color:var(--ink-3);font-weight:700}
+.usage .lbl{font-size:13.5px;color:var(--ink-2);margin-top:4px}
+.bar{height:12px;border-radius:99px;background:var(--surface-2);overflow:hidden;border:1px solid var(--line)}
+.bar i{display:block;height:100%;width:.2%;min-width:6px;background:var(--us)}
+.usage .facts{display:flex;flex-wrap:wrap;gap:6px 18px;margin-top:10px;font-size:14px;color:var(--ink-2)}
+.usage .facts b{color:var(--ink)}
+.usage .take{grid-column:1/-1;border-top:1px solid var(--line);padding-top:12px;font-size:15px}
+
+/* ---------- 「Starcat 更好」卡片 ---------- */
+.cards{display:grid;gap:22px;margin-top:26px}
+.card{background:var(--surface);border:1px solid var(--line);border-left:5px solid var(--him);border-radius:16px;padding:22px 24px;box-shadow:var(--shadow)}
+.card-h{display:flex;gap:12px;align-items:flex-start;flex-wrap:wrap}
+.card-h .n{flex:none;width:30px;height:30px;border-radius:50%;background:var(--him-bg);color:var(--him);font-weight:800;display:grid;place-items:center;font-size:15px;margin-top:1px}
+.card-h h3{flex:1 1 280px;font-size:clamp(18px,2.4vw,21px);line-height:1.4;font-weight:800}
+.pill{flex:none;font-size:13px;font-weight:700;padding:3px 12px;border-radius:999px;border:1px solid transparent;white-space:nowrap}
+.pill.him{background:var(--him-bg);color:var(--him);border-color:var(--him-line)}
+.pill.us{background:var(--us-bg);color:var(--us);border-color:var(--us-line)}
+.pill.even{background:var(--even-bg);color:var(--even);border-color:var(--even-line)}
+.cols{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:16px}
+.side{background:var(--surface-2);border-radius:12px;padding:12px 15px;font-size:15px}
+.side h4{font-size:12.5px;letter-spacing:.06em;margin-bottom:4px}
+.side.him h4{color:var(--him)} .side.us h4{color:var(--us)}
+.side .note{display:block;margin-top:8px;font-size:13.5px;color:var(--ink-2)}
+.media{display:flex;flex-wrap:wrap;gap:14px;margin-top:16px;align-items:flex-start}
+.media .shot{flex:0 1 auto}
+.media .shot.fit img{width:100%}
+.media figure{display:block}
+.media figcaption{font-size:13px;color:var(--ink-3);margin-top:6px}
+.fix{margin-top:16px;background:var(--us-bg);border:1px solid var(--us-line);border-radius:12px;padding:14px 16px}
+.fix h4{font-size:12.5px;letter-spacing:.06em;color:var(--us);margin-bottom:6px}
+.fix li{position:relative;padding-left:20px;font-size:15px}
+.fix li+li{margin-top:5px}
+.fix li::before{content:"";position:absolute;left:3px;top:.62em;width:7px;height:7px;border-radius:2px;background:var(--us)}
+.tags{display:flex;flex-wrap:wrap;gap:8px;margin-top:14px;align-items:center}
+.tag{font-size:13px;font-weight:600;padding:2px 10px;border-radius:999px;background:var(--surface-2);color:var(--ink-2);border:1px solid var(--line)}
+.tag.free{background:var(--free-bg);color:var(--free);border-color:transparent}
+.tag.cost{background:var(--cost-bg);color:var(--cost);border-color:transparent}
+.ref{margin-top:10px;font-size:12.5px;color:var(--ink-3);word-break:break-all}
+
+/* 示意小件 */
+.mock{flex:1 1 320px;border:1px dashed var(--him-line);border-radius:12px;padding:12px 14px;background:var(--surface)}
+.mock-cap{font-size:12.5px;color:var(--ink-3);margin-bottom:8px}
+.mock-search{font-size:14px;border:1px solid var(--line);background:var(--surface-2);border-radius:8px;padding:6px 10px;margin-bottom:8px;color:var(--ink-2)}
+.hit{display:grid;grid-template-columns:auto 1fr;gap:2px 10px;align-items:center;padding:8px 0;border-top:1px solid var(--line)}
+.hit .stars{grid-row:1/3;color:var(--him);font-size:14px;letter-spacing:1px}
+.hit .stars i{font-style:normal;color:var(--line)}
+.hit b{font-size:14.5px}
+.hit .why{font-size:12.5px;color:var(--us)}
+.chips{display:flex;flex-wrap:wrap;gap:8px}
+.chip{display:inline-flex;align-items:center;gap:6px;font-size:13px;padding:3px 11px;border-radius:999px;background:var(--surface-2);border:1px solid var(--line)}
+.chip i{width:8px;height:8px;border-radius:50%;display:inline-block}
+.chip.ok i{background:var(--ok)}.chip.slow i{background:var(--slow)}.chip.stale i{background:var(--stale)}.chip.arch i{background:var(--arch)}
+
+/* ---------- 其余共有功能 ---------- */
+.group{margin-top:26px}
+.group>h3{font-size:17px;font-weight:800;display:flex;gap:10px;align-items:center}
+.rows{display:grid;gap:12px;margin-top:12px}
+.r{background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:16px 18px;display:grid;grid-template-columns:10.5em 1fr 1fr;gap:6px 18px;box-shadow:var(--shadow)}
+.r .nm{font-weight:800;font-size:16px;display:flex;flex-direction:column;gap:8px;align-items:flex-start}
+.r .c{font-size:14.5px}
+.r .c small{display:block;font-size:12px;letter-spacing:.06em;font-weight:700;margin-bottom:2px}
+.r .c.him small{color:var(--him)}.r .c.us small{color:var(--us)}
+.r .why{grid-column:2/-1;font-size:14px;color:var(--ink-2);border-top:1px dashed var(--line);padding-top:8px;margin-top:2px}
+.r .why strong{color:var(--ink)}
+.r .fig{grid-column:2/-1;margin-top:6px}
+.pair{display:flex;gap:14px;flex-wrap:wrap;align-items:flex-start}
+.pair .shot{flex:0 0 auto}
+.pair img{height:300px;width:auto;max-width:100%}
+.strip{margin-top:6px}
+
+/* ---------- 设置页 ---------- */
+.score.mini{margin-top:22px}
+.score.mini .tile b{font-size:34px}
+.group .cards{margin-top:14px}
+.figs{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;margin-top:16px;align-items:start}
+.figs.a{grid-template-columns:minmax(0,420px) minmax(0,1fr)}
+.figs.one{grid-template-columns:minmax(0,440px)}
+.figs.one.wide{grid-template-columns:minmax(0,760px)}
+.r .fig .figs{margin-top:0}
+.sfig{min-width:0;margin:0}
+.sfig .frame{position:relative;display:block;border-radius:10px;overflow:hidden;border:1px solid var(--line);background:#161614;box-shadow:var(--shadow)}
+.sfig .frame img{width:100%;height:auto}
+.sfig .frame.tall{max-height:360px}
+.sfig .frame.tall::after{content:"";position:absolute;left:0;right:0;bottom:0;height:72px;background:linear-gradient(to bottom,rgba(22,22,20,0),rgba(22,22,20,.94));pointer-events:none}
+.sfig figcaption{margin-top:6px;font-size:12.5px;color:var(--ink-3)}
+.sfig figcaption em{font-style:normal}
+.sfig figcaption a{color:var(--us);text-decoration:none;white-space:nowrap}
+
+/* ---------- 第 3 版新增 ---------- */
+.jump a.new{background:var(--him-bg);border-color:var(--him-line);color:var(--him);font-weight:600}
+.whatsnew{margin-top:26px;background:var(--him-bg);border:1px solid var(--him-line);border-left:4px solid var(--him);border-radius:12px;padding:16px 20px}
+.whatsnew h2{font-size:13px;letter-spacing:.08em;color:var(--him);margin-bottom:8px}
+.whatsnew li{position:relative;padding-left:20px;font-size:15.5px}
+.whatsnew li+li{margin-top:7px}
+.whatsnew li::before{content:"";position:absolute;left:3px;top:.68em;width:7px;height:7px;border-radius:2px;background:var(--him)}
+.whatsnew a{color:var(--him);font-weight:700}
+.pill.na{background:var(--surface-2);color:var(--ink-3);border-color:var(--line)}
+.kicker .new{display:inline-block;margin-left:8px;font-size:11.5px;letter-spacing:.04em;padding:1px 8px;border-radius:999px;background:var(--him-bg);color:var(--him);border:1px solid var(--him-line);vertical-align:1px}
+
+/* 总表（设置页 20 页 / 完整度 / 文案） */
+.mx{margin-top:14px;background:var(--surface);border:1px solid var(--line);border-radius:16px;overflow:hidden;box-shadow:var(--shadow)}
+.mx>:first-child{border-top:0}
+.mx-h,.mx-r{display:grid;grid-template-columns:10em minmax(0,1fr) minmax(0,1fr) 112px;gap:2px 16px;padding:10px 16px}
+.mx-h{font-size:13px;font-weight:700;color:var(--ink-3);padding-top:11px;padding-bottom:9px}
+.mx-h .h-him{color:var(--him)} .mx-h .h-us{color:var(--us)} .mx-h>:last-child{text-align:right}
+.mx-g{padding:7px 16px;font-size:12.5px;font-weight:800;letter-spacing:.08em;color:var(--ink-3);background:var(--surface-2);border-top:1px solid var(--line)}
+.mx-r{border-top:1px solid var(--line);font-size:14px;align-items:start}
+.mx-g+.mx-r{border-top:0}
+.mx-r .pg{font-weight:800;font-size:14.5px;line-height:1.5}
+.mx-r .pg .to{display:block;font-size:12px;font-weight:500;color:var(--ink-3);margin-top:1px}
+.mx-r .pg .to a{font-weight:600}
+.mx-r .pg .to a{color:var(--us);text-decoration:none}
+.mx-r .it{color:var(--ink-2);line-height:1.6}
+.mx-r .vd{justify-self:end}
+.mx-r .vd .pill{font-size:12px;padding:2px 10px}
+
+/* 05：AI 助手接入 */
+.parts{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin-top:22px}
+.part{background:var(--surface);border:1px solid var(--line);border-top:4px solid var(--him);border-radius:14px;padding:14px 16px 16px;box-shadow:var(--shadow)}
+.part .k{font-size:12.5px;font-weight:800;letter-spacing:.04em;color:var(--him)}
+.part h3{font-size:16.5px;font-weight:800;line-height:1.4;margin-top:2px}
+.part p{margin-top:6px;font-size:14px;color:var(--ink-2)}
+.good{margin-top:16px;background:var(--him-bg);border:1px solid var(--him-line);border-radius:12px;padding:14px 16px}
+.good h4{font-size:12.5px;letter-spacing:.06em;color:var(--him);margin-bottom:6px}
+.good li{position:relative;padding-left:20px;font-size:15px}
+.good li+li{margin-top:5px}
+.good li::before{content:"";position:absolute;left:3px;top:.62em;width:7px;height:7px;border-radius:2px;background:var(--him)}
+
+/* 06：RAG 四页 */
+.rcards{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:18px;margin-top:22px}
+.rcard{background:var(--surface);border:1px solid var(--line);border-radius:16px;padding:18px 20px;box-shadow:var(--shadow);display:flex;flex-direction:column;gap:10px;min-width:0}
+.rc-h{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.rc-h h3{flex:1 1 auto;font-size:18px;font-weight:800}
+.rc-d{font-size:14.5px;color:var(--ink-2)}
+.rcard .sfig{margin-top:2px}
+.rc-t{font-size:14.5px;border-top:1px dashed var(--line);padding-top:10px;margin-top:auto}
+.rc-t b{color:var(--us)}
+.stack{display:grid;gap:22px;margin-top:22px}
+.stack .card{margin:0}
+.note-line{margin-top:12px;font-size:14px;color:var(--ink-2);background:var(--surface-2);border-radius:10px;padding:9px 13px}
+
+/* ---------- 各自独有 ---------- */
+.two{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-top:22px}
+.box{background:var(--surface);border:1px solid var(--line);border-radius:16px;padding:18px 20px;box-shadow:var(--shadow)}
+.box h3{font-size:17px;font-weight:800;margin-bottom:10px}
+.box.him{border-top:4px solid var(--him)} .box.us{border-top:4px solid var(--us)}
+.box li{padding:9px 0;border-top:1px solid var(--line);font-size:15px}
+.box li:first-of-type{border-top:0;padding-top:0}
+.box li b{display:block}
+.box li span.d{color:var(--ink-2);font-size:14px}
+.verdict{display:inline-block;font-size:12.5px;font-weight:700;padding:1px 9px;border-radius:999px;margin-left:6px;vertical-align:1px}
+.verdict.take{background:var(--free-bg);color:var(--free)}
+.verdict.skip{background:var(--even-bg);color:var(--even)}
+.keep{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-top:20px}
+
+/* ---------- 建议顺序 ---------- */
+.steps{margin-top:22px;display:grid;gap:10px;counter-reset:s}
+.step{counter-increment:s;background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:14px 18px 14px 56px;position:relative;display:grid;grid-template-columns:1fr auto;gap:6px 16px;align-items:center;box-shadow:var(--shadow)}
+.step::before{content:counter(s);position:absolute;left:16px;top:14px;width:28px;height:28px;border-radius:50%;background:var(--us-bg);color:var(--us);font-weight:800;display:grid;place-items:center;font-size:14px}
+.step.later::before{background:var(--surface-2);color:var(--ink-3)}
+.step b{font-size:16px}
+.step .d{grid-column:1;font-size:14px;color:var(--ink-2)}
+.step .tags{grid-column:2;grid-row:1/3;margin:0;justify-content:flex-end}
+.ask{margin-top:22px;background:var(--surface);border:1px solid var(--line);border-left:4px solid var(--us);border-radius:14px;padding:18px 22px}
+.ask h3{font-size:17px;font-weight:800;margin-bottom:8px}
+.ask ol{counter-reset:a}
+.ask li{counter-increment:a;position:relative;padding-left:28px;font-size:15px}
+.ask li+li{margin-top:8px}
+.ask li::before{content:counter(a);position:absolute;left:0;top:1px;font-weight:800;color:var(--us)}
+.foot{margin-top:56px;padding-top:20px;border-top:1px solid var(--line);font-size:13.5px;color:var(--ink-3);display:grid;gap:4px}
+
+/* ---------- 手机 ---------- */
+@media (max-width:820px){
+  .score{grid-template-columns:repeat(2,1fr)}
+  .cols,.two,.keep{grid-template-columns:1fr}
+  .vs-head{display:none}
+  .vs-row{grid-template-columns:1fr 1fr}
+  .vs-row .lab{grid-column:1/-1;padding-bottom:0;border-bottom:0;background:var(--surface-2)}
+  .vs-row>div:not(.lab)::before{content:attr(data-who);display:block;font-size:12px;font-weight:700;margin-bottom:2px}
+  .vs-row>div[data-who="Starcat"]::before{color:var(--him)}
+  .vs-row>div[data-who="我们"]::before{color:var(--us)}
+  .r{grid-template-columns:1fr}
+  .r .why,.r .fig{grid-column:1}
+  .step{grid-template-columns:1fr}
+  .step .tags{grid-column:1;grid-row:auto;justify-content:flex-start;margin-top:6px}
+  .usage{grid-template-columns:1fr}
+  .figs,.figs.a,.figs.one,.figs.one.wide{grid-template-columns:minmax(0,1fr)}
+  .parts{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .rcards{grid-template-columns:minmax(0,1fr)}
+  .mx-h{display:none}
+  .mx-r{grid-template-columns:minmax(0,1fr) auto}
+  .mx-r .pg{grid-column:1;grid-row:1}
+  .mx-r .vd{grid-column:2;grid-row:1}
+  .mx-r .it{grid-column:1/-1}
+  .mx-r .it::before{content:attr(data-who);display:block;font-size:12px;font-weight:700;margin-bottom:1px}
+  .mx-r .it[data-who="Starcat"]::before{color:var(--him)}
+  .mx-r .it[data-who="我们"]::before{color:var(--us)}
+}
+@media (max-width:520px){
+  .vs-row{grid-template-columns:1fr}
+  .card{padding:18px 16px}
+  .hero{padding-top:28px}
+  .pair img{height:240px}
+  .parts{grid-template-columns:minmax(0,1fr)}
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header class="hero">
+  <p class="eyebrow">对照报告 · 2026-10-19 · 第 4 版</p>
+  <h1>Starcat 比我们强在哪，<br>我们能怎么改</h1>
+  <p class="lede">Starcat 是你朋友做的成熟 Mac 应用（现已按 MIT 协议开源，你装的是 1.9.0 Pro）。这一页比<strong>两边都有的功能</strong>、它的<strong>全部 20 个设置页</strong>、它的<strong>AI 助手接入（CLI / MCP）和 RAG</strong>，还有<strong>产品完整度和文案</strong>：逐项打分，再说我们能怎么改。</p>
+
+  <div class="whatsnew">
+    <h2>这一版改了什么（你提的几处，我都补了）</h2>
+    <ul>
+      <li><strong>更正一个大判断（你指出来的）：</strong>我把「和收藏对话（RAG）」判成「不借、交给 Codex」，还把产品当成只会「复制给 Codex」，这是误解。<strong>知识库问答、仓库 AI 对话、AI 助手接入都要做</strong>，已经和 Starcat 好的部分一起排进后续计划，最新顺序见《<a href="https://claude.ai/artifact/4AXBvrtrr31TWoJ7yVx2u1">进度与规划</a>》。本页第 05、06、09、10 节按这个改了。</li>
+      <li><strong>我上一版把 MCP / 令牌判成「差不多」，判错了。</strong>它其实是一整套「AI 助手接入」：配对设备、一键复制配置、命令行、Skill。已改判「Starcat 更好」，单独一节：<a href="#agent">第 05 节</a>。</li>
+      <li><strong>20 个设置页这次全比过了。</strong>上一版只细比了 8 页，另外 12 页被我当成「用不上」跳过了。现在：10 页 Starcat 更好、4 页差不多、6 页我们用不上（<a href="#settings">第 04 节总表</a>）。</li>
+      <li><strong>RAG 和本地工具单独成节</strong>（<a href="#rag">第 06 节</a>）：它做的是「和收藏对话」，这一版已改判为要做；设置页的排法、状态牌和安全写法也值得借。顺带更正一处：我们藏着的向量检索面板其实是全的，缺的是接线。</li>
+      <li><strong>产品完整度、文案各一节</strong>（<a href="#complete">第 07 节</a>、<a href="#copy">第 08 节</a>）：差距主要在外围和「写法规范」，不在核心；单句文案我们并不差。</li>
+    </ul>
+  </div>
+
+  <div class="score" aria-label="记分牌">
+    <div class="tile"><b>15</b><span>两边都有的功能</span></div>
+    <div class="tile him"><b>7</b><span>Starcat 更好</span></div>
+    <div class="tile even"><b>5</b><span>差不多</span></div>
+    <div class="tile us"><b>3</b><span>我们更好</span></div>
+  </div>
+
+  <div class="tldr">
+    <h2>结论</h2>
+    <p>Starcat 在「找得到、看得清、界面打磨」上更成熟；我们在「自动归到业务场景、中文理解卡、找方案交接单」上走了一条它没走的路；它有的「和收藏对话」「AI 助手接入」，我们也会做。</p>
+    <p><strong>最该借的 4 样，都不花 AI 额度：</strong>维护状态标签 · 搜索排序与命中原因 · 整理进度看板 · 设计契约（DESIGN.md）。</p>
+    <p><strong>设置页另有 7 处能借：</strong>设置搜索与分组 · AI 服务商（补 MiniMax / CC Switch 导入）· 「数据去哪了」一页 · 分档清理 · 快捷键一览 · 系统通知 · 实验功能区（第 04 节）。</p>
+    <p><strong>这一版新增的重点：</strong>AI 助手接入，先做只读 MCP（第 05 节）· 把现成的向量检索面板接上线并写成白话，再加三档预设（第 06 节）· 设置页写法规范与文案盘点，由我来写（第 07、08 节）· 本机命令行当 AI 后端，先小试（第 06 节）。</p>
+    <p><strong>第 4 版更正：</strong>知识库问答和仓库 AI 对话改判为「要做」，与 AI 助手接入一起排进后续计划，按「三个出口、一个检索核心」组织（第 10 节）。</p>
+  </div>
+
+  <nav class="jump" aria-label="本页目录">
+    <a href="#glance">一眼看区别</a>
+    <a href="#better">Starcat 更强的 7 处</a>
+    <a href="#rest">其余 8 项</a>
+    <a href="#settings">设置页 20 页</a>
+    <a class="new" href="#agent">AI 助手接入</a>
+    <a class="new" href="#rag">RAG 与本地工具</a>
+    <a class="new" href="#complete">产品完整度</a>
+    <a class="new" href="#copy">文案</a>
+    <a href="#unique">各自独有</a>
+    <a href="#plan">建议顺序</a>
+  </nav>
+</header>
+
+<!-- ============ 01 一眼看区别 ============ -->
+<section id="glance">
+  <p class="kicker">01</p>
+  <h2 class="t">一眼看区别</h2>
+  <p class="sub">同样是管 GitHub 收藏，出发点不一样：Starcat 把收藏「整理好、找得到、读得懂」；我们把收藏「变成能直接用的方案」：在 App 里问、让 AI 助手自己来取，或复制交接单给 Codex。</p>
+
+  <div class="vs">
+    <div class="vs-head"><div></div><div class="h-him">Starcat</div><div class="h-us">Fox Stars Lab</div></div>
+    <div class="vs-row"><div class="lab">定位</div><div data-who="Starcat">收藏管家：整理、搜索、阅读、洞察</div><div data-who="我们">方案工具：收藏 → 找方案 → 交接单（复制给 Codex）；问答和 AI 助手接入已排进计划</div></div>
+    <div class="vs-row"><div class="lab">看到的说明</div><div data-who="Starcat">GitHub 英文原描述；AI 摘要由你发起生成（单个或批量），后台自动整理也能出，但你这台没开</div><div data-who="我们">中文理解卡：它能做什么、怎么试（约 500 张，自动生成）</div></div>
+    <div class="vs-row"><div class="lab">怎么整理</div><div data-who="Starcat">你来建标签、分组、笔记、智能集合；AI 可批量给建议，你逐条审核；也有后台自动整理，要在设置里自己打开（你这台没开）</div><div data-who="我们">自动：归到 13 个业务场景（小红书、公众号、电商……）</div></div>
+    <div class="vs-row"><div class="lab">AI 的用法</div><div data-who="Starcat">搜索、摘要、标签建议、知识库问答（RAG）；MCP + 命令行 + Skill，让外部 AI 直接用你的收藏；还内置免费的本地小模型</div><div data-who="我们">理解卡、找方案、一键交接单（复制给 Codex，要你手动点）；知识库问答、AI 助手接入在计划中</div></div>
+    <div class="vs-row"><div class="lab">做法</div><div data-who="Starcat">原生 Mac 应用（SwiftUI），MIT 开源，18 种语言</div><div data-who="我们">Tauri 桌面应用，自用，只有中文</div></div>
+    <div class="vs-row"><div class="lab">花钱</div><div data-who="Starcat">核心免费，AI 额度和高级功能按档订阅</div><div data-who="我们">用你自己的 AI 额度，默认 0，要你点头才花</div></div>
+  </div>
+
+  <div class="shots">
+    <figure>
+      <div class="shot"><span class="who him">Starcat</span><a href="img/starcat-main.jpg" target="_blank" rel="noopener"><img src="img/starcat-main.jpg" width="1400" height="854" alt="Starcat 资料列表与详情：每个收藏像一张名片，右侧直接读 README"></a></div>
+      <figcaption class="cap">每个收藏像一张名片（头像、语言、星数、分支数），右上角的字母 C / D 是健康度；右边直接读 README；顶栏切「星标 / 探索 / 活动 / 洞察」。</figcaption>
+    </figure>
+    <figure>
+      <div class="shot"><span class="who us">Fox Stars Lab</span><a href="img/ours-main.jpg" target="_blank" rel="noopener"><img src="img/ours-main.jpg" width="1400" height="875" alt="我们的资料库：左侧按业务场景，中间列表，右侧中文说明"></a></div>
+      <figcaption class="cap">左边按业务场景，中间是列表，右边是详情：「没看 / 想试 / 试过 / 在用」、中文说明区和一键「复制给 Codex」。<em>（示意数据，不是你的真实库；这张没配 AI，所以说明区先显示英文原文。）</em></figcaption>
+    </figure>
+  </div>
+
+  <div class="usage">
+    <div>
+      <div class="big">1<small> / 542</small></div>
+      <div class="lbl">你在 Starcat 里打了标签的收藏</div>
+    </div>
+    <div>
+      <div class="bar" role="img" aria-label="有标签的占 0.2%"><i></i></div>
+      <div class="facts"><span><b>541</b> 个还没打标签</span><span><b>97%</b> 没读过</span><span>近 30 天新增 <b>75</b> 个</span></div>
+    </div>
+    <p class="take"><strong>要你主动发起的整理功能，在你手里基本没转起来。</strong>它有批量 AI 整理，也有后台自动整理，但你这台的自动整理开关是关着的（页面写着「尚未自动运行过」）；笔记 0 个、进知识库的 2 个（共 542）。这正是我们做「自动归类 + 中文理解卡」的理由，也是个提醒：凡是要你手动整理才有用的新功能，都要慎加。</p>
+  </div>
+</section>
+
+<!-- ============ 02 Starcat 更强的 7 处 ============ -->
+<section id="better">
+  <p class="kicker">02</p>
+  <h2 class="t">Starcat 比我们强的 7 处</h2>
+  <p class="sub">每一处都写了：它怎么做、我们现在怎么样、我们怎么改。「不花 AI 额度」的意思是纯本地计算，不会动你的额度。</p>
+
+  <div class="cards">
+
+    <!-- 1 搜索 -->
+    <article class="card">
+      <div class="card-h"><span class="n">1</span><h3>搜索：它会排序，还会说「为什么命中」</h3><span class="pill him">Starcat 更好</span></div>
+      <div class="cols">
+        <div class="side him"><h4>STARCAT</h4>关键词 + 语义一起找，结果按相关度分 1–4 星；每条带一句命中原因；项目名字面命中的保底靠前；边输入边出结果。</div>
+        <div class="side us"><h4>我们现在</h4>资料库只做「词匹配」：最多 4 个词，不排序，不说原因。本地语义搜索的代码有，但没启用（向量表是空的）。找方案走我们自己的打分，不受影响。</div>
+      </div>
+      <div class="media">
+        <div class="mock" role="img" aria-label="示意：搜索结果带相关度星级和命中原因">
+          <div class="mock-cap">示意 · 改完之后搜索结果会这样（设计稿，不是现有界面）</div>
+          <div class="mock-search">小红书 封面</div>
+          <div class="hit"><span class="stars">★★★★</span><b>cover-maker</b><span class="why">命中：项目名 · 中文说明</span></div>
+          <div class="hit"><span class="stars">★★★<i>☆</i></span><b>poster-skill</b><span class="why">命中：中文说明</span></div>
+          <div class="hit"><span class="stars">★★<i>☆☆</i></span><b>image-prompt-kit</b><span class="why">命中：话题</span></div>
+        </div>
+      </div>
+      <div class="fix"><h4>怎么改</h4><ul>
+        <li>先上全文索引和排序配方：项目名 &gt; 中文说明 &gt; 英文说明 &gt; 话题；字面命中保底；最后一个词支持前缀。</li>
+        <li>结果行加「命中：中文说明 / 话题 / 项目名」小标签（见上面的示意）。</li>
+        <li>再启用本地语义搜索（接手说明里「找得到」那一步，本来就在计划里），和关键词混合排序。</li>
+      </ul></div>
+      <div class="tags"><span class="tag free">不花 AI 额度</span><span class="tag">工作量：中</span><span class="tag">前两条先做</span></div>
+      <p class="ref">参考：Starcat 仓库 docs/3-设计/详细设计/29-关键词与全文检索设计.md · Starcat/Features/AI/SemanticSearchService.swift</p>
+    </article>
+
+    <!-- 2 维护状态 -->
+    <article class="card">
+      <div class="card-h"><span class="n">2</span><h3>维护状态：一眼看出哪些项目「已经没人维护」</h3><span class="pill him">Starcat 更好</span></div>
+      <div class="cols">
+        <div class="side him"><h4>STARCAT</h4>列表每行右上角一个字母（A–E），详情页有「健康评分 75 · C」，洞察里直接列出「维护风险 22 个 / 安全风险 9 个」，方便清理。<span class="note">注意：它的总分里有一块要安全评分数据，你的库里只有 18 / 542 个有，所以多数是 C / D，区分度一般。真正有用的是「维护活跃度」这一块。</span></div>
+        <div class="side us"><h4>我们现在</h4>详情里只有一行「项目最近更新：19 天前」；列表上没有标记，也没法筛选「疑似停更」。</div>
+      </div>
+      <div class="media">
+        <figure><div class="shot"><a href="img/starcat-badges.jpg" target="_blank" rel="noopener"><img src="img/starcat-badges.jpg" width="374" height="244" alt="Starcat 列表里每个收藏右上角的健康度字母"></a></div><figcaption>Starcat 列表里的 C / D 徽章</figcaption></figure>
+        <figure style="flex:1 1 420px;max-width:640px"><div class="shot fit"><a href="img/starcat-health.jpg" target="_blank" rel="noopener"><img src="img/starcat-health.jpg" width="1147" height="560" alt="Starcat 洞察中心的项目健康页：维护风险、安全风险清单"></a></div><figcaption>Starcat 洞察里的「项目健康」：维护风险 22、安全风险 9</figcaption></figure>
+        <div class="mock" role="img" aria-label="示意：维护状态小标签">
+          <div class="mock-cap">示意 · 我们的「维护状态」小标签</div>
+          <div class="chips">
+            <span class="chip ok"><i></i>活跃 · 3 天前推送</span>
+            <span class="chip slow"><i></i>放缓 · 4 个月没推送</span>
+            <span class="chip stale"><i></i>疑似停更 · 14 个月没推送</span>
+            <span class="chip arch"><i></i>已归档</span>
+          </div>
+        </div>
+      </div>
+      <div class="fix"><h4>怎么改</h4><ul>
+        <li>做一个轻量「维护状态」小标签：活跃 / 放缓 / 疑似停更 / 已归档。只用已有的最近推送时间和归档标记，不联网（门槛先按 3 个月、1 年，可调）。</li>
+        <li>资料库加筛选「疑似停更」；找方案命中停更工具时提示「这个可能已经不维护」。</li>
+        <li>不做字母评分：我们的库里算不出区分度。</li>
+      </ul></div>
+      <div class="tags"><span class="tag free">不花 AI 额度</span><span class="tag">工作量：小</span></div>
+      <p class="ref">参考：Starcat 仓库 docs/3-设计/详细设计/17-项目健康度与维护活跃度设计.md · Starcat/Core/Health/RepoHealthCalculator.swift</p>
+    </article>
+
+    <!-- 3 洞察 -->
+    <article class="card">
+      <div class="card-h"><span class="n">3</span><h3>洞察：它有一整页「我的收藏现在什么样」</h3><span class="pill him">Starcat 更好</span></div>
+      <div class="cols">
+        <div class="side him"><h4>STARCAT</h4>四张数字卡（项目数、近 30 天新增、正在使用、已整理）、近 12 周收藏节奏柱图、整理情况进度条、知识沉淀覆盖、技术分布、项目健康。</div>
+        <div class="side us"><h4>我们现在</h4>「今日」有 4 个数字和「今天值得先看」；没有趋势图，也没有「整理到哪了」的总览。</div>
+      </div>
+      <div class="media">
+        <figure style="flex:1 1 520px;max-width:760px"><div class="shot fit"><a href="img/starcat-insights.jpg" target="_blank" rel="noopener"><img src="img/starcat-insights.jpg" width="795" height="598" alt="Starcat 洞察概览：数字卡、收藏节奏柱图、整理情况"></a></div><figcaption>Starcat 的洞察概览（你自己的数据）</figcaption></figure>
+      </div>
+      <div class="fix"><h4>怎么改</h4><ul>
+        <li>不照搬大屏。在「今日」或「自动整理与备份」页加一块小看板：中文说明已整理 N / 总数、「没看 → 想试 → 试过 → 在用」的漏斗、近 12 周新收藏小柱图。</li>
+        <li>全部用本地数据画，不联网。</li>
+      </ul></div>
+      <div class="tags"><span class="tag free">不花 AI 额度</span><span class="tag">工作量：小到中</span></div>
+      <p class="ref">参考：Starcat 仓库 docs/3-设计/详细设计/49-洞察中心详细设计.md</p>
+    </article>
+
+    <!-- 4 README -->
+    <article class="card">
+      <div class="card-h"><span class="n">4</span><h3>README：它能整篇翻成中文，译文还会缓存</h3><span class="pill him">Starcat 更好</span></div>
+      <div class="cols">
+        <div class="side him"><h4>STARCAT</h4>详情页直接渲染 README（徽章、图片、视频都在），底部「翻译」一键翻，可整篇替换或分段对照，引擎可选系统翻译 / Google / AI；还会在后台提前把 README 拉好，打开就有。</div>
+        <div class="side us"><h4>我们现在</h4>「项目说明（README）」页能看原文；翻译只在「发现」候选里有，资料库里没有。资料库靠 AI 中文说明（只写要点，不是全文翻译）。</div>
+      </div>
+      <div class="media">
+        <figure><div class="shot"><a href="img/starcat-readme.jpg" target="_blank" rel="noopener"><img src="img/starcat-readme.jpg" width="736" height="474" alt="Starcat 详情页里渲染的 README，底部有翻译按钮"></a></div><figcaption>README 在详情页里直接渲染，底部有「翻译」</figcaption></figure>
+      </div>
+      <div class="fix"><h4>怎么改</h4><ul>
+        <li>把「发现」里现成的 README 翻译接到资料库详情页（后端命令已有，主要是接线）。</li>
+        <li>手动点了才翻译，译文存本地，不会自动花额度；默认仍先给中文说明。</li>
+      </ul></div>
+      <div class="tags"><span class="tag cost">手动点才花额度</span><span class="tag">工作量：小</span></div>
+      <p class="ref">参考：Starcat 仓库 Starcat/Features/AI/ReadmeTranslationService.swift</p>
+    </article>
+
+    <!-- 5 发现 -->
+    <article class="card">
+      <div class="card-h"><span class="n">5</span><h3>发现：它的来源更多；我们的思路更贴业务</h3><span class="pill him">Starcat 更好</span></div>
+      <div class="cols">
+        <div class="side him"><h4>STARCAT</h4>探索里有 发现 / 趋势 / 热门 / 新发布 / 周刊 / Awesome 六类来源；Awesome 清单可以自己加，在本地解析。</div>
+        <div class="side us"><h4>我们现在</h4>「发现」按业务场景去 GitHub 搜你还没收藏的（这个思路 Starcat 没有，很贴你的业务），但目前只有这一种来源。旧榜单已不在导航里（它的「GitHub 搜索榜」其实是全站 star 最高的 15 个，天天一样）。</div>
+      </div>
+      <div class="media">
+        <figure><div class="shot"><a href="img/starcat-explore.jpg" target="_blank" rel="noopener"><img src="img/starcat-explore.jpg" width="250" height="338" alt="Starcat 探索栏目：发现、趋势、热门、新发布、周刊、Awesome"></a></div><figcaption>Starcat 的探索来源</figcaption></figure>
+        <figure style="flex:1 1 380px;max-width:560px"><div class="shot fit"><a href="img/ours-discover.jpg" target="_blank" rel="noopener"><img src="img/ours-discover.jpg" width="1400" height="875" alt="我们的发现页：按场景去 GitHub 找还没收藏的工具"></a></div><figcaption>我们的发现：按场景缺口去找（偏少的场景排前面）</figcaption></figure>
+      </div>
+      <div class="fix"><h4>怎么改</h4><ul>
+        <li>加「Awesome 清单」来源：读公开的 Awesome 列表，抽出里面的项目，免费、不用 AI，并按场景分。</li>
+        <li>再加「新锐」来源：近 30 天新建、star 涨得快的项目，也按场景筛。</li>
+      </ul></div>
+      <div class="tags"><span class="tag free">不花 AI 额度</span><span class="tag">工作量：中</span></div>
+      <p class="ref">参考：Starcat 仓库 docs/2-产品/需求讨论/正式方案/Awesome发现栏目与来源管理正式方案.md · Starcat/Core/Sync/AwesomeRepository.swift</p>
+    </article>
+
+    <!-- 6 MCP -->
+    <article class="card">
+      <div class="card-h"><span class="n">6</span><h3>AI 助手接入（MCP / 命令行）：它已经是可用的产品，我们还停在源码阶段</h3><span class="pill him">Starcat 更好</span></div>
+      <div class="cols">
+        <div class="side him"><h4>STARCAT</h4>内置 MCP 服务，24 个工具，其中 14 个只读；写操作带「预演」和审计记录；只监听本机。设置里一页走完「配对设备 → 复制配置 → 装 Skill」，另有命令行。</div>
+        <div class="side us"><h4>我们现在</h4>MCP 源码放在 docs/rebuild/mcp，没打包，不能直接用；其中 log_usage 绕过 App 直接写库，和「只有 App 写库」的原则冲突。已有本地 API（带令牌）和「复制给 Codex」交接单。</div>
+      </div>
+      <div class="fix"><h4>怎么改</h4><ul>
+        <li>借它的工具分组与安全做法：只读白名单 + 写入前预演 + 审计；所有写入都经过 App。</li>
+        <li>打包之后，Codex 里可以直接「搜我的资料库、取参考包」，不用再手动复制。</li>
+      </ul></div>
+      <div class="tags"><span class="tag free">不花 AI 额度</span><span class="tag">工作量：只读版 中</span><span class="tag">完整对照与做法见第 05 节</span></div>
+      <p class="ref">参考：Starcat 仓库 Starcat/Features/MCP/StarcatMCPToolRegistry.swift · docs/3-设计/详细设计/34-StarcatCLI与外部MCP桥接设计.md</p>
+    </article>
+
+    <!-- 7 设计契约 -->
+    <article class="card">
+      <div class="card-h"><span class="n">7</span><h3>界面一致性：它有一份「AI 能读懂的设计契约」</h3><span class="pill him">Starcat 更好</span></div>
+      <div class="cols">
+        <div class="side him"><h4>STARCAT</h4>仓库根目录的 DESIGN.md：颜色、间距、组件写法，再加状态规则（空 / 加载 / 失败 / 部分成功）、「该做 / 别做」、改界面前的检查清单、长文本规则。AI 改界面必须照着来。</div>
+        <div class="side us"><h4>我们现在</h4>apps/desktop/DESIGN.md 只有 5KB，是上游留下的基础规范：没有状态规则、没有该做 / 别做、没有检查清单。你说过「方向对了但不精致」，多半就差这一层。</div>
+      </div>
+      <div class="media">
+        <figure><div class="shot"><a href="img/ours-card-dark.jpg" target="_blank" rel="noopener"><img src="img/ours-card-dark.jpg" width="502" height="132" alt="我们的「今日」页深色模式下，选中的统计卡是白底浅字，看不清"></a></div><figcaption>我截图时发现的小问题：「今日」第一张统计卡选中时，深色下是白底浅字，数字几乎看不见（样式写死了浅色背景）。这类问题正是「检查清单」要拦的。</figcaption></figure>
+      </div>
+      <div class="fix"><h4>怎么改</h4><ul>
+        <li>我来写（不占 Codex 额度）：把那五块按我们的页面补进 DESIGN.md，之后每张界面卡都对照检查清单验收。</li>
+        <li>顺手做一次「深色模式走查」；上面这个统计卡是一行样式的小修，可以单开一张小卡。</li>
+      </ul></div>
+      <div class="tags"><span class="tag free">不花 AI 额度</span><span class="tag">工作量：小（文档）</span></div>
+      <p class="ref">参考：Starcat 仓库根目录 DESIGN.md</p>
+    </article>
+
+  </div>
+</section>
+
+<!-- ============ 03 其余 8 项 ============ -->
+<section id="rest">
+  <p class="kicker">03</p>
+  <h2 class="t">其余 8 项共有功能</h2>
+  <p class="sub">5 项差不多、3 项我们更好。这些先不动，只记下可借的小点。</p>
+
+  <div class="group">
+    <h3><span class="pill even">差不多</span> 5 项</h3>
+    <div class="rows">
+
+      <div class="r">
+        <div class="nm">同步 GitHub 收藏</div>
+        <div class="c him"><small>STARCAT</small>自动同步；用条件请求省 GitHub 配额；首次登录后台预热 README 和健康度，断了能接着做；同步 GitHub 的分组。</div>
+        <div class="c us"><small>我们</small>自动同步、可设间隔；失败自动重试、限流有提示；顶栏显示上次同步时间。</div>
+        <div class="why"><strong>够用。</strong>「首次预热可恢复」的思路以后可借，优先级低。</div>
+      </div>
+
+      <div class="r">
+        <div class="nm">筛选 · 排序 · 分组</div>
+        <div class="c him"><small>STARCAT</small>排序选项多；按语言、标签、仓库分组；「智能集合」预设视图（你那里有 8 个）。</div>
+        <div class="c us"><small>我们</small>按业务场景、使用状态、类型、有无中文说明筛；排序 3 种（收藏时间 / star / 最近更新）。</div>
+        <div class="why"><strong>可借：智能集合。</strong>加几个预设视图：久未更新、想试没试、没有中文说明、最近收藏——免费、工作量小。我们的「业务场景」维度更贴你的用法，保留。</div>
+        <div class="fig"><div class="pair">
+          <figure><div class="shot"><img src="img/starcat-sidebar.jpg" width="246" height="344" alt="Starcat 侧栏：全部仓库、未分类、知识库、智能集合、订阅发布、仓库分组"></div><figcaption style="font-size:13px;color:var(--ink-3);margin-top:6px">Starcat 的侧栏</figcaption></figure>
+          <figure><div class="shot"><img src="img/ours-scenarios-top.jpg" width="300" height="519" alt="我们的场景列表"></div><figcaption style="font-size:13px;color:var(--ink-3);margin-top:6px">我们的场景列表</figcaption></figure>
+        </div></div>
+      </div>
+
+      <div class="r">
+        <div class="nm">快速入口（收集 / 搜索）</div>
+        <div class="c him"><small>STARCAT</small>浏览器插件（在 GitHub 页面直接看笔记、标签、健康度）、Alfred / Raycast / uTools 搜本地仓库、Spotlight 系统搜索、菜单栏、桌面小组件——入口很多，围绕 GitHub 页面和系统本身。</div>
+        <div class="c us"><small>我们</small>从微信、公众号、X 文章里提取项目链接，进「收集箱」审核；有本地 API。全局快捷键 ⌥⌘F 的快速收集还没重建。</div>
+        <div class="why"><strong>各有长处。</strong>它入口多，我们的收集来源它没有。⌥⌘F 值得补回来，其余入口优先级低。</div>
+      </div>
+
+      <div class="r">
+        <div class="nm">额度与用量</div>
+        <div class="c him"><small>STARCAT</small>AI 用量面板：请求数、Token、延迟、失败数，还有预估费用。另有免费的设备端本地小模型，不用 API Key。</div>
+        <div class="c us"><small>我们</small>24 小时滚动硬上限，默认 0，授权才花；档位写成「每天最多约 N 个收藏」，没有折成钱。</div>
+        <div class="why"><strong>我们更稳，它更直观。</strong>可以在额度档位旁加一行「约 ¥x」小字（本地存一份价格表，免费、工作量小）。</div>
+        <div class="fig strip"><div class="shot"><a href="img/ours-budget.jpg" target="_blank" rel="noopener"><img src="img/ours-budget.jpg" width="1400" height="129" alt="我们的每天自动整理额度档位：关闭、试跑、日常、多整理些"></a></div><p class="cap">我们的额度档位（示意数据）</p></div>
+      </div>
+
+      <div class="r">
+        <div class="nm">导入 · 导出 · 备份</div>
+        <div class="c him"><small>STARCAT</small>JSON 导入导出（兼容 OhMyStar / Astral）。多设备 iCloud 同步它自己也还没有（官方计划做成将来的 Pro 功能）。</div>
+        <div class="c us"><small>我们</small>导出 Markdown / CSV；自动本地备份，一键恢复。</div>
+        <div class="why"><strong>够用，暂不动。</strong>你是单机使用。</div>
+      </div>
+
+    </div>
+  </div>
+
+  <div class="group">
+    <h3><span class="pill us">我们更好</span> 3 项</h3>
+    <div class="rows">
+
+      <div class="r">
+        <div class="nm">使用状态</div>
+        <div class="c him"><small>STARCAT</small>未读 / 阅读中 / 已采用 / 已废弃。</div>
+        <div class="c us"><small>我们</small>没看 / 想试 / 试过 / 在用 / 不要了；键盘 T / U / X 一键切换，操作带「撤销」。</div>
+        <div class="why"><strong>我们更贴「要不要用」。</strong>它的「已采用 / 已废弃」基本对应我们的「在用 / 不要了」，我们多了「想试」「试过」两档，列表里一键切换。</div>
+      </div>
+
+      <div class="r">
+        <div class="nm">分类与标签</div>
+        <div class="c him"><small>STARCAT</small>自己建标签、分组；AI 能批量给建议，你逐条审核；空标签库时还能先用话题在本地生成一套标签体系，不用配 AI。你的库里 541 / 542 还没打标签。</div>
+        <div class="c us"><small>我们</small>自动归到 13 个业务场景，再加形态（技能 / MCP / 命令行 / 应用……），不用你动手。</div>
+        <div class="why"><strong>这是我们最大的差异。</strong>它的整理要你发起、逐条审核；后台自动整理要你自己去设置里打开（你这台没开）；我们是装好就自动归类。它「先在本地生成标签体系」的做法以后可借，用来补场景之外的自定义标签。</div>
+      </div>
+
+      <div class="r">
+        <div class="nm">AI 说明</div>
+        <div class="c him"><small>STARCAT</small>AI 摘要 + 标签建议 + 笔记草稿，由你发起（单个或多选批量，统一队列里审核）；后台自动整理也能做，要自己打开（你这台没开）；支持自带 Key，也有免费的设备端本地小模型。</div>
+        <div class="c us"><small>我们</small>中文理解卡（它能做什么 / 解决什么 / 怎么试 / 适合谁）批量自动生成，README 变了自动重做，有「说得对吗」确认和额度上限。</div>
+        <div class="why"><strong>这是我们的核心，别丢。</strong></div>
+        <div class="fig"><div class="shot fit" style="max-width:640px"><a href="img/ours-detail.jpg" target="_blank" rel="noopener"><img src="img/ours-detail.jpg" width="838" height="756" alt="我们的详情页：场景标签、我的状态、中文说明"></a></div><p class="cap">这三项在我们的详情页一屏就能看到：场景标签（分类）、「我的状态」、中文说明区。<em>（示意数据：这张没配 AI，所以说明区显示英文原文；你的真实库里约 500 个项目已有中文理解卡。）</em></p></div>
+      </div>
+
+    </div>
+  </div>
+</section>
+
+<!-- ============ 04 设置页 ============ -->
+<section id="settings">
+  <p class="kicker">04</p>
+  <h2 class="t">设置页：20 页全比过了</h2>
+  <p class="sub">你说得对，我前面只比了功能，漏了设置；上一版又只细比了其中 8 页，另外 12 页被我当成「用不上」跳过了。这一版 20 页全部比过（逐页点开看的，没改任何设置）。</p>
+
+  <div class="score mini" aria-label="设置页记分牌">
+    <div class="tile"><b>20</b><span>设置页，全比过</span></div>
+    <div class="tile him"><b>10</b><span>Starcat 更好</span></div>
+    <div class="tile even"><b>4</b><span>差不多</span></div>
+    <div class="tile"><b>6</b><span>我们用不上</span></div>
+  </div>
+
+  <div class="tldr">
+    <h2>设置页结论</h2>
+    <p>它的设置赢在「好找、说清楚、分档」：有搜索框；一页讲清数据去哪；通知、快捷键各有专页；清理分档。RAG、MCP 两块，是它多做出来的一个产品面（第 05、06 节）。我们赢在备份与恢复，它没有这个页。</p>
+    <p>值得借的 7 处（下面 A–G）都不花 AI 额度，多数是小改动，已经排进「建议顺序」。</p>
+  </div>
+
+  <div class="group">
+    <h3>20 页总表</h3>
+    <div class="mx">
+      <div class="mx-h"><div>页面</div><div class="h-him">Starcat 有什么</div><div class="h-us">我们现在</div><div>判断</div></div>
+      <div class="mx-g">基础与账户 · 5 页</div>
+      <div class="mx-r"><div class="pg">通用<span class="to">够自用，它更全</span></div><div class="it" data-who="Starcat">外观、语言、详情页行为、菜单栏等系统集成、无障碍、更新、重置</div><div class="it" data-who="我们">主题 · 品牌色 · 字号 · 欢迎引导 · 自动同步 · 清空本机数据</div><div class="vd"><span class="pill even">差不多</span></div></div>
+      <div class="mx-r"><div class="pg">通知<span class="to"><a href="#set-F">细节 F</a></span></div><div class="it" data-who="Starcat">系统通知总开关 + 5 类各自开关</div><div class="it" data-who="我们">只有应用内铃铛</div><div class="vd"><span class="pill him">Starcat 更好</span></div></div>
+      <div class="mx-r"><div class="pg">快捷键<span class="to"><a href="#set-E">细节 E</a></span></div><div class="it" data-who="Starcat">每项可录制、可单独开关，改键查冲突</div><div class="it" data-who="我们">有快捷键，但不列出，也不能改</div><div class="vd"><span class="pill him">Starcat 更好</span></div></div>
+      <div class="mx-r"><div class="pg">Pro 与许可证</div><div class="it" data-who="Starcat">订阅与许可证激活</div><div class="it" data-who="我们">自用，没有订阅</div><div class="vd"><span class="pill na">我们用不上</span></div></div>
+      <div class="mx-r"><div class="pg">隐私与权限<span class="to"><a href="#set-C">细节 C</a></span></div><div class="it" data-who="Starcat">GitHub 权限逐项白话；匿名统计默认关；AI 请求不经自建服务器</div><div class="it" data-who="我们">没有专页，提示散在各输入框下面</div><div class="vd"><span class="pill him">Starcat 更好</span></div></div>
+      <div class="mx-g">AI · 5 页</div>
+      <div class="mx-r"><div class="pg">模型与供应商<span class="to"><a href="#set-B">细节 B</a></span></div><div class="it" data-who="Starcat">能存多套；测试后列出模型直接选；可导入</div><div class="it" data-who="我们">常用 10 家 + 自定义；一次只存一套</div><div class="vd"><span class="pill him">Starcat 更好</span></div></div>
+      <div class="mx-r"><div class="pg">翻译服务<span class="to"><a href="#better">第 02 节 · 4</a></span></div><div class="it" data-who="Starcat">默认引擎可选：系统翻译（免费、本机）/ Google / AI；可管理语言包</div><div class="it" data-who="我们">翻译只在「发现」候选里，用 AI，手动点</div><div class="vd"><span class="pill him">Starcat 更好</span></div></div>
+      <div class="mx-r"><div class="pg">自动化<span class="to"><a href="#auto">下面「自动整理」</a></span></div><div class="it" data-who="Starcat">触发时机、每轮数量、置信度、每仓库标签数</div><div class="it" data-who="我们">硬额度 + 一句话状态</div><div class="vd"><span class="pill even">差不多</span></div></div>
+      <div class="mx-r"><div class="pg">索引与上下文<span class="to"><a href="#rag">第 06 节</a></span></div><div class="it" data-who="Starcat">全文索引、向量预拉与重建（写明耗配额）、代码上下文</div><div class="it" data-who="我们">向量检索面板（本地模型、状态、重建）藏在设置里</div><div class="vd"><span class="pill even">差不多</span></div></div>
+      <div class="mx-r"><div class="pg">外部搜索</div><div class="it" data-who="Starcat">5 个联网搜索服务，给 AI 摘要和对话补网上资料</div><div class="it" data-who="我们">没有；问答先只用本机资料，不联网补</div><div class="vd"><span class="pill na">我们用不上</span></div></div>
+      <div class="mx-g">RAG · 3 页</div>
+      <div class="mx-r"><div class="pg">推理<span class="to"><a href="#rag">第 06 节</a></span></div><div class="it" data-who="Starcat">选 AI 后端：API / 本机 Codex / 本机 Claude Code，并写明执行边界</div><div class="it" data-who="我们">只用 API 服务商</div><div class="vd"><span class="pill him">Starcat 更好</span></div></div>
+      <div class="mx-r"><div class="pg">检索<span class="to"><a href="#rag">第 06 节</a></span></div><div class="it" data-who="Starcat">三档预设 + 自定义；相似度、分片上限；可勾选数据来源</div><div class="it" data-who="我们">找方案用本地打分，不开放旋钮</div><div class="vd"><span class="pill him">Starcat 更好</span></div></div>
+      <div class="mx-r"><div class="pg">提示词</div><div class="it" data-who="Starcat">问答 / 规划 / 压缩 / 标题 4 类，可改可重置</div><div class="it" data-who="我们">不开放</div><div class="vd"><span class="pill na">我们用不上</span></div></div>
+      <div class="mx-g">扩展与开发 · 4 页</div>
+      <div class="mx-r"><div class="pg">浏览器扩展</div><div class="it" data-who="Starcat">在 GitHub 页面直接看笔记、标签、健康度</div><div class="it" data-who="我们">靠微信 / 公众号收集链接</div><div class="vd"><span class="pill na">我们用不上</span></div></div>
+      <div class="mx-r"><div class="pg">MCP<span class="to"><a href="#agent">第 05 节</a></span></div><div class="it" data-who="Starcat">配对设备 · 复制配置 · 装 Skill · 分档权限</div><div class="it" data-who="我们">本地 API + 两个令牌；MCP 未打包</div><div class="vd"><span class="pill him">Starcat 更好</span></div></div>
+      <div class="mx-r"><div class="pg">本地工具<span class="to">检测行的写法可借 · <a href="#rag">第 06 节</a></span></div><div class="it" data-who="Starcat">外部程序「检测行」（路径 · 版本 · 自动检测）；CodeFlow、CodebaseMemory</div><div class="it" data-who="我们">没有这类功能</div><div class="vd"><span class="pill na">我们用不上</span></div></div>
+      <div class="mx-r"><div class="pg">自定义服务</div><div class="it" data-who="Starcat">自建后端地址（榜单、周刊），带「当前生效」和「测试」</div><div class="it" data-who="我们">没有服务端</div><div class="vd"><span class="pill na">我们用不上</span></div></div>
+      <div class="mx-g">数据与支持 · 3 页</div>
+      <div class="mx-r"><div class="pg">数据与存储<span class="to"><a href="#set-D">细节 D</a></span></div><div class="it" data-who="Starcat">缓存分项用量 · 分档清理 · 保留 Unstar 历史</div><div class="it" data-who="我们">只有「清空本机数据」</div><div class="vd"><span class="pill him">Starcat 更好</span></div></div>
+      <div class="mx-r"><div class="pg">诊断与支持<span class="to"><a href="#copy">第 08 节</a></span></div><div class="it" data-who="Starcat">导出调试日志（zip），写明包含什么、不含什么</div><div class="it" data-who="我们">「复制诊断信息」：健康一行 + 最近 8 条任务</div><div class="vd"><span class="pill even">差不多</span></div></div>
+      <div class="mx-r"><div class="pg">实验性功能<span class="to"><a href="#set-G">细节 G</a></span></div><div class="it" data-who="Starcat">默认全关，写明「可能下线」</div><div class="it" data-who="我们">没有地方放半成品（向量面板就藏着）</div><div class="vd"><span class="pill him">Starcat 更好</span></div></div>
+    </div>
+    <p class="cap">另外：<strong>备份与恢复</strong>是我们有、它没有的一页（下面单独列）。20 页里 6 页有单独的卡（B–G），MCP、翻译、推理、检索 4 页在第 02、05、06 节讲；A 是整个设置窗口的结构（分组 + 搜索），不算「页」。</p>
+  </div>
+
+  <div class="group">
+    <h3><span class="pill him">Starcat 更好</span> 值得借的 7 处（A 是整体结构，B–G 是 6 个页）</h3>
+    <div class="cards">
+
+      <!-- A 好找 -->
+      <article class="card" id="set-A">
+        <div class="card-h"><span class="n">A</span><h3>设置好找：分 5 组，还有「搜索设置」</h3><span class="pill him">Starcat 更好</span></div>
+        <div class="cols">
+          <div class="side him"><h4>STARCAT</h4>20 个设置页分成 5 组（基础与账户 · AI · RAG · 扩展与开发 · 数据与支持），左侧栏最上面是「搜索设置」，输入关键词就跳到那一项。</div>
+          <div class="side us"><h4>我们现在</h4>两层标签：先「设置 / 自动整理与备份」，里面再分 GitHub · AI 设置 · 通用 · GitHub 备份 · 关于。没有搜索；同一类事分在两处（比如备份：私有 Gist 在「GitHub 备份」，本机备份在「自动整理与备份」）。</div>
+        </div>
+        <div class="figs a">
+          <figure class="sfig">
+            <a class="frame" href="img/starcat-set-ai.jpg" target="_blank" rel="noopener"><img src="img/starcat-set-ai.jpg" width="1100" height="1100" alt="Starcat 设置窗口：左侧栏分 5 组并带「搜索设置」框，右侧是「模型与供应商」页" loading="lazy"></a>
+            <figcaption>Starcat：左侧 5 组 + 「搜索设置」框（你发我的截图，API Key 已遮住）</figcaption>
+          </figure>
+          <figure class="sfig">
+            <a class="frame" href="img/ours-set-tabs.jpg" target="_blank" rel="noopener"><img src="img/ours-set-tabs.jpg" width="1100" height="211" alt="我们的设置页顶部：两层标签" loading="lazy"></a>
+            <figcaption>我们：设置页顶上的两层标签。</figcaption>
+          </figure>
+        </div>
+        <div class="fix"><h4>怎么借</h4><ul>
+          <li>设置页顶上加一个「搜索设置」框：只搜设置项的名字和说明，纯本地，不联网。</li>
+          <li>把相关的并到一组：AI 设置 + 自动整理 →「AI 与整理」；两种备份 + 导出 + 运行状态 →「数据与备份」。</li>
+        </ul></div>
+        <div class="tags"><span class="tag free">不花 AI 额度</span><span class="tag">工作量：小到中</span></div>
+        <p class="ref">参考：Starcat 设置窗口（我实机逐页点过）</p>
+      </article>
+
+      <!-- B AI 服务商 -->
+      <article class="card" id="set-B">
+        <div class="card-h"><span class="n">B</span><h3>AI 服务商：能存多套，测完直接选模型</h3><span class="pill him">Starcat 更好</span></div>
+        <div class="cols">
+          <div class="side him"><h4>STARCAT</h4>服务商是一个下拉列表，能存多套（你那里是指向 MiniMax 的 OpenAI Compatible），旁边有导入 / 新增 / 删除。点「测试」就读一遍模型列表，显示「连接正常，发现 9 个模型」；下面每个模型单独打勾启用，类型（Chat / Embedding）读错了能手动改。更新日志写着还能一键从 CC Switch 导入。</div>
+          <div class="side us"><h4>我们现在</h4>常用 10 家 + 自定义：选一家，填密钥和模型名；有「获取模型」「测试连接」（真调一次，显示耗时和用量）。一次只存一套，换服务商要重新填密钥和模型名。清单里没有 MiniMax（你在 Starcat 里用的那家），要走「自定义服务」手填地址。</div>
+        </div>
+        <div class="figs">
+          <figure class="sfig">
+            <a class="frame tall" href="img/starcat-set-ai-pane.jpg" target="_blank" rel="noopener"><img src="img/starcat-set-ai-pane.jpg" width="733" height="998" alt="Starcat 的「模型与供应商」页：服务商配置、测试结果、模型列表" loading="lazy"></a>
+            <figcaption>Starcat 的「模型与供应商」（API Key 已遮住）· <a href="img/starcat-set-ai-pane.jpg" target="_blank" rel="noopener">看全图 ↗</a></figcaption>
+          </figure>
+          <figure class="sfig">
+            <a class="frame" href="img/ours-set-ai.jpg" target="_blank" rel="noopener"><img src="img/ours-set-ai.jpg" width="900" height="521" alt="我们的「AI 设置」：常用服务卡片、关闭 AI、自动整理提示" loading="lazy"></a>
+            <figcaption>我们的「AI 设置」。<em>（示意数据）</em></figcaption>
+          </figure>
+        </div>
+        <div class="fix"><h4>怎么借</h4><ul>
+          <li>常用清单里补上 MiniMax（再看你还常用哪些国内服务商）。</li>
+          <li>「测试连接」成功后，直接写「连接正常，发现 N 个模型」并让你从列表里选；我们已有「获取模型」，主要是把两步并成一步。</li>
+          <li>你机器上装了 CC Switch：可以加一个「从 CC Switch 导入」按钮，你点了才读它的配置，省得再手填密钥。</li>
+          <li>可选：存几套、一键切换（额度用完时换一家）。</li>
+        </ul></div>
+        <div class="tags"><span class="tag free">不花 AI 额度</span><span class="tag">工作量：小；导入那条小到中</span></div>
+        <p class="ref">参考：Starcat 设置 → 模型与供应商（你发我的截图）· CHANGELOG-ZH.md「Anthropic 与 CC Switch」</p>
+      </article>
+
+      <!-- C 数据去哪了 -->
+      <article class="card" id="set-C">
+        <div class="card-h"><span class="n">C</span><h3>数据去哪了：一页写清权限和数据去向</h3><span class="pill him">Starcat 更好</span></div>
+        <div class="cols">
+          <div class="side him"><h4>STARCAT</h4>「隐私与权限」一页写清：登录 GitHub 时申请哪 4 项权限（每项一句白话）；匿名遥测（你这台关着）；AI 请求只发给你选的服务商，不经它自己的服务器。<span class="note">提醒：页里有一项「匿名贡献公开 Star 数据」，你这台是开着的（官方设计是默认关闭，首次登录时让你选一次）。它只传公开仓库 ID 和 Star 时间，不传私有库、标签、笔记。不想要，就在 设置 → 隐私与权限 里关掉。</span></div>
+          <div class="side us"><h4>我们现在</h4>没有这样一页。「关于」只有版本、许可证和数据位置；「密钥只存钥匙串」这类话散在各个输入框下面。实际会联网的地方：GitHub、你选的 AI 服务商、「社区」页刷新时查 Hacker News 和 GitHub Issues、检查更新。我查过代码，没找到上报统计的部分。</div>
+        </div>
+        <div class="figs one">
+          <figure class="sfig">
+            <a class="frame" href="img/starcat-set-privacy.jpg" target="_blank" rel="noopener"><img src="img/starcat-set-privacy.jpg" width="731" height="985" alt="Starcat 的「隐私与权限」页：4 项 GitHub OAuth 权限、匿名贡献、匿名遥测" loading="lazy"></a>
+            <figcaption>Starcat 的「隐私与权限」</figcaption>
+          </figure>
+        </div>
+        <div class="fix"><h4>怎么借</h4><ul>
+          <li>在「关于」旁边加一页「数据去哪了」：① GitHub 权限，每项一句白话 ② 会联网的几处，各自发什么 ③ 从不离开这台电脑的东西（密钥在钥匙串、你的标记和中文说明）。</li>
+          <li>前端只是一页静态说明，文案我在任务卡里写好。</li>
+        </ul></div>
+        <div class="tags"><span class="tag free">不花 AI 额度</span><span class="tag">工作量：小</span></div>
+        <p class="ref">参考：Starcat 设置 → 隐私与权限 · 它的设计文档 docs/3-设计/详细设计/63-Starcat公开Star数据静默上报与Collection服务详细设计.md（默认关闭的说明）</p>
+      </article>
+
+      <!-- D 数据与存储 -->
+      <article class="card" id="set-D">
+        <div class="card-h"><span class="n">D</span><h3>数据与存储：占了多少，分档清理</h3><span class="pill him">Starcat 更好</span></div>
+        <div class="cols">
+          <div class="side him"><h4>STARCAT</h4>「缓存用量」一条彩色条 + 总量（共 34.6 MB）+ 分项（README 546 条 32 MB、图片 2.5 MB……），每项一个「清理」键，上面一行写着「这些缓存可重新生成。清理不会删除你的 Stars、标签或笔记。」危险操作分两档：「删除全部缓存」和「清空所有本地数据」。另有「保留 Unstar 历史」滑块（1 天 … 永久）。</div>
+          <div class="side us"><h4>我们现在</h4>只有一个「清空本机数据」：一次把想试 / 在用标记、收集箱、中文说明（重做要花钱）、令牌和 AI 密钥全清掉，没有中间档，也看不到各项占多大。GitHub 上取消收藏的，同步时直接从库里隐藏，并提示一句。</div>
+        </div>
+        <div class="figs one">
+          <figure class="sfig">
+            <a class="frame" href="img/starcat-set-cache.jpg" target="_blank" rel="noopener"><img src="img/starcat-set-cache.jpg" width="731" height="450" alt="Starcat 的缓存用量：彩色条、分项大小、清理按钮" loading="lazy"></a>
+            <figcaption>Starcat 的「缓存用量」（数据与存储页的上半部分）</figcaption>
+          </figure>
+        </div>
+        <div class="fix"><h4>怎么借</h4><ul>
+          <li>加一块「本机数据」：各项占多大（资料库、README 原文、备份）。</li>
+          <li>能重新拉取的（比如 README 原文）单独一档「清理」，写明不会丢你的标记和中文说明。</li>
+          <li>真正的「清空」放最下面，保持两步确认，并把「会丢什么」列清楚。</li>
+        </ul></div>
+        <div class="tags"><span class="tag free">不花 AI 额度</span><span class="tag">工作量：小到中</span></div>
+        <p class="ref">参考：Starcat 设置 → 数据与存储</p>
+      </article>
+
+      <!-- E 快捷键 -->
+      <article class="card" id="set-E">
+        <div class="card-h"><span class="n">E</span><h3>快捷键：有一张表，还能改</h3><span class="pill him">Starcat 更好</span></div>
+        <div class="cols">
+          <div class="side him"><h4>STARCAT</h4>设置里有专门的「快捷键」页：每项一个录制框（点一下，按新组合就改）、每项单独开关、改键会做冲突检查；全局搜索 ⌘K、README 内搜索 ⌘F、刷新 ⌘R、AI 摘要 ⇧⌘A。</div>
+          <div class="side us"><h4>我们现在</h4>快捷键其实不少：⌘K 命令面板、/ 搜索、J / K 上下移动、T 想试 / U 在用 / X 不要了 / C 复制。但没有任何地方列出来，也不能改。</div>
+        </div>
+        <div class="figs one">
+          <figure class="sfig">
+            <a class="frame" href="img/starcat-set-keys.jpg" target="_blank" rel="noopener"><img src="img/starcat-set-keys.jpg" width="731" height="665" alt="Starcat 的快捷键页：每项一个录制框和开关" loading="lazy"></a>
+            <figcaption>Starcat 的「快捷键」页</figcaption>
+          </figure>
+        </div>
+        <div class="fix"><h4>怎么借</h4><ul>
+          <li>在「通用」里加一张「快捷键一览」（只读表），先不做自定义录制。</li>
+          <li>⌥⌘F 快速收集重建后，也列进去。</li>
+        </ul></div>
+        <div class="tags"><span class="tag free">不花 AI 额度</span><span class="tag">工作量：小</span></div>
+        <p class="ref">参考：Starcat 设置 → 快捷键</p>
+      </article>
+
+      <!-- F 通知 -->
+      <article class="card" id="set-F">
+        <div class="card-h"><span class="n">F</span><h3>通知：能弹系统通知，还分类开关</h3><span class="pill him">Starcat 更好</span></div>
+        <div class="cols">
+          <div class="side him"><h4>STARCAT</h4>一个总开关「启用系统通知」（走 macOS 通知中心），下面 5 类各自开关：新 Release · GitHub 通知 · 批量 AI 完成 · 同步问题 · MCP 服务失败。</div>
+          <div class="side us"><h4>我们现在</h4>只有应用里的铃铛面板。应用不在前台时，整理跑完了、同步出错了，你都不会知道。</div>
+        </div>
+        <div class="figs one">
+          <figure class="sfig">
+            <a class="frame" href="img/starcat-set-notify.jpg" target="_blank" rel="noopener"><img src="img/starcat-set-notify.jpg" width="731" height="445" alt="Starcat 的通知页：系统通知总开关和 5 类通知" loading="lazy"></a>
+            <figcaption>Starcat 的「通知」页（你这台各项都开着）</figcaption>
+          </figure>
+        </div>
+        <div class="fix"><h4>怎么借</h4><ul>
+          <li>加「系统通知」总开关，先只做 3 类：整理跑完、同步出问题、额度用完；以后做了 Release 提醒再加一类。</li>
+          <li>用 macOS 自带通知，不联网。</li>
+        </ul></div>
+        <div class="tags"><span class="tag free">不花 AI 额度</span><span class="tag">工作量：小</span><span class="tag">最好和 Release 提醒一起做</span></div>
+        <p class="ref">参考：Starcat 设置 → 通知</p>
+      </article>
+
+      <!-- G 实验功能 -->
+      <article class="card" id="set-G">
+        <div class="card-h"><span class="n">G</span><h3>实验功能：没做完的东西有地方放</h3><span class="pill him">Starcat 更好</span></div>
+        <div class="cols">
+          <div class="side him"><h4>STARCAT</h4>单独一页「实验性功能」，顶上写明「默认全部关闭、随时可能整体下线，开启前请知悉」；没做完的能力（比如它的决策引擎）放这里，不混进正式设置。</div>
+          <div class="side us"><h4>我们现在</h4>向量检索（本地语义搜索）的设置页其实已经做全了，但没放进标签列表，平时点不到，也没接到资料库搜索（详见第 06 节）。以后再有半成品，会遇到同样的问题。</div>
+        </div>
+        <div class="figs one">
+          <figure class="sfig">
+            <a class="frame" href="img/starcat-set-labs.jpg" target="_blank" rel="noopener"><img src="img/starcat-set-labs.jpg" width="733" height="401" alt="Starcat 的实验性功能页：顶部说明和决策引擎开关" loading="lazy"></a>
+            <figcaption>Starcat 的「实验性功能」页顶部</figcaption>
+          </figure>
+        </div>
+        <div class="fix"><h4>怎么借</h4><ul>
+          <li>设置里加一个「实验功能」区：向量检索、将来的 Awesome 来源等先放这里，默认关，写明「可能会改」；做完再转正。</li>
+        </ul></div>
+        <div class="tags"><span class="tag free">不花 AI 额度</span><span class="tag">工作量：小</span></div>
+        <p class="ref">参考：Starcat 设置 → 实验性功能</p>
+      </article>
+
+    </div>
+  </div>
+
+  <div class="group">
+    <h3><span class="pill even">差不多</span> 这里细比 1 项（另 3 页：通用在总表里；索引与上下文见第 06 节；诊断与支持见第 08 节）</h3>
+    <div class="rows">
+
+      <div class="r" id="auto">
+        <div class="nm">自动整理</div>
+        <div class="c him"><small>STARCAT</small>「自动化」页：总开关（你这台关着，页里写着「尚未自动运行过」）。打开后可选触发时机（启动后 60 秒 · 同步后 · 每 1–24 小时）、每轮处理 5–500 个、先处理最近 / 最早 / 随机、置信度阈值（90%）、每个仓库 1–3 个标签；底部是「运行状态」和「立刻手动触发一次」。</div>
+        <div class="c us"><small>我们</small>新收藏、或 README 有实质更新，就自动在后台整理；每天额度（按 24 小时滚动）封顶、默认 0；有「现在整理」按钮；状态写成一句话（上次整理了多少个、用了多少 token、为什么停下）。</div>
+        <div class="why"><strong>差不多，不用改。</strong>它旋钮多；我们的硬额度更贴你「不能乱花钱」的要求，旋钮少，对你反而省心。</div>
+        <div class="fig"><div class="figs one">
+          <figure class="sfig">
+            <a class="frame tall" href="img/starcat-set-auto.jpg" target="_blank" rel="noopener"><img src="img/starcat-set-auto.jpg" width="731" height="1484" alt="Starcat 的「自动化」页：总开关、触发时机、处理范围、置信度阈值、运行状态" loading="lazy"></a>
+            <figcaption>Starcat 的「自动化」页（只截了上半部分）· <a href="img/starcat-set-auto.jpg" target="_blank" rel="noopener">看全图 ↗</a></figcaption>
+          </figure>
+        </div></div>
+      </div>
+
+    </div>
+  </div>
+
+  <div class="group">
+    <h3><span class="pill us">我们更好</span> 1 项 · 它没有这个页</h3>
+    <div class="rows">
+
+      <div class="r">
+        <div class="nm">备份与恢复</div>
+        <div class="c him"><small>STARCAT</small>「数据与存储」页只有清缓存和「清空所有本地数据」，我没找到备份 / 恢复入口；JSON 导入导出在别处（兼容 OhMyStar / Astral）。</div>
+        <div class="c us"><small>我们</small>本机备份自动做（应用开着时约每 20 小时一次），列表里点「恢复到这一份…」（两步确认）；另有私有 Gist 备份、Markdown / CSV 导出、「复制诊断信息」。</div>
+        <div class="why"><strong>这块我们更扎实：</strong>你的标记和中文说明（重做要花钱）有两道保险。</div>
+        <div class="fig"><div class="figs one wide">
+          <figure class="sfig">
+            <a class="frame" href="img/ours-set-backup.jpg" target="_blank" rel="noopener"><img src="img/ours-set-backup.jpg" width="1100" height="545" alt="我们的「自动整理与备份」页下半部分：本机备份、恢复、导出、运行状态" loading="lazy"></a>
+            <figcaption>我们的「自动整理与备份」页下半部分。<em>（示意数据）</em></figcaption>
+          </figure>
+        </div></div>
+      </div>
+
+    </div>
+  </div>
+
+</section>
+
+<!-- ============ 05 AI 助手接入 ============ -->
+<section id="agent">
+  <p class="kicker">05<span class="new">第 3 版新增</span></p>
+  <h2 class="t">AI 助手接入：CLI · MCP · Skill</h2>
+  <p class="sub">你发的这页不只是一排权限开关，而是一整套「让 Codex / Claude Code 直接用你的收藏」的东西：配对、安装配置、命令行、Skill，点复制就能接上。我上一版只看了权限开关，把它判成「差不多」，判错了。</p>
+
+  <div class="parts">
+    <div class="part"><div class="k">① 配对</div><h3>给设备发「通行证」</h3><p>App 里生成一条 5 分钟内有效、只能用一次的配对命令；粘到目标终端回车，再回 App 点确认。按它的设计文档，之后每台设备一个独立令牌，可单独撤销，存在系统钥匙串里。</p></div>
+    <div class="part"><div class="k">② MCP 服务</div><h3>App 是唯一入口</h3><p>对外开放 24 个工具，其中 14 个只读。写入类默认「预演」，确认后才真改；权限开关默认全关；只监听本机。</p></div>
+    <div class="part"><div class="k">③ 命令行 starcat</div><h3>给终端和脚本用</h3><p>配对、体检、搜仓库、取上下文、记笔记、打标签……同一套能力的转接头，不另写一份逻辑。写操作默认预演，加 --apply 才真改。</p></div>
+    <div class="part"><div class="k">④ Skill</div><h3>一份「怎么用」的说明</h3><p>starcat-skill 只放使用说明，让 Codex / Claude Code 知道什么时候该调用、怎么调用。不含任何凭据。</p></div>
+  </div>
+
+  <div class="stack">
+    <article class="card">
+      <div class="card-h"><h3>它是一个完整的产品；我们现在是两个要手抄的令牌</h3><span class="pill him">Starcat 更好</span></div>
+      <div class="cols">
+        <div class="side him"><h4>STARCAT</h4>设置 → MCP 一页走完：<b>配对设备 → 安装 MCP Service → 安装 starcat-skill</b>。每一行右边一个「复制」键，Claude Code 给 JSON、Codex 给 TOML；写入权限分档，默认全关。<span class="note">MCP 服务仅 Pro 用户可用（你是最高订阅）。页脚写明：只监听 127.0.0.1，并要求使用共享的本地 API Key。</span></div>
+        <div class="side us"><h4>我们现在</h4>本地 API（127.0.0.1:39217）+ 两个长期令牌：「口令」只能往收集箱加链接；「完整令牌」能读资料库，折在「高级」里。要用，得手动复制、自己加请求头。MCP 源码在 docs/rebuild/mcp，没打包进 2.0，其中 log_usage 绕过 App 直接写库。「复制给 Codex」是手动交接单：能用，但每次都要你点。</div>
+      </div>
+      <div class="figs">
+        <figure class="sfig">
+          <a class="frame tall" href="img/starcat-set-mcp-agent.jpg" target="_blank" rel="noopener"><img src="img/starcat-set-mcp-agent.jpg" width="936" height="1332" alt="Starcat 的 MCP 页下半部分：配对设备、安装 MCP Service、安装 starcat-skill，每行右边一个复制键" loading="lazy"></a>
+          <figcaption>你发我的那张（下半页）：配对 · 安装 MCP · 安装 Skill，每行右边一个复制键（这里只露出上半，装 Skill 那栏在下面）· <a href="img/starcat-set-mcp-agent.jpg" target="_blank" rel="noopener">看全图 ↗</a></figcaption>
+        </figure>
+        <figure class="sfig">
+          <a class="frame tall" href="img/starcat-set-mcp.jpg" target="_blank" rel="noopener"><img src="img/starcat-set-mcp.jpg" width="731" height="985" alt="Starcat 的 MCP 页上半部分：服务开关和 4 档写入权限，全部关着" loading="lazy"></a>
+          <figcaption>上半页：服务开关和 4 档写入权限，全部关着（上一版我只看了这半页）· <a href="img/starcat-set-mcp.jpg" target="_blank" rel="noopener">看全图 ↗</a></figcaption>
+        </figure>
+      </div>
+      <div class="good"><h4>它做对的 4 件事（可以照着学）</h4><ul>
+        <li><b>每一步都有「AI Agent · …」：</b>复制一句话交给 Codex / Claude Code，让它自己配、自己验证；想自己动手的，旁边还有「目标设备终端 · …」「Claude Code · …」「Codex · …」。不爱敲命令的人也能接上，对你特别合适。</li>
+        <li><b>默认最小权限：</b>权限开关全关；写入默认预演；外部程序读不到数据库和令牌。</li>
+        <li><b>写明「不要做什么」：</b>「不要添加 endpoint 或 Local API Key」「安装说明不包含长期凭据。请只配对可信设备，并核对 Starcat 显示的确认信息。」</li>
+        <li><b>按客户端给格式：</b>Claude Code 一份 JSON，Codex 一份 TOML，不让人自己改格式。</li>
+      </ul></div>
+      <div class="fix"><h4>我的建议：值得做，分三步，先只读</h4><ul>
+        <li><b>第一步（先做）：</b>设置里加「给 AI 助手用」：三个复制键（Codex 配置 · Claude Code 配置 · 让 AI 帮我配），默认关。先开放 4 个只读能力：搜资料库、取某个项目的中文理解卡、列业务场景、取交接参考包。Codex 就不用你再手动复制了。</li>
+        <li><b>顺手做 Skill：</b>一份很短的说明，教 Codex 什么时候该查你的收藏。几乎零成本。</li>
+        <li><b>第二步：</b>配对码 + 每台设备单独的令牌，换掉现在手抄的两个长期令牌（可单独撤销）。</li>
+        <li><b>第三步（可选）：</b>写入类（改「想试 / 在用」、加标签），一律预演 + 审计，只由 App 写库，顺便解决 log_usage 绕过 App 的老问题。</li>
+        <li><b>命令行先不做：</b>本地 API 和 MCP 已够用，多一套要维护；以后要，就做成 MCP 的转接头。</li>
+      </ul></div>
+      <div class="tags"><span class="tag free">不花 AI 额度</span><span class="tag">工作量：第一步 中</span><span class="tag">要你点头：做不做、做到哪一步</span></div>
+      <p class="ref">参考：Starcat 设置 → MCP（你发我的两张截图）· docs/3-设计/详细设计/34-StarcatCLI与外部MCP桥接设计.md · Starcat/Features/MCP/StarcatMCPToolRegistry.swift</p>
+    </article>
+  </div>
+</section>
+
+<!-- ============ 06 RAG 与本地工具 ============ -->
+<section id="rag">
+  <p class="kicker">06<span class="new">第 3 版新增</span></p>
+  <h2 class="t">RAG 与本地工具：对话要做，本地工具只借「检测行」</h2>
+  <p class="sub">RAG 就是「和你的收藏对话」：问一句，先在本机检索相关的 README、笔记、摘要，再交给 AI 回答，所以它需要一整套检索和提示词设置。<strong>你说这个有用，我改判为要做</strong>：资料库「问问我的收藏」、详情页「问问它」，进计划阶段 3。它这块想得更全，下面一页一页对；借它的<strong>排法、状态牌和安全写法</strong>，参数先不开放。</p>
+
+  <div class="rcards">
+    <div class="rcard">
+      <div class="rc-h"><h3>推理</h3><span class="pill him">Starcat 更好</span></div>
+      <p class="rc-d">选哪个「大脑」来回答：自己配的 API 服务商，或你电脑上已登录的 Codex / Claude Code（只做文字推理）。每个选项有状态牌（内置 / 可用 / 检测失败），点开能看版本、路径、失败原因；底下「执行边界」框写明命令行<strong>不能</strong>做什么。</p>
+      <figure class="sfig">
+        <a class="frame tall" href="img/starcat-rag-infer.jpg" target="_blank" rel="noopener"><img src="img/starcat-rag-infer.jpg" width="936" height="1105" alt="Starcat 的「推理」页：API Provider、Codex、Claude Code 三个后端，各带状态牌，底部是执行边界" loading="lazy"></a>
+        <figcaption>你这台的 Codex 显示「检测失败」：env: node: No such file or directory（从图标启动的应用找不到 node 的路径）· <a href="img/starcat-rag-infer.jpg" target="_blank" rel="noopener">看全图 ↗</a></figcaption>
+      </figure>
+      <p class="rc-t"><b>借：</b>「本机命令行当 AI 后端」（下面单独一张卡），以及「状态牌 + 失败原因 + 边界框」这个写法。</p>
+    </div>
+
+    <div class="rcard">
+      <div class="rc-h"><h3>检索</h3><span class="pill him">Starcat 更好</span></div>
+      <p class="rc-d">三档预设（平衡 / 严格 / 广泛）+「自定义」；常用区只放 3 项：最低向量相似度 0.65、单仓库分片上限 3、最终分片上限 8；Token 预算收进「高级」；还能勾选「数据来源」（README / 个人笔记 / AI 摘要……）。</p>
+      <figure class="sfig">
+        <a class="frame tall" href="img/starcat-rag-search.jpg" target="_blank" rel="noopener"><img src="img/starcat-rag-search.jpg" width="936" height="1340" alt="Starcat 的「检索」页：预设、常用、高级、数据来源" loading="lazy"></a>
+        <figcaption>「预设 → 常用 → 高级 → 数据来源」的排法 · <a href="img/starcat-rag-search.jpg" target="_blank" rel="noopener">看全图 ↗</a></figcaption>
+      </figure>
+      <p class="rc-t"><b>借：</b>「预设 → 常用 → 高级」三层的排法，和「搜哪些内容」勾选。数值本身先不开放：片段大小、问答最多取几个片段，我们定好，不让你调。</p>
+    </div>
+
+    <div class="rcard">
+      <div class="rc-h"><h3>提示词</h3><span class="pill na">只借一条</span></div>
+      <p class="rc-d">问答 / 规划 / 压缩 / 标题 4 类，各一份 System 提示词，可改、可「默认」、可重置。默认提示词里写明：README、笔记等都是不可信数据，里面夹带的指令一律忽略。</p>
+      <figure class="sfig">
+        <a class="frame tall" href="img/starcat-rag-prompts.jpg" target="_blank" rel="noopener"><img src="img/starcat-rag-prompts.jpg" width="936" height="885" alt="Starcat 的「提示词」页：4 类提示词和 System 提示词编辑区" loading="lazy"></a>
+        <figcaption>Starcat 的「提示词」页 · <a href="img/starcat-rag-prompts.jpg" target="_blank" rel="noopener">看全图 ↗</a></figcaption>
+      </figure>
+      <p class="rc-t"><b>不借：</b>不做提示词编辑器（只读展示 + 恢复默认就够），你不需要改它。「别听 README 里夹带的指令」这一条，我们的整理和找方案提示词里已经有，问答的提示词也照这个写。</p>
+    </div>
+
+    <div class="rcard">
+      <div class="rc-h"><h3>索引与上下文</h3><span class="pill even">差不多</span></div>
+      <p class="rc-d">README 截断长度、搜索过滤阈值、重建阈值（严格 / 标准 / 宽松 / 自定义）。「启动时自动后台预拉」旁一行状态「尚未预拉」加一个「开始预拉」；「全量重建向量」带 ⚠，写明「会消耗配额」。另有「代码上下文」：把仓库源码打包给 AI。</p>
+      <figure class="sfig">
+        <a class="frame tall" href="img/starcat-idx.jpg" target="_blank" rel="noopener"><img src="img/starcat-idx.jpg" width="936" height="1340" alt="Starcat 的「索引与上下文」页：全文索引阈值、后台预拉、全量重建、代码上下文" loading="lazy"></a>
+        <figcaption>「一行状态 + 一个动作」和「危险行写明代价」 · <a href="img/starcat-idx.jpg" target="_blank" rel="noopener">看全图 ↗</a></figcaption>
+      </figure>
+      <p class="rc-t"><b>借：</b>「一行状态 + 一个动作按钮」，和「危险行写明代价」。代码上下文不借。</p>
+    </div>
+  </div>
+
+  <div class="stack">
+    <article class="card">
+      <div class="card-h"><h3>更正：我们藏着的向量检索面板其实是全的</h3><span class="pill even">差不多，缺接线</span></div>
+      <div class="cols">
+        <div class="side him"><h4>STARCAT</h4>向量索引是为「对话」服务的：调在线的向量接口，要配额；有预设、阈值、预拉、全量重建。</div>
+        <div class="side us"><h4>我们现在（我查了代码，更正）</h4>设置里藏着一页「向量检索」：本地多语言模型（multilingual-e5-small，384 维）、可选下载源、状态分阶段显示、「检查状态 / 重建索引 / 重试准备 / 删除本地模型」，高级里还能接远程接口。全在本机，不花 AI 额度。<span class="note">差三件事：① 藏着，设置标签里没有入口 ② 文案还是开发者口吻 ③ 没接到资料库搜索。上一版我写「做了一半」，说重了。</span></div>
+      </div>
+      <div class="fix"><h4>怎么借</h4><ul>
+        <li>做「搜索」那张卡时一起接上线：资料库搜索 = 关键词 + 本地语义混合排序（见第 02 节第 1 处）。</li>
+        <li>面板改成白话：「已就绪 / 正在准备 / 失败：原因 [重试]」；加三档预设（严格 / 平衡 / 广泛）和「搜哪些内容」勾选（中文说明 / 英文说明 / 话题 / 笔记）；高级项折起来。</li>
+        <li>会花时间的动作（比如重建），按钮旁写清「要多久、会不会花钱」（本地模型：不花）。</li>
+      </ul></div>
+      <div class="tags"><span class="tag free">不花 AI 额度</span><span class="tag">工作量：小到中（接线 + 文案）</span><span class="tag">和「搜索」同一批做</span></div>
+      <p class="ref">参考：我们的 apps/desktop/src/pages/settings.tsx（向量检索面板）· Starcat 设置 → 检索 / 索引与上下文</p>
+    </article>
+
+    <article class="card">
+      <div class="card-h"><h3>本机命令行当 AI 后端：可以小试</h3><span class="pill him">Starcat 更好</span></div>
+      <div class="cols">
+        <div class="side him"><h4>STARCAT</h4>「推理」页可以选「本机 Codex / 本机 Claude Code」：用你电脑上已登录的命令行做文字推理，不用另配 API Key。强制纯文字模式，禁用它的工具、Shell、文件访问、MCP、浏览器和子 Agent。仅限直装版。</div>
+        <div class="side us"><h4>我们现在</h4>整理中文理解卡用你配置的 API 服务商，按 24 小时额度计。后端只能是 API。</div>
+      </div>
+      <div class="fix"><h4>怎么试</h4><ul>
+        <li>允许选「本机 Codex（纯文字模式）」做整理。好处：用你已有的订阅额度，不用另付 API 的钱。</li>
+        <li>先验证 4 件事：① 质量：拿 20 张卡和现在的结果对比 ② 速度和稳定：批量时每张都要起一个进程 ③ 路径：从图标启动的应用找不到 node / codex 的位置（Starcat 在你这台就栽在这里）④ 额度：会占 Codex 订阅，这类用额度的事要你本人点头。</li>
+        <li>试验交给 Codex 跑，不占 Claude 额度；通过了再做设置项，样子参考上面「推理」页的状态牌。</li>
+      </ul></div>
+      <div class="tags"><span class="tag cost">占 Codex 订阅额度，要你点头</span><span class="tag">工作量：先小试一次</span></div>
+      <p class="ref">参考：Starcat 设置 → 推理 · docs/3-设计/详细设计/34-StarcatCLI与外部MCP桥接设计.md</p>
+    </article>
+
+    <article class="card">
+      <div class="card-h"><h3>本地工具页：整块不借，只借「检测行」</h3><span class="pill na">我们用不上</span></div>
+      <div class="cols">
+        <div class="side him"><h4>STARCAT</h4>三块都围绕「读仓库代码、跑 Agent」：Agent Runtime（Codex App Server「就绪」；DeepSeek Harness「未配置」，红字写明找不到哪个可执行文件）、CodeFlow（把仓库代码画成流程页，存在本机目录，ZIP 上限 50 MB）、CodebaseMemory（用 Tree-sitter 给代码建索引，在浏览器里看 3D 图谱）。</div>
+        <div class="side us"><h4>我们现在</h4>没有这类功能，我们没有 Agent 工作台。</div>
+      </div>
+      <div class="figs">
+        <figure class="sfig">
+          <a class="frame tall" href="img/starcat-local.jpg" target="_blank" rel="noopener"><img src="img/starcat-local.jpg" width="936" height="1340" alt="Starcat 的「本地工具」页上半部分：Agent Runtime 与 CodeFlow" loading="lazy"></a>
+          <figcaption>Agent Runtime 与 CodeFlow · <a href="img/starcat-local.jpg" target="_blank" rel="noopener">看全图 ↗</a></figcaption>
+        </figure>
+        <figure class="sfig">
+          <a class="frame tall" href="img/starcat-local-cbm.jpg" target="_blank" rel="noopener"><img src="img/starcat-local-cbm.jpg" width="936" height="770" alt="Starcat 的「本地工具」页：CodebaseMemory 的检测行，自动检测、重新检测、选择文件、恢复自动检测" loading="lazy"></a>
+          <figcaption>CodebaseMemory 的「检测行」：路径 + 版本 +「自动检测」+ 4 个动作 · <a href="img/starcat-local-cbm.jpg" target="_blank" rel="noopener">看全图 ↗</a></figcaption>
+        </figure>
+      </div>
+      <div class="fix"><h4>怎么借</h4><ul>
+        <li>只借「检测行」的样子：名称 · 状态点 · 路径与版本 · [重新检测] [手动选择] [恢复自动] · 失败原因 · 安装说明。</li>
+        <li>以后我们要接本机 Codex 或本地向量模型，就用这一种行。</li>
+      </ul></div>
+      <div class="tags"><span class="tag free">不花 AI 额度</span><span class="tag">和「命令行后端」「向量面板」一起用</span></div>
+      <p class="ref">参考：Starcat 设置 → 本地工具</p>
+    </article>
+  </div>
+</section>
+
+<!-- ============ 07 产品完整度 ============ -->
+<section id="complete">
+  <p class="kicker">07<span class="new">第 3 版新增</span></p>
+  <h2 class="t">产品完整度：差在外围，不在核心</h2>
+  <p class="sub">你说它更完整，我同意：打开设置，它像一个上架的产品。我把「完整度」拆开看，差距主要在外围；核心上，我们更贴你的用法。</p>
+
+  <div class="mx">
+    <div class="mx-h"><div>维度</div><div class="h-him">Starcat</div><div class="h-us">我们</div><div>判断</div></div>
+    <div class="mx-g">外围：它更完整</div>
+    <div class="mx-r"><div class="pg">设置的结构<span class="to"><a href="#set-A">细节 A</a></span></div><div class="it" data-who="Starcat">20 页 · 5 组 ·「搜索设置」</div><div class="it" data-who="我们">两层标签 · 5 个小页 · 没有搜索</div><div class="vd"><span class="pill him">Starcat 更好</span></div></div>
+    <div class="mx-r"><div class="pg">通知<span class="to"><a href="#set-F">细节 F</a></span></div><div class="it" data-who="Starcat">系统通知，5 类各自开关</div><div class="it" data-who="我们">只有应用内铃铛</div><div class="vd"><span class="pill him">Starcat 更好</span></div></div>
+    <div class="mx-r"><div class="pg">隐私与数据去向<span class="to"><a href="#set-C">细节 C</a></span></div><div class="it" data-who="Starcat">一页写清：要哪些权限 · 联网做什么 · 不联网的是什么</div><div class="it" data-who="我们">散在各输入框下面</div><div class="vd"><span class="pill him">Starcat 更好</span></div></div>
+    <div class="mx-r"><div class="pg">数据管理<span class="to"><a href="#set-D">细节 D</a></span></div><div class="it" data-who="Starcat">缓存分项用量 · 分档清理 · 保留期</div><div class="it" data-who="我们">只有「清空本机数据」</div><div class="vd"><span class="pill him">Starcat 更好</span></div></div>
+    <div class="mx-r"><div class="pg">快捷键<span class="to"><a href="#set-E">细节 E</a></span></div><div class="it" data-who="Starcat">一张表，可改</div><div class="it" data-who="我们">有，但不列出</div><div class="vd"><span class="pill him">Starcat 更好</span></div></div>
+    <div class="mx-r"><div class="pg">AI 助手接入<span class="to"><a href="#agent">第 05 节</a></span></div><div class="it" data-who="Starcat">配对 · MCP · 命令行 · Skill</div><div class="it" data-who="我们">本地 API + 两个令牌</div><div class="vd"><span class="pill him">Starcat 更好</span></div></div>
+    <div class="mx-r"><div class="pg">状态与错误的写法<span class="to"><a href="#copy">第 08 节</a></span></div><div class="it" data-who="Starcat">统一的状态词；失败给原因和下一步</div><div class="it" data-who="我们">一整句话，更具体，但没有统一词表</div><div class="vd"><span class="pill even">差不多</span></div></div>
+    <div class="mx-r"><div class="pg">规范与验收<span class="to"><a href="#better">第 02 节 · 7</a></span></div><div class="it" data-who="Starcat">强制的《设置页规范》+ 8 项验收清单 + 288 条文案重写清单</div><div class="it" data-who="我们">DESIGN.md（5KB）+ 一次文案审读 + 统一用词表</div><div class="vd"><span class="pill him">Starcat 更好</span></div></div>
+    <div class="mx-g">核心与规模：各有取舍</div>
+    <div class="mx-r"><div class="pg">整理<span class="to">你这台它的标签 1 / 542</span></div><div class="it" data-who="Starcat">要你发起，或自己去设置里打开后台整理；逐条审核</div><div class="it" data-who="我们">装好就自动整理；24 小时硬额度；默认 0</div><div class="vd"><span class="pill us">我们更好</span></div></div>
+    <div class="mx-r"><div class="pg">备份与恢复</div><div class="it" data-who="Starcat">清缓存、清空；没找到备份入口</div><div class="it" data-who="我们">本机自动备份 + 一键恢复 + 私有 Gist + 导出</div><div class="vd"><span class="pill us">我们更好</span></div></div>
+    <div class="mx-r"><div class="pg">从收藏到行动</div><div class="it" data-who="Starcat">对话（RAG）、笔记、分享</div><div class="it" data-who="我们">找方案 → 交接单 → 复制给 Codex；问答和助手直取在计划中</div><div class="vd"><span class="pill even">各走各路</span></div></div>
+    <div class="mx-r"><div class="pg">分发与更新</div><div class="it" data-who="Starcat">Homebrew · App Store · 直装；自动更新；18 种语言</div><div class="it" data-who="我们">自用，只有中文；更新入口还指着上游，要改成不指</div><div class="vd"><span class="pill na">我们用不上</span></div></div>
+    <div class="mx-r"><div class="pg">生态</div><div class="it" data-who="Starcat">Raycast / Alfred / uTools · 浏览器扩展 · 小组件（约 25 个仓库）</div><div class="it" data-who="我们">单个应用</div><div class="vd"><span class="pill na">我们用不上</span></div></div>
+  </div>
+
+  <div class="tldr">
+    <h2>完整度结论</h2>
+    <p><strong>差的是外围，不是核心。</strong>设置结构、通知、隐私页、数据管理、快捷键、AI 接入、写法规范，它更完整；这些多半是小改动，已经排进计划。</p>
+    <p><strong>完整感来自规范，不是功能多。</strong>它有强制的设置页规范和验收清单，每页照着写；我们缺这一层，所以单页都对，合起来却不统一。</p>
+    <p><strong>核心我们更贴你。</strong>它的整理要你发起，在你手里没转起来（标签 1 / 542）；分发、18 种语言、生态是团队规模的事，我们不需要。</p>
+  </div>
+</section>
+
+<!-- ============ 08 文案表达 ============ -->
+<section id="copy">
+  <p class="kicker">08<span class="new">第 3 版新增</span></p>
+  <h2 class="t">文案：单句我们不差，差一套写法规范</h2>
+  <p class="sub">你觉得它的文案更完善，我对着两边的原文逐条看了。差的不是某一句，而是它有几条固定写法，每页都照着写；我们是一次性审读过，没有留下规范。</p>
+
+  <div class="mx">
+    <div class="mx-h"><div>写法</div><div class="h-him">Starcat 的原文</div><div class="h-us">我们现在</div><div>判断</div></div>
+    <div class="mx-r"><div class="pg">每项 = 名称 + 一行说明 + 默认值</div><div class="it" data-who="Starcat">「README 截断长度」：清洗后用于向量化的最大字符数；默认 12000。</div><div class="it" data-who="我们">多数设置有一行说明；默认值没有统一写出来</div><div class="vd"><span class="pill him">Starcat 更好</span></div></div>
+    <div class="mx-r"><div class="pg">花钱的操作，按钮旁写代价</div><div class="it" data-who="Starcat">「强制所有 starred 仓库重新走 embedding API；会消耗配额。」「已缓存的所有译文将被清空。仓库仍可按需重新翻译，需要重新消耗 AI 配额。」</div><div class="it" data-who="我们">「会真实调用一次 AI，会产生很少的费用。」「已整理好的中文说明（重做要重新花钱）」</div><div class="vd"><span class="pill even">差不多</span></div></div>
+    <div class="mx-r"><div class="pg">写明「不包含 / 不会」</div><div class="it" data-who="Starcat">「诊断包设计上不包含 GitHub token、API Key、AI prompt、README 正文和私有笔记。」「这些缓存可重新生成。清理不会删除你的 Stars、标签或笔记。」</div><div class="it" data-who="我们">「清空本机数据」把会丢的东西逐项列出（很好）；「复制诊断信息」没写含什么、不含什么</div><div class="vd"><span class="pill him">Starcat 更好</span></div></div>
+    <div class="mx-r"><div class="pg">状态词统一，旁边给下一步</div><div class="it" data-who="Starcat">就绪 / 可用 / 检测失败 / 尚未预拉，各带一个按钮（安装说明 · 开始预拉 · 重新检测）</div><div class="it" data-who="我们">状态是一整句（上次整理了多少个、为什么停下），更具体；但没有统一词表</div><div class="vd"><span class="pill even">差不多</span></div></div>
+    <div class="mx-r"><div class="pg">写出「当前生效的是什么」</div><div class="it" data-who="Starcat">「当前生效：内置服务」「留空使用默认服务」</div><div class="it" data-who="我们">「现在：DeepSeek。换一个服务商后，要填它对应的密钥和模型名。」</div><div class="vd"><span class="pill even">差不多</span></div></div>
+    <div class="mx-r"><div class="pg">同一步给两类人各写一版</div><div class="it" data-who="Starcat">「目标设备终端 · 配对设备」+「AI Agent · 配对设备」</div><div class="it" data-who="我们">没有这个写法</div><div class="vd"><span class="pill him">Starcat 更好</span></div></div>
+    <div class="mx-r"><div class="pg">少用行话</div><div class="it" data-who="Starcat">RAG 几页里是「最低向量相似度」「分片」「Rerank」「Embedding」</div><div class="it" data-who="我们">大多是白话（「想试 / 在用」「重做要重新花钱」）；你不是开发者，这点对你更重要</div><div class="vd"><span class="pill us">我们更好</span></div></div>
+  </div>
+
+  <div class="stack">
+    <article class="card">
+      <div class="card-h"><h3>我们自己还留着两处开发者口吻</h3><span class="pill us">我们的问题</span></div>
+      <div class="cols">
+        <div class="side us"><h4>令牌的提示</h4>「调用时加请求头 Authorization: Bearer，后面接这串口令。」<span class="note">位置：设置 → 自动整理与备份 → 高级。普通人看不懂「请求头」。</span></div>
+        <div class="side us"><h4>运行状态的开发者信息</h4>「只读查询读取原来的表；写记录需要单独打开；本机入口默认关闭。」<span class="note">「原来的表」是内部说法，用户不知道指什么。</span></div>
+      </div>
+      <div class="figs one wide">
+        <figure class="sfig">
+          <a class="frame" href="img/starcat-diag.jpg" target="_blank" rel="noopener"><img src="img/starcat-diag.jpg" width="936" height="445" alt="Starcat 的诊断与支持页：导出调试日志，诊断包内容说明" loading="lazy"></a>
+          <figcaption>它的「诊断与支持」：导出之前就写明包含什么、不含什么。我们的「复制诊断信息」没有这一句。</figcaption>
+        </figure>
+      </div>
+      <p class="note-line">它也有疏漏：「本地工具」页里 CodebaseMemory 那一栏的空状态写的是「当前目录还没有 CodeFlow 生成项目」，把名字写成了另一块。所以它的优势是有规范、有清单，不是没有错。</p>
+      <div class="fix"><h4>怎么办</h4><ul>
+        <li><b>我来写《设置页写法规范》</b>（并入 DESIGN.md）：每项 = 名称 + 一行说明 + 默认值；花钱 / 危险的写代价；写「不包含 / 不会」；统一状态词（就绪 / 未配置 / 检测失败 / 尚未运行）加下一步按钮；配置类给「复制给 AI」选项；不用行话。</li>
+        <li><b>做一次「设置文案盘点」：</b>逐条列出（位置 · 现文 · 问题 · 改写），像它的 288 条清单。我先出清单，你过目，再派 Codex 改。</li>
+        <li><b>先改这两处开发者口吻，</b>并给「复制诊断信息」加一句「包含什么、不含什么」。</li>
+      </ul></div>
+      <div class="tags"><span class="tag free">不花 AI 额度</span><span class="tag">工作量：规范 小（文档）；盘点 + 改文案 小到中</span><span class="tag">规范由我写，不占 Codex 额度</span></div>
+      <p class="ref">参考：Starcat 仓库 docs/5-规范/UI-设置页规范.md · 设置页文案重写清单.md · 我们的 docs/rebuild/文案审读.md</p>
+    </article>
+  </div>
+</section>
+
+<!-- ============ 09 各自独有 ============ -->
+<section id="unique">
+  <p class="kicker">09</p>
+  <h2 class="t">各自独有的</h2>
+  <p class="sub">不在「共有」之列，但决定了各自的性格。</p>
+
+  <div class="two">
+    <div class="box him">
+      <h3>Starcat 有、我们没有</h3>
+      <ul>
+        <li><b>Release 订阅与时间线<span class="verdict take">值得借</span></b><span class="d">关注的项目一发新版就提醒，时间线里直接下载。只对「想试 / 在用」的工具开就够，免费，工作量中。</span></li>
+        <li><b>GitHub 通知时间线<span class="verdict skip">不建议</span></b><span class="d">被 @、被指派的通知。你不靠 GitHub 协作。</span></li>
+        <li><b>设备端本地 AI（免费、不用 API Key）<span class="verdict take">可小试</span></b><span class="d">能不能拿来做「便宜的初筛」，比如先判断值不值得生成理解卡。中文理解卡的质量要先拿一小批对比，再决定。</span></li>
+        <li><b>AI 助手接入：配对 + MCP + 命令行 + Skill<span class="verdict take">值得借</span></b><span class="d">让 Codex / Claude Code 直接用你的收藏。先做只读版，默认关（第 05 节）。</span></li>
+        <li><b>本机命令行当 AI 后端<span class="verdict take">可小试</span></b><span class="d">用你已登录的 Codex 做文字整理，省 API 的钱；先对比 20 张卡的质量和速度，会占订阅额度，要你点头（第 06 节）。</span></li>
+        <li><b>仓库 AI 对话 / 知识库问答（RAG）<span class="verdict take">值得借</span></b><span class="d">你说有用，已改判为要做：资料库「问问我的收藏」、详情页「问问它」，答案带出处；没额度时降级成检索结果（第 06 节，计划阶段 3）。</span></li>
+        <li><b>GitHub Lists 分组同步<span class="verdict skip">不建议</span></b><span class="d">我们有业务场景归类。</span></li>
+        <li><b>18 种语言、订阅分级、分享卡片 / 短链、桌面小组件、浏览器扩展、Raycast / Alfred / uTools 插件<span class="verdict skip">不需要</span></b><span class="d">自用、单机、只有中文。</span></li>
+      </ul>
+    </div>
+    <div class="box us">
+      <h3>我们有、Starcat 没有</h3>
+      <ul>
+        <li><b>13 个业务场景自动归类</b><span class="d">小红书、公众号、抖音、海报封面、电商、SEO……</span></li>
+        <li><b>找方案 → 交接单 → 一键复制给 Codex</b><span class="d">一句话说任务，从你的收藏里挑工具，整理成 Codex 能直接开工的单子。</span></li>
+        <li><b>中文理解卡</b><span class="d">它能做什么、怎么试、适合谁，约 500 张。</span></li>
+        <li><b>从微信 / 公众号 / X 文章里收集项目</b><span class="d">进收集箱审核，再入库。</span></li>
+        <li><b>按场景缺口去 GitHub 找没收藏的</b><span class="d">偏少的场景排前面。</span></li>
+        <li><b>严格的额度预算</b><span class="d">硬上限、默认 0、只能你本人授权。</span></li>
+        <li><b>备份与恢复，两道保险</b><span class="d">本机自动备份 + 一键恢复 + 私有 Gist + 导出；Starcat 没有这个页。</span></li>
+        <li><b>形态与许可证识别</b><span class="d">技能 / MCP / 命令行 / 应用……一眼分清。</span></li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="keep">
+    <figure>
+      <div class="shot"><span class="who us">Fox Stars Lab</span><a href="img/ours-solve.jpg" target="_blank" rel="noopener"><img src="img/ours-solve.jpg" width="1400" height="875" alt="我们的找方案页：说一句想做的事，生成交接单" loading="lazy"></a></div>
+      <figcaption class="cap">找方案：说一句想做的事，左边列出你收藏里最相关的，右边出「交接单」，一键复制给 Codex。<em>（还没输入时的样子。）</em></figcaption>
+    </figure>
+    <figure>
+      <div class="shot"><span class="who us">Fox Stars Lab</span><a href="img/ours-today.jpg" target="_blank" rel="noopener"><img src="img/ours-today.jpg" width="1400" height="875" alt="我们的今日页：今天值得先看的收藏" loading="lazy"></a></div>
+      <figcaption class="cap">今日：「今天值得先看」，优先挑和小红书、公众号、抖音等场景有关的。<em>（浅色模式截图）</em></figcaption>
+    </figure>
+  </div>
+</section>
+
+<!-- ============ 10 建议顺序 ============ -->
+<section id="plan">
+  <p class="kicker">10<span class="new">第 4 版重排</span></p>
+  <h2 class="t">建议的顺序</h2>
+  <p class="sub">这一节按你的指示重排过：7 个阶段、29 张草案卡。<strong>最新、最全的版本在《<a href="https://claude.ai/artifact/4AXBvrtrr31TWoJ7yVx2u1">进度与规划</a>》页</strong>，里面还写了每个阶段你来验收什么。写卡、派 Codex 都要你说「开始」。</p>
+
+  <ol class="steps">
+    <li class="step"><b>阶段 0 · 收尾与稳定</b><span class="d">版本号与上游更新检查 · 深色统计卡 · 「重新整理这一张」；设计契约、设置页写法规范、文案盘点由我写（第 07、08 节）。</span><span class="tags"><span class="tag free">不花额度</span><span class="tag">小</span></span></li>
+    <li class="step"><b>阶段 1 · 找得更准</b><span class="d">维护状态标签 · 搜索排序 + 命中原因 · 把向量检索面板接上线（本机语义搜索）· 智能集合 · 设置页整理（第 02、04、06 节）。这是检索核心，问答和助手都靠它。</span><span class="tags"><span class="tag free">不花额度</span><span class="tag">中</span></span></li>
+    <li class="step"><b>阶段 2 · 让 AI 助手来取（只读版）</b><span class="d">只读 MCP + Skill + 复制配置，默认关；Codex / Claude Code 直接查你的收藏（第 05 节）。你点名要的。</span><span class="tags"><span class="tag free">不花 App 额度</span><span class="tag">中</span></span></li>
+    <li class="step"><b>阶段 3 · 问你的收藏</b><span class="d">知识库问答 + 仓库 AI 对话：资料库「问问我的收藏」、详情页「问问它」，答案带出处；独立每日额度，没额度也给检索结果（第 06 节）。你点名要的。</span><span class="tags"><span class="tag cost">花独立额度</span><span class="tag">中到大</span></span></li>
+    <li class="step later"><b>阶段 4 · 助手进阶</b><span class="d">配对码 · 每台设备单独令牌 · 带预演的写入类 · 命令行（可选）（第 05 节）。</span><span class="tags"><span class="tag free">不花额度</span><span class="tag">中到大</span></span></li>
+    <li class="step later"><b>阶段 5 · 把界面打磨到精致</b><span class="d">设置小件（MiniMax · CC Switch 导入 · 系统通知）· 整理进度小看板 · README 翻译 · ⌥⌘F 快速收集 · 额度旁「约 ¥x」估算。</span><span class="tags"><span class="tag cost">README 翻译手动点才花</span><span class="tag">小到中</span></span></li>
+    <li class="step later"><b>阶段 6 · 发现更多</b><span class="d">Awesome 与「新锐」来源 · Release 提醒（只对「想试 / 在用」）· 本机 Codex 当 AI 后端先小试 20 张卡。</span><span class="tags"><span class="tag cost">试验占 Codex 订阅，要你点头</span><span class="tag">中</span></span></li>
+  </ol>
+
+  <div class="ask">
+    <h3>要你拍板的 2 件事，外加一条默认</h3>
+    <ol>
+      <li><strong>顺序：</strong>按上面（先让助手能查，再做问答）？想先做问答，把阶段 2 和 3 对调就行。</li>
+      <li><strong>问答用独立的每日额度吗？</strong>建议起步 10 万 token / 天，约够问 10–15 个问题（预估，真跑后校准）。整理把额度用光了，问答不会跟着死；反过来也一样。</li>
+      <li><strong>默认（不用回）：</strong>设计契约、写法规范、文案盘点由我先写；上一版的三件事（Release 提醒做 · README 翻译手动点才翻 · CC Switch 导入加补 MiniMax）按上一版的建议排。</li>
+    </ol>
+  </div>
+</section>
+
+<footer class="foot">
+  <span><strong>口径：</strong>Starcat 部分——我装好后实际点过各个页面，并读了它的 MIT 开源仓库（github.com/starcat-app/Starcat）里的设计文档和关键源码（搜索、健康度、MCP 与命令行桥接、用量、README 翻译、DESIGN.md、设置页规范）；AI 功能没有深度使用，也没有真的配对设备、调用 MCP 或命令行。</span>
+  <span>设置页部分——它的 20 个设置页逐页点开看过（没改任何设置）；文中「你这台开着 / 关着」说的是你这台 Starcat 当前的状态，不一定是默认值。</span>
+  <span>我们部分——查的是当前集成线的代码（2026-10-06 切库之后没有新提交），包括设置页、文案常量和向量检索面板；我们的界面截图来自假后端的示意数据。</span>
+  <span>更正记录——第 2 版有两处判断不对，这版已改：MCP / 令牌（「差不多」→「Starcat 更好」）；向量检索（「做了一半」→「面板是全的，缺接线」）。第 4 版又改一处（你指出的）：把「对话（RAG）」判成「不借、交给 Codex」是误解，已改判为要做，产品定位也更正为三个出口。评分是判断，不是跑分。</span>
+</footer>
+
+</div>
+</body>
+</html>
+
+</body></html>

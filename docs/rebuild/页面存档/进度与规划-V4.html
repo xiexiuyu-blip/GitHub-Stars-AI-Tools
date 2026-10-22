@@ -1,0 +1,356 @@
+<!doctype html><html><head><meta charset=utf8><meta name=viewport content="width=device-width,initial-scale=1,viewport-fit=cover"><style>:root{color-scheme:light;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}html{scroll-padding-top:env(safe-area-inset-top,0px)}body{margin:0;padding:0;font:14px -apple-system,BlinkMacSystemFont,sans-serif;background:#fff;color:#000}img{max-width:100%}[hidden]:not([hidden=until-found i]){display:none!important}</style></head><body>
+<title>Fox Stars Lab 进度与规划</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:wght@600;800&display=swap">
+<style>
+:root{
+  --bg:#f2f4f9; --surface:#ffffff; --ink:#131a2e; --muted:#586280;
+  --line:#dde2ee; --line-strong:#b4bcd2;
+  --accent:#3347d6; --accent-soft:#e7eaff;
+  --ok:#17935c; --ok-soft:#dff3e9; --ok-ink:#0d6b42; --on-ok:#ffffff;
+  --warn:#c27a00; --warn-soft:#fdf0d6; --warn-ink:#8a5600;
+  --bad:#cc3340; --bad-soft:#fde4e6;
+  --you:#b81e72; --you-soft:#fbe3ef;
+  --font-d:"Bricolage Grotesque","PingFang SC","Hiragino Sans GB","Microsoft YaHei",system-ui,sans-serif;
+  --font-b:-apple-system,BlinkMacSystemFont,"PingFang SC","Hiragino Sans GB","Microsoft YaHei","Noto Sans SC",system-ui,sans-serif;
+  --font-m:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+}
+@media (prefers-color-scheme:dark){
+  :root:not([data-theme="light"]){
+    --bg:#0e1322; --surface:#151c31; --ink:#e8ecf8; --muted:#9aa4c4;
+    --line:#27304b; --line-strong:#3c4768;
+    --accent:#93a2ff; --accent-soft:#222a55;
+    --ok:#3fcf8e; --ok-soft:#14352a; --ok-ink:#3fcf8e; --on-ok:#07180f;
+    --warn:#f2b04a; --warn-soft:#3a2c10; --warn-ink:#f2b04a;
+    --bad:#ff7a85; --bad-soft:#3e1b20;
+    --you:#ff7fbd; --you-soft:#431a31;
+    color-scheme:dark;
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#0e1322; --surface:#151c31; --ink:#e8ecf8; --muted:#9aa4c4;
+  --line:#27304b; --line-strong:#3c4768;
+  --accent:#93a2ff; --accent-soft:#222a55;
+  --ok:#3fcf8e; --ok-soft:#14352a; --ok-ink:#3fcf8e; --on-ok:#07180f;
+  --warn:#f2b04a; --warn-soft:#3a2c10; --warn-ink:#f2b04a;
+  --bad:#ff7a85; --bad-soft:#3e1b20;
+  --you:#ff7fbd; --you-soft:#431a31;
+  color-scheme:dark;
+}
+*{box-sizing:border-box}
+body{background:var(--bg);color:var(--ink);font:16px/1.7 var(--font-b);-webkit-text-size-adjust:100%}
+.wrap{max-width:1080px;margin-inline:auto;padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px));padding-block:24px 72px}
+@media (min-width:720px){.wrap{padding-left:max(32px,env(safe-area-inset-left,0px));padding-right:max(32px,env(safe-area-inset-right,0px));padding-block:36px 96px}}
+h1,h2,h3,p,ul,ol,dl,dd{margin:0}
+h1,h2,h3{text-wrap:balance}
+ul,ol{padding:0;list-style:none}
+b,strong{font-weight:650}
+.num{font-family:var(--font-d);font-variant-numeric:tabular-nums}
+a{color:var(--accent)}
+:focus-visible{outline:2px solid var(--accent);outline-offset:3px;border-radius:4px}
+
+.top{display:flex;justify-content:space-between;align-items:baseline;gap:4px 12px;flex-wrap:wrap;color:var(--muted);font-size:13px}
+.top .name{font-family:var(--font-d);font-weight:600;letter-spacing:.02em;color:var(--ink)}
+.top .stamp{font-family:var(--font-m);font-size:12px}
+
+/* 开头：左边结论，右边三个出口的示意图 */
+.hero{display:grid;grid-template-columns:minmax(0,1.05fr) minmax(0,1fr);gap:36px;align-items:center;margin-top:28px}
+@media (max-width:860px){.hero{grid-template-columns:minmax(0,1fr);gap:24px}}
+.hero h1{font-family:var(--font-d);font-weight:800;font-size:clamp(27px,4.4vw,42px);line-height:1.22;letter-spacing:-.01em}
+.nw{white-space:nowrap}
+.hero .lead{margin-top:16px;font-size:17px;color:var(--muted);max-width:34em}
+.facts{display:flex;flex-wrap:wrap;gap:10px 30px;margin-top:22px}
+.facts div{min-width:0}
+.facts .num{display:block;font-size:32px;font-weight:800;line-height:1.1}
+.facts small{display:block;color:var(--muted);font-size:13px;margin-top:2px}
+
+.field-box{background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:18px 18px 16px}
+.field-cap{font-size:13px;color:var(--muted);margin-bottom:12px}
+.flow{display:grid;gap:12px}
+.node{border:1px solid var(--line);background:var(--surface);border-radius:12px;padding:11px 14px}
+.node h3{font-size:15.5px;font-weight:650;line-height:1.5;display:flex;flex-wrap:wrap;gap:2px 8px;align-items:center}
+.node p{font-size:13.5px;line-height:1.55;color:var(--muted);margin-top:2px}
+.node.core{background:var(--accent-soft);border-color:transparent}
+.node.core p{color:var(--ink)}
+.exits{position:relative;display:grid;gap:10px;padding-left:24px;margin-top:2px}
+.exits::before{content:"";position:absolute;left:9px;top:-13px;height:13px;width:2px;background:var(--line-strong)}
+.exit{position:relative}
+.exit::before{content:"";position:absolute;left:-15px;top:-11px;height:32px;width:15px;border-left:2px solid var(--line-strong);border-bottom:2px solid var(--line-strong);border-bottom-left-radius:9px}
+.exit:first-child::before{top:-12px;height:33px}
+.exit .cost{display:flex;flex-wrap:wrap;gap:6px;margin-top:7px}
+
+.chip,.tag{font-size:12px;font-weight:600;line-height:1;padding:4px 8px;border-radius:999px;white-space:nowrap}
+.tag{background:var(--accent-soft);color:var(--accent)}
+.tag.you{background:var(--you-soft);color:var(--you)}
+.tag.have{background:var(--ok-soft);color:var(--ok-ink)}
+.chip.ok{background:var(--ok-soft);color:var(--ok-ink)}
+.chip.warn{background:var(--warn-soft);color:var(--warn-ink)}
+
+/* 区块 */
+section{margin-top:56px}
+h2{font-family:var(--font-d);font-weight:800;font-size:22px;line-height:1.3;margin-bottom:6px}
+.sub{color:var(--muted);margin-bottom:20px;max-width:40em}
+.note{color:var(--muted);font-size:14.5px;margin-top:12px;max-width:46em}
+.note b{color:var(--ink)}
+
+/* 更正三处 */
+.fixes{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+@media (max-width:860px){.fixes{grid-template-columns:minmax(0,1fr)}}
+.fix{border:1px solid var(--line);background:var(--surface);border-radius:12px;padding:16px 18px;display:grid;gap:10px;align-content:start}
+.fix .was{color:var(--muted);font-size:14.5px}
+.fix .was i{font-style:normal;font-size:12px;font-weight:600;color:var(--bad);margin-right:8px}
+.fix .now{font-size:15.5px}
+.fix .now i{font-style:normal;font-size:12px;font-weight:600;color:var(--ok-ink);margin-right:8px}
+
+/* 左：轮到你的；右：七个阶段 */
+.cols{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.25fr);gap:44px;align-items:start}
+@media (max-width:860px){.cols{grid-template-columns:minmax(0,1fr);gap:36px}}
+.you-panel{background:var(--you-soft);border-radius:14px;padding:22px 22px 20px}
+.you-panel h2{color:var(--you);font-size:20px}
+.you-panel ol{counter-reset:y;margin-top:14px;display:grid;gap:16px}
+.you-panel ol>li{counter-increment:y;display:grid;grid-template-columns:26px minmax(0,1fr);gap:10px}
+.you-panel ol>li::before{content:counter(y);width:24px;height:24px;border-radius:50%;background:var(--you);color:var(--bg);display:grid;place-items:center;font:700 13px/1 var(--font-d)}
+.you-panel ol>li b{display:block}
+.you-panel ol>li p{color:var(--muted);font-size:14.5px;margin-top:2px}
+.you-panel ol>li p b{display:inline;color:var(--ink)}
+.you-panel .decided,.you-panel .when{margin-top:18px;padding-top:14px;border-top:1px solid color-mix(in srgb,var(--you) 28%,transparent);font-size:14.5px}
+.you-panel .decided>b{display:block}
+.you-panel .dec{margin-top:10px;display:grid;gap:10px}
+.you-panel .dec li{padding-left:12px;border-left:2px solid color-mix(in srgb,var(--you) 35%,transparent)}
+.you-panel .dec li b{display:block;font-size:14.5px}
+.you-panel .dec li p{margin-top:1px;font-size:14px;color:var(--muted)}
+.you-panel .when ol{counter-reset:s;margin-top:8px;gap:6px}
+.you-panel .when li{counter-increment:s;display:block;padding-left:0}
+.you-panel .when li::before{content:none}
+
+.plan>li{position:relative;display:grid;grid-template-columns:30px minmax(0,1fr);gap:14px;padding-bottom:30px}
+.plan>li::before{content:"";position:absolute;left:14px;top:36px;bottom:4px;width:2px;background:var(--line)}
+.plan>li:last-child{padding-bottom:0}
+.plan>li:last-child::before{display:none}
+.pn{width:30px;height:30px;border-radius:50%;display:grid;place-items:center;font:800 14px/1 var(--font-d);background:var(--surface);color:var(--accent);box-shadow:inset 0 0 0 2px var(--accent);margin-top:1px}
+.pn.you{color:var(--you);box-shadow:inset 0 0 0 2px var(--you)}
+.plan h3{font-size:17.5px;font-weight:650;line-height:1.5;display:flex;flex-wrap:wrap;gap:4px 8px;align-items:center}
+.plan .desc{color:var(--muted);font-size:15px;margin-top:3px}
+.accept{margin-top:9px;padding:8px 12px;border-left:3px solid var(--you);background:var(--you-soft);border-radius:0 8px 8px 0;font-size:14.5px;line-height:1.6}
+.accept b{color:var(--you)}
+.cards{margin-top:10px}
+.cards summary{font-size:14px}
+.cl{margin-top:8px;display:grid;gap:7px;font-size:14px}
+.cl li{display:grid;grid-template-columns:34px minmax(0,1fr);gap:2px 8px;align-items:baseline}
+.cl .cn{font-family:var(--font-m);font-size:12.5px;color:var(--muted)}
+.cl .cw{color:var(--muted)}
+.cl .cw b{color:var(--ink)}
+
+details{margin-top:14px}
+summary{cursor:pointer;color:var(--accent);font-weight:600}
+summary:hover{text-decoration:underline}
+
+/* 两件新事 */
+.lanes{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
+@media (max-width:760px){.lanes{grid-template-columns:minmax(0,1fr)}}
+.lane{border:1px solid var(--line);background:var(--surface);border-radius:12px;padding:18px 18px 16px}
+.lane h3{font-size:17.5px;font-weight:650;display:flex;flex-wrap:wrap;gap:4px 10px;align-items:center}
+.steps{display:flex;flex-wrap:wrap;gap:8px 20px;margin-top:14px}
+.steps li{position:relative;padding:5px 10px;background:var(--accent-soft);color:var(--accent);border-radius:8px;font-size:13px;font-weight:600;line-height:1.4}
+.steps li:not(:last-child)::after{content:"→";position:absolute;right:-17px;top:50%;transform:translateY(-50%);color:var(--muted);font-weight:400}
+.lane ul.pts{margin-top:14px;display:grid;gap:9px;font-size:15px;color:var(--muted)}
+.lane ul.pts li{padding-left:16px;position:relative}
+.lane ul.pts li::before{content:"";position:absolute;left:2px;top:.78em;width:5px;height:5px;border-radius:50%;background:var(--line-strong)}
+.lane ul.pts li b{color:var(--ink)}
+
+/* Starcat 对照 */
+.map{border-top:1px solid var(--line);max-width:880px}
+.map li{display:grid;grid-template-columns:minmax(0,1.6fr) minmax(0,1fr);gap:4px 24px;padding:11px 0;border-bottom:1px solid var(--line);font-size:15px}
+.map li span:last-child{color:var(--muted)}
+.map li span:last-child b{color:var(--ink);font-weight:600}
+@media (max-width:640px){.map li{grid-template-columns:minmax(0,1fr)}}
+
+/* 底线 */
+.rails{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:24px;border-top:1px solid var(--line);padding-top:22px}
+@media (max-width:760px){.rails{grid-template-columns:minmax(0,1fr);gap:16px}}
+.rails b{display:block;font-size:16px}
+.rails p{color:var(--muted);font-size:14.5px;margin-top:2px}
+footer{margin-top:40px;color:var(--muted);font-size:12.5px;font-family:var(--font-m);overflow-wrap:anywhere}
+
+/* 已经做完的（折叠） */
+.hist>summary{font-size:15.5px}
+.done{display:grid;gap:0;border-top:1px solid var(--line);margin-top:14px}
+.done div{display:grid;grid-template-columns:110px minmax(0,1fr);gap:8px 24px;padding:14px 0;border-bottom:1px solid var(--line)}
+.done dt{font-weight:650}
+.done dd{color:var(--muted);font-size:15px}
+@media (max-width:640px){.done div{grid-template-columns:minmax(0,1fr)}}
+.hist .field-box{margin-top:22px}
+.field{display:grid;grid-template-columns:repeat(auto-fill,minmax(11px,1fr));gap:5px}
+.s{display:block;aspect-ratio:1;border-radius:50%;background:var(--ok);transition:transform .12s}
+.s.amber{background:var(--warn)}
+.s.red{background:var(--bad)}
+.s.pending{background:transparent;box-shadow:inset 0 0 0 1.5px var(--line-strong)}
+.s:hover{transform:scale(1.7)}
+@media (prefers-reduced-motion:reduce){.s{transition:none}.s:hover{transform:none}}
+.legend{display:flex;flex-wrap:wrap;gap:6px 18px;margin-top:14px;font-size:13px;color:var(--muted)}
+.legend span{display:inline-flex;align-items:center;gap:7px}
+.legend i{display:inline-block;width:10px;height:10px;border-radius:50%;background:var(--ok)}
+.legend i.amber{background:var(--warn)} .legend i.red{background:var(--bad)}
+.legend i.pending{background:transparent;box-shadow:inset 0 0 0 1.5px var(--line-strong)}
+.legend b{color:var(--ink);font-family:var(--font-d);font-variant-numeric:tabular-nums}
+.issues{display:grid;gap:12px;margin:22px 0 6px}
+.issues li{display:grid;grid-template-columns:minmax(0,1.5fr) minmax(80px,1fr) 78px;gap:6px 14px;align-items:center;font-size:15px}
+.issues .ib{height:8px;border-radius:99px;background:var(--line);overflow:hidden;display:block}
+.issues .ib b{display:block;height:100%;background:var(--warn);border-radius:99px}
+.issues .in{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+.issues .in small{color:var(--muted);margin-left:6px}
+@media (max-width:640px){.issues li{grid-template-columns:minmax(0,1fr) auto}.issues .ib{grid-column:1/-1;order:3}}
+.redo{margin-top:10px;display:grid;gap:6px;font-size:14px}
+.redo li{display:flex;flex-wrap:wrap;gap:2px 12px}
+.redo .rn{font-family:var(--font-m);font-size:13px;word-break:break-all}
+.redo .rw{color:var(--muted)}
+</style>
+
+<div class="wrap">
+  <header class="top">
+    <span class="name">Fox Stars Lab 2.0</span>
+    <span class="stamp">2026-10-19 重排 · 草案，等你说「开始」</span>
+  </header>
+
+  <div class="hero">
+    <div>
+      <h1>后续计划改好了：<span class="nw">AI 助手</span>和<span class="nw">「问我的收藏」</span>都排进来了</h1>
+      <p class="lead">之前我把产品当成「只会复制给 Codex」，这是误解。现在是三个出口、共用一个检索核心，Starcat 里好的部分也分到了各个阶段。还没开工、没写卡、没花额度，等你看完说「开始」。</p>
+      <div class="facts">
+        <div><span class="num">3</span><small>个出口</small></div>
+        <div><span class="num">7</span><small>个阶段</small></div>
+        <div><span class="num">29</span><small>张草案卡</small></div>
+      </div>
+    </div>
+    <div class="field-box" role="group" aria-label="三个出口共用一个检索核心">
+      <p class="field-cap">同一份收藏、同一个检索核心，分三个出口。</p>
+      <div class="flow">
+        <div class="node"><h3>你的收藏</h3><p>约 504 个项目的说明卡、README 摘录、你的笔记</p></div>
+        <div class="node core"><h3>检索核心 <span class="tag">阶段 1</span></h3><p>关键词 + 本机语义，每条结果说清「为什么命中」。全在本机算，不花额度。</p></div>
+        <div class="exits">
+          <div class="node exit"><h3>在 App 里问 <span class="tag">阶段 3</span></h3><p>问问题、回忆、比较，答案带出处。</p><div class="cost"><span class="chip warn">花独立额度</span><span class="chip ok">用完也能看检索结果</span></div></div>
+          <div class="node exit"><h3>让 AI 助手自己来取 <span class="tag">阶段 2</span></h3><p>Codex / Claude Code 做事时，直接查你的库。</p><div class="cost"><span class="chip ok">不花 App 额度</span></div></div>
+          <div class="node exit"><h3>交接单 <span class="tag have">已有</span></h3><p>要动手做一件事：找方案，复制给 Codex。</p><div class="cost"><span class="chip ok">不花额度</span></div></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <section id="fixes">
+    <h2>我之前理解错的三处</h2>
+    <p class="sub">你说得对，下面按你的意思改了。</p>
+    <div class="fixes">
+      <div class="fix"><p class="was"><i>之前</i>把「复制给 Codex」当成产品唯一的出口。</p><p class="now"><i>现在</i>交接单只是出口之一，用在要动手做一件事。问一个问题、回忆收藏里有什么，直接在 App 里答。</p></div>
+      <div class="fix"><p class="was"><i>之前</i>把「和收藏对话」（RAG）判成「不借」。</p><p class="now"><i>现在</i>要做：资料库里「问问我的收藏」，详情页里「问问它」，答案带出处。</p></div>
+      <div class="fix"><p class="was"><i>之前</i>把「AI 助手配置」当成可以后放的老功能。</p><p class="now"><i>现在</i>要做，建议排在问答前面（改动小、不花 App 额度）。1.4.0 有过，2.0 一直没搬回来。</p></div>
+    </div>
+    <p class="note"><b>另外：</b>「交给 Codex」只是现在谁来写代码的分工，不是产品功能。产品里的 AI 用你在设置里配的服务商，不绑定 Codex。</p>
+  </section>
+
+  <section id="plan">
+    <div class="cols">
+      <aside class="you-panel">
+        <h2>轮到你的</h2>
+        <ol>
+          <li><div><b>看一眼顺序</b><p>建议先让助手能查你的收藏（小、不花 App 额度，搜索一好就能用），再做问答。想先做问答，把阶段 2 和 3 对调就行，两条线互不挡。</p></div></li>
+          <li><div><b>定问答的额度</b><p>建议问答用<b>独立的每日额度</b>，起步 10 万 token，约够问 10–15 个问题（预估，真跑后校准）。整理把额度用光了，问答不会跟着死；反过来也一样。开关你自己点。</p></div></li>
+          <li><div><b>说「开始」</b><p>你说了，我才写第一批卡、派 Codex。现在什么都没动，也没花额度。</p></div></li>
+        </ol>
+        <div class="decided">
+          <b>没意见就按这个默认走</b>
+          <ul class="dec">
+            <li><b>设计契约和设置页写法规范我先写</b><p>文档，不花额度；后面每张改界面的卡都按它验收。</p></li>
+            <li><b>上一版的三项按建议排</b><p>Release 提醒做；README 翻译手动点才翻；补 MiniMax 并加「从 CC Switch 导入」。</p></li>
+          </ul>
+        </div>
+        <div class="when">
+          <b>三件小事，不挡计划：</b>
+          <ol>
+            <li>点顶栏「同步」：App 里约 504 个，GitHub 上 542 个，差约 38 个。</li>
+            <li>每天自动整理的额度切库时设成了 0；想让新收藏自动出说明卡，建议开到 20 万 / 天（只有你能点开）。</li>
+            <li>1.4.0 回滚副本过了一周观察期，可以归档了。</li>
+          </ol>
+        </div>
+      </aside>
+
+      <div>
+        <h2>七个阶段，按这个顺序</h2>
+        <p class="sub">编号就是建议的先后。每个阶段做完都是：发布到开发版，你亲手做一件真任务，通过了再问你要不要升级正式版（升级前自动备份，可整库回滚）。</p>
+        <ol class="plan"><li><span class="pn">0</span><div><h3>收尾与稳定 <span class="tag">第一批</span><span class="chip ok">不花额度</span><span class="chip warn">单张重做点才花</span></h3><p class="desc">切库后的杂事：版本号对齐并关掉上游更新提示，修深色模式的统计卡，详情页加「重新整理这一张」。我同时把设计契约和设置页写法规范写好。</p><p class="accept"><b>你来做：</b>点顶栏「同步」补回新收藏；挑一张文字不顺的说明卡，点「重新整理这一张」。</p><details class="cards"><summary>这一阶段的 3 张卡，另有 2 份文档</summary><ul class="cl"><li><span class="cn">46</span><span class="cw"><b>版本号与更新检查</b> · 版本号对齐 2.0.0-fox.1；关掉指向上游的更新检查</span></li><li><span class="cn">47</span><span class="cw"><b>两处小修</b> · 深色模式下看不见的统计卡；整理花费估算从 7.5 千校准到约 9 千</span></li><li><span class="cn">48</span><span class="cw"><b>重新整理这一张</b> · 详情页单张重做（约 1 万 token，你点确认才花）；列出约 24 张疑似半截话的旧卡</span></li><li><span class="cn">文档</span><span class="cw"><b>设计契约与写法规范</b> · 设置页怎么写、状态怎么显示、改界面前的检查清单（我写）</span></li><li><span class="cn">文档</span><span class="cw"><b>升级正式版的流程</b> · 备份 → 构建 → 替换 → 核对 → 回滚（我写）</span></li></ul></details></div></li><li><span class="pn">1</span><div><h3>找得更准 <span class="chip ok">不花额度</span></h3><p class="desc">搜索按相关度排序，每条写明为什么命中；把现成但没接上的本机语义搜索接上线，没写这几个字、意思相近也能找到；项目带「维护状态」小标签；设置页一次整理好。</p><p class="accept"><b>你来验收：</b>搜「小红书 封面」，看排序和命中原因；说一句「给图片批量加水印」，能找到对的工具；筛「疑似停更」。</p><details class="cards"><summary>这一阶段的 7 张卡</summary><ul class="cl"><li><span class="cn">49</span><span class="cw"><b>维护状态标签</b> · 活跃 / 放缓 / 疑似停更 / 已归档，可筛选；不做字母评分</span></li><li><span class="cn">50</span><span class="cw"><b>搜索排序（后端）</b> · 项目名 > 中文说明 > 英文说明 > 话题；每条带命中原因</span></li><li><span class="cn">51</span><span class="cw"><b>搜索结果行（前端）</b> · 1–4 星、命中标签、边输入边出结果</span></li><li><span class="cn">52</span><span class="cw"><b>检索核心</b> · 关键词 + 本机语义接到资料库和找方案；附评测，不比纯词匹配差才上线</span></li><li><span class="cn">53</span><span class="cw"><b>语义搜索设置</b> · 把藏着的向量检索面板放进设置，写成白话</span></li><li><span class="cn">54</span><span class="cw"><b>智能集合</b> · 久未更新 / 想试没试 / 没有中文说明 / 最近收藏</span></li><li><span class="cn">55</span><span class="cw"><b>设置页整理</b> · 分组 + 搜索框、「数据去哪了」、分档清理、快捷键表；预留助手与问答两块</span></li></ul></details></div></li><li><span class="pn you">2</span><div><h3>让 AI 助手来取 <span class="tag you">你点名要的</span><span class="chip ok">不花 App 额度</span></h3><p class="desc">设置里「给 AI 助手用」一键复制配置给 Codex / Claude Code。助手自己查你的收藏，带回命中原因。只读、默认关。</p><p class="accept"><b>你来验收：</b>在 Codex 里说「在我的收藏里找做小红书封面的工具」，它自己查到；设置里「最近调用」看得到这一次。</p><details class="cards"><summary>这一阶段的 4 张卡</summary><ul class="cl"><li><span class="cn">56</span><span class="cw"><b>本地接口只读路由</b> · 搜索、取说明卡、README 摘录、场景、智能集合、找方案、参考包；审计表 + 总开关</span></li><li><span class="cn">57</span><span class="cw"><b>MCP 转接头</b> · 约 8 个只读工具，只调 App，不读数据库文件</span></li><li><span class="cn">58</span><span class="cw"><b>设置「给 AI 助手用」</b> · 开关、复制配置（Claude Code / Codex / 其他）、测试连接、最近调用</span></li><li><span class="cn">59</span><span class="cw"><b>Skill 与接入说明</b> · 「fox-stars-lab」Skill，教助手先查你的收藏再去外面找（我写）</span></li></ul></details></div></li><li><span class="pn you">3</span><div><h3>问你的收藏 <span class="tag you">你点名要的</span><span class="chip warn">花独立额度</span></h3><p class="desc">资料库「问问我的收藏」、⌘K 问模式、详情页「问问它」。答案带出处，点开跳详情。独立每日额度，用完照样给检索结果，不锁死。</p><p class="accept"><b>你来验收：</b>问「我收藏里有哪些能批量加水印的」，答案里的项目你认、点出处能跳到详情；把问答额度调成 0 再问，仍给结果并写明原因。</p><details class="cards"><summary>这一阶段的 4 张卡</summary><ul class="cl"><li><span class="cn">60</span><span class="cw"><b>问答后端</b> · 本机检索 → 一次 AI 调用 → 校验出处；独立额度；对话只存本机</span></li><li><span class="cn">61</span><span class="cw"><b>资料库问答入口</b> · 「问问我的收藏」+ ⌘K 问模式；额度为 0 时降级成检索结果</span></li><li><span class="cn">62</span><span class="cw"><b>详情页「问问它」</b> · 围绕单个项目问怎么装、适合做什么、和另一个有什么区别</span></li><li><span class="cn">63</span><span class="cw"><b>设置「问答」</b> · 每日额度、检索预设、数据来源勾选、清除对话</span></li></ul></details></div></li><li><span class="pn">4</span><div><h3>助手进阶：写入与配对 <span class="chip ok">不花额度</span></h3><p class="desc">助手能改状态、加笔记、收链接，但默认只「预演」，你在 App 里点确认才真改；配对码 + 每台设备单独令牌，随时撤销。</p><p class="accept"><b>你来验收：</b>让助手改一个项目的状态：先看到预演，再在 App 里点确认；撤销一台设备后，它立刻连不上。</p><details class="cards"><summary>这一阶段的 3 张卡</summary><ul class="cl"><li><span class="cn">64</span><span class="cw"><b>写入类工具</b> · 改状态、加笔记、收链接、设场景；默认预演，点确认才执行，全部记审计</span></li><li><span class="cn">65</span><span class="cw"><b>配对码与设备令牌</b> · 5 分钟一次性配对码；每台设备单独令牌，可撤销</span></li><li><span class="cn">66</span><span class="cw"><b>命令行（可选）</b> · 把开发小工具升级成正式命令行，给没有 MCP 的助手用</span></li></ul></details></div></li><li><span class="pn">5</span><div><h3>把界面打磨到精致 <span class="chip ok">不花额度</span><span class="chip warn">README 翻译点才花</span></h3><p class="desc">设置小件、整理进度小看板、README 翻译、⌥⌘F 快速收集、额度旁的「约 ¥x」估算。</p><details class="cards"><summary>这一阶段的 5 张卡</summary><ul class="cl"><li><span class="cn">67</span><span class="cw"><b>设置小件</b> · 补 MiniMax、从 CC Switch 导入、实验功能区、系统通知</span></li><li><span class="cn">68</span><span class="cw"><b>整理进度小看板</b> · 已整理 N / 总数、状态漏斗、近 12 周新收藏</span></li><li><span class="cn">69</span><span class="cw"><b>README 翻译</b> · 手动点才翻，译文存本地</span></li><li><span class="cn">70</span><span class="cw"><b>快速收集 ⌥⌘F</b> · 1.4.0 的老功能搬回来</span></li><li><span class="cn">71</span><span class="cw"><b>额度旁的「约 ¥x」</b> · 标「估算」，以服务商账单为准</span></li></ul></details></div></li><li><span class="pn">6</span><div><h3>发现更多 <span class="chip ok">不花额度</span><span class="chip warn">本机 Codex 试验占订阅</span></h3><p class="desc">「发现」加 Awesome 清单和「新锐」来源；想试 / 在用的项目有新版本时提醒你；本机 Codex 当 AI 后端先小试。</p><details class="cards"><summary>这一阶段的 3 张卡</summary><ul class="cl"><li><span class="cn">72</span><span class="cw"><b>Awesome 与新锐</b> · 加两个来源，替代天天一样的旧榜单</span></li><li><span class="cn">73</span><span class="cw"><b>Release 提醒</b> · 只对「想试 / 在用」的项目，定期读 GitHub 发布信息，只读</span></li><li><span class="cn">74</span><span class="cw"><b>本机 Codex 当 AI 后端（试验）</b> · 先小试 20 张卡；占你的 Codex 订阅，你点头才试</span></li></ul></details></div></li></ol>
+        <p class="note">粗估：每个阶段是「天」的量级，不是「周」，前提是你当天有空验收、Codex 不排队。这是估算，不是承诺。</p>
+      </div>
+    </div>
+  </section>
+
+  <section id="two">
+    <h2>你点名要的两件事，具体怎么做</h2>
+    <p class="sub">都建在同一个检索核心上，所以先做阶段 1。</p>
+    <div class="lanes">
+      <div class="lane">
+        <h3>让 AI 助手自己来取 <span class="chip ok">不花 App 额度</span></h3>
+        <ol class="steps"><li>Codex / Claude Code</li><li>MCP 转接头</li><li>App（只在你这台 Mac 上）</li><li>你的库</li></ol>
+        <ul class="pts">
+          <li><b>只有 App 读写你的库。</b>助手只能通过 App 取资料，碰不到数据库文件。</li>
+          <li><b>默认关。</b>打开后先只读，每次调用都记下来，设置里能看。</li>
+          <li>取回的内容都标「不可信」，README 摘录限长、一次最多 20 条；<b>你的笔记默认不给助手。</b></li>
+          <li>配置是「复制给你」，不会替你改 Codex / Claude 的全局配置。</li>
+          <li>第一版要求 App 开着，没开会提示「请先打开 Fox Stars Lab」。</li>
+          <li>改库（改状态、加笔记）放到阶段 4：默认只「预演」，你在 App 里点确认才真改。</li>
+        </ul>
+      </div>
+      <div class="lane">
+        <h3>问你的收藏 <span class="chip warn">花独立额度</span></h3>
+        <ol class="steps"><li>你问</li><li>本机检索（免费）</li><li>AI 答一次</li><li>校验出处</li><li>答案 + 出处</li></ol>
+        <ul class="pts">
+          <li><b>答案必须带出处。</b>出处不在检索结果里的一律丢掉；找不到就直说，不编造收藏里没有的项目。</li>
+          <li>资料里夹带的「指令」一律不执行（整理说明卡、找方案用的是同一套做法）。</li>
+          <li>一次回答 ≤ 300 字，网址不会自动打开；对话只存本机，不进同步。</li>
+          <li><b>额度为 0、用完或没配 AI 服务时，仍给本地检索结果和命中原因</b>，并有「复制给 Codex / Claude 问」。</li>
+          <li>每问约 5–8 千 token 输入 + 最多 800 输出，和整理一张卡同量级（预估，真跑后校准）。</li>
+          <li>入口：资料库「问问我的收藏」、⌘K 问模式、详情页「问问它」；导航仍是 5 项，不加新页。</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <section id="starcat">
+    <h2>Starcat 里好的部分，各自放在哪</h2>
+    <p class="sub">做法和架构借，代码不借（它是 Swift 原生，我们是 Tauri）。逐条对照见 <a href="https://claude.ai/artifact/5R8SBFb9CihAXrSUcMrjZr">Starcat 对照页</a>。</p>
+    <ul class="map"><li><span>搜索排序 + 「为什么命中」</span><span>阶段 1 · 卡 50–51</span></li><li><span>本地语义搜索（我们藏着的面板接上线）</span><span>阶段 1 · 卡 52–53</span></li><li><span>维护状态标签（只取活跃度，不做字母分）</span><span>阶段 1 · 卡 49</span></li><li><span>智能集合（久未更新、想试没试…）</span><span>阶段 1 · 卡 54</span></li><li><span>设置页整理：分组、搜索框、「数据去哪了」、分档清理、快捷键表</span><span>阶段 1 · 卡 55</span></li><li><span>设计契约 + 设置页写法规范 + 文案盘点</span><span>文档（我写，阶段 1 之前）</span></li><li><span>AI 助手接入：MCP、Skill、复制配置、调用记录</span><span>阶段 2 · 卡 56–59</span></li><li><span>写入先预演、配对码 + 每台设备令牌、命令行</span><span>阶段 4 · 卡 64–66</span></li><li><span>知识库问答 + 仓库 AI 对话（RAG）</span><span><b>阶段 3 · 卡 60–63</b>（你改判为要做）</span></li><li><span>RAG 设置页的排法和状态牌</span><span>卡 53、63（借排法，不借参数）</span></li><li><span>设置小件：MiniMax、CC Switch 导入、系统通知</span><span>阶段 5 · 卡 67</span></li><li><span>整理进度小看板</span><span>阶段 5 · 卡 68</span></li><li><span>README 翻译（手动点才翻）</span><span>阶段 5 · 卡 69</span></li><li><span>额度旁的「约 ¥x」估算</span><span>阶段 5 · 卡 71</span></li><li><span>Awesome 清单 + 「新锐」来源</span><span>阶段 6 · 卡 72</span></li><li><span>Release 提醒</span><span>阶段 6 · 卡 73</span></li><li><span>本机命令行当 AI 后端</span><span>阶段 6 · 卡 74（先小试）</span></li></ul>
+    <p class="note"><b>不借的：</b>分享卡片、通知收件箱、屏保、小组件、18 种语言、订阅付费、提示词编辑器、Agent 工作台、服务端榜单与周刊、浏览器扩展、Raycast / Alfred 插件、Swift 原生重写。</p>
+  </section>
+
+  <section>
+    <div class="rails">
+      <div><b>改代码只用开发版</b><p>正式版的数据目录我只看修改时间，不碰。升级正式版先自动备份，出问题整库回滚。</p></div>
+      <div><b>花钱的开关只有你能点</b><p>问答额度、README 翻译、单张重做、本机 Codex 试验，都是你点了才花。</p></div>
+      <div><b>没额度也能用</b><p>额度为 0 或用完，问答照样给本地检索结果，不会锁死。</p></div>
+    </div>
+  </section>
+
+  <section id="done">
+    <details class="hist">
+      <summary>已经做完的，和 500 张说明卡的现状（点开看）</summary>
+      <dl class="done"><div><dt>底座与安全</dt><dd>2026-10-06 已切到新版 2.0.0-fox.1：切库前完整备份，1.4.0 留作回滚副本。开发版和正式版完全隔开；每次改库前自动备份并检查，每天自动备份，可以一键还原。</dd></div><div><dt>今日</dt><dd>打开就是今天值得先看的和本周新收藏。点一个，右边直接出详情，改状态可以撤销。</dd></div><div><dt>资料库</dt><dd>输入关键词搜，或按 13 个业务场景（小红书、公众号、视频、PPT……）、状态、类型筛。每个项目有头像、封面和彩色标签。</dd></div><div><dt>找方案</dt><dd>说一句想做的事，从你的收藏里挑出能用的，AI 再精选排序并写一句人话理由。一键「复制给 Codex」生成交接单。没有合适的收藏时，也能直接交给 Codex 去找现成的。本机已装的 Skill 和 MCP 会标出来。</dd></div><div><dt>收集</dt><dd>粘贴群聊或链接，先看后收。自动读标题和摘要，文章里提到的 GitHub 项目能一键收进来。微信联动的接收端已经就绪。</dd></div><div><dt>发现</dt><dd>按场景去 GitHub 找还没收藏的好工具，看中的一键加入收集。每个项目详情里的「社区」页，带你去 10 个平台看别人怎么用。</dd></div><div><dt>新版说明</dt><dd>每个项目一张：一句话、三句话讲清是什么、能做什么、我想解决什么、用之前要注意什么。场景标签都带原话出处。项目说明（README）变了会自动重新整理。</dd></div><div><dt>自动整理</dt><dd>「现在整理」是你手动点、立刻开始；「每天自动整理」是后台只处理新增和变化的。额度用完不会锁死，花钱前必须你自己点确认。</dd></div></dl>
+      <div class="field-box" role="group" aria-label="500 个收藏的新版说明状态">
+        <p class="field-cap">2026-10-06 切库前对 500 张新版说明的检查结果：每一颗星是一个项目，鼠标放上去看名字。</p>
+        <div class="field"><i class="s green" title="kargulstudio/sales-crm：没发现问题"></i><i class="s amber" title="kargulstudio/workflow-editor：「能做」写成了「支持/提供…」开头"></i><i class="s amber" title="zerx-lab/FluxDown：有没翻成人话的术语"></i><i class="s green" title="jundizhou/easy-stock：没发现问题"></i><i class="s green" title="D4Vinci/Scrapling：没发现问题"></i><i class="s green" title="whaleyxbt/patchright-enhanced：没发现问题"></i><i class="s green" title="bojieli/greenbubbles：没发现问题"></i><i class="s green" title="jev-chat/jev-chat-jarvis-mac：没发现问题"></i><i class="s green" title="toeverything/AFFiNE：没发现问题"></i><i class="s amber" title="Tencent/tdesign-vue-next-starter：「能做」写成了「支持/提供…」开头；「想解决」没按「我想…」写"></i><i class="s green" title="CopilotKit/openmuse：没发现问题"></i><i class="s amber" title="EverMind-AI/Raven：有没翻成人话的术语"></i><i class="s amber" title="Anil-matcha/open-dots：有没翻成人话的术语"></i><i class="s amber" title="yetone/magpie：「能做」写成了「支持/提供…」开头；有没翻成人话的术语"></i><i class="s amber" title="basetenlabs/baseten-switch：有没翻成人话的术语"></i><i class="s amber" title="czg86389-hub/muse2api：有没翻成人话的术语"></i><i class="s green" title="clash-verge-rev/clash-verge-rev：没发现问题"></i><i class="s green" title="techflag/workdsh：没发现问题"></i><i class="s green" title="vrtmrz/obsidian-livesync：没发现问题"></i><i class="s green" title="openchamber/openchamber：没发现问题"></i><i class="s red" title="miuuyy/codex-chatgpt-web：「能做」写成了「支持/提供…」开头；疑似有半截话（字段被截断）"></i><i class="s amber" title="satnaing/shadcn-admin：「能做」写成了「支持/提供…」开头"></i><i class="s green" title="open-slide/open-slide：没发现问题"></i><i class="s green" title="AgriciDaniel/compass：没发现问题"></i><i class="s green" title="deepseek-ai/deepseek-harness：没发现问题"></i><i class="s amber" title="HuangPuStar/FenixAgent：「能做」写成了「支持/提供…」开头；有没翻成人话的术语"></i><i class="s red" title="milind-soni/OpenMausBot：试用步骤里有 README 片段里没出现的词（需核对）"></i><i class="s green" title="PrismLibrary/Prism：没发现问题"></i><i class="s green" title="jackwener/opencli-mcp：没发现问题"></i><i class="s green" title="freestylefly/WeChatBridge：没发现问题"></i><i class="s amber" title="eternity4719/HowToLiveBetter：「能做」写成了「支持/提供…」开头"></i><i class="s green" title="BillionsBobby/JevRouter：没发现问题"></i><i class="s green" title="elvisun/newsjack：没发现问题"></i><i class="s green" title="Cranot/super-hermes：没发现问题"></i><i class="s green" title="jackwener/wx-cli-again：没发现问题"></i><i class="s green" title="LifeArchiveProject/WeChatDataAnalysis：没发现问题"></i><i class="s amber" title="we1jia/TeamCodex：「能做」写成了「支持/提供…」开头；有没翻成人话的术语"></i><i class="s green" title="iAmCorey/Wake：没发现问题"></i><i class="s amber" title="xmanrui/dsh-im：有没翻成人话的术语"></i><i class="s green" title="aizhimou/javranking-extension：没发现问题"></i><i class="s green" title="yorukot/superfile：没发现问题"></i><i class="s green" title="abue-ammar/tinycast：没发现问题"></i><i class="s green" title="Gabberflast/academic-pptx-skill：没发现问题"></i><i class="s green" title="alphaXiv/OpenResearch：没发现问题"></i><i class="s green" title="hypit-ai/hypit：没发现问题"></i><i class="s green" title="donvito/codex-astra-luna-orchestrator：没发现问题"></i><i class="s green" title="romangojiberryAI/gojiberryai-sales-os：没发现问题"></i><i class="s green" title="qzz0518/Dukou：没发现问题"></i><i class="s amber" title="siknet/FreePEP：有没翻成人话的术语"></i><i class="s green" title="EvoLinkAI/gpt-image-2.5-for-e-commerce：没发现问题"></i><i class="s green" title="geekjourneyx/obsidian-md2wechat：没发现问题"></i><i class="s red" title="jgraph/drawio-desktop：有字段缺项"></i><i class="s amber" title="jiji262/douyin-downloader：「能做」写成了「支持/提供…」开头"></i><i class="s amber" title="ljquan/opentu：有没翻成人话的术语"></i><i class="s green" title="feigeCode/navop：没发现问题"></i><i class="s red" title="FluentRead/FluentRead：试用步骤里有 README 片段里没出现的词（需核对）"></i><i class="s green" title="Rion-Wu-tech/wechat-intelligence-hub：没发现问题"></i><i class="s green" title="ricocc/ricoui-design-md：没发现问题"></i><i class="s amber" title="qishu321/ops-admin：有没翻成人话的术语"></i><i class="s green" title="can4hou6joeng4/boss-agent-cli：没发现问题"></i><i class="s amber" title="carnot-tech/consulting-pptx-skill：「能做」写成了「支持/提供…」开头"></i><i class="s amber" title="seakee/CPA-Manager-Plus：有没翻成人话的术语"></i><i class="s amber" title="router-for-me/CLIProxyAPI：「能做」写成了「支持/提供…」开头"></i><i class="s green" title="THU-MAIC/OpenMAIC：没发现问题"></i><i class="s green" title="antvis/Infographic：没发现问题"></i><i class="s green" title="qufei1993/skills-hub：没发现问题"></i><i class="s amber" title="teableio/teable：「能做」写成了「支持/提供…」开头"></i><i class="s green" title="yanhua1010/self-media-content-workflow：没发现问题"></i><i class="s green" title="laoma2053/awesome-zhuiju-free：没发现问题"></i><i class="s green" title="gristlabs/grist-desktop：没发现问题"></i><i class="s green" title="f/prompts.chat：没发现问题"></i><i class="s green" title="ZJU-LLMs/Foundations-of-LLMs：没发现问题"></i><i class="s green" title="Tencent/WeMM-Embedding：没发现问题"></i><i class="s green" title="cclank/lanshu-create-ai-presenter-video：没发现问题"></i><i class="s green" title="pireel/pireel：没发现问题"></i><i class="s amber" title="jnMetaCode/agency-agents-zh：「能做」写成了「支持/提供…」开头；有没翻成人话的术语"></i><i class="s red" title="mvanhorn/last30days-skill：疑似有半截话（字段被截断）"></i><i class="s green" title="Jesseovo/last30days-skill-cn：没发现问题"></i><i class="s green" title="3441293738/creatorhub：没发现问题"></i><i class="s amber" title="makeplane/plane：有没翻成人话的术语"></i><i class="s green" title="teknium1/hermes-pixel-office：没发现问题"></i><i class="s amber" title="BigPengSays/bigpeng-hot-gzh：「能做」写成了「支持/提供…」开头"></i><i class="s green" title="vorssaint/vorssaint-utils：没发现问题"></i><i class="s amber" title="anywhere-labs/dsh-desktop：有没翻成人话的术语"></i><i class="s green" title="cactus-compute/needle：没发现问题"></i><i class="s amber" title="chuspeeism/dashi-ppt-skill：「能做」写成了「支持/提供…」开头"></i><i class="s green" title="krusemediallc/arcads-claude-code：没发现问题"></i><i class="s green" title="Yuzzyuk/marketing-os：没发现问题"></i><i class="s green" title="BytePioneer-AI/codex-host：没发现问题"></i><i class="s green" title="macro-inc/macro：没发现问题"></i><i class="s green" title="petergyang/no-ai-slop：没发现问题"></i><i class="s green" title="KKKKhazix/human-writing：没发现问题"></i><i class="s amber" title="mujingquan835/dashiai-ppt-skill：「能做」写成了「支持/提供…」开头"></i><i class="s amber" title="imraywang/rayskills：有没翻成人话的术语"></i><i class="s green" title="anYuJia/better-douyin：没发现问题"></i><i class="s green" title="quickdrawjs/quickdraw：没发现问题"></i><i class="s green" title="ChenShuo2004/cs-skills：没发现问题"></i><i class="s green" title="QwenLM/Qwen-MM-Plugins：没发现问题"></i><i class="s green" title="lightningpixel/modly：没发现问题"></i><i class="s green" title="herdrdev/herdr：没发现问题"></i><i class="s green" title="NarratorAI-Studio/narrator-ai-cli-skill：没发现问题"></i><i class="s green" title="santinic/audiblez：没发现问题"></i><i class="s green" title="Jakubantalik/transitions.dev：没发现问题"></i><i class="s green" title="semantica-agi/semantica：没发现问题"></i><i class="s green" title="oso95/scroll-world：没发现问题"></i><i class="s amber" title="mindmuxai/brain.md：「想解决」没按「我想…」写"></i><i class="s red" title="realchendahuang/OMPChamber：有没翻成人话的术语；疑似有半截话（字段被截断）；说明超过 3 句"></i><i class="s green" title="threerocks/hand-drawn-styles：没发现问题"></i><i class="s green" title="wendy7756/AI-Video-Transcriber：没发现问题"></i><i class="s green" title="kangarooking/cangjie-skill：没发现问题"></i><i class="s amber" title="yuuouu/WeChat-Bridge：有没翻成人话的术语"></i><i class="s amber" title="eshengsky/Codex-Sidecar：有没翻成人话的术语"></i><i class="s green" title="yqxie1991/WxCleaner：没发现问题"></i><i class="s green" title="LiamGvchi/gc-minimal-zine-poster：没发现问题"></i><i class="s amber" title="img2threejs/img2threejs：「能做」写成了「支持/提供…」开头"></i><i class="s green" title="charlax/professional-programming：没发现问题"></i><i class="s green" title="aandrew-me/ytDownloader：没发现问题"></i><i class="s green" title="PrimeIntellect-ai/prime-agent：没发现问题"></i><i class="s green" title="x007xyz/flycut-caption：没发现问题"></i><i class="s red" title="limboinf/liteparse-agentic-studio：疑似有半截话（字段被截断）"></i><i class="s amber" title="ln-dev7/circle：「能做」写成了「支持/提供…」开头"></i><i class="s green" title="Nutlope/logocreator：没发现问题"></i><i class="s green" title="abus-aikorea/voice-pro：没发现问题"></i><i class="s green" title="HKUDS/VideoAgent：没发现问题"></i><i class="s amber" title="jbiaojerry/ebook-treasure-chest：「能做」写成了「支持/提供…」开头"></i><i class="s amber" title="NdoleStudio/httpsms：「能做」写成了「支持/提供…」开头；有没翻成人话的术语"></i><i class="s green" title="eternityspring/shuohao-skills：没发现问题"></i><i class="s red" title="cathrynlavery/diagram-design：「想解决」没按「我想…」写；疑似有半截话（字段被截断）"></i><i class="s green" title="Fenng/Tech-Doc-Style-Chinese：没发现问题"></i><i class="s green" title="huangserva/ComfyUI_MiniMaxH3_Director：没发现问题"></i><i class="s amber" title="lidangzzz/goal-driven：有没翻成人话的术语"></i><i class="s green" title="Lulu-Eva/Eva-skill：没发现问题"></i><i class="s amber" title="T8mars/comfyui-minimax-h3-audio-T8：有没翻成人话的术语"></i><i class="s green" title="agentplugins/agent-plugins-spec：没发现问题"></i><i class="s green" title="unclecode/crawl4ai：没发现问题"></i><i class="s green" title="Backtthefuture/goalgo：没发现问题"></i><i class="s green" title="OpenCut-app/OpenCut：没发现问题"></i><i class="s green" title="deepbeepmeep/Wan2GP：没发现问题"></i><i class="s green" title="ronaldo-avalos/Maya：没发现问题"></i><i class="s green" title="yynxxxxx/Codex-X：没发现问题"></i><i class="s green" title="freestylefly/wesight-obsidian：没发现问题"></i><i class="s red" title="Binaryify/open-kimi-ppt-skill：有字段缺项"></i><i class="s green" title="freestylefly/awesome-gpt-image-2：没发现问题"></i><i class="s green" title="criptogus/HermesOffice：没发现问题"></i><i class="s red" title="Javis603/token-monitor：疑似有半截话（字段被截断）"></i><i class="s green" title="kanshurichard/enableAppleAI：没发现问题"></i><i class="s amber" title="memvid/memvid：「想解决」没按「我想…」写"></i><i class="s green" title="xcc3641/blinkface：没发现问题"></i><i class="s green" title="sophiamyang/finger-frame-effect-ai：没发现问题"></i><i class="s green" title="vercel-labs/marketing-team-eve-template：没发现问题"></i><i class="s green" title="xintu1314/content-boom-monitor：没发现问题"></i><i class="s green" title="Railly/agentfiles：没发现问题"></i><i class="s amber" title="Vincentwei1021/video-shotcraft：「能做」写成了「支持/提供…」开头"></i><i class="s green" title="Xiaoyangy/novel-studio：没发现问题"></i><i class="s green" title="text2future/flowix：没发现问题"></i><i class="s red" title="firecrawl/anydoc：疑似有半截话（字段被截断）"></i><i class="s amber" title="clockless-org/html-anything：「能做」写成了「支持/提供…」开头"></i><i class="s green" title="claude-world/notebooklm-skill：没发现问题"></i><i class="s green" title="openakita/openakita：没发现问题"></i><i class="s red" title="oil-oil/codex-deepseek-subagent：疑似有半截话（字段被截断）"></i><i class="s green" title="Pinvou/pinvou-agent：没发现问题"></i><i class="s green" title="chuspeeism/dashi-taskboard：没发现问题"></i><i class="s amber" title="joeseesun/qiaomu-goal-meta-skill：「能做」写成了「支持/提供…」开头"></i><i class="s green" title="tanweai/pua：没发现问题"></i><i class="s green" title="Tencent/WeChatReading：没发现问题"></i><i class="s amber" title="nihalashetty/Forge：有没翻成人话的术语"></i><i class="s amber" title="zenbu-labs/terminal-browser：「能做」写成了「支持/提供…」开头"></i><i class="s green" title="rlaope/oh-my-hermes：没发现问题"></i><i class="s green" title="robert-mcdermott/ai-knowledge-graph：没发现问题"></i><i class="s green" title="microsoft/skill-recorder：没发现问题"></i><i class="s green" title="tw93/Mole：没发现问题"></i><i class="s green" title="oil-oil/oil-frontend：没发现问题"></i><i class="s green" title="lobehub/lobehub：没发现问题"></i><i class="s green" title="zhaoxuya520/reverse-skill：没发现问题"></i><i class="s amber" title="pathwaycom/llm-app：「能做」写成了「支持/提供…」开头；有没翻成人话的术语"></i><i class="s green" title="ricocc/brands-design-md：没发现问题"></i><i class="s green" title="loopx-project/loopx：没发现问题"></i><i class="s amber" title="yan5xu/codexloom：「能做」写成了「支持/提供…」开头；有没翻成人话的术语"></i><i class="s green" title="TencentCloud/TencentDB-Agent-Memory：没发现问题"></i><i class="s amber" title="DannyMac180/sol-advisor：有没翻成人话的术语"></i><i class="s green" title="sherlock-project/sherlock：没发现问题"></i><i class="s green" title="trycompai/crm：没发现问题"></i><i class="s green" title="42-evey/hermes-plugins：没发现问题"></i><i class="s green" title="openai/codex-security：没发现问题"></i><i class="s green" title="bytec-ai/book-video-factory：没发现问题"></i><i class="s green" title="Endless1936/book-video：没发现问题"></i><i class="s green" title="suntianc/shape-ui-aesthetics：没发现问题"></i><i class="s green" title="icebird1998/drawio-scientific-illustrator：没发现问题"></i><i class="s green" title="RongleCat/grok-app：没发现问题"></i><i class="s amber" title="duolahypercho/codex-router：「能做」写成了「支持/提供…」开头"></i><i class="s amber" title="TEN-framework/ten-framework：有没翻成人话的术语"></i><i class="s amber" title="mikeroyal/Self-Hosting-Guide：有没翻成人话的术语"></i><i class="s amber" title="Volmarg/personal-management-system：有没翻成人话的术语；「想解决」没按「我想…」写"></i><i class="s green" title="Atarity/deploy-your-own-saas：没发现问题"></i><i class="s green" title="enescingoz/awesome-n8n-templates：没发现问题"></i><i class="s amber" title="rafska/awesome-local-llm：「能做」写成了「支持/提供…」开头"></i><i class="s amber" title="tycrek/degoogle：「能做」写成了「支持/提供…」开头"></i><i class="s amber" title="songguoxs/seedance-prompt-skill：「能做」写成了「支持/提供…」开头"></i><i class="s amber" title="HBAI-Ltd/Toonflow-app：有没翻成人话的术语"></i><i class="s green" title="coreyhaines31/makerskills：没发现问题"></i><i class="s green" title="Leobai03/wechat-group-daily：没发现问题"></i><i class="s green" title="Emily2040/seedance-2.0：没发现问题"></i><i class="s green" title="Rogers-F/code-switch-R：没发现问题"></i><i class="s green" title="dimthink/PriceAI：没发现问题"></i><i class="s green" title="JerBouma/FinanceDatabase：没发现问题"></i><i class="s amber" title="fqscfqj/Y2A-Auto：有没翻成人话的术语"></i><i class="s green" title="nowledge-co/community：没发现问题"></i><i class="s green" title="tt-a1i/archify：没发现问题"></i><i class="s amber" title="OpenBMB/StaffDeck：「能做」写成了「支持/提供…」开头"></i><i class="s green" title="ltaoo/wx_channels_download：没发现问题"></i><i class="s amber" title="AstrBotDevs/AstrBot：「能做」写成了「支持/提供…」开头；有没翻成人话的术语"></i><i class="s amber" title="penpot/penpot：「能做」写成了「支持/提供…」开头；有没翻成人话的术语"></i><i class="s amber" title="oblien/openship：有没翻成人话的术语"></i><i class="s amber" title="ItzCrazyKns/Vane：有没翻成人话的术语"></i><i class="s amber" title="lidge-jun/opencodex：「能做」写成了「支持/提供…」开头"></i><i class="s amber" title="palemoky/chinese-poetry-api：有没翻成人话的术语"></i><i class="s green" title="KnockOutEZ/wigolo：没发现问题"></i><i class="s green" title="dososo/blcaptain-lingjian-video：没发现问题"></i><i class="s green" title="yizhiyanhua-ai/fireworks-tech-graph：没发现问题"></i><i class="s amber" title="chenjin-cmd/xhs-virtual-product：「能做」写成了「支持/提供…」开头"></i><i class="s green" title="nicejade/markdown-online-editor：没发现问题"></i><i class="s amber" title="renoir1220/esse：「想解决」没按「我想…」写"></i><i class="s green" title="ZacharyZhang-NY/Kigi-CLI：没发现问题"></i><i class="s amber" title="leeguooooo/AgentParty：有没翻成人话的术语"></i><i class="s green" title="chukong-creator/agent-os-skill：没发现问题"></i><i class="s amber" title="firstintent/ccteam：「能做」写成了「支持/提供…」开头；有没翻成人话的术语"></i><i class="s green" title="cclank/lanshu-animated-architecture-diagram：没发现问题"></i><i class="s green" title="Leonxlnx/kimi-code-desktop：没发现问题"></i><i class="s green" title="Nutlope/hallmark：没发现问题"></i><i class="s red" title="xiejunjie524/handdraw-story-video：疑似有半截话（字段被截断）"></i><i class="s green" title="YILS-LIN/short-video-factory：没发现问题"></i><i class="s green" title="Loyalsoldier/clash-rules：没发现问题"></i><i class="s amber" title="getpaseo/paseo：有没翻成人话的术语"></i><i class="s amber" title="shaom/infocard-skills：「能做」写成了「支持/提供…」开头"></i><i class="s amber" title="plait-board/drawnix：有没翻成人话的术语"></i><i class="s green" title="lqshow/prompt-canvas：没发现问题"></i><i class="s green" title="OpenSenseNova/SenseNova-U1：没发现问题"></i><i class="s amber" title="zhouxiaoka/autoclip：有没翻成人话的术语"></i><i class="s green" title="ZhangHanDong/agent-spec：没发现问题"></i><i class="s amber" title="mengke-wang/xiaohongshu-ai-workbench：「想解决」没按「我想…」写"></i><i class="s green" title="team-reflect/reflect-open：没发现问题"></i><i class="s green" title="fxy2311-youyou/expression-trainer：没发现问题"></i><i class="s red" title="RICHQAQ/PasteMD：试用步骤里有 README 片段里没出现的词（需核对）"></i><i class="s green" title="alchaincyf/huashu-design：没发现问题"></i><i class="s green" title="zarazhangrui/beautiful-html-templates：没发现问题"></i><i class="s green" title="diskd-ai/codespaces：没发现问题"></i><i class="s green" title="nashsu/llm_wiki：没发现问题"></i><i class="s green" title="coreyhaines31/marketingskills：没发现问题"></i><i class="s amber" title="AlephAITech/WorkBuddyGuide：「能做」写成了「支持/提供…」开头"></i><i class="s green" title="imraywang/wewrite：没发现问题"></i><i class="s green" title="facebook/astryx：没发现问题"></i><i class="s green" title="Zackriya-Solutions/meetily：没发现问题"></i><i class="s amber" title="openinterpreter/openinterpreter：有没翻成人话的术语"></i><i class="s green" title="Augani/openreel-video：没发现问题"></i><i class="s amber" title="multica-ai/multica：有没翻成人话的术语"></i><i class="s amber" title="inkeep/open-knowledge：「能做」写成了「支持/提供…」开头"></i><i class="s green" title="anysearch-ai/anysearch-skill：没发现问题"></i><i class="s green" title="Niall-Young/Canvasight：没发现问题"></i><i class="s amber" title="paperclipai/paperclip：有没翻成人话的术语"></i><i class="s amber" title="Shubhamsaboo/awesome-llm-apps：「能做」写成了「支持/提供…」开头"></i><i class="s green" title="ChatCut-Inc/agent-plugin：没发现问题"></i><i class="s green" title="yikart/AiToEarn：没发现问题"></i><i class="s green" title="mrbear1024/ai-content-kb：没发现问题"></i><i class="s green" title="MengTo/Skills：没发现问题"></i><i class="s amber" title="emilkowalski/skills：「能做」写成了「支持/提供…」开头"></i><i class="s amber" title="webadderallorg/Recordly：说明超过 3 句"></i><i class="s green" title="liangdabiao/liurun-bookwriter-skills：没发现问题"></i><i class="s amber" title="biheto/DevAgent-Studio：有没翻成人话的术语"></i><i class="s green" title="Jane-xiaoer/paper-collage-ad-codex：没发现问题"></i><i class="s amber" title="galacean/effects-runtime：「能做」写成了「支持/提供…」开头"></i><i class="s amber" title="public-apis/public-apis：「能做」写成了「支持/提供…」开头"></i><i class="s green" title="Graphify-Labs/graphify：没发现问题"></i><i class="s amber" title="easysoft/zentaopms：「能做」写成了「支持/提供…」开头"></i><i class="s red" title="HKUDS/DeepTutor：疑似有半截话（字段被截断）"></i><i class="s green" title="ATH-MaaS/Pixelle-Video：没发现问题"></i><i class="s green" title="Diolinux/PhotoGIMP：没发现问题"></i><i class="s green" title="DeadWaveWave/opencove：没发现问题"></i><i class="s green" title="browser-act/skills：没发现问题"></i><i class="s green" title="JarvixGaby/eval-skill：没发现问题"></i><i class="s amber" title="ryanstephen/lil-agents：「想解决」没按「我想…」写"></i><i class="s red" title="karakeep-app/karakeep：试用步骤里有 README 片段里没出现的词（需核对）；有没翻成人话的术语"></i><i class="s amber" title="AmintaCCCP/GithubStarsManager：「能做」写成了「支持/提供…」开头"></i><i class="s green" title="chenhg5/cc-connect：没发现问题"></i><i class="s amber" title="dramaclaw/dramaclaw：有没翻成人话的术语"></i><i class="s amber" title="ExplosiveCoderflome/AI-Novel-Writing-Assistant：「能做」写成了「支持/提供…」开头"></i><i class="s amber" title="lipku/LiveTalking：「能做」写成了「支持/提供…」开头"></i><i class="s green" title="chainbase-labs/Agentkey：没发现问题"></i><i class="s green" title="zilliztech/deep-searcher：没发现问题"></i><i class="s green" title="isjiamu/gzh-design-skill：没发现问题"></i><i class="s amber" title="VoltAgent/awesome-design-md：「能做」写成了「支持/提供…」开头；「想解决」没按「我想…」写；说明超过 3 句"></i><i class="s green" title="frappe/hrms：没发现问题"></i><i class="s green" title="nexu-io/motion-anything：没发现问题"></i><i class="s amber" title="scasella/claude-dynamic-workflows-codex：有没翻成人话的术语"></i><i class="s green" title="xingranya/GitHub-Stars-AI-Tools：没发现问题"></i><i class="s red" title="hcengineering/platform：有没翻成人话的术语；有字段缺项"></i><i class="s amber" title="Team-Commonly/commonly：有没翻成人话的术语"></i><i class="s green" title="mattpocock/skills：没发现问题"></i><i class="s amber" title="tutti-os/tutti：有没翻成人话的术语"></i><i class="s green" title="kenn-io/agentsview：没发现问题"></i><i class="s amber" title="oomol-lab/open-connector：「能做」写成了「支持/提供…」开头；有没翻成人话的术语；「想解决」没按「我想…」写"></i><i class="s amber" title="GaosCode/PlanWeave：「能做」写成了「支持/提供…」开头；说明超过 3 句"></i><i class="s amber" title="qingchencloud/clawpanel：有没翻成人话的术语"></i><i class="s red" title="openai/codex-plugin-cc：疑似有半截话（字段被截断）"></i><i class="s green" title="chenjin-cmd/agent-skills-launch-pack_：没发现问题"></i><i class="s amber" title="bozhouDev/codex-orange-book：「能做」写成了「支持/提供…」开头"></i><i class="s amber" title="steipete/oracle：「能做」写成了「支持/提供…」开头"></i><i class="s green" title="rahilp/second-brain-cloudflare：没发现问题"></i><i class="s green" title="hardhackerlabs/podwise-cli：没发现问题"></i><i class="s amber" title="Usagi-org/ai-goofish-monitor：有没翻成人话的术语"></i><i class="s amber" title="nuxt-content/docus：「能做」写成了「支持/提供…」开头"></i><i class="s amber" title="nullpointexception-i/agent-sphere：有没翻成人话的术语"></i><i class="s green" title="bradautomates/claude-video：没发现问题"></i><i class="s green" title="0xNyk/council-of-high-intelligence：没发现问题"></i><i class="s green" title="Tasihi89/canvas-hand：没发现问题"></i><i class="s green" title="xingranya/CC-Statusline-Builder：没发现问题"></i><i class="s green" title="jamiepine/voicebox：没发现问题"></i><i class="s green" title="op7418/guizang-ppt-skill：没发现问题"></i><i class="s amber" title="EKKOLearnAI/ekko-studio：有没翻成人话的术语"></i><i class="s green" title="browser-use/video-use：没发现问题"></i><i class="s green" title="openclaw/agent-skills：没发现问题"></i><i class="s green" title="comet-ml/opik-openclaw：没发现问题"></i><i class="s green" title="public-clis/bilibili-cli：没发现问题"></i><i class="s amber" title="openclaw/clawsweeper：「能做」写成了「支持/提供…」开头"></i><i class="s green" title="awesome-selfhosted/awesome-selfhosted：没发现问题"></i><i class="s amber" title="craft-ai-agents/craft-agents-oss：有没翻成人话的术语"></i><i class="s green" title="ojowwalker77/BonsAI：没发现问题"></i><i class="s green" title="virgiliojr94/book-to-skill：没发现问题"></i><i class="s green" title="AkaraChen/aghub：没发现问题"></i><i class="s green" title="bruc3van/agent-skills-guard：没发现问题"></i><i class="s green" title="Dimillian/CodexSkillManager：没发现问题"></i><i class="s red" title="chekusu/wanman：「能做」写成了「支持/提供…」开头；疑似有半截话（字段被截断）"></i><i class="s amber" title="ding113/claude-code-hub：有没翻成人话的术语"></i><i class="s amber" title="apache/maka：「能做」写成了「支持/提供…」开头；有没翻成人话的术语"></i><i class="s red" title="mco-org/squad：疑似有半截话（字段被截断）"></i><i class="s green" title="gnipbao/knowledge-cat-ppt-skill：没发现问题"></i><i class="s green" title="mcncarl/yichen-skills：没发现问题"></i><i class="s green" title="stablyai/orca：没发现问题"></i><i class="s green" title="DeusData/codebase-memory-mcp：没发现问题"></i><i class="s green" title="Sugers955/agent-mill：没发现问题"></i><i class="s amber" title="chaitin/PandaWiki：有没翻成人话的术语"></i><i class="s green" title="geekjourneyx/md2wechat-skill：没发现问题"></i><i class="s amber" title="Pluviobyte/video-production-skills：有没翻成人话的术语"></i><i class="s green" title="BlackTor-tor/blacktor-skills：没发现问题"></i><i class="s amber" title="zhukunpenglinyutong/desktop-cc-gui：有没翻成人话的术语；「想解决」没按「我想…」写"></i><i class="s red" title="tashfeenahmed/freellmapi：有没翻成人话的术语；疑似有半截话（字段被截断）"></i><i class="s green" title="JimLiu/baoyu-design：没发现问题"></i><i class="s green" title="xpzouying/xiaohongshu-mcp：没发现问题"></i><i class="s green" title="LearnPrompt/humanize-ppt：没发现问题"></i><i class="s green" title="xiaohuailabs/xiaohu-ip-studio：没发现问题"></i><i class="s green" title="LearnPrompt/ai-news-radar：没发现问题"></i><i class="s green" title="1224267419/noval-writer：没发现问题"></i><i class="s green" title="luoluoluo22/jianying-editor-skill：没发现问题"></i><i class="s green" title="anbeime/skill：没发现问题"></i><i class="s green" title="dontbesilent2025/dbskill：没发现问题"></i><i class="s red" title="nexu-io/html-anything：试用步骤里有 README 片段里没出现的词（需核对）；疑似有半截话（字段被截断）"></i><i class="s green" title="helloianneo/ian-xiaohei-illustrations：没发现问题"></i><i class="s green" title="JimLiu/baoyu-skills：没发现问题"></i><i class="s green" title="op7418/guizang-social-card-skill：没发现问题"></i><i class="s green" title="adrianpunk/Punk-Skill：没发现问题"></i><i class="s green" title="KKKKhazix/khazix-skills：没发现问题"></i><i class="s red" title="PleasePrompto/notebooklm-skill：疑似有半截话（字段被截断）"></i><i class="s green" title="Cheerwhy/hermes-lark-streaming：没发现问题"></i><i class="s green" title="Agentchengfeng/chengfeng-videocut-skills：没发现问题"></i><i class="s green" title="addyosmani/agent-skills：没发现问题"></i><i class="s amber" title="MapleShaw/seedance2.0-prompt-skill：「想解决」没按「我想…」写"></i><i class="s green" title="calesthio/OpenMontage：没发现问题"></i><i class="s amber" title="peiyizhi0724/ChatGpt-Image-Studio：有没翻成人话的术语"></i><i class="s amber" title="mcncarl/agent-memory-vault：「能做」写成了「支持/提供…」开头；说明超过 3 句"></i><i class="s amber" title="bytedance/deer-flow：「能做」写成了「支持/提供…」开头"></i><i class="s green" title="AgriciDaniel/claude-obsidian：没发现问题"></i><i class="s green" title="open-free-llm-api/awesome-freellm-apis：没发现问题"></i><i class="s amber" title="jlcodes99/cockpit-tools：有没翻成人话的术语"></i><i class="s green" title="zhongerxin/Cowart：没发现问题"></i><i class="s green" title="Forget-C/Jellyfish：没发现问题"></i><i class="s amber" title="zarazhangrui/beautiful-feishu-whiteboard：「能做」写成了「支持/提供…」开头"></i><i class="s green" title="palmier-io/palmier-pro：没发现问题"></i><i class="s red" title="harry0703/MoneyPrinterTurbo：试用步骤里有 README 片段里没出现的词（需核对）；有没翻成人话的术语"></i><i class="s green" title="dososo/BLCaptain-Opportunity-PRD-Skill：没发现问题"></i><i class="s amber" title="lfnovo/open-notebook：有没翻成人话的术语"></i><i class="s amber" title="Ancienttwo/repo-harness：有没翻成人话的术语"></i><i class="s green" title="RyensX/OpenCodex：没发现问题"></i><i class="s green" title="Haleclipse/CCometixLine：没发现问题"></i><i class="s amber" title="browser-use/browser-use：「能做」写成了「支持/提供…」开头"></i><i class="s red" title="ComposioHQ/awesome-claude-skills：「能做」写成了「支持/提供…」开头；疑似有半截话（字段被截断）"></i><i class="s red" title="kepano/obsidian-skills：「能做」写成了「支持/提供…」开头；疑似有半截话（字段被截断）"></i><i class="s green" title="sickn33/agentic-awesome-skills：没发现问题"></i><i class="s amber" title="Dimillian/CodexMonitor：有没翻成人话的术语"></i><i class="s green" title="hardikpandya/stop-slop：没发现问题"></i><i class="s amber" title="op7418/Humanizer-zh：「能做」写成了「支持/提供…」开头"></i><i class="s red" title="blader/humanizer：疑似有半截话（字段被截断）"></i><i class="s green" title="anthropics/knowledge-work-plugins：没发现问题"></i><i class="s green" title="openai/plugins：没发现问题"></i><i class="s green" title="EveryInc/compound-engineering-plugin：没发现问题"></i><i class="s green" title="openai/skills：没发现问题"></i><i class="s green" title="code-yeongyu/lazycodex：没发现问题"></i><i class="s green" title="code-yeongyu/oh-my-openagent：没发现问题"></i><i class="s amber" title="ChesterRa/cccc：「能做」写成了「支持/提供…」开头；有没翻成人话的术语"></i><i class="s amber" title="hmjz100/LinkSwift：「能做」写成了「支持/提供…」开头"></i><i class="s amber" title="EverMind-AI/EverOS：有没翻成人话的术语"></i><i class="s green" title="Panniantong/Agent-Reach：没发现问题"></i><i class="s red" title="zarazhangrui/follow-builders：疑似有半截话（字段被截断）"></i><i class="s amber" title="Waishnav/devspace：「能做」写成了「支持/提供…」开头"></i><i class="s green" title="rebel0789/codexpro：没发现问题"></i><i class="s amber" title="freestylefly/CodexGuide：「能做」写成了「支持/提供…」开头"></i><i class="s green" title="nolly-studio/cult-ui：没发现问题"></i><i class="s green" title="MrLesk/Backlog.md：没发现问题"></i><i class="s amber" title="blackboardsh/electrobun：「能做」写成了「支持/提供…」开头；有没翻成人话的术语"></i><i class="s green" title="hanshuaikang/nezha：没发现问题"></i><i class="s amber" title="Gloridust/WechatOnCloud：有没翻成人话的术语"></i><i class="s green" title="baileyh8/hermes-feishu-streaming-card：没发现问题"></i><i class="s green" title="MapleTechLabs/maple：没发现问题"></i><i class="s green" title="nolangz/pixel2motion：没发现问题"></i><i class="s red" title="iOfficeAI/AionUi：疑似有半截话（字段被截断）"></i><i class="s amber" title="xiaocoss/quotio-desktop：有没翻成人话的术语"></i><i class="s green" title="Lovest20018/cursor-v3-chinese-translate：没发现问题"></i><i class="s amber" title="Thysrael/Horizon：有没翻成人话的术语"></i><i class="s green" title="JoeanAmier/XHS-Downloader：没发现问题"></i><i class="s green" title="JoeanAmier/TikTokDownloader：没发现问题"></i><i class="s amber" title="cv-cat/DouYin_Spider：「能做」写成了「支持/提供…」开头"></i><i class="s amber" title="Abilityai/trinity：有没翻成人话的术语"></i><i class="s amber" title="anthropics/skills：「能做」写成了「支持/提供…」开头"></i><i class="s amber" title="obra/superpowers：有没翻成人话的术语；「想解决」没按「我想…」写"></i><i class="s green" title="karpathy/nanochat：没发现问题"></i><i class="s amber" title="ShilongLee/Crawler：「能做」写成了「支持/提供…」开头；有没翻成人话的术语"></i><i class="s green" title="qiutongxue/oba-live-tool：没发现问题"></i><i class="s amber" title="leookun/cursor-byok：「能做」写成了「支持/提供…」开头；有没翻成人话的术语"></i><i class="s green" title="msitarzewski/agency-agents：没发现问题"></i><i class="s green" title="op7418/CodePilot：没发现问题"></i><i class="s amber" title="refactoringhq/tolaria：「能做」写成了「支持/提供…」开头"></i><i class="s green" title="nexu-io/html-video：没发现问题"></i><i class="s green" title="codewhale-hq/Codewhale：没发现问题"></i><i class="s green" title="KunAgent/Kun：没发现问题"></i><i class="s green" title="233i/ore-code：没发现问题"></i><i class="s green" title="nguyenphutrong/quotio：没发现问题"></i><i class="s green" title="yb2460/harness-anything：没发现问题"></i><i class="s green" title="iOfficeAI/OfficeCLI：没发现问题"></i><i class="s amber" title="CodeGraphContext/CodeGraphContext：「能做」写成了「支持/提供…」开头"></i><i class="s green" title="Egonex-AI/Understand-Anything：没发现问题"></i><i class="s green" title="odysseus-dev/odysseus：没发现问题"></i><i class="s amber" title="relaydeck/relaydeck：「能做」写成了「支持/提供…」开头"></i><i class="s amber" title="ricocc/ricoui-astro-starter：「能做」写成了「支持/提供…」开头"></i><i class="s green" title="numman-ali/editorzero：没发现问题"></i><i class="s amber" title="felinics/Memoh：「能做」写成了「支持/提供…」开头；有没翻成人话的术语"></i><i class="s green" title="greensock/gsap-skills：没发现问题"></i><i class="s green" title="DingTalk-Real-AI/dingtalk-workspace-cli：没发现问题"></i><i class="s amber" title="pbakaus/impeccable：「能做」写成了「支持/提供…」开头"></i><i class="s green" title="b-nnett/codex-plusplus：没发现问题"></i><i class="s amber" title="AITabby/codexsplit：有没翻成人话的术语"></i><i class="s red" title="GordenSun/GordenPPTSkill：疑似有半截话（字段被截断）"></i><i class="s green" title="VRSEN/OpenSwarm：没发现问题"></i><i class="s green" title="Razz19/Exort：没发现问题"></i><i class="s amber" title="opendatalab/MinerU：「能做」写成了「支持/提供…」开头"></i><i class="s green" title="affaan-m/ECC：没发现问题"></i><i class="s green" title="Leonxlnx/taste-skill：没发现问题"></i><i class="s amber" title="Rishurajgautam24/free-claude-code：「能做」写成了「支持/提供…」开头"></i><i class="s green" title="earendil-works/pi：没发现问题"></i><i class="s green" title="skillsgate/skillsgate：没发现问题"></i><i class="s green" title="edison7009/EchoBird：没发现问题"></i><i class="s amber" title="521xueweihan/HelloGitHub：「能做」写成了「支持/提供…」开头"></i><i class="s amber" title="langbot-app/LangBot：有没翻成人话的术语"></i><i class="s amber" title="byoungd/up：「能做」写成了「支持/提供…」开头"></i><i class="s amber" title="happy-loki/codexhub：有没翻成人话的术语"></i><i class="s green" title="FoundationAgents/OpenManus：没发现问题"></i><i class="s green" title="OthmanAdi/planning-with-files：没发现问题"></i><i class="s amber" title="hashgraph-online/awesome-codex-plugins：「能做」写成了「支持/提供…」开头"></i><i class="s amber" title="RoggeOhta/awesome-codex-cli：「能做」写成了「支持/提供…」开头"></i><i class="s green" title="Yeachan-Heo/oh-my-codex：没发现问题"></i><i class="s green" title="BigPizzaV3/CodexPlusPlus：没发现问题"></i><i class="s green" title="cline/cline：没发现问题"></i><i class="s green" title="nexu-io/open-design：没发现问题"></i><i class="s green" title="farion1231/cc-switch：没发现问题"></i><i class="s amber" title="lonr-6/cc-desktop-switch：「能做」写成了「支持/提供…」开头"></i><i class="s green" title="esengine/DeepSeek-Reasonix：没发现问题"></i><i class="s green" title="tw93/Waza：没发现问题"></i><i class="s green" title="mate-matt/comate：没发现问题"></i><i class="s amber" title="fathah/hermes-desktop：有没翻成人话的术语"></i><i class="s green" title="vixues/LeAgent：没发现问题"></i><i class="s green" title="bytedance/UI-TARS-desktop：没发现问题"></i><i class="s amber" title="leodavinci1/kanbots：「能做」写成了「支持/提供…」开头；有没翻成人话的术语"></i><i class="s amber" title="sansan0/TrendRadar：有没翻成人话的术语"></i><i class="s green" title="cmliu/edgetunnel：没发现问题"></i><i class="s green" title="hugohe3/ppt-master：没发现问题"></i><i class="s green" title="lewislulu/html-ppt-skill：没发现问题"></i><i class="s amber" title="yaojingang/GEOFlow：有没翻成人话的术语"></i><i class="s red" title="xiaotonng/pikiloom：「能做」写成了「支持/提供…」开头；有没翻成人话的术语；疑似有半截话（字段被截断）"></i><i class="s green" title="markdown-viewer/skills：没发现问题"></i><i class="s amber" title="88lin/video_vip：「能做」写成了「支持/提供…」开头"></i><i class="s green" title="multica-ai/andrej-karpathy-skills：没发现问题"></i><i class="s red" title="lukilabs/beautiful-mermaid：疑似有半截话（字段被截断）"></i><i class="s green" title="SIXIANGGUO/cc-note-ops：没发现问题"></i><i class="s green" title="HKUDS/ViMax：没发现问题"></i><i class="s green" title="colbymchenry/codegraph：没发现问题"></i><i class="s green" title="firecrawl/firecrawl：没发现问题"></i><i class="s green" title="NanmiCoder/MediaCrawler：没发现问题"></i><i class="s amber" title="xianyu110/awesome-openclaw-tutorial：「能做」写成了「支持/提供…」开头"></i><i class="s amber" title="AlexAnys/awesome-openclaw-usecases-zh：「能做」写成了「支持/提供…」开头"></i><i class="s amber" title="listen1/listen1_desktop：「能做」写成了「支持/提供…」开头"></i><i class="s amber" title="ACL4SSR/ACL4SSR：「想解决」没按「我想…」写"></i><i class="s red" title="sjzar/chatlog：有字段缺项"></i><i class="s amber" title="Tencent/WeKnora：有没翻成人话的术语"></i></div>
+        <div class="legend">
+          <span><i></i>没发现问题 <b>307</b></span>
+          <span><i class="amber"></i>有小毛病 <b>160</b></span>
+          <span><i class="red"></i>建议重新整理 <b>33</b></span>
+          <span><i class="pending"></i>还没整理 <b>0</b></span>
+        </div>
+      </div>
+      <ul class="issues"><li class=""><span class="il">有没翻成人话的术语（Docker、网关、编排…）</span><span class="ib"><b style="width:98.9%"></b></span><span class="in">90 张<small>18%</small></span></li><li class=""><span class="il">「能做」写成「支持 / 提供 / 通过…」开头</span><span class="ib"><b style="width:100.0%"></b></span><span class="in">91 张<small>18%</small></span></li><li class=""><span class="il">「想解决」没写成「我想…」</span><span class="ib"><b style="width:15.4%"></b></span><span class="in">14 张<small>3%</small></span></li><li class=""><span class="il">疑似有半截话（字段被截断）</span><span class="ib"><b style="width:26.4%"></b></span><span class="in">24 张<small>5%</small></span></li><li class=""><span class="il">试用步骤里有 README 片段里没出现的词（需核对）</span><span class="ib"><b style="width:6.6%"></b></span><span class="in">6 张<small>1%</small></span></li><li class=""><span class="il">有字段缺项</span><span class="ib"><b style="width:4.4%"></b></span><span class="in">4 张<small>1%</small></span></li></ul>
+      <p class="note">都是写法问题，不影响用。其中约 24 张疑似半截话的老卡，会在阶段 0 的卡 48 里挑着重做（你点才花钱）。</p>
+      <details>
+        <summary>建议重新整理的 33 张是哪些</summary>
+        <ul class="redo"><li><span class="rn">miuuyy/codex-chatgpt-web</span><span class="rw">疑似有半截话（字段被截断）</span></li><li><span class="rn">milind-soni/OpenMausBot</span><span class="rw">试用步骤里有 README 片段里没出现的词（需核对）</span></li><li><span class="rn">jgraph/drawio-desktop</span><span class="rw">有字段缺项</span></li><li><span class="rn">FluentRead/FluentRead</span><span class="rw">试用步骤里有 README 片段里没出现的词（需核对）</span></li><li><span class="rn">mvanhorn/last30days-skill</span><span class="rw">疑似有半截话（字段被截断）</span></li><li><span class="rn">realchendahuang/OMPChamber</span><span class="rw">疑似有半截话（字段被截断）</span></li><li><span class="rn">limboinf/liteparse-agentic-studio</span><span class="rw">疑似有半截话（字段被截断）</span></li><li><span class="rn">cathrynlavery/diagram-design</span><span class="rw">疑似有半截话（字段被截断）</span></li><li><span class="rn">Binaryify/open-kimi-ppt-skill</span><span class="rw">有字段缺项</span></li><li><span class="rn">Javis603/token-monitor</span><span class="rw">疑似有半截话（字段被截断）</span></li><li><span class="rn">firecrawl/anydoc</span><span class="rw">疑似有半截话（字段被截断）</span></li><li><span class="rn">oil-oil/codex-deepseek-subagent</span><span class="rw">疑似有半截话（字段被截断）</span></li><li><span class="rn">xiejunjie524/handdraw-story-video</span><span class="rw">疑似有半截话（字段被截断）</span></li><li><span class="rn">RICHQAQ/PasteMD</span><span class="rw">试用步骤里有 README 片段里没出现的词（需核对）</span></li><li><span class="rn">HKUDS/DeepTutor</span><span class="rw">疑似有半截话（字段被截断）</span></li><li><span class="rn">karakeep-app/karakeep</span><span class="rw">试用步骤里有 README 片段里没出现的词（需核对）</span></li><li><span class="rn">hcengineering/platform</span><span class="rw">有字段缺项</span></li><li><span class="rn">openai/codex-plugin-cc</span><span class="rw">疑似有半截话（字段被截断）</span></li><li><span class="rn">chekusu/wanman</span><span class="rw">疑似有半截话（字段被截断）</span></li><li><span class="rn">mco-org/squad</span><span class="rw">疑似有半截话（字段被截断）</span></li><li><span class="rn">tashfeenahmed/freellmapi</span><span class="rw">疑似有半截话（字段被截断）</span></li><li><span class="rn">nexu-io/html-anything</span><span class="rw">试用步骤里有 README 片段里没出现的词（需核对）；疑似有半截话（字段被截断）</span></li><li><span class="rn">PleasePrompto/notebooklm-skill</span><span class="rw">疑似有半截话（字段被截断）</span></li><li><span class="rn">harry0703/MoneyPrinterTurbo</span><span class="rw">试用步骤里有 README 片段里没出现的词（需核对）</span></li><li><span class="rn">ComposioHQ/awesome-claude-skills</span><span class="rw">疑似有半截话（字段被截断）</span></li><li><span class="rn">kepano/obsidian-skills</span><span class="rw">疑似有半截话（字段被截断）</span></li><li><span class="rn">blader/humanizer</span><span class="rw">疑似有半截话（字段被截断）</span></li><li><span class="rn">zarazhangrui/follow-builders</span><span class="rw">疑似有半截话（字段被截断）</span></li><li><span class="rn">iOfficeAI/AionUi</span><span class="rw">疑似有半截话（字段被截断）</span></li><li><span class="rn">GordenSun/GordenPPTSkill</span><span class="rw">疑似有半截话（字段被截断）</span></li><li><span class="rn">xiaotonng/pikiloom</span><span class="rw">疑似有半截话（字段被截断）</span></li><li><span class="rn">lukilabs/beautiful-mermaid</span><span class="rw">疑似有半截话（字段被截断）</span></li><li><span class="rn">sjzar/chatlog</span><span class="rw">有字段缺项</span></li></ul>
+      </details>
+    </details>
+    <footer>完整计划：仓库 docs/rebuild/后续开发计划.md。说明卡检查数据来自切库前的开发库只读副本。</footer>
+  </section>
+</div>
+
+</body></html>
