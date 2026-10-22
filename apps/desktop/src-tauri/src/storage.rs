@@ -838,10 +838,11 @@ INSERT INTO repositories (
   pushed_at,
   license_spdx,
   license_name,
+  archived,
   sync_status,
   updated_at
 )
-VALUES ({id}, {account_id}, {owner}, {name}, {full_name}, {description}, {language}, {topics_json}, {html_url}, {stars_count}, {forks_count}, {starred_at}, {pushed_at}, {license_spdx}, {license_name}, 'active', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+VALUES ({id}, {account_id}, {owner}, {name}, {full_name}, {description}, {language}, {topics_json}, {html_url}, {stars_count}, {forks_count}, {starred_at}, {pushed_at}, {license_spdx}, {license_name}, {archived}, 'active', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 ON CONFLICT(id) DO UPDATE SET
   account_id = excluded.account_id,
   owner = excluded.owner,
@@ -857,6 +858,7 @@ ON CONFLICT(id) DO UPDATE SET
   pushed_at = excluded.pushed_at,
   license_spdx = excluded.license_spdx,
   license_name = excluded.license_name,
+  archived = COALESCE(excluded.archived, repositories.archived),
   sync_status = 'active',
   updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
 ON CONFLICT(account_id, full_name) DO UPDATE SET
@@ -872,6 +874,7 @@ ON CONFLICT(account_id, full_name) DO UPDATE SET
   pushed_at = excluded.pushed_at,
   license_spdx = excluded.license_spdx,
   license_name = excluded.license_name,
+  archived = COALESCE(excluded.archived, repositories.archived),
   sync_status = 'active',
   updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now');
 
@@ -896,6 +899,7 @@ WHERE account_id = {account_id}
                 pushed_at = sql_optional_text(repository.pushed_at.as_deref()),
                 license_spdx = sql_optional_text(repository.license_spdx.as_deref()),
                 license_name = sql_optional_text(repository.license_name.as_deref()),
+                archived = sql_optional_bool(repository.archived),
             ));
         }
 
@@ -5221,6 +5225,15 @@ fn sql_optional_text(value: Option<&str>) -> String {
     value.map(sql_text).unwrap_or_else(|| "NULL".to_owned())
 }
 
+/// `Some(true)` → 1，`Some(false)` → 0，`None` → NULL。不拼 true / false 字面量。
+fn sql_optional_bool(value: Option<bool>) -> String {
+    match value {
+        Some(true) => "1".to_owned(),
+        Some(false) => "0".to_owned(),
+        None => "NULL".to_owned(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5481,6 +5494,7 @@ INSERT INTO github_accounts (id, login, token_ref) VALUES ('1001', 'alice', 'tes
             pushed_at: Some("2026-01-02T00:00:00Z".to_owned()),
             license_spdx: None,
             license_name: None,
+            archived: None,
         };
         storage
             .upsert_repositories(&[repository])
@@ -5502,6 +5516,7 @@ INSERT INTO github_accounts (id, login, token_ref) VALUES ('1001', 'alice', 'tes
             pushed_at: Some("2026-01-03T00:00:00Z".to_owned()),
             license_spdx: None,
             license_name: None,
+            archived: None,
         };
         storage
             .upsert_repositories(&[renamed_repository])
@@ -5538,6 +5553,7 @@ INSERT INTO github_accounts (id, login, token_ref) VALUES ('1001', 'alice', 'tes
             pushed_at: None,
             license_spdx: None,
             license_name: None,
+            archived: None,
         }
     }
 
@@ -5653,6 +5669,155 @@ SELECT COUNT(*) FROM repositories WHERE account_id = '1001' AND full_name = 'own
             .upsert_repositories(&[cleared_other])
             .expect("同 full_name 返回空许可证应清空");
         assert_eq!(license_cell(&storage, "1001:2"), "<null>,<null>");
+        let _ = remove_sqlite_database_files(&database_path);
+    }
+
+    fn archived_cell(storage: &AppStorage, id: &str) -> String {
+        storage
+            .query_sql(&format!(
+                "
+.mode list
+SELECT CASE WHEN archived IS NULL THEN '<null>' ELSE CAST(archived AS TEXT) END
+FROM repositories
+WHERE id = '{id}';
+"
+            ))
+            .expect("应能读回归档标记")
+            .trim()
+            .to_owned()
+    }
+
+    #[test]
+    fn upsert_repositories_writes_archived_variants() {
+        let (storage, database_path) = prepare_license_storage("archived-write");
+        let mut yes = starred_for_license("1001:1", "owner/yes");
+        yes.archived = Some(true);
+        let mut no = starred_for_license("1001:2", "owner/no");
+        no.archived = Some(false);
+        let unknown = starred_for_license("1001:3", "owner/unknown");
+        storage
+            .upsert_repositories(&[yes, no, unknown])
+            .expect("应能写入归档标记");
+        assert_eq!(archived_cell(&storage, "1001:1"), "1");
+        assert_eq!(archived_cell(&storage, "1001:2"), "0");
+        assert_eq!(archived_cell(&storage, "1001:3"), "<null>");
+        let _ = remove_sqlite_database_files(&database_path);
+    }
+
+    #[test]
+    fn upsert_repositories_overwrites_archived_on_same_id() {
+        let (storage, database_path) = prepare_license_storage("archived-same-id");
+        let mut first = starred_for_license("1001:1", "owner/one");
+        first.archived = Some(false);
+        storage.upsert_repositories(&[first]).expect("应能首次写入");
+        assert_eq!(archived_cell(&storage, "1001:1"), "0");
+
+        let mut archived = starred_for_license("1001:1", "owner/one");
+        archived.archived = Some(true);
+        storage
+            .upsert_repositories(&[archived])
+            .expect("同 id 新归档应覆盖");
+        assert_eq!(archived_cell(&storage, "1001:1"), "1");
+
+        let mut cleared = starred_for_license("1001:1", "owner/one");
+        cleared.archived = Some(false);
+        storage
+            .upsert_repositories(&[cleared])
+            .expect("同 id 取消归档应覆盖");
+        assert_eq!(archived_cell(&storage, "1001:1"), "0");
+        let _ = remove_sqlite_database_files(&database_path);
+    }
+
+    #[test]
+    fn upsert_repositories_keeps_archived_when_sync_omits_it() {
+        let (storage, database_path) = prepare_license_storage("archived-keep");
+        let mut yes = starred_for_license("1001:1", "owner/yes");
+        yes.archived = Some(true);
+        let mut no = starred_for_license("1001:2", "owner/no");
+        no.archived = Some(false);
+        storage.upsert_repositories(&[yes, no]).expect("应能写入");
+
+        let again_yes = starred_for_license("1001:1", "owner/yes");
+        let again_no = starred_for_license("1001:2", "owner/no");
+        storage
+            .upsert_repositories(&[again_yes, again_no])
+            .expect("不知道时应保留旧值");
+        assert_eq!(archived_cell(&storage, "1001:1"), "1");
+        assert_eq!(archived_cell(&storage, "1001:2"), "0");
+        let _ = remove_sqlite_database_files(&database_path);
+    }
+
+    #[test]
+    fn upsert_repositories_updates_archived_on_full_name_conflict() {
+        let (storage, database_path) = prepare_license_storage("archived-rename-id");
+        let mut yes = starred_for_license("1001:2", "owner/two");
+        yes.archived = Some(true);
+        let mut no = starred_for_license("1001:3", "owner/three");
+        no.archived = Some(false);
+        storage
+            .upsert_repositories(&[yes, no])
+            .expect("应能首次写入");
+
+        let mut renamed_yes = starred_for_license("1001:9", "owner/two");
+        renamed_yes.archived = Some(false);
+        storage
+            .upsert_repositories(&[renamed_yes])
+            .expect("同 full_name 冲突应更新归档标记");
+        assert_eq!(archived_cell(&storage, "1001:2"), "0");
+        let count = storage
+            .query_sql(
+                "
+.mode list
+SELECT COUNT(*) FROM repositories WHERE account_id = '1001' AND full_name = 'owner/two';
+",
+            )
+            .expect("应能计数");
+        assert_eq!(count.trim(), "1");
+
+        let omitted_yes = starred_for_license("1001:10", "owner/two");
+        let omitted_no = starred_for_license("1001:11", "owner/three");
+        storage
+            .upsert_repositories(&[omitted_yes, omitted_no])
+            .expect("同 full_name 传空时应保留旧值");
+        assert_eq!(archived_cell(&storage, "1001:2"), "0");
+        assert_eq!(archived_cell(&storage, "1001:3"), "0");
+
+        let mut back = starred_for_license("1001:12", "owner/two");
+        back.archived = Some(true);
+        storage
+            .upsert_repositories(&[back])
+            .expect("同 full_name 应能重新标成已归档");
+        assert_eq!(archived_cell(&storage, "1001:2"), "1");
+        let omitted_again = starred_for_license("1001:13", "owner/two");
+        storage
+            .upsert_repositories(&[omitted_again])
+            .expect("已归档后再传空应保留 1");
+        assert_eq!(archived_cell(&storage, "1001:2"), "1");
+        let _ = remove_sqlite_database_files(&database_path);
+    }
+
+    #[test]
+    fn upsert_repositories_fills_archived_on_old_null_row() {
+        let (storage, database_path) = prepare_license_storage("archived-old-null");
+        storage
+            .execute_sql(
+                "
+INSERT INTO repositories (
+  id, account_id, owner, name, full_name, topics_json, html_url, sync_status, starred_at
+) VALUES (
+  '1001:1', '1001', 'owner', 'one', 'owner/one', '[]', 'https://github.com/owner/one', 'active', '2026-01-01T00:00:00Z'
+);
+",
+            )
+            .expect("应能写入还没有 archived 的旧行");
+        assert_eq!(archived_cell(&storage, "1001:1"), "<null>");
+
+        let mut synced = starred_for_license("1001:1", "owner/one");
+        synced.archived = Some(true);
+        storage
+            .upsert_repositories(&[synced])
+            .expect("同步应补上归档标记");
+        assert_eq!(archived_cell(&storage, "1001:1"), "1");
         let _ = remove_sqlite_database_files(&database_path);
     }
 
@@ -6593,6 +6758,7 @@ INSERT INTO github_accounts (id, login, token_ref) VALUES ('1001', 'alice', 'tes
                 pushed_at: Some("2026-02-03T00:00:00Z".to_owned()),
                 license_spdx: None,
                 license_name: None,
+                archived: None,
             }])
             .expect("真实 GitHub 同步应按 fullName 合并导入仓库");
 

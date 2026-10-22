@@ -173,6 +173,32 @@ describe('详情：维护状态', () => {
     expect(missingText).not.toContain('疑似停更');
     expect(missing).not.toContain('最近 3 个月内有更新');
   });
+
+  it('已归档有红色小标签，没有推送时间也画；没归档时三档照旧', () => {
+    const archivedRecent = render(make({ archived: true, pushedAt: iso(1) }));
+    expect(textOf(archivedRecent)).toContain('已归档');
+    expect(archivedRecent).toContain('title="作者已在 GitHub 上把它归档：只读，不会再更新"');
+    expect(archivedRecent).toContain('bg-error-container');
+    expect(textOf(archivedRecent)).not.toContain('活跃');
+
+    const archivedMissing = render(make({ archived: true, pushedAt: null }));
+    expect(textOf(archivedMissing)).toContain('已归档');
+    expect(textOf(archivedMissing)).toContain('项目最近更新：');
+    expect(archivedMissing).toContain('title="作者已在 GitHub 上把它归档：只读，不会再更新"');
+
+    const active = render(make({ archived: false, pushedAt: iso(1) }));
+    expect(textOf(active)).toContain('活跃');
+    expect(textOf(active)).not.toContain('已归档');
+
+    const slow = render(make({ archived: false, pushedAt: iso(200) }));
+    expect(textOf(slow)).toContain('放缓');
+    expect(textOf(slow)).not.toContain('已归档');
+
+    const stale = render(make({ archived: false, pushedAt: iso(400), maturity: null }));
+    expect(textOf(stale)).toContain('疑似停更');
+    expect(textOf(stale)).not.toContain('已归档');
+    expect(textOf(stale)).not.toContain('放缓');
+  });
 });
 
 describe('详情：中文说明和它的依据', () => {

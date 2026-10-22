@@ -76,6 +76,31 @@ describe('api 命令名和参数', () => {
     expect(calls).toEqual([{ command: 'list_library_view', args: { filters } }]);
   });
 
+  it('listLibraryView 的参数原样带上 maintenance: archived，响应里的 archived 原样读出', async () => {
+    const page = {
+      items: [{ id: 'r-archived', fullName: 'o/boxed', archived: true }],
+      totalCount: 1,
+      counts: {
+        total: 7,
+        scenarios: {},
+        reading: { unseen: 1, want: 0, tried: 0, in_use: 0, dropped: 0 },
+        cardState: { done: 0, pending: 1 },
+        forms: {},
+        maintenance: { active: 1, slow: 1, stale: 1, archived: 3 },
+      },
+    };
+    const calls: Call[] = [];
+    setInvokeForTests(async (command, args) => {
+      calls.push({ command, args });
+      return page;
+    });
+    const filters = { cardState: 'all' as const, maintenance: 'archived' as const, limit: 1 };
+    const got = await listLibraryView(filters);
+    expect(calls).toEqual([{ command: 'list_library_view', args: { filters } }]);
+    expect(got.items[0]?.archived).toBe(true);
+    expect(got.counts.maintenance.archived).toBe(3);
+  });
+
   it('getLibraryDetail 传 { id }', async () => {
     const calls = installInvoke();
     await getLibraryDetail('repo-1');

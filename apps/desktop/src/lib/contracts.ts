@@ -6,8 +6,9 @@
  * 命令名与参数写在每个类型上方的注释里。
  */
 
-/** 维护状态。按最近推送距今多久：active 活跃（≤ 90 天）、slow 放缓（> 90 天且 ≤ 365 天）、stale 疑似停更（> 365 天）。没有推送时间是 null，不算任何一档。 */
-export type MaintenanceTier = 'active' | 'slow' | 'stale';
+/** 维护状态。按最近推送距今多久：active 活跃（≤ 90 天）、slow 放缓（> 90 天且 ≤ 365 天）、stale 疑似停更（> 365 天）。
+ *  archived 已归档：GitHub 上已归档，压过按推送时间算的三档。没有推送时间、也没归档是 null，不算任何一档。 */
+export type MaintenanceTier = 'active' | 'slow' | 'stale' | 'archived';
 
 /** 「我的状态」五档。库里存的是上游的 8 个状态值，按组归并：
  *  unseen = unread + later；want = want_to_try + watching；tried = tried + read；in_use = in_use；dropped = deprecated。
@@ -33,7 +34,7 @@ export type LibraryFilters = {
   /** done = 已有理解卡（卡片一句话非空）；pending = 还没有；all = 不筛。默认 done */
   cardState?: 'done' | 'pending' | 'all';
   form?: string | null;
-  /** 不传 = 不筛。active / slow / stale 三档互斥。 */
+  /** 不传 = 不筛。active / slow / stale / archived 四档互斥，已归档压过按推送时间算的三档。 */
   maintenance?: MaintenanceTier | null;
   keyword?: string;
   /** starred = 按收藏时间新到旧（默认）；stars = 按星数；updated = 按最近更新；relevance = 按相关度（有关键词时用） */
@@ -72,6 +73,8 @@ export type LibraryItem = {
   matchScore?: number | null;
   /** 匹配度档位 1–4，只有带关键词的相关度排序才有值。 */
   matchStars?: number | null;
+  /** 是否已在 GitHub 上归档。后端总会带；写成可选只是为了不用改一堆旧测试夹具。只有 true 才算已归档。 */
+  archived?: boolean;
 };
 
 export type LibraryCounts = {
@@ -84,8 +87,9 @@ export type LibraryCounts = {
   /** 已整理 / 整理中的数量；按其他筛选条件算，不按卡片状态本身算 */
   cardState: { done: number; pending: number };
   forms: Record<string, number>;
-  /** 活跃 / 放缓 / 疑似停更的个数。按其他筛选算，不按自己算；没有推送时间的不计。 */
-  maintenance: { active: number; slow: number; stale: number };
+  /** 活跃 / 放缓 / 疑似停更 / 已归档的个数。已归档单独一档，压过按推送时间算的三档。
+   *  按其他筛选算，不按自己算。archived 写成可选，是为了旧夹具不用逐个补；缺了当 0。 */
+  maintenance: { active: number; slow: number; stale: number; archived?: number };
 };
 
 export type LibraryPage = {

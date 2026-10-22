@@ -236,4 +236,65 @@ describe('资料库左栏：维护状态', () => {
     );
     expect(textOf(rowOf(unknown, '疑似停更'))).toBe('疑似停更 …');
   });
+
+  it('已归档有个数，选中能点，个数为 0 且未选中时淡一点，悬停带同步提醒', () => {
+    const calls: string[] = [];
+    const rows = maintenanceOptions({ active: 1, slow: 0, stale: 2, archived: 7 });
+    const element = (
+      <FilterPanel
+        scenarios={[]}
+        scenarioStatus="ready"
+        readingCounts={READING}
+        forms={[]}
+        maintenance={rows}
+        countsKnown
+        scenario={null}
+        reading={null}
+        form={null}
+        maintenanceTier="archived"
+        onScenario={() => {}}
+        onReading={() => {}}
+        onForm={() => {}}
+        onMaintenance={(tier) => calls.push(tier)}
+      />
+    );
+    const html = renderToStaticMarkup(element);
+    const text = textOf(html);
+    expect(text.indexOf('疑似停更')).toBeLessThan(text.indexOf('已归档'));
+    expect(textOf(rowOf(html, '已归档'))).toBe('已归档 7');
+    expect(rowOf(html, '已归档')).toContain('aria-pressed="true"');
+    expect(rowOf(html, '已归档')).toContain(
+      'title="作者已在 GitHub 上把它归档：只读，不会再更新。旧数据点一次「同步」后才会标出来"',
+    );
+
+    const buttons: ReactElement<unknown>[] = [];
+    walk(element, (el) => {
+      if (el.type === 'button') buttons.push(el);
+    });
+    const archived = buttons.find((button) => hostText(button).includes('已归档'));
+    (archived?.props as { onClick?: () => void } | null)?.onClick?.();
+    expect(calls).toEqual(['archived']);
+
+    const zero = renderToStaticMarkup(
+      <FilterPanel
+        scenarios={[]}
+        scenarioStatus="ready"
+        readingCounts={READING}
+        forms={[]}
+        maintenance={maintenanceOptions({ active: 1, slow: 1, stale: 1, archived: 0 })}
+        countsKnown
+        scenario={null}
+        reading={null}
+        form={null}
+        maintenanceTier={null}
+        onScenario={() => {}}
+        onReading={() => {}}
+        onForm={() => {}}
+        onMaintenance={() => {}}
+      />,
+    );
+    expect(textOf(rowOf(zero, '已归档'))).toBe('已归档 0');
+    expect(rowOf(zero, '已归档')).toContain('aria-pressed="false"');
+    expect(rowOf(zero, '已归档')).toContain('opacity-50');
+  });
 });

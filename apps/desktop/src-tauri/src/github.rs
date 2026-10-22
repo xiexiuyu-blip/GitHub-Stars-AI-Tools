@@ -35,6 +35,8 @@ pub struct StarredRepository {
     pub pushed_at: Option<String>,
     pub license_spdx: Option<String>,
     pub license_name: Option<String>,
+    /// GitHub `archived`。键不存在或 `null` 是 `None`（不知道）；`true` / `false` 原样。
+    pub archived: Option<bool>,
 }
 
 #[derive(Debug, Clone)]
@@ -128,6 +130,9 @@ struct GitHubRepository {
     /// 有对象 = 有许可证。落库时「没声明」存成空串，「不知道」存成 NULL，详情才能说「未声明」而不是留空。
     #[serde(default, deserialize_with = "deserialize_present")]
     license: Option<Option<GitHubLicense>>,
+    /// 键不存在或 `null` 都是 `None`。只有 JSON 布尔才写成 `Some`。
+    #[serde(default)]
+    archived: Option<bool>,
     owner: GitHubOwner,
 }
 
@@ -468,6 +473,7 @@ fn map_starred_repository(
         pushed_at: item.repo.pushed_at,
         license_spdx,
         license_name,
+        archived: item.repo.archived,
     })
 }
 
@@ -671,5 +677,85 @@ mod tests {
         assert_eq!(parsed[3].license_name, None);
         assert_eq!(parsed[4].license_spdx, None);
         assert_eq!(parsed[4].license_name.as_deref(), Some("Custom Only"));
+    }
+
+    #[test]
+    fn parse_starred_repositories_reads_archived_variants() {
+        let body = r#"[
+            {
+                "starred_at": "2026-01-01T00:00:00Z",
+                "repo": {
+                    "id": 1,
+                    "name": "yes",
+                    "full_name": "octo/yes",
+                    "description": null,
+                    "language": null,
+                    "topics": [],
+                    "html_url": "https://github.com/octo/yes",
+                    "stargazers_count": 1,
+                    "forks_count": 0,
+                    "pushed_at": null,
+                    "owner": {"login": "octo"},
+                    "archived": true
+                }
+            },
+            {
+                "starred_at": "2026-01-01T00:00:00Z",
+                "repo": {
+                    "id": 2,
+                    "name": "no",
+                    "full_name": "octo/no",
+                    "description": null,
+                    "language": null,
+                    "topics": [],
+                    "html_url": "https://github.com/octo/no",
+                    "stargazers_count": 1,
+                    "forks_count": 0,
+                    "pushed_at": null,
+                    "owner": {"login": "octo"},
+                    "archived": false
+                }
+            },
+            {
+                "starred_at": "2026-01-01T00:00:00Z",
+                "repo": {
+                    "id": 3,
+                    "name": "missing",
+                    "full_name": "octo/missing",
+                    "description": null,
+                    "language": null,
+                    "topics": [],
+                    "html_url": "https://github.com/octo/missing",
+                    "stargazers_count": 1,
+                    "forks_count": 0,
+                    "pushed_at": null,
+                    "owner": {"login": "octo"}
+                }
+            },
+            {
+                "starred_at": "2026-01-01T00:00:00Z",
+                "repo": {
+                    "id": 4,
+                    "name": "nullish",
+                    "full_name": "octo/nullish",
+                    "description": null,
+                    "language": null,
+                    "topics": [],
+                    "html_url": "https://github.com/octo/nullish",
+                    "stargazers_count": 1,
+                    "forks_count": 0,
+                    "pushed_at": null,
+                    "owner": {"login": "octo"},
+                    "archived": null
+                }
+            }
+        ]"#;
+
+        let parsed = parse_starred_repositories("1001", body).expect("应能解析 Stars 响应");
+        assert_eq!(parsed.len(), 4);
+        assert_eq!(parsed[0].archived, Some(true));
+        assert_eq!(parsed[1].archived, Some(false));
+        assert_eq!(parsed[2].archived, None);
+        assert_eq!(parsed[3].archived, None);
     }
 }

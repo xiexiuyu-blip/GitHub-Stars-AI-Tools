@@ -1,5 +1,5 @@
 import type { LibraryCounts, LibraryFilters, MaintenanceTier, ReadingGroup, ScenarioSummary } from '@/lib/contracts';
-import { MAINTENANCE_HINTS, MAINTENANCE_LABELS, MAINTENANCE_TIERS } from '@/lib/maintenance';
+import { MAINTENANCE_FILTER_HINTS, MAINTENANCE_HINTS, MAINTENANCE_LABELS, MAINTENANCE_TIERS } from '@/lib/maintenance';
 
 /** 资料库页面上的筛选。默认看全部，按收藏时间新到旧。 */
 export type LibraryUiState = {
@@ -222,14 +222,14 @@ export function formOptions(forms: Readonly<Record<string, number>> | null | und
   return rows;
 }
 
-/** 维护状态固定顺序：活跃、放缓、疑似停更。个数缺失或不是有限数字都当 0。 */
+/** 维护状态固定顺序：活跃、放缓、疑似停更、已归档。个数缺失或不是有限数字都当 0。 */
 export function maintenanceOptions(
   counts: Partial<Record<MaintenanceTier, number>> | null | undefined,
 ): MaintenanceFilterRow[] {
   return MAINTENANCE_TIERS.map((tier) => ({
     tier,
     label: MAINTENANCE_LABELS[tier],
-    hint: MAINTENANCE_HINTS[tier],
+    hint: MAINTENANCE_FILTER_HINTS[tier] ?? MAINTENANCE_HINTS[tier],
     count: asCount(counts?.[tier]),
   }));
 }
