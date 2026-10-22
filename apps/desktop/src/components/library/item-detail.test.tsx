@@ -144,6 +144,37 @@ describe('详情：标签', () => {
   });
 });
 
+describe('详情：维护状态', () => {
+  const day = 86_400_000;
+  const nowMs = Date.now();
+  const iso = (daysAgo: number) => new Date(nowMs - daysAgo * day).toISOString();
+
+  it('三档都画小标签和悬停说明；没有最近推送时间不画', () => {
+    const active = render(make({ pushedAt: iso(1) }));
+    expect(textOf(active)).toContain('活跃');
+    expect(active).toContain('title="最近 3 个月内有更新"');
+    expect(textOf(active)).toContain('项目最近更新：');
+
+    const slow = render(make({ pushedAt: iso(200) }));
+    expect(textOf(slow)).toContain('放缓');
+    expect(slow).toContain('title="3 到 12 个月没有更新"');
+    expect(textOf(slow)).not.toContain('疑似停更');
+
+    const stale = render(make({ pushedAt: iso(400), maturity: null }));
+    expect(textOf(stale)).toContain('疑似停更');
+    expect(stale).toContain('title="超过 1 年没有更新，可能已经不维护了"');
+    expect(textOf(stale)).not.toContain('放缓');
+
+    const missing = render(make({ pushedAt: null }));
+    const missingText = textOf(missing);
+    expect(missingText).toContain('项目最近更新：');
+    expect(missingText).not.toContain('活跃');
+    expect(missingText).not.toContain('放缓');
+    expect(missingText).not.toContain('疑似停更');
+    expect(missing).not.toContain('最近 3 个月内有更新');
+  });
+});
+
 describe('详情：中文说明和它的依据', () => {
   it('依据项目说明：第一次出现写成「项目说明（README）」', () => {
     const text = textOf(render(make()));

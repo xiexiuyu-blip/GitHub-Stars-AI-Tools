@@ -17,11 +17,13 @@ import {
   formOptions,
   hasActiveFilters,
   libraryEmptyNote,
+  maintenanceOptions,
   nextPageOffset,
   removeIfFilteredOut,
   shouldFallbackToAll,
   toFilters,
   toggleForm,
+  toggleMaintenance,
   toggleReading,
   toggleScenario,
   visibleScenarios,
@@ -496,6 +498,7 @@ export function LibraryPage(props: LibraryPageProps) {
 
   const scenarioRows = visibleScenarios(scenarios, counts);
   const formRows = formOptions(counts?.forms);
+  const maintenanceRows = maintenanceOptions(counts?.maintenance);
   const readingCounts = readingCountsOf(counts);
   const cardOptions = counts
     ? cardStateOptions(counts.cardState)
@@ -511,7 +514,7 @@ export function LibraryPage(props: LibraryPageProps) {
   const showFallbackHint = fallbackHint && !cardStateTouched && ui.cardState === 'all';
   const filtersActive = hasActiveFilters(ui);
   // 提示说的是整个资料库还有多少没整理；已经按场景 / 关键词筛窄了，数字对不上，就不提示
-  const narrowedDown = Boolean(ui.scenario || ui.reading || ui.form || ui.keyword.trim());
+  const narrowedDown = Boolean(ui.scenario || ui.reading || ui.form || ui.maintenance || ui.keyword.trim());
   const hint = narrowedDown ? null : automationHint(automation, counts?.cardState?.pending ?? 0);
   const moreOffset = nextPageOffset(serverItems.length, resultCount ?? 0, LIBRARY_PAGE_SIZE);
   const hasMore = moreOffset != null && !noMore;
@@ -567,7 +570,7 @@ export function LibraryPage(props: LibraryPageProps) {
               variant="default"
               aria-expanded={filterOpen}
               aria-controls="library-filters"
-              className={cn((ui.scenario || ui.reading || ui.form) && 'text-accent-foreground')}
+              className={cn((ui.scenario || ui.reading || ui.form || ui.maintenance) && 'text-accent-foreground')}
               onClick={() => setFilterOpen((open) => !open)}
             >
               <Icon name="filter_list" size={16} />
@@ -654,13 +657,16 @@ export function LibraryPage(props: LibraryPageProps) {
         onRetryScenarios={() => setScenarioReloadKey((key) => key + 1)}
         readingCounts={readingCounts}
         forms={formRows}
+        maintenance={maintenanceRows}
         countsKnown={counts != null}
         scenario={ui.scenario}
         reading={ui.reading}
         form={ui.form}
+        maintenanceTier={ui.maintenance}
         onScenario={(id) => setUi((current) => toggleScenario(current, id))}
         onReading={(group) => setUi((current) => toggleReading(current, group))}
         onForm={(id) => setUi((current) => toggleForm(current, id))}
+        onMaintenance={(tier) => setUi((current) => toggleMaintenance(current, tier))}
       />
     );
   }
@@ -760,6 +766,7 @@ function uiKey(state: LibraryUiState): string {
     state.scenario ?? '',
     state.reading ?? '',
     state.form ?? '',
+    state.maintenance ?? '',
     state.cardState,
     state.keyword,
     state.sort,

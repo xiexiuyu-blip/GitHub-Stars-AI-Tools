@@ -1,10 +1,12 @@
-import type { LibraryCounts, LibraryFilters, ReadingGroup, ScenarioSummary } from '@/lib/contracts';
+import type { LibraryCounts, LibraryFilters, MaintenanceTier, ReadingGroup, ScenarioSummary } from '@/lib/contracts';
+import { MAINTENANCE_HINTS, MAINTENANCE_LABELS, MAINTENANCE_TIERS } from '@/lib/maintenance';
 
 /** 资料库页面上的筛选。默认看全部，按收藏时间新到旧。 */
 export type LibraryUiState = {
   scenario: string | null;
   reading: ReadingGroup | null;
   form: string | null;
+  maintenance: MaintenanceTier | null;
   cardState: 'done' | 'pending' | 'all';
   keyword: string;
   sort: 'starred' | 'stars' | 'updated';
@@ -29,6 +31,13 @@ export type FormFilterRow = {
 export type CardStateOption = {
   value: LibraryUiState['cardState'];
   label: string;
+};
+
+export type MaintenanceFilterRow = {
+  tier: MaintenanceTier;
+  label: string;
+  hint: string;
+  count: number;
 };
 
 /** 类型的短名字：行内小标签、找方案的命中行、复制给 Codex 的正文都用这一套，别把解释写进去。 */
@@ -85,6 +94,7 @@ export function createLibraryUiState(): LibraryUiState {
     scenario: null,
     reading: null,
     form: null,
+    maintenance: null,
     // 默认看全部：还没整理的收藏也要能搜到，搜关键词、按场景找都不该漏掉
     cardState: 'all',
     keyword: '',
@@ -109,7 +119,7 @@ export function withInitial(
   return state;
 }
 
-/** 空关键词不传。有关键词且排序还是默认的收藏时间时，改发 relevance。offset 是页码乘每页条数。场景、状态、类型为空时不传。 */
+/** 空关键词不传。有关键词且排序还是默认的收藏时间时，改发 relevance。offset 是页码乘每页条数。场景、状态、类型、维护状态为空时不传。 */
 export function toFilters(state: LibraryUiState, page: number, pageSize: number): LibraryFilters {
   const safePage = Number.isFinite(page) && page > 0 ? Math.floor(page) : 0;
   const safeSize = Number.isFinite(pageSize) && pageSize > 0 ? Math.floor(pageSize) : 0;
@@ -122,6 +132,7 @@ export function toFilters(state: LibraryUiState, page: number, pageSize: number)
   if (state.scenario) filters.scenario = state.scenario;
   if (state.reading) filters.reading = state.reading;
   if (state.form) filters.form = state.form;
+  if (state.maintenance) filters.maintenance = state.maintenance;
   const keyword = state.keyword.trim();
   if (keyword) filters.keyword = keyword;
   // 用户没另选排序时，搜索按相关度。选了星数或最近更新就保持原样。
@@ -143,23 +154,29 @@ export function toggleForm(state: LibraryUiState, value: string): LibraryUiState
   return { ...state, form: state.form === value ? null : value };
 }
 
-/** 清掉场景、状态、类型和关键词，整理状态回到默认。排序保留。 */
+export function toggleMaintenance(state: LibraryUiState, tier: MaintenanceTier): LibraryUiState {
+  return { ...state, maintenance: state.maintenance === tier ? null : tier };
+}
+
+/** 清掉场景、状态、类型、维护状态和关键词，整理状态回到默认。排序保留。 */
 export function clearFilters(state: LibraryUiState): LibraryUiState {
   return {
     scenario: null,
     reading: null,
     form: null,
+    maintenance: null,
     cardState: 'all',
     keyword: '',
     sort: state.sort,
   };
 }
 
-/** 决定是否显示「清除筛选」。整理状态不是默认的「全部」也算有筛选。 */
+/** 决定是否显示「清除筛选」。整理状态不是默认的「全部」、或选了维护状态，也算有筛选。 */
 export function hasActiveFilters(state: LibraryUiState): boolean {
   return Boolean(state.scenario)
     || Boolean(state.reading)
     || Boolean(state.form)
+    || state.maintenance != null
     || state.keyword.trim() !== ''
     || state.cardState !== 'all';
 }
@@ -200,6 +217,18 @@ export function formOptions(forms: Readonly<Record<string, number>> | null | und
   return rows;
 }
 
+/** 维护状态固定顺序：活跃、放缓、疑似停更。个数缺失或不是有限数字都当 0。 */
+export function maintenanceOptions(
+  counts: Partial<Record<MaintenanceTier, number>> | null | undefined,
+): MaintenanceFilterRow[] {
+  return MAINTENANCE_TIERS.map((tier) => ({
+    tier,
+    label: MAINTENANCE_LABELS[tier],
+    hint: MAINTENANCE_HINTS[tier],
+    count: asCount(counts?.[tier]),
+  }));
+}
+
 /** 资料库列表一个都没有时，页面中间说什么。 */
 export type LibraryEmptyNote = {
   title: string;
@@ -219,14 +248,14 @@ const SEARCH_EMPTY: LibraryEmptyNote = {
  * 一个都没有时说什么：
  * - 搜了关键词：「没有找到，换个说法试试」，并给「去找方案」。
  * - 没搜关键词，只点了「待 AI 整理」：「没有待 AI 整理的收藏，都整理好了。」——这是好消息，不是没搜到。
- * - 没搜关键词，点了别的筛选（想试 / 试过 / 在用 / 不要了、场景、类型、AI 已整理，或几个叠在一起）：「这一类还没有。」
+ * - 没搜关键词，点了别的筛选（想试 / 试过 / 在用 / 不要了、场景、类型、维护状态、AI 已整理，或几个叠在一起）：「这一类还没有。」
  * - 什么都没筛、也没搜（资料库本身是空的）：保持原来那句。
  */
 export function libraryEmptyNote(
-  state: Pick<LibraryUiState, 'scenario' | 'reading' | 'form' | 'cardState' | 'keyword'>,
+  state: Pick<LibraryUiState, 'scenario' | 'reading' | 'form' | 'maintenance' | 'cardState' | 'keyword'>,
 ): LibraryEmptyNote {
   if (state.keyword.trim()) return SEARCH_EMPTY;
-  const narrowed = Boolean(state.scenario || state.reading || state.form);
+  const narrowed = Boolean(state.scenario || state.reading || state.form || state.maintenance);
   if (state.cardState === 'pending' && !narrowed) {
     return { title: '没有待 AI 整理的收藏，都整理好了。', description: null, offerSolve: false };
   }

@@ -13,11 +13,13 @@ import {
   formTagLabel,
   hasActiveFilters,
   libraryEmptyNote,
+  maintenanceOptions,
   nextPageOffset,
   removeIfFilteredOut,
   shouldFallbackToAll,
   toFilters,
   toggleForm,
+  toggleMaintenance,
   toggleReading,
   toggleScenario,
   visibleScenarios,
@@ -35,6 +37,7 @@ describe('资料库筛选状态', () => {
       scenario: null,
       reading: null,
       form: null,
+      maintenance: null,
       cardState: 'all',
       keyword: '',
       sort: 'starred',
@@ -133,6 +136,7 @@ describe('资料库筛选状态', () => {
       scenario: null,
       reading: null,
       form: null,
+      maintenance: null,
       cardState: 'all',
       keyword: '',
       sort: 'updated',
@@ -453,6 +457,61 @@ describe('libraryEmptyNote：列表一个都没有时说什么', () => {
     expect(librarySource).toContain('libraryEmptyNote(ui)');
     expect(librarySource).not.toContain('title="没有找到"');
     expect(librarySource).toContain('empty.offerSolve ? (');
+  });
+});
+
+describe('维护状态筛选', () => {
+  it('选了才传给后端，再点取消，清除和空列表文案都认它', () => {
+    expect(createLibraryUiState().maintenance).toBeNull();
+    expect(toFilters(state(), 0, 80).maintenance).toBeUndefined();
+    expect('maintenance' in toFilters(state(), 0, 80)).toBe(false);
+
+    const picked = toggleMaintenance(state(), 'slow');
+    expect(picked.maintenance).toBe('slow');
+    expect(toFilters(picked, 0, 80).maintenance).toBe('slow');
+    expect(toggleMaintenance(picked, 'slow').maintenance).toBeNull();
+    expect(toggleMaintenance(picked, 'stale').maintenance).toBe('stale');
+    expect(state().maintenance).toBeNull();
+
+    const cleared = clearFilters(state({ maintenance: 'active', scenario: 'xhs', sort: 'stars' }));
+    expect(cleared.maintenance).toBeNull();
+    expect(cleared.scenario).toBeNull();
+    expect(cleared.sort).toBe('stars');
+
+    expect(hasActiveFilters(state({ maintenance: 'stale' }))).toBe(true);
+    expect(hasActiveFilters(state())).toBe(false);
+
+    expect(libraryEmptyNote(state({ maintenance: 'slow' }))).toEqual({
+      title: '这一类还没有。',
+      description: null,
+      offerSolve: false,
+    });
+
+    const rows = maintenanceOptions({ stale: 3, active: 1, slow: 2 });
+    expect(rows.map((row) => row.tier)).toEqual(['active', 'slow', 'stale']);
+    expect(rows.map((row) => row.label)).toEqual(['活跃', '放缓', '疑似停更']);
+    expect(rows.map((row) => row.count)).toEqual([1, 2, 3]);
+    expect(rows.map((row) => row.hint)).toEqual([
+      '最近 3 个月内有更新',
+      '3 到 12 个月没有更新',
+      '超过 1 年没有更新，可能已经不维护了',
+    ]);
+    expect(maintenanceOptions(null).map((row) => row.count)).toEqual([0, 0, 0]);
+    expect(maintenanceOptions(undefined).map((row) => row.count)).toEqual([0, 0, 0]);
+    expect(maintenanceOptions({
+      active: Number.NaN,
+      slow: Number.POSITIVE_INFINITY,
+      stale: 'x' as unknown as number,
+    }).map((row) => row.count)).toEqual([0, 0, 0]);
+    expect(maintenanceOptions({ active: 4 }).map((row) => row.count)).toEqual([4, 0, 0]);
+  });
+
+  it('页面重新取数的键带上维护状态，漏了切换筛选不会重新取数', () => {
+    const start = librarySource.indexOf('function uiKey(');
+    expect(start).toBeGreaterThanOrEqual(0);
+    const end = librarySource.indexOf('\nfunction ', start + 1);
+    const body = librarySource.slice(start, end === -1 ? undefined : end);
+    expect(body).toContain('state.maintenance');
   });
 });
 

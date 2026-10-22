@@ -1,6 +1,8 @@
 import type { MouseEvent } from 'react';
 import type { LibraryItem, ReadingGroup, ScenarioSummary } from '@/lib/contracts';
 import { DROP_HINT, cleanDescription, readingGroupLabel, splitRepoName } from '@/lib/item-format';
+import { maintenanceOf } from '@/lib/maintenance';
+import { MaintenanceTag } from './maintenance-tag';
 import { LangDot, RepoAvatar, ScenarioChip, StarCount, Tag } from '@/components/kit';
 import { Icon } from '@/components/ui/icon';
 import { cn } from '@/lib/utils';
@@ -23,6 +25,8 @@ export function ItemRow(props: {
   scenarios?: ScenarioSummary[];
   /** 「不要了」的悬停说明。不传就用今日页那一句；资料库传自己的（见 DROP_HINT_LIBRARY）。 */
   dropHint?: string;
+  /** 算维护状态用的「现在」。不传就是此刻。 */
+  now?: Date | number | string;
   onSelect: () => void;
   onWant: () => void;
   onDrop: () => void;
@@ -30,6 +34,7 @@ export function ItemRow(props: {
   const { owner, repo } = splitRepoName(props.item.fullName);
   const chips = scenarioChipsOf(props.item, props.scenarios);
   const text = props.item.oneLiner?.trim() || cleanDescription(props.item.description);
+  const now = props.now ?? new Date();
 
   return (
     <div
@@ -57,6 +62,7 @@ export function ItemRow(props: {
           {chips.map((scenario) => (
             <ScenarioChip key={scenario.id} name={scenario.nameZh} scenarioKey={scenario.slug || scenario.id} />
           ))}
+          <MaintenanceTag tier={maintenanceOf(props.item.pushedAt, now)} showActive={false} />
         </div>
         {props.why ? (
           <div className="why-line mt-1.5 flex items-start gap-1 text-xs leading-[1.5]">

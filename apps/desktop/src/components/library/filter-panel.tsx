@@ -1,6 +1,6 @@
 import type { ReactNode } from 'react';
-import type { ReadingGroup } from '@/lib/contracts';
-import type { FormFilterRow, ScenarioFilterRow } from '@/lib/library-filters';
+import type { MaintenanceTier, ReadingGroup } from '@/lib/contracts';
+import type { FormFilterRow, MaintenanceFilterRow, ScenarioFilterRow } from '@/lib/library-filters';
 import { readingGroupLabel } from '@/lib/item-format';
 import { scenarioHue } from '@/lib/repo-assets';
 import { Button } from '@/components/kit';
@@ -16,13 +16,16 @@ export function FilterPanel(props: {
   onRetryScenarios?: () => void;
   readingCounts: Record<ReadingGroup, number>;
   forms: FormFilterRow[];
+  maintenance: MaintenanceFilterRow[];
   countsKnown: boolean;
   scenario: string | null;
   reading: ReadingGroup | null;
   form: string | null;
+  maintenanceTier: MaintenanceTier | null;
   onScenario: (id: string) => void;
   onReading: (group: ReadingGroup) => void;
   onForm: (id: string) => void;
+  onMaintenance: (tier: MaintenanceTier) => void;
 }) {
   return (
     <div className="min-h-0 flex-1 overflow-auto py-2">
@@ -70,6 +73,19 @@ export function FilterPanel(props: {
           countsKnown={props.countsKnown}
           selected={props.form === row.id}
           onClick={() => props.onForm(row.id)}
+        />
+      ))}
+
+      <GroupTitle>维护状态</GroupTitle>
+      {props.maintenance.map((row) => (
+        <FilterButton
+          key={row.tier}
+          label={row.label}
+          title={row.hint}
+          count={row.count}
+          countsKnown={props.countsKnown}
+          selected={props.maintenanceTier === row.tier}
+          onClick={() => props.onMaintenance(row.tier)}
         />
       ))}
     </div>
