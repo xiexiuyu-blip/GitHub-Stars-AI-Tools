@@ -2,7 +2,7 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-**多个 AI 协作开发本仓库（Grok 主力开发，Claude 总控审核）。先读 `AGENTS.md`（红线）、`docs/rebuild/命令契约.md`、`docs/rebuild/接手说明.md`，再动手。**
+**多个 AI 协作开发本仓库（执行者按 Fox 确认的分配单：Grok / GLM / Codex 等；Claude 总控审核）。先读 `AGENTS.md`（红线）、`docs/rebuild/命令契约.md`、`docs/rebuild/接手说明.md`，再动手。**
 
 ## 项目概述
 
