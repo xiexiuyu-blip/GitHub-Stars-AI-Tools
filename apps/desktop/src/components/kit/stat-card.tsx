@@ -27,7 +27,7 @@ export function StatCard(props: {
       style={style}
       className={cn(
         'flex items-center gap-3 rounded-lg border border-border bg-card px-4 py-3 text-left shadow-xs transition-all hover:-translate-y-px hover:border-input hover:shadow-md',
-        props.active && 'border-primary bg-[hsl(var(--h)_100%_98.5%)] shadow-[inset_0_0_0_1px_var(--color-primary)]',
+        props.active && 'border-primary bg-[hsl(var(--h)_100%_98.5%)] dark:bg-[hsl(var(--h)_40%_17%)] shadow-[inset_0_0_0_1px_var(--color-primary)]',
       )}
     >
       {props.icon ? (

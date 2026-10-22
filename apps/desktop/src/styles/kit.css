@@ -52,6 +52,12 @@
   color: hsl(var(--h) 60% 40%);
 }
 
+/* 深色：底比统计卡选中底稍亮，图标用同色相的亮色 */
+.dark .hue-tile {
+  background: hsl(var(--h) 40% 24%);
+  color: hsl(var(--h) 85% 78%);
+}
+
 /* 「适合：…」那一行：暖色，和蓝色的主操作区分开 */
 .why-line {
   color: hsl(30 70% 30%);
