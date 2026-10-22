@@ -70,6 +70,8 @@ export type LibraryItem = {
   matchReasons?: string[];
   /** 相关度总分。只有带关键词的相关度排序才有值；其它情况是 null。 */
   matchScore?: number | null;
+  /** 匹配度档位 1–4，只有带关键词的相关度排序才有值。 */
+  matchStars?: number | null;
 };
 
 export type LibraryCounts = {

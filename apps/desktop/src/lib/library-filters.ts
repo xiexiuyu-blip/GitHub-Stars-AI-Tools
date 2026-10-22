@@ -140,6 +140,11 @@ export function toFilters(state: LibraryUiState, page: number, pageSize: number)
   return filters;
 }
 
+/** 搜索框里有词、并且还是默认排序：列表按相关度排。判断条件只走 `toFilters`，不另写一套。 */
+export function isRelevanceSort(state: LibraryUiState): boolean {
+  return toFilters(state, 0, 1).sort === 'relevance';
+}
+
 export function toggleScenario(state: LibraryUiState, value: string): LibraryUiState {
   if (!value) return { ...state, scenario: null };
   return { ...state, scenario: state.scenario === value ? null : value };

@@ -12,6 +12,7 @@ import {
   formOptions,
   formTagLabel,
   hasActiveFilters,
+  isRelevanceSort,
   libraryEmptyNote,
   maintenanceOptions,
   nextPageOffset,
@@ -97,6 +98,13 @@ describe('资料库筛选状态', () => {
     const stars = toFilters(state({ keyword: '封面', sort: 'stars' }), 0, 80);
     expect(stars.keyword).toBe('封面');
     expect(stars.sort).toBe('stars');
+  });
+
+  it('有关键词且仍是默认排序时才算相关度排序', () => {
+    expect(isRelevanceSort(state({ keyword: '封面' }))).toBe(true);
+    expect(isRelevanceSort(state({ keyword: '   ' }))).toBe(false);
+    expect(isRelevanceSort(state({ keyword: '封面', sort: 'stars' }))).toBe(false);
+    expect(isRelevanceSort(state({ keyword: '封面', sort: 'updated' }))).toBe(false);
   });
 
   it('场景再点同一项就取消，点另一项就替换', () => {

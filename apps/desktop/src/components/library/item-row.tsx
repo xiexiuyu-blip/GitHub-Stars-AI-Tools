@@ -3,6 +3,7 @@ import type { LibraryItem, ReadingGroup, ScenarioSummary } from '@/lib/contracts
 import { DROP_HINT, cleanDescription, readingGroupLabel, splitRepoName } from '@/lib/item-format';
 import { maintenanceOf } from '@/lib/maintenance';
 import { MaintenanceTag } from './maintenance-tag';
+import { MatchHint } from './match-hint';
 import { LangDot, RepoAvatar, ScenarioChip, StarCount, Tag } from '@/components/kit';
 import { Icon } from '@/components/ui/icon';
 import { cn } from '@/lib/utils';
@@ -57,6 +58,7 @@ export function ItemRow(props: {
         {text ? (
           <div className={cn('mt-0.5 line-clamp-2 text-sm leading-[1.55]', props.item.oneLiner ? 'text-foreground' : 'text-on-surface-variant')}>{text}</div>
         ) : null}
+        <MatchHint reasons={props.item.matchReasons} stars={props.item.matchStars} />
         <div className="mt-1.5 flex flex-wrap items-center gap-x-2.5 gap-y-1">
           <LangDot language={props.item.language} />
           {chips.map((scenario) => (

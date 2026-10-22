@@ -222,6 +222,8 @@ pub struct LibraryItem {
     pub match_reasons: Vec<String>,
     /// 相关度总分。只有带关键词的相关度排序才是 `Some`；其它情况是 `None`，序列化成 `null`。
     pub match_score: Option<i64>,
+    /// 匹配度档位 1–4。只有带关键词的相关度排序才是 `Some`；其它情况是 `None`，序列化成 `null`。
+    pub match_stars: Option<u8>,
 }
 
 /// 状态组的键保持契约里的字面量。`in_use` 不能被 serde 写成 `inUse`。
@@ -765,6 +767,22 @@ struct MatchInput<'a> {
 struct MatchScore {
     score: i64,
     reasons: Vec<String>,
+    /// 1–4。由总分和实际参与打分的词项个数算出。
+    stars: u8,
+}
+
+/// 按「每个词平均得多少分」落到 1–4 档。`term_count` 是非空词项个数，至少按 1。0 分也是 1 档。
+fn match_stars(score: i64, term_count: usize) -> u8 {
+    let n = i64::try_from(term_count.max(1)).unwrap_or(1);
+    if score >= 100 * n {
+        4
+    } else if score >= 60 * n {
+        3
+    } else if score >= 30 * n {
+        2
+    } else {
+        1
+    }
 }
 
 struct FoldedChar {
@@ -847,8 +865,9 @@ fn list_has(items: &[String], term_lower: &str) -> bool {
     !term_lower.is_empty() && items.iter().any(|item| item.contains(term_lower))
 }
 
-/// 纯函数：词项 + 这一条的字段 → 总分和命中原因。不读数据库。
+/// 纯函数：词项 + 这一条的字段 → 总分、命中原因和匹配度档位。不读数据库。
 /// 一个词项只取命中字段里的最高权重，再按词首、仓库名整词加分。各词项相加。
+/// 空词项不参与打分，也不计入档位用的词项个数。
 fn score_keyword_match(terms: &[String], fields: MatchInput<'_>) -> MatchScore {
     let name_lower = fields.full_name.to_lowercase();
     let line_lower = fields.one_liner_zh.to_lowercase();
@@ -862,11 +881,13 @@ fn score_keyword_match(terms: &[String], fields: MatchInput<'_>) -> MatchScore {
     let mut hit_en = false;
     let mut hit_topic = false;
     let mut total = 0i64;
+    let mut term_count = 0usize;
     for term in terms {
         let term_lower = term.to_lowercase();
         if term_lower.is_empty() {
             continue;
         }
+        term_count += 1;
         let name_hit = text_has(&name_lower, &term_lower);
         let exact_repo = repo_lower == term_lower;
         let mut best = 0i64;
@@ -916,6 +937,7 @@ fn score_keyword_match(terms: &[String], fields: MatchInput<'_>) -> MatchScore {
     MatchScore {
         score: total,
         reasons,
+        stars: match_stars(total, term_count),
     }
 }
 
@@ -1020,6 +1042,7 @@ struct RankedRaw {
     raw: RawItem,
     score: i64,
     reasons: Vec<String>,
+    stars: u8,
 }
 
 fn match_input_of(raw: &RawItem) -> MatchInput<'_> {
@@ -1053,6 +1076,7 @@ fn query_items_by_relevance(
             raw,
             score: scored.score,
             reasons: scored.reasons,
+            stars: scored.stars,
         });
     }
     ranked.sort_by(|left, right| {
@@ -1075,6 +1099,7 @@ fn query_items_by_relevance(
             let mut item = into_item(row.raw, scenarios.get(&id).cloned().unwrap_or_default());
             item.match_score = Some(row.score);
             item.match_reasons = row.reasons;
+            item.match_stars = Some(row.stars);
             item
         })
         .collect())
@@ -1307,6 +1332,7 @@ fn into_item(raw: RawItem, scenario_ids: Vec<String>) -> LibraryItem {
         card_review: card_review(has_card, &card),
         match_reasons: Vec::new(),
         match_score: None,
+        match_stars: None,
     }
 }
 
@@ -3558,6 +3584,7 @@ mod tests {
                 "cardReview",
                 "matchReasons",
                 "matchScore",
+                "matchStars",
             ])
         );
         for key in [
@@ -3575,6 +3602,7 @@ mod tests {
         assert!(item_json["scenarioIds"].is_array());
         assert!(item_json["matchReasons"].as_array().unwrap().is_empty());
         assert!(item_json["matchScore"].is_null());
+        assert!(item_json["matchStars"].is_null());
         assert!(item_json["hasCard"].is_boolean());
         assert!(item_json["starsCount"].is_number());
         assert!(item_json["id"].is_string());
@@ -3691,6 +3719,7 @@ mod tests {
                 "cardReview",
                 "matchReasons",
                 "matchScore",
+                "matchStars",
                 "whatItIs",
                 "capabilities",
                 "problemsSolved",
@@ -3985,6 +4014,7 @@ mod tests {
             card_review: None,
             match_reasons: Vec::new(),
             match_score: None,
+            match_stars: None,
         }
     }
 
@@ -4783,6 +4813,272 @@ mod tests {
         let item_json = serde_json::to_string(&page.items[0]).expect("条目应能序列化");
         assert!(item_json.contains("\"matchReasons\":[]"), "{item_json}");
         assert!(item_json.contains("\"matchScore\":null"), "{item_json}");
+    }
+
+    // ───────────── 卡 51：匹配度档位 ─────────────
+
+    /// 同一个词只落在一个字段上：项目名 / 中文一句话 / 英文简介 / 话题。
+    fn save_zeta_ladder(conn: &Connection) {
+        let mut name = Repo::new("name");
+        name.full_name = "o/prezeta".to_owned();
+        name.one_liner = Some("填充".to_owned());
+        name.save(conn);
+        let mut zh = Repo::new("zh");
+        zh.one_liner = Some("含有 zeta".to_owned());
+        zh.save(conn);
+        let mut en = Repo::new("en");
+        en.description = Some("has zeta".to_owned());
+        en.one_liner = Some("填充".to_owned());
+        en.save(conn);
+        let mut topic = Repo::new("topic");
+        topic.topics_json = r#"["Zeta"]"#.to_owned();
+        topic.one_liner = Some("填充".to_owned());
+        topic.save(conn);
+    }
+
+    #[test]
+    fn match_stars_boundaries_follow_average_score() {
+        let cases = [
+            (150, 1, 4),
+            (100, 1, 4),
+            (99, 1, 3),
+            (60, 1, 3),
+            (59, 1, 2),
+            (30, 1, 2),
+            (29, 1, 1),
+            (0, 1, 1),
+            (200, 2, 4),
+            (199, 2, 3),
+            (120, 2, 3),
+            (119, 2, 2),
+            (60, 2, 2),
+            (59, 2, 1),
+            (400, 4, 4),
+            (399, 4, 3),
+            (240, 4, 3),
+            (239, 4, 2),
+            (120, 4, 2),
+            (119, 4, 1),
+            // 词项个数为 0 时至少按 1 算，不能因为 100 * 0 = 0 变成 4 档。
+            (0, 0, 1),
+            (99, 0, 3),
+            (100, 0, 4),
+        ];
+        for (score, term_count, stars) in cases {
+            assert_eq!(
+                match_stars(score, term_count),
+                stars,
+                "score={score} n={term_count}"
+            );
+        }
+    }
+
+    #[test]
+    fn relevance_match_stars_follow_the_hit_field() {
+        let lab = Lab::new("stars-fields");
+        lab.with(|conn| save_zeta_ladder(conn));
+        let page = list_library_view(&lab.path, &search_filters(Some("zeta"), Some("relevance")))
+            .expect("相关度查询应成功");
+        let got: Vec<_> = page
+            .items
+            .iter()
+            .map(|item| {
+                (
+                    item.id.as_str(),
+                    item.match_stars,
+                    item.match_reasons.clone(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("name", Some(4), owned(&["项目名"])),
+                ("zh", Some(3), owned(&["中文说明"])),
+                ("en", Some(2), owned(&["英文简介"])),
+                ("topic", Some(1), owned(&["话题"])),
+            ]
+        );
+    }
+
+    #[test]
+    fn relevance_match_stars_for_summary_keyword_and_zero() {
+        let lab = Lab::new("stars-bands");
+        lab.with(|conn| {
+            let mut summary = Repo::new("sumhit");
+            summary.one_liner = Some("填充".to_owned());
+            summary.summary = "摘要里有 zeta".to_owned();
+            summary.save(conn);
+            let mut keywords = Repo::new("kwhit");
+            keywords.one_liner = Some("填充".to_owned());
+            keywords.keywords_json = r#"["zeta"]"#.to_owned();
+            keywords.save(conn);
+            let mut zero = Repo::new("zerohit");
+            zero.one_liner = Some("填充".to_owned());
+            zero.keywords_json = "not-json-zeta".to_owned();
+            zero.save(conn);
+        });
+        let page = list_library_view(&lab.path, &search_filters(Some("zeta"), Some("relevance")))
+            .expect("相关度查询应成功");
+        let by_id = |id: &str| page.items.iter().find(|item| item.id == id).unwrap();
+        let summary = by_id("sumhit");
+        assert_eq!(summary.match_score, Some(45));
+        assert_eq!(summary.match_stars, Some(2));
+        let keywords = by_id("kwhit");
+        assert_eq!(keywords.match_score, Some(20));
+        assert_eq!(keywords.match_stars, Some(1));
+        let zero = by_id("zerohit");
+        assert_eq!(zero.match_score, Some(0));
+        assert!(zero.match_reasons.is_empty());
+        assert_eq!(zero.match_stars, Some(1));
+    }
+
+    #[test]
+    fn relevance_match_stars_average_two_terms() {
+        let lab = Lab::new("stars-average");
+        lab.with(|conn| {
+            let mut mixed = Repo::new("mixed");
+            mixed.full_name = "o/my-note-app".to_owned();
+            mixed.one_liner = Some("填充".to_owned());
+            mixed.topics_json = r#"["quill"]"#.to_owned();
+            mixed.save(conn);
+            let mut topics = Repo::new("topics");
+            topics.full_name = "o/plainbox".to_owned();
+            topics.one_liner = Some("填充".to_owned());
+            topics.topics_json = r#"["note","quill"]"#.to_owned();
+            topics.save(conn);
+        });
+        let page = list_library_view(
+            &lab.path,
+            &search_filters(Some("note quill"), Some("relevance")),
+        )
+        .expect("相关度查询应成功");
+        let mixed = page.items.iter().find(|item| item.id == "mixed").unwrap();
+        assert_eq!(mixed.match_score, Some(140));
+        assert_eq!(mixed.match_stars, Some(3));
+        let topics = page.items.iter().find(|item| item.id == "topics").unwrap();
+        assert_eq!(topics.match_score, Some(40));
+        assert_eq!(topics.match_stars, Some(1));
+    }
+
+    #[test]
+    fn match_stars_ignores_empty_terms() {
+        let with_empty = score_keyword_match(
+            &["note".to_owned(), String::new()],
+            fields("o/my-note-app", "", "", "", "[]", "[]"),
+        );
+        let only = score_keyword_match(
+            &["note".to_owned()],
+            fields("o/my-note-app", "", "", "", "[]", "[]"),
+        );
+        assert_eq!(with_empty.stars, only.stars);
+        assert_eq!(with_empty.score, only.score);
+        assert_eq!(with_empty.stars, 4);
+    }
+
+    #[test]
+    fn match_stars_absent_unless_relevance_with_keyword() {
+        let lab = Lab::new("stars-absent");
+        lab.with(|conn| {
+            let mut repo = Repo::new("hit");
+            repo.description = Some("has zeta".to_owned());
+            repo.one_liner = Some("填充".to_owned());
+            repo.stars = 3;
+            repo.starred_at = "2026-06-01T00:00:00Z".to_owned();
+            repo.pushed_at = Some("2026-08-01T00:00:00Z".to_owned());
+            repo.save(conn);
+        });
+        for sort in ["starred", "stars", "updated"] {
+            let page = list_library_view(&lab.path, &search_filters(Some("zeta"), Some(sort)))
+                .unwrap_or_else(|error| panic!("{sort} 查询失败：{error}"));
+            assert!(
+                page.items.iter().any(|item| item.id == "hit"),
+                "{sort} 应能查到这条"
+            );
+            for item in &page.items {
+                assert_eq!(item.match_stars, None, "{sort} {}", item.id);
+            }
+        }
+        for keyword in [None, Some(""), Some("   "), Some(" \t\n ")] {
+            let page = list_library_view(&lab.path, &search_filters(keyword, Some("relevance")))
+                .unwrap_or_else(|error| panic!("空关键词不应报错：{error}"));
+            assert!(
+                page.items.iter().any(|item| item.id == "hit"),
+                "{keyword:?} 应仍列出这条"
+            );
+            for item in &page.items {
+                assert_eq!(item.match_stars, None, "{keyword:?} {}", item.id);
+            }
+        }
+    }
+
+    #[test]
+    fn today_and_detail_leave_match_stars_empty() {
+        let lab = Lab::new("stars-other-views");
+        lab.with(|conn| {
+            let mut repo = Repo::new("repo");
+            repo.full_name = "o/zeta-tool".to_owned();
+            repo.one_liner = Some("含 zeta".to_owned());
+            repo.starred_at = "2026-10-09T00:00:00Z".to_owned();
+            repo.save(conn);
+        });
+        let today = get_today_view(&lab.path, "2026-10-10T00:00:00Z").expect("今日应成功");
+        assert!(today.picks.iter().any(|item| item.id == "repo"));
+        assert!(today.week_new.iter().any(|item| item.id == "repo"));
+        for item in today.picks.iter().chain(today.week_new.iter()) {
+            assert_eq!(item.match_stars, None, "{}", item.id);
+        }
+        let detail = get_library_detail(&lab.path, "repo").expect("详情应成功");
+        assert_eq!(detail.item.match_stars, None);
+    }
+
+    #[test]
+    fn library_item_serializes_match_stars() {
+        let empty = serde_json::to_value(sample_item(None)).expect("应能序列化");
+        assert!(empty.get("match_stars").is_none(), "{empty}");
+        assert!(empty["matchStars"].is_null(), "{empty}");
+
+        let mut scored = sample_item(None);
+        scored.match_stars = Some(3);
+        let json = serde_json::to_value(&scored).expect("应能序列化");
+        assert!(json.get("match_stars").is_none(), "{json}");
+        assert_eq!(json["matchStars"], 3);
+        assert!(json["matchStars"].is_number());
+
+        let lab = Lab::new("stars-json");
+        lab.with(|conn| {
+            let mut repo = Repo::new("name");
+            repo.full_name = "o/prezeta".to_owned();
+            repo.one_liner = Some("填充".to_owned());
+            repo.save(conn);
+        });
+        let page = list_library_view(&lab.path, &search_filters(Some("zeta"), Some("relevance")))
+            .expect("相关度查询应成功");
+        let item_json = serde_json::to_value(&page.items[0]).expect("条目应能序列化");
+        assert!(item_json.get("match_stars").is_none(), "{item_json}");
+        assert_eq!(item_json["matchStars"], 4);
+        assert!(item_json["matchStars"].is_number());
+    }
+
+    #[test]
+    fn relevance_match_stars_never_increase_down_the_list() {
+        let lab = Lab::new("stars-mono");
+        lab.with(|conn| save_zeta_ladder(conn));
+        let page = list_library_view(&lab.path, &search_filters(Some("zeta"), Some("relevance")))
+            .expect("相关度查询应成功");
+        let stars: Vec<u8> = page
+            .items
+            .iter()
+            .map(|item| item.match_stars.expect("相关度结果应有档位"))
+            .collect();
+        assert!(stars.len() >= 2, "{stars:?}");
+        let mut distinct = stars.clone();
+        distinct.sort();
+        distinct.dedup();
+        assert!(distinct.len() >= 2, "至少两档才看得出会不会变大：{stars:?}");
+        for pair in stars.windows(2) {
+            assert!(pair[1] <= pair[0], "往下档位变大了：{stars:?}");
+        }
     }
 
     // ───────────── 卡 49：维护状态 ─────────────
