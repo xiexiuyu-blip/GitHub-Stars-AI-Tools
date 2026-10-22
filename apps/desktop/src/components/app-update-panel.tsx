@@ -3,7 +3,7 @@ import rehypeSanitize from 'rehype-sanitize';
 import remarkGfm from 'remark-gfm';
 import type { AppUpdateContextValue } from '@/providers/app-update-provider';
 import { Icon } from '@/components/ui/icon';
-import { describeUpdateStatus } from '@/lib/api';
+import { describeUpdateStatus, IN_APP_UPDATES_ENABLED } from '@/lib/api';
 import { formatMinute } from '@/lib/automation-view';
 
 type AppUpdatePanelProps = {
@@ -70,10 +70,12 @@ export function AppUpdatePanel({ appUpdate }: AppUpdatePanelProps) {
               <span className="font-medium text-on-surface">当前版本：</span>
               {appUpdate.currentVersion || '读取中'}
             </p>
-            <p className="min-w-0 [overflow-wrap:anywhere]">
-              <span className="font-medium text-on-surface">最近检查：</span>
-              {formatUpdateCheckedAt(appUpdate.lastCheckedAt)}
-            </p>
+            {IN_APP_UPDATES_ENABLED && (
+              <p className="min-w-0 [overflow-wrap:anywhere]">
+                <span className="font-medium text-on-surface">最近检查：</span>
+                {formatUpdateCheckedAt(appUpdate.lastCheckedAt)}
+              </p>
+            )}
             {appUpdate.availableVersion && (
               <p className="min-w-0 [overflow-wrap:anywhere]">
                 <span className="font-medium text-on-surface">可用版本：</span>
@@ -120,15 +122,17 @@ export function AppUpdatePanel({ appUpdate }: AppUpdatePanelProps) {
           )}
         </div>
         <div className="grid w-full grid-cols-1 gap-2 sm:w-auto sm:min-w-36">
-          <button
-            type="button"
-            onClick={() => void appUpdate.checkForUpdate()}
-            disabled={isBusy}
-            className="inline-flex items-center justify-center gap-2 rounded-lg border border-outline-variant/35 bg-surface px-3 py-2 text-sm font-medium text-on-surface transition-colors hover:bg-surface-container-high disabled:cursor-not-allowed disabled:opacity-60"
-          >
-            <Icon name="refresh" size={17} className={isChecking ? 'animate-spin' : ''} />
-            {isChecking ? '检查中' : '检查更新'}
-          </button>
+          {IN_APP_UPDATES_ENABLED && (
+            <button
+              type="button"
+              onClick={() => void appUpdate.checkForUpdate()}
+              disabled={isBusy}
+              className="inline-flex items-center justify-center gap-2 rounded-lg border border-outline-variant/35 bg-surface px-3 py-2 text-sm font-medium text-on-surface transition-colors hover:bg-surface-container-high disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              <Icon name="refresh" size={17} className={isChecking ? 'animate-spin' : ''} />
+              {isChecking ? '检查中' : '检查更新'}
+            </button>
+          )}
           {canInstall && (
             <button
               type="button"
