@@ -63,20 +63,29 @@ const MAINTENANCE_STALE_DAYS: i64 = 365;
 /// 一天的秒数。门槛用「天数 × 这个数」绑进 SQL，语句里不写 90 / 365。
 const SECONDS_PER_DAY: i64 = 86400;
 
-/// 最近推送能解析成整数秒，并且距 `:now` 不超过活跃门槛。解析不了的不算。
+/// 已在 GitHub 上归档。NULL 当没归档，避免「还不知道」从三档里消失。
+macro_rules! is_archived {
+    () => {
+        "IFNULL(r.archived, 0) = 1"
+    };
+}
+
+/// 最近推送能解析成整数秒，并且距 `:now` 不超过活跃门槛。解析不了的不算。已归档的不算。
 macro_rules! is_active {
     () => {
         concat!(
+            "IFNULL(r.archived, 0) <> 1 AND ",
             "CAST(strftime('%s', r.pushed_at) AS INTEGER) IS NOT NULL AND ",
             "(CAST(strftime('%s', :now) AS INTEGER) - CAST(strftime('%s', r.pushed_at) AS INTEGER)) <= :active_secs"
         )
     };
 }
 
-/// 超过活跃门槛，并且不超过停更门槛。
+/// 超过活跃门槛，并且不超过停更门槛。已归档的不算。
 macro_rules! is_slow {
     () => {
         concat!(
+            "IFNULL(r.archived, 0) <> 1 AND ",
             "CAST(strftime('%s', r.pushed_at) AS INTEGER) IS NOT NULL AND ",
             "(CAST(strftime('%s', :now) AS INTEGER) - CAST(strftime('%s', r.pushed_at) AS INTEGER)) > :active_secs AND ",
             "(CAST(strftime('%s', :now) AS INTEGER) - CAST(strftime('%s', r.pushed_at) AS INTEGER)) <= :stale_secs"
@@ -84,10 +93,11 @@ macro_rules! is_slow {
     };
 }
 
-/// 超过停更门槛。没有推送时间、空白、解析不了的都不算。
+/// 超过停更门槛。没有推送时间、空白、解析不了的都不算。已归档的不算。
 macro_rules! is_stale {
     () => {
         concat!(
+            "IFNULL(r.archived, 0) <> 1 AND ",
             "CAST(strftime('%s', r.pushed_at) AS INTEGER) IS NOT NULL AND ",
             "(CAST(strftime('%s', :now) AS INTEGER) - CAST(strftime('%s', r.pushed_at) AS INTEGER)) > :stale_secs"
         )
@@ -98,6 +108,7 @@ macro_rules! is_stale {
 const IS_ACTIVE: &str = is_active!();
 const IS_SLOW: &str = is_slow!();
 const IS_STALE: &str = is_stale!();
+const IS_ARCHIVED: &str = is_archived!();
 
 const FILTER_WHERE: &str = concat!(
     r#"
@@ -147,6 +158,9 @@ AND (
   OR (:maintenance = 'stale' AND "#,
     is_stale!(),
     r#")
+  OR (:maintenance = 'archived' AND "#,
+    is_archived!(),
+    r#")
 )
 "#,
     keyword_term!(":pattern"),
@@ -163,14 +177,16 @@ LEFT JOIN repo_ai_documents d ON d.repo_id = r.id
 
 const ITEM_SELECT: &str = "
 SELECT r.id, r.full_name, r.html_url, r.description, r.language, r.stars_count,
-       r.starred_at, r.pushed_at, d.one_liner_zh, d.card_json, a.read_status
+       r.starred_at, r.pushed_at, d.one_liner_zh, d.card_json, a.read_status,
+       r.archived
 ";
 
 /// 相关度排序要在内存里打分，多带摘要、关键词、话题。其它排序仍用 `ITEM_SELECT`。
+/// `r.archived` 仍是第 12 列（下标 11），摘要从下标 12 开始。
 const ITEM_SELECT_RANK: &str = "
 SELECT r.id, r.full_name, r.html_url, r.description, r.language, r.stars_count,
        r.starred_at, r.pushed_at, d.one_liner_zh, d.card_json, a.read_status,
-       d.summary_zh, d.keywords_json, r.topics_json
+       r.archived, d.summary_zh, d.keywords_json, r.topics_json
 ";
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -184,7 +200,7 @@ pub struct LibraryFilters {
     pub card_state: Option<String>,
     #[serde(default)]
     pub form: Option<String>,
-    /// `active` / `slow` / `stale`。空、缺省 = 不筛。
+    /// `active` / `slow` / `stale` / `archived`。空、缺省 = 不筛。
     #[serde(default)]
     pub maintenance: Option<String>,
     #[serde(default)]
@@ -224,6 +240,8 @@ pub struct LibraryItem {
     pub match_score: Option<i64>,
     /// 匹配度档位 1–4。只有带关键词的相关度排序才是 `Some`；其它情况是 `None`，序列化成 `null`。
     pub match_stars: Option<u8>,
+    /// GitHub 上已归档。只有库里的 `archived = 1` 才是 true；NULL 和 0 都是 false。
+    pub archived: bool,
 }
 
 /// 状态组的键保持契约里的字面量。`in_use` 不能被 serde 写成 `inUse`。
@@ -244,13 +262,14 @@ pub struct CardStateCounts {
     pub pending: i64,
 }
 
-/// 维护状态三档的个数。没有推送时间的不计入任何一档。
+/// 维护状态四档的个数。已归档压过按推送时间算的三档。没有推送时间、也没归档的不计入任何一档。
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MaintenanceCounts {
     pub active: i64,
     pub slow: i64,
     pub stale: i64,
+    pub archived: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -328,7 +347,7 @@ struct Normalized {
     terms: Vec<String>,
     /// 有关键词且 sort = relevance：取出全部匹配后再打分、排序、分页。
     rank_by_relevance: bool,
-    /// `active` / `slow` / `stale`；空 = 不筛。
+    /// `active` / `slow` / `stale` / `archived`；空 = 不筛。
     maintenance: String,
     /// 调用方给的当前时间（RFC 3339）。门槛按它和 `pushed_at` 的整数秒差算。
     now: String,
@@ -350,6 +369,8 @@ struct RawItem {
     one_liner_zh: Option<String>,
     card_json: Option<String>,
     read_status: Option<String>,
+    /// 只有 `repositories.archived = 1` 才是 true。
+    archived: bool,
     /// 只有相关度查询会填。其它查询保持 `None`，不参与列表字段。
     summary_zh: Option<String>,
     keywords_json: Option<String>,
@@ -456,6 +477,7 @@ pub fn get_library_detail(path: &Path, id: &str) -> Result<LibraryDetail, String
     let sql = "
 SELECT r.id, r.full_name, r.html_url, r.description, r.language, r.stars_count,
        r.starred_at, r.pushed_at, d.one_liner_zh, d.card_json, a.read_status,
+       r.archived,
        r.forks_count, d.keywords_json, r.topics_json, rd.raw_markdown,
        r.license_spdx, r.license_name
 FROM repositories r
@@ -468,12 +490,12 @@ WHERE r.id = ?1
         .query_row(sql, params![id], |row| {
             Ok((
                 read_raw(row)?,
-                row.get::<_, i64>(11)?,
-                row.get::<_, Option<String>>(12)?,
+                row.get::<_, i64>(12)?,
                 row.get::<_, Option<String>>(13)?,
                 row.get::<_, Option<String>>(14)?,
                 row.get::<_, Option<String>>(15)?,
                 row.get::<_, Option<String>>(16)?,
+                row.get::<_, Option<String>>(17)?,
             ))
         })
         .optional()
@@ -604,7 +626,7 @@ fn normalize(filters: &LibraryFilters, now: &str) -> Result<Normalized, String> 
         _ => return Err("卡片状态筛选无效".to_owned()),
     };
     let maintenance = filters.maintenance.as_deref().unwrap_or("").trim();
-    if !matches!(maintenance, "" | "active" | "slow" | "stale") {
+    if !matches!(maintenance, "" | "active" | "slow" | "stale" | "archived") {
         return Err("维护状态筛选无效".to_owned());
     }
     let terms = keyword_terms(filters.keyword.as_deref().unwrap_or(""));
@@ -1227,7 +1249,8 @@ fn maintenance_counts(
         "SELECT
             COALESCE(SUM(CASE WHEN {IS_ACTIVE} THEN 1 ELSE 0 END), 0),
             COALESCE(SUM(CASE WHEN {IS_SLOW} THEN 1 ELSE 0 END), 0),
-            COALESCE(SUM(CASE WHEN {IS_STALE} THEN 1 ELSE 0 END), 0)
+            COALESCE(SUM(CASE WHEN {IS_STALE} THEN 1 ELSE 0 END), 0),
+            COALESCE(SUM(CASE WHEN {IS_ARCHIVED} THEN 1 ELSE 0 END), 0)
          {JOINS}
          WHERE {FILTER_WHERE}"
     );
@@ -1237,6 +1260,7 @@ fn maintenance_counts(
                 active: row.get(0)?,
                 slow: row.get(1)?,
                 stale: row.get(2)?,
+                archived: row.get(3)?,
             })
         })
         .map_err(|error| format!("维护状态计数失败：{error}"))
@@ -1291,6 +1315,7 @@ fn read_raw(row: &Row<'_>) -> rusqlite::Result<RawItem> {
         one_liner_zh: row.get(8)?,
         card_json: row.get(9)?,
         read_status: row.get(10)?,
+        archived: row.get::<_, Option<i64>>(11)?.unwrap_or(0) == 1,
         summary_zh: None,
         keywords_json: None,
         topics_json: None,
@@ -1299,9 +1324,9 @@ fn read_raw(row: &Row<'_>) -> rusqlite::Result<RawItem> {
 
 fn read_ranked(row: &Row<'_>) -> rusqlite::Result<RawItem> {
     let mut raw = read_raw(row)?;
-    raw.summary_zh = row.get(11)?;
-    raw.keywords_json = row.get(12)?;
-    raw.topics_json = row.get(13)?;
+    raw.summary_zh = row.get(12)?;
+    raw.keywords_json = row.get(13)?;
+    raw.topics_json = row.get(14)?;
     Ok(raw)
 }
 
@@ -1333,6 +1358,7 @@ fn into_item(raw: RawItem, scenario_ids: Vec<String>) -> LibraryItem {
         match_reasons: Vec::new(),
         match_score: None,
         match_stars: None,
+        archived: raw.archived,
     }
 }
 
@@ -3585,8 +3611,10 @@ mod tests {
                 "matchReasons",
                 "matchScore",
                 "matchStars",
+                "archived",
             ])
         );
+        assert!(item_json["archived"].is_boolean());
         for key in [
             "description",
             "language",
@@ -3628,6 +3656,7 @@ mod tests {
                 active: 2,
                 slow: 3,
                 stale: 4,
+                archived: 5,
             },
         };
         let counts_json = serde_json::to_value(&counts).unwrap();
@@ -3647,11 +3676,12 @@ mod tests {
         assert!(counts_json["forms"].is_object());
         assert_eq!(
             object_keys(&counts_json["maintenance"]),
-            set(&["active", "slow", "stale"])
+            set(&["active", "slow", "stale", "archived"])
         );
         assert!(counts_json["maintenance"]["active"].is_number());
         assert!(counts_json["maintenance"]["slow"].is_number());
         assert!(counts_json["maintenance"]["stale"].is_number());
+        assert!(counts_json["maintenance"]["archived"].is_number());
         assert_eq!(
             object_keys(&counts_json["reading"]),
             set(&["unseen", "want", "tried", "in_use", "dropped"])
@@ -3720,6 +3750,7 @@ mod tests {
                 "matchReasons",
                 "matchScore",
                 "matchStars",
+                "archived",
                 "whatItIs",
                 "capabilities",
                 "problemsSolved",
@@ -4015,6 +4046,7 @@ mod tests {
             match_reasons: Vec::new(),
             match_score: None,
             match_stars: None,
+            archived: false,
         }
     }
 
@@ -5268,6 +5300,7 @@ mod tests {
                 active: 1,
                 slow: 1,
                 stale: 1,
+                archived: 0,
             }
         );
         assert_eq!(open.counts.reading.want, 1);
@@ -5392,6 +5425,7 @@ mod tests {
                 active: 1,
                 slow: 1,
                 stale: 5,
+                archived: 0,
             }
         );
 
@@ -5404,6 +5438,7 @@ mod tests {
                 active: 1,
                 slow: 0,
                 stale: 4,
+                archived: 0,
             }
         );
 
@@ -5417,6 +5452,7 @@ mod tests {
                 active: 1,
                 slow: 0,
                 stale: 3,
+                archived: 0,
             }
         );
 
@@ -5441,6 +5477,7 @@ mod tests {
                 active: 1,
                 slow: 0,
                 stale: 1,
+                archived: 0,
             }
         );
     }
@@ -5584,5 +5621,571 @@ mod tests {
         stale.card_state = Some("all".to_owned());
         stale.maintenance = Some("stale".to_owned());
         assert_eq!(page_ids(&lab.path, stale), vec!["ancient".to_owned()]);
+    }
+
+    fn set_archived(conn: &Connection, id: &str, value: Option<i64>) {
+        conn.execute(
+            "UPDATE repositories SET archived = ?1 WHERE id = ?2",
+            params![value, id],
+        )
+        .expect("应能写入归档标记");
+    }
+
+    #[test]
+    fn archived_flag_is_on_list_detail_today_and_relevance() {
+        let lab = Lab::new("arch-json");
+        lab.with(|conn| {
+            let mut yes = Repo::new("yes");
+            yes.description = Some("含有 zzarch 的说明".to_owned());
+            yes.starred_at = "2026-10-08T00:00:00Z".to_owned();
+            yes.pushed_at = Some("2026-10-09T00:00:00Z".to_owned());
+            yes.save(conn);
+            set_archived(conn, "yes", Some(1));
+
+            let mut no = Repo::new("no");
+            no.description = Some("别的说明".to_owned());
+            no.starred_at = "2026-10-07T00:00:00Z".to_owned();
+            no.pushed_at = Some("2026-10-09T00:00:00Z".to_owned());
+            no.save(conn);
+            set_archived(conn, "no", Some(0));
+        });
+        let now = "2026-10-10T00:00:00Z";
+        let page = list_library_view_at(&lab.path, &maint_filters(None), now).expect("列表");
+        let page_json = serde_json::to_value(&page).expect("列表应能序列化");
+        assert_eq!(
+            object_keys(&page_json["counts"]["maintenance"]),
+            set(&["active", "archived", "slow", "stale"])
+        );
+        for key in ["active", "slow", "stale", "archived"] {
+            assert!(page_json["counts"]["maintenance"][key].is_number(), "{key}");
+        }
+        assert_eq!(page_json["counts"]["maintenance"]["active"], 1);
+        assert_eq!(page_json["counts"]["maintenance"]["archived"], 1);
+        for item in &page.items {
+            let json = serde_json::to_value(item).expect("条目应能序列化");
+            assert!(json["archived"].is_boolean(), "{}", item.id);
+        }
+        let yes = page
+            .items
+            .iter()
+            .find(|item| item.id == "yes")
+            .expect("yes");
+        let no = page.items.iter().find(|item| item.id == "no").expect("no");
+        assert!(yes.archived);
+        assert!(!no.archived);
+
+        let detail = get_library_detail(&lab.path, "yes").expect("详情");
+        let detail_json = serde_json::to_value(&detail).expect("详情应能序列化");
+        assert_eq!(detail_json["archived"], true);
+        assert!(detail.item.archived);
+
+        let today = get_today_view(&lab.path, now).expect("今日");
+        for item in today.picks.iter().chain(today.week_new.iter()) {
+            let json = serde_json::to_value(item).expect("今日行应能序列化");
+            assert!(json["archived"].is_boolean(), "{}", item.id);
+        }
+        assert!(today
+            .picks
+            .iter()
+            .any(|item| item.id == "yes" && item.archived));
+        assert!(today
+            .week_new
+            .iter()
+            .any(|item| item.id == "yes" && item.archived));
+        assert!(today
+            .picks
+            .iter()
+            .any(|item| item.id == "no" && !item.archived));
+        assert!(today
+            .week_new
+            .iter()
+            .any(|item| item.id == "no" && !item.archived));
+
+        let mut filters = maint_filters(None);
+        filters.keyword = Some("zzarch".to_owned());
+        filters.sort = Some("relevance".to_owned());
+        let ranked = list_library_view_at(&lab.path, &filters, now).expect("相关度");
+        assert_eq!(ranked.items.len(), 1);
+        assert_eq!(ranked.items[0].id, "yes");
+        assert!(ranked.items[0].archived);
+        let ranked_json = serde_json::to_value(&ranked.items[0]).expect("相关度行应能序列化");
+        assert_eq!(ranked_json["archived"], true);
+        assert!(ranked.items[0].match_score.is_some());
+    }
+
+    #[test]
+    fn archived_overrides_the_three_push_time_tiers() {
+        let lab = Lab::new("arch-priority");
+        lab.with(|conn| {
+            let rows = [
+                ("recent", Some("2026-10-21T12:00:00Z")),
+                ("slowish", Some("2026-04-01T12:00:00Z")),
+                ("old", Some("2021-10-22T12:00:00Z")),
+                ("missing", None),
+            ];
+            for (id, pushed) in rows {
+                let mut repo = Repo::new(id);
+                repo.pushed_at = pushed.map(str::to_owned);
+                repo.save(conn);
+                set_archived(conn, id, Some(1));
+            }
+        });
+        assert_eq!(
+            sorted_ids(maint_ids(&lab.path, Some("archived"))),
+            owned(&["missing", "old", "recent", "slowish"])
+        );
+        for tier in ["active", "slow", "stale"] {
+            let ids = maint_ids(&lab.path, Some(tier));
+            assert!(ids.is_empty(), "{tier} 不该包含已归档：{ids:?}");
+        }
+        assert!(maint_page(&lab.path, maint_filters(Some("archived")))
+            .items
+            .iter()
+            .all(|item| item.archived));
+    }
+
+    #[test]
+    fn null_and_zero_archived_follow_push_time() {
+        let lab = Lab::new("arch-null-zero");
+        lab.with(|conn| {
+            let rows = [
+                ("null-recent", Some("2026-10-21T12:00:00Z"), None),
+                ("zero-recent", Some("2026-10-21T12:00:00Z"), Some(0)),
+                ("null-old", Some("2021-10-22T12:00:00Z"), None),
+                ("zero-old", Some("2021-10-22T12:00:00Z"), Some(0)),
+                ("null-none", None, None),
+                ("zero-none", None, Some(0)),
+            ];
+            for (id, pushed, archived) in rows {
+                let mut repo = Repo::new(id);
+                repo.pushed_at = pushed.map(str::to_owned);
+                repo.save(conn);
+                if let Some(value) = archived {
+                    set_archived(conn, id, Some(value));
+                }
+            }
+        });
+        assert_eq!(
+            sorted_ids(maint_ids(&lab.path, Some("active"))),
+            owned(&["null-recent", "zero-recent"])
+        );
+        assert_eq!(
+            sorted_ids(maint_ids(&lab.path, Some("stale"))),
+            owned(&["null-old", "zero-old"])
+        );
+        assert!(maint_ids(&lab.path, Some("slow")).is_empty());
+        assert!(maint_ids(&lab.path, Some("archived")).is_empty());
+        assert_eq!(maint_ids(&lab.path, None).len(), 6);
+        assert!(maint_page(&lab.path, maint_filters(None))
+            .items
+            .iter()
+            .all(|item| !item.archived));
+    }
+
+    #[test]
+    fn archived_filter_is_exclusive_and_unfiltered_keeps_everyone() {
+        let lab = Lab::new("arch-filter");
+        lab.with(|conn| {
+            let rows: &[(&str, Option<&str>, Option<i64>)] = &[
+                ("live", Some(MAINT_NOW), Some(0)),
+                ("slowing", Some("2026-04-01T12:00:00Z"), None),
+                ("quiet", Some("2020-01-01T00:00:00Z"), Some(0)),
+                ("boxed", Some(MAINT_NOW), Some(1)),
+                ("boxed-slow", Some("2026-04-01T12:00:00Z"), Some(1)),
+                ("unknown", None, None),
+            ];
+            for (id, pushed, archived) in rows {
+                let mut repo = Repo::new(id);
+                repo.pushed_at = pushed.map(str::to_owned);
+                repo.save(conn);
+                if let Some(value) = archived {
+                    set_archived(conn, id, Some(*value));
+                }
+            }
+        });
+        assert_eq!(
+            sorted_ids(maint_ids(&lab.path, Some("archived"))),
+            owned(&["boxed", "boxed-slow"])
+        );
+        assert_eq!(
+            sorted_ids(maint_ids(&lab.path, Some("active"))),
+            owned(&["live"])
+        );
+        assert_eq!(
+            sorted_ids(maint_ids(&lab.path, Some("slow"))),
+            owned(&["slowing"])
+        );
+        assert_eq!(
+            sorted_ids(maint_ids(&lab.path, Some("stale"))),
+            owned(&["quiet"])
+        );
+        assert_eq!(
+            sorted_ids(maint_ids(&lab.path, None)),
+            owned(&["boxed", "boxed-slow", "live", "quiet", "slowing", "unknown"])
+        );
+    }
+
+    #[test]
+    fn archived_counts_are_exclusive_and_ignore_their_own_filter() {
+        let lab = Lab::new("arch-counts");
+        lab.with(|conn| {
+            scenario(conn, "scn-a", "a", "甲", 1, 0);
+            scenario(conn, "scn-b", "b", "乙", 2, 0);
+
+            let mut active = Repo::new("active-one");
+            active.pushed_at = Some(MAINT_NOW.to_owned());
+            active.reading = Some("want_to_try".to_owned());
+            active.card_json = Some(card_form("cli"));
+            active.save(conn);
+            link(conn, "active-one", "scn-a", "suggested");
+
+            let mut slow = Repo::new("slow-one");
+            slow.pushed_at = Some("2026-01-01T00:00:00Z".to_owned());
+            slow.reading = Some("tried".to_owned());
+            slow.card_json = Some(card_form("library"));
+            slow.save(conn);
+            set_archived(conn, "slow-one", Some(0));
+
+            let mut stale = Repo::new("stale-one");
+            stale.pushed_at = Some("2020-01-01T00:00:00Z".to_owned());
+            stale.reading = Some("deprecated".to_owned());
+            stale.card_json = Some(card_form("skill"));
+            stale.save(conn);
+            link(conn, "stale-one", "scn-b", "suggested");
+
+            let mut none = Repo::new("none-one");
+            none.reading = Some("in_use".to_owned());
+            none.card_json = Some(card_form("app"));
+            none.save(conn);
+            set_archived(conn, "none-one", Some(0));
+
+            let mut recent = Repo::new("arch-recent");
+            recent.pushed_at = Some(MAINT_NOW.to_owned());
+            recent.reading = Some("want_to_try".to_owned());
+            recent.card_json = Some(card_form("cli"));
+            recent.save(conn);
+            link(conn, "arch-recent", "scn-a", "suggested");
+            set_archived(conn, "arch-recent", Some(1));
+
+            let mut old = Repo::new("arch-old");
+            old.pushed_at = Some("2020-01-01T00:00:00Z".to_owned());
+            old.reading = Some("tried".to_owned());
+            old.card_json = Some(card_form("library"));
+            old.save(conn);
+            link(conn, "arch-old", "scn-b", "suggested");
+            set_archived(conn, "arch-old", Some(1));
+
+            let mut slow_archived = Repo::new("arch-slow");
+            slow_archived.pushed_at = Some("2026-04-01T12:00:00Z".to_owned());
+            slow_archived.reading = Some("tried".to_owned());
+            slow_archived.card_json = Some(card_form("library"));
+            slow_archived.save(conn);
+            link(conn, "arch-slow", "scn-b", "suggested");
+            set_archived(conn, "arch-slow", Some(1));
+
+            let mut missing = Repo::new("arch-none");
+            missing.one_liner = None;
+            missing.card_json = Some(card_form("skill"));
+            missing.save(conn);
+            set_archived(conn, "arch-none", Some(1));
+        });
+
+        let open = maint_page(&lab.path, maint_filters(None));
+        assert_eq!(open.total_count, 8);
+        assert_eq!(open.counts.total, 8);
+        let maintenance = MaintenanceCounts {
+            active: 1,
+            slow: 1,
+            stale: 1,
+            archived: 4,
+        };
+        assert_eq!(open.counts.maintenance, maintenance);
+        assert_eq!(
+            open.total_count
+                - maintenance.active
+                - maintenance.slow
+                - maintenance.stale
+                - maintenance.archived,
+            1
+        );
+
+        let narrowed = maint_page(&lab.path, maint_filters(Some("archived")));
+        assert_eq!(
+            sorted_ids(narrowed.items.iter().map(|item| item.id.clone()).collect()),
+            owned(&["arch-none", "arch-old", "arch-recent", "arch-slow"])
+        );
+        assert_eq!(narrowed.total_count, 4);
+        assert_eq!(narrowed.counts.total, 8);
+        assert_eq!(narrowed.counts.maintenance, maintenance);
+        assert_eq!(
+            narrowed.counts.reading,
+            ReadingCounts {
+                unseen: 1,
+                want: 1,
+                tried: 2,
+                in_use: 0,
+                dropped: 0,
+            }
+        );
+        assert_eq!(
+            narrowed.counts.card_state,
+            CardStateCounts {
+                done: 3,
+                pending: 1
+            }
+        );
+        assert_eq!(narrowed.counts.forms.get("cli"), Some(&1));
+        assert_eq!(narrowed.counts.forms.get("library"), Some(&2));
+        assert_eq!(narrowed.counts.forms.get("skill"), Some(&1));
+        assert_eq!(narrowed.counts.forms.len(), 3);
+        assert_eq!(narrowed.counts.scenarios.get("scn-a"), Some(&1));
+        assert_eq!(narrowed.counts.scenarios.get("scn-b"), Some(&2));
+    }
+
+    #[test]
+    fn archived_filter_intersects_sorts_and_keeps_relevance() {
+        let sort_lab = Lab::new("arch-sort");
+        sort_lab.with(|conn| {
+            let rows = [
+                (
+                    "a",
+                    "2026-09-01T00:00:00Z",
+                    10_i64,
+                    Some(MAINT_NOW),
+                    Some(0_i64),
+                ),
+                (
+                    "b",
+                    "2026-08-01T00:00:00Z",
+                    50,
+                    Some("2026-04-01T12:00:00Z"),
+                    None,
+                ),
+                (
+                    "c",
+                    "2026-07-01T00:00:00Z",
+                    30,
+                    Some("2026-10-01T12:00:00Z"),
+                    Some(1),
+                ),
+                (
+                    "d",
+                    "2026-06-01T00:00:00Z",
+                    40,
+                    Some("2024-01-01T12:00:00Z"),
+                    Some(1),
+                ),
+                ("e", "2026-05-01T00:00:00Z", 60, None, Some(0)),
+            ];
+            for (id, starred, stars, pushed, archived) in rows {
+                let mut repo = Repo::new(id);
+                repo.starred_at = starred.to_owned();
+                repo.stars = stars;
+                repo.pushed_at = pushed.map(str::to_owned);
+                repo.save(conn);
+                if let Some(value) = archived {
+                    set_archived(conn, id, Some(value));
+                }
+            }
+        });
+        let archived_ids = ["c", "d"];
+        let sorts = [
+            (None, owned(&["a", "b", "c", "d", "e"])),
+            (Some("stars"), owned(&["e", "b", "d", "c", "a"])),
+            (Some("updated"), owned(&["a", "c", "b", "d", "e"])),
+        ];
+        for (sort, expected_full) in sorts {
+            let mut open = maint_filters(None);
+            open.sort = sort.map(str::to_owned);
+            let full: Vec<String> = maint_page(&sort_lab.path, open)
+                .items
+                .into_iter()
+                .map(|item| item.id)
+                .collect();
+            assert_eq!(full, expected_full, "{sort:?}");
+            let mut filters = maint_filters(Some("archived"));
+            filters.sort = sort.map(str::to_owned);
+            let got: Vec<String> = maint_page(&sort_lab.path, filters)
+                .items
+                .into_iter()
+                .map(|item| item.id)
+                .collect();
+            let expected: Vec<String> = full
+                .iter()
+                .filter(|id| archived_ids.contains(&id.as_str()))
+                .cloned()
+                .collect();
+            assert_eq!(got, expected, "{sort:?}");
+        }
+
+        let mix = Lab::new("arch-mix");
+        mix.with(|conn| {
+            scenario(conn, "scn-x", "x", "场景", 1, 0);
+            let rows: &[(&str, &str, bool, bool, &str, &str, i64)] = &[
+                ("hit", MAINT_NOW, true, true, "want_to_try", "cli", 1),
+                ("miss-word", MAINT_NOW, false, true, "want_to_try", "cli", 1),
+                ("miss-scn", MAINT_NOW, true, false, "want_to_try", "cli", 1),
+                ("miss-read", MAINT_NOW, true, true, "tried", "cli", 1),
+                (
+                    "miss-form",
+                    MAINT_NOW,
+                    true,
+                    true,
+                    "want_to_try",
+                    "skill",
+                    1,
+                ),
+                ("live", MAINT_NOW, true, true, "want_to_try", "cli", 0),
+                (
+                    "quiet",
+                    "2020-01-01T00:00:00Z",
+                    true,
+                    true,
+                    "want_to_try",
+                    "cli",
+                    0,
+                ),
+            ];
+            for (id, pushed, keyword, linked, reading, form, archived) in rows {
+                let mut repo = Repo::new(id);
+                repo.pushed_at = Some((*pushed).to_owned());
+                repo.description = Some(if *keyword {
+                    "含有 zzarch 的说明".to_owned()
+                } else {
+                    "别的说明".to_owned()
+                });
+                repo.reading = Some((*reading).to_owned());
+                repo.card_json = Some(card_form(form));
+                repo.save(conn);
+                set_archived(conn, id, Some(*archived));
+                if *linked {
+                    link(conn, id, "scn-x", "suggested");
+                }
+            }
+        });
+        let mut all = maint_filters(Some("archived"));
+        all.keyword = Some("zzarch".to_owned());
+        all.scenario = Some("scn-x".to_owned());
+        all.reading = Some("want".to_owned());
+        all.form = Some("cli".to_owned());
+        let hit = maint_page(&mix.path, all);
+        assert_eq!(
+            hit.items
+                .iter()
+                .map(|item| item.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["hit"]
+        );
+        assert_eq!(hit.total_count, 1);
+        assert_eq!(
+            hit.counts.maintenance,
+            MaintenanceCounts {
+                active: 1,
+                slow: 0,
+                stale: 1,
+                archived: 1,
+            }
+        );
+
+        let rank = Lab::new("arch-rank");
+        rank.with(|conn| {
+            let mut by_name = Repo::new("by-name");
+            by_name.full_name = "o/zzarch".to_owned();
+            by_name.description = Some("无关".to_owned());
+            by_name.save(conn);
+            set_archived(conn, "by-name", Some(1));
+
+            let mut by_desc = Repo::new("by-desc");
+            by_desc.description = Some("含有 zzarch".to_owned());
+            by_desc.save(conn);
+            set_archived(conn, "by-desc", Some(1));
+
+            let mut live = Repo::new("live-desc");
+            live.description = Some("含有 zzarch".to_owned());
+            live.save(conn);
+            set_archived(conn, "live-desc", Some(0));
+        });
+        let mut open = maint_filters(None);
+        open.keyword = Some("zzarch".to_owned());
+        open.sort = Some("relevance".to_owned());
+        let open_page = maint_page(&rank.path, open);
+        let mut filtered = maint_filters(Some("archived"));
+        filtered.keyword = Some("zzarch".to_owned());
+        filtered.sort = Some("relevance".to_owned());
+        let filtered_page = maint_page(&rank.path, filtered);
+        let expected: Vec<LibraryItem> = open_page
+            .items
+            .iter()
+            .filter(|item| item.archived)
+            .cloned()
+            .collect();
+        assert_eq!(
+            filtered_page
+                .items
+                .iter()
+                .map(|item| item.id.as_str())
+                .collect::<Vec<_>>(),
+            expected
+                .iter()
+                .map(|item| item.id.as_str())
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            expected.len() >= 2,
+            "{:?}",
+            expected.iter().map(|item| &item.id).collect::<Vec<_>>()
+        );
+        assert!(open_page
+            .items
+            .iter()
+            .any(|item| item.id == "live-desc" && !item.archived));
+        for (got, want) in filtered_page.items.iter().zip(expected.iter()) {
+            assert_eq!(got.match_reasons, want.match_reasons, "{}", got.id);
+            assert_eq!(got.match_score, want.match_score, "{}", got.id);
+            assert_eq!(got.match_stars, want.match_stars, "{}", got.id);
+            assert!(got.match_score.is_some(), "{}", got.id);
+            assert!(got.match_stars.is_some(), "{}", got.id);
+            assert!(!got.match_reasons.is_empty(), "{}", got.id);
+        }
+    }
+
+    #[test]
+    fn archived_maintenance_value_is_case_sensitive() {
+        let lab = Lab::new("arch-validate");
+        lab.with(|conn| {
+            let mut boxed = Repo::new("boxed");
+            boxed.pushed_at = Some(MAINT_NOW.to_owned());
+            boxed.save(conn);
+            set_archived(conn, "boxed", Some(1));
+            let mut live = Repo::new("live");
+            live.pushed_at = Some(MAINT_NOW.to_owned());
+            live.save(conn);
+        });
+        for bad in ["Archived", "dead"] {
+            let err = list_library_view_at(&lab.path, &maint_filters(Some(bad)), MAINT_NOW)
+                .expect_err("非法维护状态应失败");
+            assert_eq!(err, "维护状态筛选无效", "{bad}");
+        }
+        assert_eq!(
+            maint_ids(&lab.path, Some("archived")),
+            vec!["boxed".to_owned()]
+        );
+        let baseline = sorted_ids(maint_ids(&lab.path, None));
+        assert_eq!(sorted_ids(maint_ids(&lab.path, Some(""))), baseline);
+        assert_eq!(sorted_ids(maint_ids(&lab.path, Some("  "))), baseline);
+        let mut missing = LibraryFilters::default();
+        missing.card_state = Some("all".to_owned());
+        missing.limit = Some(50);
+        assert!(missing.maintenance.is_none());
+        assert_eq!(
+            sorted_ids(
+                maint_page(&lab.path, missing)
+                    .items
+                    .into_iter()
+                    .map(|item| item.id)
+                    .collect()
+            ),
+            baseline
+        );
     }
 }

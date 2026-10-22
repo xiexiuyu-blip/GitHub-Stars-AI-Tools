@@ -496,22 +496,47 @@ describe('维护状态筛选', () => {
     });
 
     const rows = maintenanceOptions({ stale: 3, active: 1, slow: 2 });
-    expect(rows.map((row) => row.tier)).toEqual(['active', 'slow', 'stale']);
-    expect(rows.map((row) => row.label)).toEqual(['活跃', '放缓', '疑似停更']);
-    expect(rows.map((row) => row.count)).toEqual([1, 2, 3]);
+    expect(rows.map((row) => row.tier)).toEqual(['active', 'slow', 'stale', 'archived']);
+    expect(rows.map((row) => row.label)).toEqual(['活跃', '放缓', '疑似停更', '已归档']);
+    expect(rows.map((row) => row.count)).toEqual([1, 2, 3, 0]);
     expect(rows.map((row) => row.hint)).toEqual([
       '最近 3 个月内有更新',
       '3 到 12 个月没有更新',
       '超过 1 年没有更新，可能已经不维护了',
+      '作者已在 GitHub 上把它归档：只读，不会再更新。旧数据点一次「同步」后才会标出来',
     ]);
-    expect(maintenanceOptions(null).map((row) => row.count)).toEqual([0, 0, 0]);
-    expect(maintenanceOptions(undefined).map((row) => row.count)).toEqual([0, 0, 0]);
+    expect(maintenanceOptions(null).map((row) => row.count)).toEqual([0, 0, 0, 0]);
+    expect(maintenanceOptions(undefined).map((row) => row.count)).toEqual([0, 0, 0, 0]);
     expect(maintenanceOptions({
       active: Number.NaN,
       slow: Number.POSITIVE_INFINITY,
       stale: 'x' as unknown as number,
-    }).map((row) => row.count)).toEqual([0, 0, 0]);
-    expect(maintenanceOptions({ active: 4 }).map((row) => row.count)).toEqual([4, 0, 0]);
+    }).map((row) => row.count)).toEqual([0, 0, 0, 0]);
+    expect(maintenanceOptions({ active: 4 }).map((row) => row.count)).toEqual([4, 0, 0, 0]);
+  });
+
+  it('已归档是第四项，个数缺失或不是有限数字当 0，选了再点取消', () => {
+    const rows = maintenanceOptions({ active: 1, slow: 2, stale: 3, archived: 4 });
+    expect(rows.map((row) => row.tier)).toEqual(['active', 'slow', 'stale', 'archived']);
+    expect(rows.map((row) => row.label)).toEqual(['活跃', '放缓', '疑似停更', '已归档']);
+    expect(rows.map((row) => row.count)).toEqual([1, 2, 3, 4]);
+    expect(rows.slice(0, 3).map((row) => row.hint)).toEqual([
+      '最近 3 个月内有更新',
+      '3 到 12 个月没有更新',
+      '超过 1 年没有更新，可能已经不维护了',
+    ]);
+    expect(rows[3]?.hint).toBe('作者已在 GitHub 上把它归档：只读，不会再更新。旧数据点一次「同步」后才会标出来');
+
+    expect(maintenanceOptions({}).find((row) => row.tier === 'archived')?.count).toBe(0);
+    expect(maintenanceOptions({ archived: Number.NaN }).map((row) => row.count)).toEqual([0, 0, 0, 0]);
+    expect(maintenanceOptions({ archived: Number.POSITIVE_INFINITY }).map((row) => row.count)).toEqual([0, 0, 0, 0]);
+    expect(maintenanceOptions({ archived: 'x' as unknown as number }).map((row) => row.count)).toEqual([0, 0, 0, 0]);
+
+    const picked = toggleMaintenance(state(), 'archived');
+    expect(picked.maintenance).toBe('archived');
+    expect(toFilters(picked, 0, 80).maintenance).toBe('archived');
+    expect(toggleMaintenance(picked, 'archived').maintenance).toBeNull();
+    expect(toFilters(toggleMaintenance(picked, 'archived'), 0, 80).maintenance).toBeUndefined();
   });
 
   it('页面重新取数的键带上维护状态，漏了切换筛选不会重新取数', () => {

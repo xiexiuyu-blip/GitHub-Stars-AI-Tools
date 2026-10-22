@@ -64,7 +64,7 @@ export function ItemRow(props: {
           {chips.map((scenario) => (
             <ScenarioChip key={scenario.id} name={scenario.nameZh} scenarioKey={scenario.slug || scenario.id} />
           ))}
-          <MaintenanceTag tier={maintenanceOf(props.item.pushedAt, now)} showActive={false} />
+          <MaintenanceTag tier={maintenanceOf(props.item.pushedAt, now, props.item.archived)} showActive={false} />
         </div>
         {props.why ? (
           <div className="why-line mt-1.5 flex items-start gap-1 text-xs leading-[1.5]">

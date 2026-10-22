@@ -158,7 +158,7 @@ function DetailBody(props: Parameters<typeof ItemDetail>[0] & { detail: LibraryD
             <StarCount value={detail.starsCount} className="text-[13px]" />
             <LangDot language={detail.language} className="text-[13px]" />
             <span className="text-xs text-on-surface-variant">项目最近更新：{relativeDays(detail.pushedAt, now)}</span>
-            <MaintenanceTag tier={maintenanceOf(detail.pushedAt, now)} showActive />
+            <MaintenanceTag tier={maintenanceOf(detail.pushedAt, now, detail.archived)} showActive />
             <span className="text-xs text-on-surface-variant">收藏于 {monthDay(detail.starredAt, now)}</span>
           </div>
           <div className="mt-2.5 flex flex-wrap items-center gap-1.5">

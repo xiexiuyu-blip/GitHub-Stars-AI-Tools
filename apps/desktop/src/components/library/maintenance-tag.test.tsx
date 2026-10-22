@@ -29,4 +29,16 @@ describe('维护状态标签', () => {
     expect(renderToStaticMarkup(<MaintenanceTag tier={null} showActive />)).toBe('');
     expect(renderToStaticMarkup(<MaintenanceTag tier={null} />)).toBe('');
   });
+
+  it('已归档是红色，悬停是短句；不画活跃时已归档仍然画，活跃仍然不画', () => {
+    const archived = renderToStaticMarkup(<MaintenanceTag tier="archived" />);
+    expect(textOf(archived)).toBe('已归档');
+    expect(archived).toContain('bg-error-container');
+    expect(archived).toContain('title="作者已在 GitHub 上把它归档：只读，不会再更新"');
+
+    const hiddenActive = renderToStaticMarkup(<MaintenanceTag tier="archived" showActive={false} />);
+    expect(textOf(hiddenActive)).toBe('已归档');
+    expect(hiddenActive).toContain('bg-error-container');
+    expect(renderToStaticMarkup(<MaintenanceTag tier="active" showActive={false} />)).toBe('');
+  });
 });

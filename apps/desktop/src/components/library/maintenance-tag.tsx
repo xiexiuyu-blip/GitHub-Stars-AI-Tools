@@ -6,6 +6,7 @@ const TONE: Record<MaintenanceTier, 'gray' | 'blue' | 'red'> = {
   active: 'blue',
   slow: 'gray',
   stale: 'red',
+  archived: 'red',
 };
 
 /** 维护状态小标签。列表行不画活跃（`showActive` 为假）；没有状态不画。 */

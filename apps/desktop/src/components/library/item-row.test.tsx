@@ -194,6 +194,72 @@ describe('列表行：维护状态只标放缓和疑似停更', () => {
     expect(text(slow)).not.toContain('疑似停更');
     expect(slow).toContain('title="3 到 12 个月没有更新"');
   });
+
+  it('已归档压过推送时间，没归档或没有这个字段时和以前一样，行里原有内容还在', () => {
+    function marked(pushedAt: string | null, archived?: boolean): string {
+      const item: LibraryItem = {
+        ...ITEM,
+        pushedAt,
+        archived,
+        starsCount: 42,
+        scenarioIds: ['scn-xhs'],
+        readingGroup: 'want',
+        readingStatus: 'want_to_try',
+        matchReasons: ['项目名'],
+        matchStars: 2,
+      };
+      return renderToStaticMarkup(
+        <ItemRow item={item} now={NOW} scenarios={[scenario]} onSelect={() => {}} onWant={() => {}} onDrop={() => {}} />,
+      );
+    }
+
+    function keepsTheRow(html: string) {
+      const visible = text(html);
+      expect(visible).toContain('tool');
+      expect(visible).toContain('做封面');
+      expect(visible).toContain('小红书');
+      expect(visible).toContain('42');
+      expect(visible).toContain('想试');
+      expect(visible).toContain('命中：项目名');
+    }
+
+    for (const pushedAt of ['2026-10-21T12:00:00Z', null]) {
+      const html = marked(pushedAt, true);
+      const visible = text(html);
+      expect(visible, String(pushedAt)).toContain('已归档');
+      expect(html, String(pushedAt)).toContain('title="作者已在 GitHub 上把它归档：只读，不会再更新"');
+      expect(visible, String(pushedAt)).not.toContain('活跃');
+      expect(visible, String(pushedAt)).not.toContain('放缓');
+      expect(visible, String(pushedAt)).not.toContain('疑似停更');
+      keepsTheRow(html);
+    }
+
+    const active = marked('2026-10-21T12:00:00Z', false);
+    expect(text(active)).not.toContain('已归档');
+    expect(text(active)).not.toContain('活跃');
+    expect(text(active)).not.toContain('放缓');
+    expect(text(active)).not.toContain('疑似停更');
+    keepsTheRow(active);
+
+    const slow = marked('2026-04-01T12:00:00Z', false);
+    expect(text(slow)).toContain('放缓');
+    expect(text(slow)).not.toContain('已归档');
+    expect(text(slow)).not.toContain('疑似停更');
+    keepsTheRow(slow);
+
+    const stale = marked('2024-01-01T12:00:00Z');
+    expect(text(stale)).toContain('疑似停更');
+    expect(text(stale)).not.toContain('已归档');
+    expect(text(stale)).not.toContain('放缓');
+    keepsTheRow(stale);
+
+    const missing = marked(null);
+    expect(text(missing)).not.toContain('已归档');
+    expect(text(missing)).not.toContain('活跃');
+    expect(text(missing)).not.toContain('放缓');
+    expect(text(missing)).not.toContain('疑似停更');
+    keepsTheRow(missing);
+  });
 });
 
 describe('「今天值得先看」卡片上的悬停按钮', () => {
