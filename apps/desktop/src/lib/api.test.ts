@@ -162,10 +162,16 @@ describe('api 命令名和参数', () => {
     expect(calls).toEqual([{ command: 'confirm_library_card', args: { id: 'repo-1' } }]);
   });
 
-  it('regenerateLibraryCard 传 { id }', async () => {
+  it('regenerateLibraryCard 传 { id, confirmed: true }', async () => {
     const calls = installInvoke();
-    await regenerateLibraryCard('repo-1');
-    expect(calls).toEqual([{ command: 'regenerate_library_card', args: { id: 'repo-1' } }]);
+    await regenerateLibraryCard('repo-1', true);
+    expect(calls).toEqual([{ command: 'regenerate_library_card', args: { id: 'repo-1', confirmed: true } }]);
+  });
+
+  it('regenerateLibraryCard 没确认时传 confirmed: false', async () => {
+    const calls = installInvoke();
+    await regenerateLibraryCard('repo-1', false);
+    expect(calls).toEqual([{ command: 'regenerate_library_card', args: { id: 'repo-1', confirmed: false } }]);
   });
 
   it('commitCaptureBatch 传 { text, sourceContext }', async () => {

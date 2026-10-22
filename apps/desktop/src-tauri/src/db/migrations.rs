@@ -228,6 +228,13 @@ const MIGRATIONS: &[Migration] = &[
             "../../../../../packages/storage/migrations/fox/036_solve_rerank_cache.sql"
         ),
     },
+    Migration {
+        version: "037",
+        name: "ai_job_spend_authorization",
+        sql: include_str!(
+            "../../../../../packages/storage/migrations/fox/037_ai_job_spend_authorization.sql"
+        ),
+    },
 ];
 
 pub fn latest_migration() -> &'static Migration {
@@ -514,9 +521,9 @@ mod tests {
         let path = temp_db("web-content");
         let report = migrate_database(&path).expect("空库应能迁到 031");
         assert_eq!(report.applied.len(), MIGRATIONS.len());
-        assert_eq!(MIGRATIONS.len(), 36);
-        assert_eq!(latest_migration().version, "036");
-        assert_eq!(latest_migration().name, "solve_rerank_cache");
+        assert_eq!(MIGRATIONS.len(), 37);
+        assert_eq!(latest_migration().version, "037");
+        assert_eq!(latest_migration().name, "ai_job_spend_authorization");
         assert!(report.applied.iter().any(|item| item == "031 web_content"));
         assert!(report.applied.iter().any(|item| item == "032 repo_license"));
         assert!(report.applied.iter().any(|item| item == "033 inbox_fetch"));
@@ -762,8 +769,12 @@ INSERT INTO ai_task_items(id, run_id, repository_id, full_name, status, reason) 
             .applied
             .iter()
             .any(|item| item == "036 solve_rerank_cache"));
-        assert_eq!(latest_migration().version, "036");
-        assert_eq!(latest_migration().name, "solve_rerank_cache");
+        assert!(report
+            .applied
+            .iter()
+            .any(|item| item == "037 ai_job_spend_authorization"));
+        assert_eq!(latest_migration().version, "037");
+        assert_eq!(latest_migration().name, "ai_job_spend_authorization");
         let columns = license_columns(&path);
         assert_eq!(columns.len(), 2);
         for name in ["license_spdx", "license_name"] {
@@ -817,6 +828,7 @@ INSERT INTO repositories(id, account_id, owner, name, full_name, topics_json, ht
                 "034 inbox_repos".to_owned(),
                 "035 readme_basis".to_owned(),
                 "036 solve_rerank_cache".to_owned(),
+                "037 ai_job_spend_authorization".to_owned(),
             ]
         );
         assert_eq!(count_query(&path, "SELECT COUNT(*) FROM repositories"), 2);
@@ -882,10 +894,11 @@ INSERT INTO inbox_items(id, account_id, original_url, normalized_url, title, ite
                 "034 inbox_repos".to_owned(),
                 "035 readme_basis".to_owned(),
                 "036 solve_rerank_cache".to_owned(),
+                "037 ai_job_spend_authorization".to_owned(),
             ]
         );
-        assert_eq!(latest_migration().version, "036");
-        assert_eq!(latest_migration().name, "solve_rerank_cache");
+        assert_eq!(latest_migration().version, "037");
+        assert_eq!(latest_migration().name, "ai_job_spend_authorization");
         assert!(MIGRATIONS
             .iter()
             .any(|migration| migration.version == "033" && migration.name == "inbox_fetch"));
@@ -1003,10 +1016,11 @@ INSERT INTO inbox_items(id, account_id, original_url, normalized_url, title, ite
                 "034 inbox_repos".to_owned(),
                 "035 readme_basis".to_owned(),
                 "036 solve_rerank_cache".to_owned(),
+                "037 ai_job_spend_authorization".to_owned(),
             ]
         );
-        assert_eq!(latest_migration().version, "036");
-        assert_eq!(latest_migration().name, "solve_rerank_cache");
+        assert_eq!(latest_migration().version, "037");
+        assert_eq!(latest_migration().name, "ai_job_spend_authorization");
         assert!(MIGRATIONS
             .iter()
             .any(|migration| { migration.version == "034" && migration.name == "inbox_repos" }));
@@ -1107,12 +1121,13 @@ INSERT INTO inbox_items(id, account_id, original_url, normalized_url, title, ite
             report_034.applied,
             vec![
                 "035 readme_basis".to_owned(),
-                "036 solve_rerank_cache".to_owned()
+                "036 solve_rerank_cache".to_owned(),
+                "037 ai_job_spend_authorization".to_owned(),
             ]
         );
         assert_eq!(cache_table(&from_034), 1);
-        assert_eq!(latest_migration().version, "036");
-        assert_eq!(latest_migration().name, "solve_rerank_cache");
+        assert_eq!(latest_migration().version, "037");
+        assert_eq!(latest_migration().name, "ai_job_spend_authorization");
         let connection = Connection::open(&from_034).expect("应能打开升级后的库");
         connection
             .execute(
@@ -1151,7 +1166,10 @@ INSERT INTO inbox_items(id, account_id, original_url, normalized_url, title, ite
         let report_035 = migrate_database(&from_035).expect("035 库应能升到 036");
         assert_eq!(
             report_035.applied,
-            vec!["036 solve_rerank_cache".to_owned()]
+            vec![
+                "036 solve_rerank_cache".to_owned(),
+                "037 ai_job_spend_authorization".to_owned(),
+            ]
         );
         assert_eq!(cache_table(&from_035), 1);
         let version: String = Connection::open(&from_035)
@@ -1162,7 +1180,7 @@ INSERT INTO inbox_items(id, account_id, original_url, normalized_url, title, ite
                 |row| row.get(0),
             )
             .expect("应能读到最新迁移");
-        assert_eq!(version, "036");
+        assert_eq!(version, "037");
 
         for path in [&from_034, &from_035] {
             let _ = fs::remove_file(path);
@@ -1173,6 +1191,89 @@ INSERT INTO inbox_items(id, account_id, original_url, normalized_url, title, ite
             if let Some(backup) = &report.backup_path {
                 let _ = fs::remove_file(backup);
             }
+        }
+    }
+
+    #[test]
+    fn upgrade_from_036_adds_nullable_spend_authorization() {
+        let path = temp_db("spend-auth-036");
+        {
+            let mut connection = Connection::open(&path).expect("应能创建 036 夹具");
+            connection
+                .execute_batch("PRAGMA foreign_keys = ON;")
+                .expect("应能打开外键");
+            for migration in MIGRATIONS
+                .iter()
+                .filter(|migration| migration.version <= "036")
+            {
+                apply_one(&mut connection, migration).expect("夹具迁移应成功");
+            }
+            connection
+                .execute(
+                    "INSERT INTO github_accounts(id, login, token_ref) VALUES ('acct', 'fox', 'test')",
+                    [],
+                )
+                .expect("账号应能写入");
+            connection
+                .execute(
+                    "INSERT INTO ai_jobs(id, account_id, job_type, target_type, target_id, status)
+                     VALUES ('old', 'acct', 'repo_card', 'repository', 'old', 'queued')",
+                    [],
+                )
+                .expect("旧任务应能写入");
+            let columns: Vec<String> = {
+                let mut statement = connection
+                    .prepare("PRAGMA table_info(ai_jobs)")
+                    .expect("应能读取表结构");
+                statement
+                    .query_map([], |row| row.get::<_, String>(1))
+                    .expect("应能遍历列")
+                    .map(|row| row.expect("应能读取列名"))
+                    .collect()
+            };
+            assert!(
+                !columns.iter().any(|name| name == "spend_authorized_until"),
+                "036 的库还没有授权列"
+            );
+        }
+
+        let report = migrate_database(&path).expect("036 库应能升到 037");
+        assert_eq!(
+            report.applied,
+            vec!["037 ai_job_spend_authorization".to_owned()]
+        );
+        assert_eq!(latest_migration().version, "037");
+        assert_eq!(latest_migration().name, "ai_job_spend_authorization");
+        assert!(MIGRATIONS.iter().any(|migration| {
+            migration.version == "037" && migration.name == "ai_job_spend_authorization"
+        }));
+
+        let connection = Connection::open(&path).expect("应能打开升级后的库");
+        let column: (String, i64, Option<String>) = connection
+            .query_row(
+                "SELECT type, \"notnull\", dflt_value FROM pragma_table_info('ai_jobs') WHERE name = 'spend_authorized_until'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("应能读到新列");
+        assert_eq!(column.0.to_ascii_uppercase(), "TEXT");
+        assert_eq!(column.1, 0, "授权列应可空");
+        assert!(column.2.is_none(), "授权列不应有默认值");
+        let until: Option<String> = connection
+            .query_row(
+                "SELECT spend_authorized_until FROM ai_jobs WHERE id = 'old'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("旧行应还在");
+        assert!(until.is_none(), "已有行的授权必须是 NULL");
+        drop(connection);
+
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_file(format!("{}-wal", path.display()));
+        let _ = fs::remove_file(format!("{}-shm", path.display()));
+        if let Some(backup) = report.backup_path {
+            let _ = fs::remove_file(backup);
         }
     }
 
@@ -1257,11 +1358,12 @@ INSERT INTO repo_ai_documents(repo_id, summary_zh, model, prompt_version, source
             report.applied,
             vec![
                 "035 readme_basis".to_owned(),
-                "036 solve_rerank_cache".to_owned()
+                "036 solve_rerank_cache".to_owned(),
+                "037 ai_job_spend_authorization".to_owned(),
             ]
         );
-        assert_eq!(latest_migration().version, "036");
-        assert_eq!(latest_migration().name, "solve_rerank_cache");
+        assert_eq!(latest_migration().version, "037");
+        assert_eq!(latest_migration().name, "ai_job_spend_authorization");
         assert!(MIGRATIONS
             .iter()
             .any(|migration| { migration.version == "035" && migration.name == "readme_basis" }));

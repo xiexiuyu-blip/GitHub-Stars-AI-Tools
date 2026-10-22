@@ -13,6 +13,7 @@ import {
   noInstallStepsNote,
   readmeBasisLabel,
   readmeTabLabel,
+  redoConfirmCopy,
   relativeDays,
   splitRepoName,
   type CopyKind,
@@ -81,6 +82,8 @@ export function ItemDetail(props: {
 function DetailBody(props: Parameters<typeof ItemDetail>[0] & { detail: LibraryDetail }) {
   const { detail } = props;
   const [tab, setTabState] = useState<TabKey>(lastTab);
+  const [askingRedo, setAskingRedo] = useState(false);
+  const redoCopy = askingRedo ? redoConfirmCopy(detail.cardReview === 'confirmed') : null;
   const setTab = (next: TabKey) => {
     lastTab = next;
     setTabState(next);
@@ -177,18 +180,41 @@ function DetailBody(props: Parameters<typeof ItemDetail>[0] & { detail: LibraryD
               <p className="mt-1.5 text-sm leading-[1.8] text-foreground">{firstSentences(summarySource, 3)}</p>
               <div className="mt-2 flex flex-wrap items-center gap-0.5 text-xs text-on-surface-variant">
                 {detail.cardReview === 'confirmed' ? (
-                  <span className="inline-flex items-center gap-1">
-                    <Icon name="check" size={14} />
-                    你确认过了
-                  </span>
+                  <>
+                    <span className="inline-flex items-center gap-1">
+                      <Icon name="check" size={14} />
+                      你确认过了
+                    </span>
+                    <Button variant="text" size="sm" className="h-7 px-1.5 text-xs" onClick={() => setAskingRedo(true)}>重新整理这一张</Button>
+                  </>
                 ) : (
                   <>
                     上面这段说明说得对吗？
                     <Button variant="text" size="sm" className="h-7 px-1.5 text-xs" onClick={props.onConfirm}>对</Button>
-                    <Button variant="text" size="sm" className="h-7 px-1.5 text-xs" onClick={props.onRegenerate}>不对，请 AI 重写（会花一点钱）</Button>
+                    <Button variant="text" size="sm" className="h-7 px-1.5 text-xs" onClick={() => setAskingRedo(true)}>不对，请 AI 重写（会花一点钱）</Button>
                   </>
                 )}
               </div>
+              {redoCopy ? (
+                <div role="group" data-redo-confirm className="mt-3 rounded-lg border border-primary/40 bg-card p-3 text-sm leading-[1.7]">
+                  <p className="m-0 font-medium text-foreground">{redoCopy.title}</p>
+                  <p className="mt-1 mb-0 text-on-surface-variant">{redoCopy.body}</p>
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    <Button
+                      data-confirm-redo
+                      variant="primary"
+                      size="sm"
+                      onClick={() => {
+                        setAskingRedo(false);
+                        props.onRegenerate();
+                      }}
+                    >
+                      {redoCopy.confirmLabel}
+                    </Button>
+                    <Button size="sm" onClick={() => setAskingRedo(false)}>{redoCopy.cancelLabel}</Button>
+                  </div>
+                </div>
+              ) : null}
             </div>
           ) : (
             <PendingNote fullName={detail.fullName} description={detail.description} onOpenToolbox={props.onOpenToolbox} />

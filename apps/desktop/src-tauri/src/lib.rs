@@ -1071,10 +1071,17 @@ fn confirm_library_card(app_handle: tauri::AppHandle, id: String) -> Result<(), 
     card_handler::confirm_card(storage.database_path(), &id)
 }
 
+/// 重新整理这一张。花钱的决定只能由 Fox 本人做：界面先展开确认，确认后带 `confirmed = true`。
+/// 只给这一张任务写授权，不看每天额度；暂停或没配置 AI 时拒绝。
 #[tauri::command]
-fn regenerate_library_card(app_handle: tauri::AppHandle, id: String) -> Result<(), String> {
+fn regenerate_library_card(
+    app_handle: tauri::AppHandle,
+    id: String,
+    confirmed: bool,
+) -> Result<(), String> {
     let storage = AppStorage::from_app_handle(&app_handle)?;
-    card_handler::request_regenerate(storage.database_path(), &id)
+    let settings = read_app_settings_value(&app_handle)?;
+    card_handler::request_regenerate(storage.database_path(), &settings, &id, confirmed)
 }
 
 #[tauri::command]
