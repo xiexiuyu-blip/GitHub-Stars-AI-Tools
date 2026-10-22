@@ -10036,4 +10036,38 @@ mod tests {
             "两次抓取合起来给收尾"
         );
     }
+
+    #[test]
+    fn updater_endpoints_are_empty_and_version_is_2_0_0_fox_1() {
+        let config: serde_json::Value = serde_json::from_str(include_str!("../tauri.conf.json"))
+            .expect("tauri.conf.json 应当能解析成 JSON");
+
+        let endpoints = config
+            .pointer("/plugins/updater/endpoints")
+            .and_then(serde_json::Value::as_array)
+            .expect("plugins.updater.endpoints 应当是数组");
+        assert!(
+            endpoints.is_empty(),
+            "plugins.updater.endpoints 应当是空数组"
+        );
+
+        // 失败信息只说「应当是非空字符串」，不把公钥内容打出来。
+        let pubkey_is_nonempty_string = matches!(
+            config
+                .pointer("/plugins/updater/pubkey")
+                .and_then(serde_json::Value::as_str),
+            Some(value) if !value.is_empty()
+        );
+        assert!(
+            pubkey_is_nonempty_string,
+            "plugins.updater.pubkey 应当是非空字符串"
+        );
+
+        let version = config
+            .get("version")
+            .and_then(serde_json::Value::as_str)
+            .expect("顶层 version 应当是字符串");
+        assert_eq!(version, env!("CARGO_PKG_VERSION"));
+        assert_eq!(version, "2.0.0-fox.1");
+    }
 }
