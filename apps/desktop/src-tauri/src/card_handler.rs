@@ -19,6 +19,8 @@ pub const NOT_CONFIGURED_MESSAGE: &str = "还没有配置 AI 服务或密钥，�
 const BACKFILL_PRIORITY: i64 = 6;
 const NEW_STAR_PRIORITY: i64 = 3;
 const REGENERATE_PRIORITY: i64 = 2;
+/// Fox 确认「重新整理这一张」之后，这一行可以不看每天额度的时长（秒）。
+const ONE_OFF_AUTHORIZATION_SECS: i64 = 1800;
 /// 空串和坏 JSON 上直接 `json_extract` 会让整句失败。`CASE` 只在合法 JSON 上取值。
 /// 「说明过期」：有卡，但结构还是第 2 版之前的，或者是旧版提示词写的（提示词升版后，旧说明的文风、场景标签口径都变了）。
 fn outdated_sql() -> String {
@@ -322,7 +324,28 @@ pub fn confirm_card(db_path: &Path, repo_id: &str) -> Result<(), String> {
     Ok(())
 }
 
-pub fn request_regenerate(db_path: &Path, repo_id: &str) -> Result<(), String> {
+/// 重新整理这一张。必须 `confirmed`：没确认、没配置 AI、队列暂停时数据库一个字不动。
+/// 确认后在一个 `BEGIN IMMEDIATE` 里把理解卡改回待确认，并只给这一张 `repo_card` 写上 30 分钟授权。
+pub fn request_regenerate(
+    db_path: &Path,
+    settings: &Value,
+    repo_id: &str,
+    confirmed: bool,
+) -> Result<(), String> {
+    if !confirmed {
+        return Err("重新整理这一张会花 token，需要你在界面上确认之后才能开始。".to_owned());
+    }
+    let (provider_configured, _) = provider_from_settings(settings);
+    if !provider_configured {
+        return Err(
+            "还没配置 AI 服务，先到「设置 → AI 设置」里选好服务商和模型、保存密钥。".to_owned(),
+        );
+    }
+    if jobs::read_control(&jobs::queue_control_path(db_path)).paused {
+        return Err("自动整理现在是暂停的，先到「自动整理」里恢复，再重新整理这一张。".to_owned());
+    }
+    let now = jobs::now_db_time();
+    let until = jobs::shift_db_time(&now, ONE_OFF_AUTHORIZATION_SECS)?;
     let mut conn = open_db(db_path)?;
     let tx = conn
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
@@ -340,6 +363,17 @@ pub fn request_regenerate(db_path: &Path, repo_id: &str) -> Result<(), String> {
     };
     let card_json = read_card_json(&tx, repo_id)?;
     let updated = rewrite_review_status(card_json.as_deref(), "suggested")?;
+    let running: i64 = tx
+        .query_row(
+            "SELECT COUNT(*) FROM ai_jobs
+             WHERE job_type = 'repo_card' AND target_type = 'repository' AND target_id = ?1 AND status = 'running'",
+            params![repo_id],
+            |row| row.get(0),
+        )
+        .map_err(|error| format!("理解卡重做失败：{error}"))?;
+    if running > 0 {
+        return Err("这一张正在整理中，等它结束再试。".to_owned());
+    }
     let changed = tx
         .execute(
             "UPDATE repo_ai_documents SET card_json = ?1, source_hash = '' WHERE repo_id = ?2",
@@ -349,12 +383,34 @@ pub fn request_regenerate(db_path: &Path, repo_id: &str) -> Result<(), String> {
     if changed == 0 {
         return Err("这个仓库还没有理解卡".to_owned());
     }
-    tx.execute(
-        "INSERT OR IGNORE INTO ai_jobs(id, account_id, job_type, target_type, target_id, priority, status)
-         VALUES (lower(hex(randomblob(8))), ?1, 'repo_card', 'repository', ?2, ?3, 'queued')",
-        params![account_id, repo_id, REGENERATE_PRIORITY],
-    )
-    .map_err(|error| format!("理解卡重做入队失败：{error}"))?;
+    let updated_jobs = tx
+        .execute(
+            "UPDATE ai_jobs
+             SET priority = MIN(priority, ?1),
+                 spend_authorized_until = ?2,
+                 not_before = NULL,
+                 attempts = 0,
+                 error_kind = NULL,
+                 error_message = NULL,
+                 updated_at = ?3
+             WHERE job_type = 'repo_card'
+               AND target_type = 'repository'
+               AND target_id = ?4
+               AND status = 'queued'",
+            params![REGENERATE_PRIORITY, until, now, repo_id],
+        )
+        .map_err(|error| format!("理解卡重做入队失败：{error}"))?;
+    if updated_jobs == 0 {
+        tx.execute(
+            "INSERT INTO ai_jobs(
+                id, account_id, job_type, target_type, target_id, priority, status, spend_authorized_until
+             ) VALUES (
+                lower(hex(randomblob(8))), ?1, 'repo_card', 'repository', ?2, ?3, 'queued', ?4
+             )",
+            params![account_id, repo_id, REGENERATE_PRIORITY, until],
+        )
+        .map_err(|error| format!("理解卡重做入队失败：{error}"))?;
+    }
     tx.commit()
         .map_err(|error| format!("理解卡重做失败：{error}"))?;
     Ok(())
@@ -1981,20 +2037,156 @@ mod tests {
         }
     }
 
+    fn configured_ai() -> Value {
+        json!({ "ai": { "provider": "openai", "model": "fake-model" } })
+    }
+
+    fn write_paused(db: &TempDb, paused: bool) {
+        fs::write(
+            jobs::queue_control_path(db.path()),
+            format!(r#"{{"paused":{paused},"dailyBudgetTokens":0}}"#),
+        )
+        .expect("控制文件应能写入");
+    }
+
+    fn card_pair(conn: &Connection, repo_id: &str) -> (String, String) {
+        (
+            cell_string(
+                conn,
+                &format!("SELECT card_json FROM repo_ai_documents WHERE repo_id = '{repo_id}'"),
+            ),
+            cell_string(
+                conn,
+                &format!("SELECT source_hash FROM repo_ai_documents WHERE repo_id = '{repo_id}'"),
+            ),
+        )
+    }
+
+    fn job_digest(conn: &Connection) -> String {
+        let mut statement = conn
+            .prepare(
+                "SELECT id, target_id, priority, status, attempts, ifnull(not_before, ''),
+                        ifnull(error_kind, ''), ifnull(error_message, ''), ifnull(spend_authorized_until, '')
+                 FROM ai_jobs ORDER BY id",
+            )
+            .expect("任务摘要应能准备");
+        let rows = statement
+            .query_map([], |row| {
+                Ok(format!(
+                    "{}|{}|{}|{}|{}|{}|{}|{}|{}",
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, String>(7)?,
+                    row.get::<_, String>(8)?,
+                ))
+            })
+            .expect("任务摘要应能查询");
+        rows.collect::<Result<Vec<_>, _>>()
+            .expect("任务摘要应能读出")
+            .join("\n")
+    }
+
+    fn auth_window(until: &str, before: &str, after: &str) {
+        let low = jobs::shift_db_time(before, 1800 - 5).expect("下限");
+        let high = jobs::shift_db_time(after, 1800 + 5).expect("上限");
+        assert!(
+            until >= low.as_str() && until <= high.as_str(),
+            "授权到期 {until} 不在 {low} 和 {high} 之间"
+        );
+    }
+
     #[test]
-    fn regenerate_resets_hash_and_enqueues_priority_two() {
-        let db = TempDb::new("regen");
-        let conn = db.open();
-        insert_repo(&conn, "r1", "active");
+    fn one_off_authorization_lasts_thirty_minutes() {
+        // 这是每日额度第二个例外的边界。改它要同时改 AGENTS.md 的说明和任务卡。
+        assert_eq!(ONE_OFF_AUTHORIZATION_SECS, 30 * 60);
+    }
+
+    fn seed_confirmed(conn: &Connection, repo_id: &str) {
+        insert_repo(conn, repo_id, "active");
         insert_card(
-            &conn,
-            "r1",
+            conn,
+            repo_id,
             r#"{"review_status":"confirmed","one_liner_zh":"旧的"}"#,
             2,
             "abc",
         );
+    }
+
+    #[test]
+    fn regenerate_without_confirmation_does_not_touch_the_database() {
+        let db = TempDb::new("regen-unconfirmed");
+        let conn = db.open();
+        seed_confirmed(&conn, "r1");
+        let before_card = card_pair(&conn, "r1");
+        let before_jobs = job_digest(&conn);
         drop(conn);
-        request_regenerate(db.path(), "r1").expect("应能重做");
+        let error =
+            request_regenerate(db.path(), &configured_ai(), "r1", false).expect_err("没确认应拒绝");
+        assert_eq!(
+            error,
+            "重新整理这一张会花 token，需要你在界面上确认之后才能开始。"
+        );
+        let conn = db.open();
+        assert_eq!(card_pair(&conn, "r1"), before_card);
+        assert_eq!(job_digest(&conn), before_jobs);
+        assert_eq!(cell_i64(&conn, "SELECT COUNT(*) FROM ai_jobs"), 0);
+    }
+
+    #[test]
+    fn regenerate_without_ai_provider_does_not_touch_the_database() {
+        let db = TempDb::new("regen-no-ai");
+        let conn = db.open();
+        seed_confirmed(&conn, "r1");
+        let before_card = card_pair(&conn, "r1");
+        let before_jobs = job_digest(&conn);
+        drop(conn);
+        let error =
+            request_regenerate(db.path(), &json!({}), "r1", true).expect_err("没配置应拒绝");
+        assert_eq!(
+            error,
+            "还没配置 AI 服务，先到「设置 → AI 设置」里选好服务商和模型、保存密钥。"
+        );
+        let conn = db.open();
+        assert_eq!(card_pair(&conn, "r1"), before_card);
+        assert_eq!(job_digest(&conn), before_jobs);
+        assert_eq!(cell_i64(&conn, "SELECT COUNT(*) FROM ai_jobs"), 0);
+    }
+
+    #[test]
+    fn regenerate_while_paused_does_not_touch_the_database() {
+        let db = TempDb::new("regen-paused");
+        let conn = db.open();
+        seed_confirmed(&conn, "r1");
+        let before_card = card_pair(&conn, "r1");
+        let before_jobs = job_digest(&conn);
+        drop(conn);
+        write_paused(&db, true);
+        let error =
+            request_regenerate(db.path(), &configured_ai(), "r1", true).expect_err("暂停应拒绝");
+        assert_eq!(
+            error,
+            "自动整理现在是暂停的，先到「自动整理」里恢复，再重新整理这一张。"
+        );
+        let conn = db.open();
+        assert_eq!(card_pair(&conn, "r1"), before_card);
+        assert_eq!(job_digest(&conn), before_jobs);
+        assert_eq!(cell_i64(&conn, "SELECT COUNT(*) FROM ai_jobs"), 0);
+    }
+
+    #[test]
+    fn regenerate_resets_hash_and_enqueues_priority_two() {
+        let db = TempDb::new("regen");
+        let conn = db.open();
+        seed_confirmed(&conn, "r1");
+        drop(conn);
+        let before = jobs::now_db_time();
+        request_regenerate(db.path(), &configured_ai(), "r1", true).expect("应能重做");
+        let after = jobs::now_db_time();
         let conn = db.open();
         let stored = cell_string(
             &conn,
@@ -2017,39 +2209,108 @@ mod tests {
             priority_of(&rows, "r1"),
             Some((REGENERATE_PRIORITY, "queued"))
         );
+        let (attempts, max_attempts, until): (i64, i64, String) = conn
+            .query_row(
+                "SELECT attempts, max_attempts, spend_authorized_until FROM ai_jobs WHERE target_id = 'r1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("任务应能读出");
+        assert_eq!(attempts, 0);
+        assert_eq!(max_attempts, 3);
+        auth_window(&until, &before, &after);
     }
 
     #[test]
-    fn regenerate_keeps_an_existing_active_job() {
-        let db = TempDb::new("regen-dup");
+    fn regenerate_updates_an_existing_queued_job_in_place() {
+        let db = TempDb::new("regen-queued");
         let conn = db.open();
         insert_repo(&conn, "queued", "active");
         insert_card(
             &conn,
             "queued",
-            r#"{"review_status":"suggested","one_liner_zh":"甲"}"#,
-            2,
-            "hash",
-        );
-        insert_repo(&conn, "running", "active");
-        insert_card(
-            &conn,
-            "running",
-            r#"{"review_status":"suggested","one_liner_zh":"乙"}"#,
+            r#"{"review_status":"confirmed","one_liner_zh":"甲"}"#,
             2,
             "hash",
         );
         conn.execute(
-            "INSERT INTO ai_jobs(id, account_id, job_type, target_type, target_id, priority, status)
-             VALUES ('q', 'acct', 'repo_card', 'repository', 'queued', 6, 'queued'),
-                    ('r', 'acct', 'repo_card', 'repository', 'running', 4, 'running')",
+            "INSERT INTO ai_jobs(
+                id, account_id, job_type, target_type, target_id, priority, status,
+                attempts, max_attempts, not_before, error_kind, error_message
+             ) VALUES (
+                'backfill', 'acct', 'repo_card', 'repository', 'queued', 6, 'queued',
+                2, 3, '2026-10-03T18:00:00.000Z', 'timeout', '旧错误'
+             )",
             [],
         )
-        .expect("已有任务应能写入");
+        .expect("补旧账任务应能写入");
         drop(conn);
-        request_regenerate(db.path(), "queued").expect("已有排队任务时仍应成功");
-        request_regenerate(db.path(), "running").expect("已有运行任务时仍应成功");
+        let before = jobs::now_db_time();
+        request_regenerate(db.path(), &configured_ai(), "queued", true).expect("应能原地更新");
+        let after = jobs::now_db_time();
         let conn = db.open();
+        let (
+            id,
+            priority,
+            status,
+            attempts,
+            max_attempts,
+            not_before,
+            error_kind,
+            error_message,
+            until,
+        ): (
+            String,
+            i64,
+            String,
+            i64,
+            i64,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            String,
+        ) = conn
+            .query_row(
+                "SELECT id, priority, status, attempts, max_attempts, not_before, error_kind, error_message, spend_authorized_until
+                 FROM ai_jobs WHERE target_id = 'queued'",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                        row.get(7)?,
+                        row.get(8)?,
+                    ))
+                },
+            )
+            .expect("任务应能读出");
+        assert_eq!(id, "backfill");
+        assert_eq!(priority, REGENERATE_PRIORITY);
+        assert_eq!(status, "queued");
+        assert_eq!(attempts, 0);
+        assert_eq!(max_attempts, 3);
+        assert!(not_before.is_none());
+        assert!(error_kind.is_none());
+        assert!(error_message.is_none());
+        auth_window(&until, &before, &after);
+        assert_eq!(
+            cell_i64(
+                &conn,
+                "SELECT COUNT(*) FROM ai_jobs WHERE target_id = 'queued' AND job_type = 'repo_card' AND status IN ('queued', 'running')"
+            ),
+            1
+        );
+        let stored = cell_string(
+            &conn,
+            "SELECT card_json FROM repo_ai_documents WHERE repo_id = 'queued'",
+        );
+        let parsed: Value = serde_json::from_str(&stored).expect("卡片应能解析");
+        assert_eq!(parsed["review_status"], "suggested");
         assert_eq!(
             cell_string(
                 &conn,
@@ -2057,31 +2318,140 @@ mod tests {
             ),
             ""
         );
+    }
+
+    #[test]
+    fn regenerate_refuses_a_running_job_without_writing() {
+        let db = TempDb::new("regen-running");
+        let conn = db.open();
+        insert_repo(&conn, "running", "active");
+        insert_card(
+            &conn,
+            "running",
+            r#"{"review_status":"confirmed","one_liner_zh":"乙"}"#,
+            2,
+            "hash",
+        );
+        conn.execute(
+            "INSERT INTO ai_jobs(id, account_id, job_type, target_type, target_id, priority, status)
+             VALUES ('r', 'acct', 'repo_card', 'repository', 'running', 4, 'running')",
+            [],
+        )
+        .expect("进行中的任务应能写入");
+        let before_card = card_pair(&conn, "running");
+        let before_jobs = job_digest(&conn);
+        drop(conn);
+        let error = request_regenerate(db.path(), &configured_ai(), "running", true)
+            .expect_err("进行中应拒绝");
+        assert_eq!(error, "这一张正在整理中，等它结束再试。");
+        let conn = db.open();
+        assert_eq!(card_pair(&conn, "running"), before_card);
+        assert_eq!(job_digest(&conn), before_jobs);
         assert_eq!(
             cell_string(
                 &conn,
-                "SELECT source_hash FROM repo_ai_documents WHERE repo_id = 'running'"
+                "SELECT ifnull(spend_authorized_until, '') FROM ai_jobs WHERE id = 'r'"
             ),
             ""
         );
-        let queued_card: Value = serde_json::from_str(&cell_string(
-            &conn,
-            "SELECT card_json FROM repo_ai_documents WHERE repo_id = 'queued'",
-        ))
-        .expect("卡片应能解析");
-        assert_eq!(queued_card["review_status"], "suggested");
-        let rows = job_rows(&conn);
-        assert_eq!(rows.len(), 2);
-        assert_eq!(priority_of(&rows, "queued"), Some((6, "queued")));
-        assert_eq!(priority_of(&rows, "running"), Some((4, "running")));
+        assert_eq!(
+            cell_string(&conn, "SELECT status FROM ai_jobs WHERE id = 'r'"),
+            "running"
+        );
+    }
+
+    #[test]
+    fn regenerate_does_not_authorize_another_repos_job() {
+        let db = TempDb::new("regen-other");
+        let conn = db.open();
+        seed_confirmed(&conn, "mine");
+        seed_confirmed(&conn, "other");
+        conn.execute(
+            "INSERT INTO ai_jobs(id, account_id, job_type, target_type, target_id, priority, status)
+             VALUES ('other-job', 'acct', 'repo_card', 'repository', 'other', 0, 'queued')",
+            [],
+        )
+        .expect("另一个仓库的任务应能写入");
+        drop(conn);
+        request_regenerate(db.path(), &configured_ai(), "mine", true).expect("应能重做这一张");
+        let conn = db.open();
+        let other_until: Option<String> = conn
+            .query_row(
+                "SELECT spend_authorized_until FROM ai_jobs WHERE id = 'other-job'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("另一个任务应还在");
+        assert!(other_until.is_none());
+        let mine_until: Option<String> = conn
+            .query_row(
+                "SELECT spend_authorized_until FROM ai_jobs WHERE target_id = 'mine'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("这一张的任务应已写入");
+        assert!(mine_until.is_some());
+    }
+
+    #[test]
+    fn regenerate_missing_card_does_not_enqueue() {
+        let db = TempDb::new("regen-no-card");
+        let conn = db.open();
+        insert_repo(&conn, "bare", "active");
+        drop(conn);
+        let error = request_regenerate(db.path(), &configured_ai(), "bare", true)
+            .expect_err("没有理解卡应失败");
+        assert_eq!(error, "这个仓库还没有理解卡");
+        assert_eq!(cell_i64(&db.open(), "SELECT COUNT(*) FROM ai_jobs"), 0);
     }
 
     #[test]
     fn regenerate_missing_repo_is_an_error() {
         let db = TempDb::new("regen-missing");
-        let error = request_regenerate(db.path(), "nope").expect_err("不存在的仓库应失败");
+        let error = request_regenerate(db.path(), &configured_ai(), "nope", true)
+            .expect_err("不存在的仓库应失败");
         assert_eq!(error, "找不到这个仓库");
         assert_eq!(cell_i64(&db.open(), "SELECT COUNT(*) FROM ai_jobs"), 0);
+    }
+
+    #[test]
+    fn regenerate_then_claim_next_takes_only_the_authorized_row() {
+        let db = TempDb::new("regen-claim");
+        let conn = db.open();
+        seed_confirmed(&conn, "mine");
+        seed_confirmed(&conn, "other");
+        conn.execute(
+            "INSERT INTO ai_jobs(id, account_id, job_type, target_type, target_id, priority, status)
+             VALUES ('other-job', 'acct', 'repo_card', 'repository', 'other', 0, 'queued')",
+            [],
+        )
+        .expect("没授权的任务应能写入");
+        drop(conn);
+        request_regenerate(db.path(), &configured_ai(), "mine", true).expect("应能重做这一张");
+        let now = jobs::now_db_time();
+        let gate = jobs::BudgetGate {
+            paused: false,
+            daily_budget_tokens: 0,
+            unlimited: false,
+            full_scan_periods: Vec::new(),
+        };
+        let handled = vec![jobs::ClaimCandidate {
+            job_type: "repo_card".to_owned(),
+            spends_tokens: true,
+        }];
+        let mut conn = db.open();
+        let claimed = jobs::claim_next(&mut conn, &now, &handled, &gate)
+            .expect("认领应成功")
+            .expect("预算是 0 时也应领到这一张");
+        assert_eq!(claimed.target_id, "mine");
+        assert_eq!(claimed.reserved, jobs::CLAIM_RESERVE_TOKENS);
+        assert!(jobs::claim_next(&mut conn, &now, &handled, &gate)
+            .expect("第二次认领应成功返回")
+            .is_none());
+        assert_eq!(
+            cell_string(&conn, "SELECT status FROM ai_jobs WHERE id = 'other-job'"),
+            "queued"
+        );
     }
 
     #[test]

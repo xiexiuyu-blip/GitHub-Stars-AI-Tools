@@ -207,7 +207,14 @@ fn call(work: &Path, cmd: &str, args: &serde_json::Value) -> Result<serde_json::
             Ok(Value::Null)
         }
         "regenerate_library_card" => {
-            crate::card_handler::request_regenerate(work, &arg_str(args, "id")?)?;
+            crate::card_handler::request_regenerate(
+                work,
+                &serde_json::json!({"ai": {"provider": "openai", "model": "LongCat-2.0"}}),
+                &arg_str(args, "id")?,
+                args.get("confirmed")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
+            )?;
             Ok(Value::Null)
         }
         "get_repository_detail" => {

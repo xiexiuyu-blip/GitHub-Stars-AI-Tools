@@ -1,28 +1,29 @@
 import { useCallback } from 'react';
 import { useToast } from '@/components/kit';
-import { describeInvokeError, getAiAutomation, regenerateLibraryCard } from '@/lib/api';
-import { regenerateToast } from '@/lib/item-format';
+import { describeInvokeError, regenerateLibraryCard } from '@/lib/api';
+import { regenerateFailureNote, regenerateStartedNote } from '@/lib/item-format';
 
 /**
- * 「不对，请 AI 重写」：把这条收藏排进整理队列，并按自动整理现在的真实状态说清楚会不会真的重写。
- * 说什么由 `regenerateToast` 决定（纯函数，有单测）；没开额度时不许说「整理好会更新」。
- * onOpenToolbox 不传就不给「去开启」按钮。
+ * 「确认，重新整理」之后才调用。命令带 confirmed: true，只开这一张的额度闸。
+ * 只能在用户点了确认条上的「确认，重新整理」之后调用。
+ * onOpenToolbox 不传就不给「去自动整理」按钮。
  */
 export function useRegenerate(onOpenToolbox?: () => void): (id: string) => Promise<void> {
   const toast = useToast();
   return useCallback(async (id: string) => {
     try {
-      await regenerateLibraryCard(id);
+      // 只能在用户点了确认条上的「确认，重新整理」之后调用。
+      await regenerateLibraryCard(id, true);
     } catch (reason) {
-      toast.show({ title: describeInvokeError(reason) });
+      const message = describeInvokeError(reason);
+      const failure = regenerateFailureNote(message);
+      toast.show({
+        title: message,
+        actions: failure.actionLabel && onOpenToolbox ? [{ label: failure.actionLabel, onClick: onOpenToolbox }] : undefined,
+      });
       return;
     }
-    const status = await getAiAutomation().catch(() => null);
-    const note = regenerateToast(status);
-    toast.show({
-      title: note.title,
-      sub: note.sub,
-      actions: note.actionLabel && onOpenToolbox ? [{ label: note.actionLabel, onClick: onOpenToolbox }] : undefined,
-    });
+    const note = regenerateStartedNote();
+    toast.show({ title: note.title, sub: note.sub });
   }, [toast, onOpenToolbox]);
 }

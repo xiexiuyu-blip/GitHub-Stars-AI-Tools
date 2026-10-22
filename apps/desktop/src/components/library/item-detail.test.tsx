@@ -173,6 +173,73 @@ describe('详情：中文说明和它的依据', () => {
   });
 });
 
+describe('详情：重新整理这一张', () => {
+  it('初始渲染没有确认条；没确认过的看到重写入口，确认过的看到重新整理', () => {
+    const suggested = render(make());
+    expect(suggested).not.toContain('data-redo-confirm');
+    expect(textOf(suggested)).toContain('不对，请 AI 重写（会花一点钱）');
+    expect(textOf(suggested)).not.toContain('重新整理这一张');
+
+    const confirmed = render(make({ cardReview: 'confirmed' }));
+    expect(confirmed).not.toContain('data-redo-confirm');
+    expect(textOf(confirmed)).toContain('你确认过了');
+    expect(textOf(confirmed)).toContain('重新整理这一张');
+    expect(textOf(confirmed)).not.toContain('不对，请 AI 重写');
+  });
+
+  it('源码里 props.onRegenerate 只出现在「确认，重新整理」的处理函数里', () => {
+    expect(itemDetailSource.split('props.onRegenerate').length - 1).toBe(1);
+    const callAt = itemDetailSource.indexOf('props.onRegenerate');
+    const buttonStart = itemDetailSource.lastIndexOf('<Button', callAt);
+    const buttonEnd = itemDetailSource.indexOf('</Button>', callAt);
+    const button = itemDetailSource.slice(buttonStart, buttonEnd);
+    expect(button).toContain('data-confirm-redo');
+    expect(button).toContain('confirmLabel');
+    expect(button).toContain('props.onRegenerate()');
+
+    const entry = (label: string) => {
+      const end = itemDetailSource.indexOf(`>${label}</Button>`);
+      expect(end).toBeGreaterThan(-1);
+      const start = itemDetailSource.lastIndexOf('<Button', end);
+      return itemDetailSource.slice(start, end);
+    };
+    const rewrite = entry('不对，请 AI 重写（会花一点钱）');
+    const again = entry('重新整理这一张');
+    expect(rewrite).not.toContain('onRegenerate');
+    expect(again).not.toContain('onRegenerate');
+    expect(rewrite).toContain('setAskingRedo(true)');
+    expect(again).toContain('setAskingRedo(true)');
+  });
+
+  it('点确认先收起确认条，再调用重新整理', () => {
+    const callAt = itemDetailSource.indexOf('props.onRegenerate()');
+    const buttonStart = itemDetailSource.lastIndexOf('<Button', callAt);
+    const buttonEnd = itemDetailSource.indexOf('</Button>', callAt);
+    const button = itemDetailSource.slice(buttonStart, buttonEnd);
+    const closeAt = button.indexOf('setAskingRedo(false)');
+    const regenerateAt = button.indexOf('props.onRegenerate()');
+    expect(closeAt).toBeGreaterThan(-1);
+    expect(regenerateAt).toBeGreaterThan(-1);
+    expect(closeAt).toBeLessThan(regenerateAt);
+  });
+
+  it('「先不了」只收起确认条，不调用重新整理', () => {
+    const end = itemDetailSource.indexOf('{redoCopy.cancelLabel}</Button>');
+    expect(end).toBeGreaterThan(-1);
+    const start = itemDetailSource.lastIndexOf('<Button', end);
+    const button = itemDetailSource.slice(start, end);
+    expect(button).toContain('setAskingRedo(false)');
+    expect(button).not.toContain('onRegenerate');
+    expect(button).not.toContain('setAskingRedo(true)');
+  });
+
+  it('确认文案按有没有点过「对」分支', () => {
+    expect(itemDetailSource).toContain("redoConfirmCopy(detail.cardReview === 'confirmed')");
+    expect(itemDetailSource).not.toContain('redoConfirmCopy(false)');
+    expect(itemDetailSource).not.toContain('redoConfirmCopy(true)');
+  });
+});
+
 describe('详情：页签', () => {
   it('「安装」页签改叫「怎么试」，和概览里「看完整的怎么试」对得上', () => {
     const html = render(make());

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { AutomationStatus } from './automation-view';
+import { formatTokens } from './automation-view';
 import {
   applyReadingOverrides,
   assembleWeekGroups,
@@ -32,8 +32,12 @@ import {
   readmeBasisLabel,
   readmeTabLabel,
   readingGroupLabel,
-  regenerateToast,
+  redoConfirmCopy,
+  regenerateFailureNote,
+  regenerateStartedNote,
   relativeDays,
+  SINGLE_REDO_ESTIMATE_TOKENS,
+  SINGLE_REDO_EXTRA_TRIES,
   splitRepoName,
   todayEmptyCopy,
   WEEK_NEW_LABEL,
@@ -581,62 +585,44 @@ describe('复制给 Codex 之后的提示（按钮上的字见详情页和发现
   });
 });
 
-describe('regenerateToast：点「不对，请 AI 重写」之后的提示', () => {
-  function status(overrides: Partial<AutomationStatus> = {}): AutomationStatus {
-    return {
-      enabled: true,
-      dailyBudgetTokens: 100_000,
-      paused: false,
-      pauseReason: null,
-      tokens24h: 0,
-      budgetRemaining: 100_000,
-      queued: 0,
-      running: 0,
-      failed: 0,
-      providerConfigured: true,
-      model: 'gpt-x',
-      ...overrides,
-    };
-  }
+describe('重新整理这一张：确认文案', () => {
+  const baseBody = `让 AI 重新读一遍这个工具的项目说明，写一份新的中文说明，大约花 ${formatTokens(SINGLE_REDO_ESTIMATE_TOKENS)} token。失败了会自动再试，最多再试 ${SINGLE_REDO_EXTRA_TRIES} 次，每次试都可能再花一点。`;
 
-  it('自动整理没开：说清已记下但不会重写，开启后才会重写，保留「去开启」', () => {
-    expect(regenerateToast(status({ enabled: false, dailyBudgetTokens: 0, budgetRemaining: 0 }))).toEqual({
-      title: '已记下，但自动整理没开，不会重写。',
-      sub: '开启后才会重写。',
-      actionLabel: '去开启',
+  it('还没点过「对」：标题、正文里的数字等于常量、两个按钮', () => {
+    const copy = redoConfirmCopy(false);
+    expect(copy.title).toBe('重新整理这一张？');
+    expect(copy.confirmLabel).toBe('确认，重新整理');
+    expect(copy.cancelLabel).toBe('先不了');
+    expect(copy.body).toBe(baseBody);
+    expect(copy.body).toContain('1 万');
+    expect(copy.body).toContain('2 次');
+    expect(copy.body).toContain(formatTokens(SINGLE_REDO_ESTIMATE_TOKENS));
+    expect(copy.body).toContain(String(SINGLE_REDO_EXTRA_TRIES));
+    expect(copy.body).not.toContain('你之前点过');
+    expect(SINGLE_REDO_ESTIMATE_TOKENS).toBe(10_000);
+    expect(SINGLE_REDO_EXTRA_TRIES).toBe(2);
+  });
+
+  it('点过「对」才加上需要再看一眼那一句', () => {
+    const copy = redoConfirmCopy(true);
+    expect(copy.title).toBe('重新整理这一张？');
+    expect(copy.confirmLabel).toBe('确认，重新整理');
+    expect(copy.cancelLabel).toBe('先不了');
+    expect(copy.body.startsWith(baseBody)).toBe(true);
+    expect(copy.body).toContain('你之前点过「对」，重新整理后会换成新的说明，需要你再看一眼。');
+  });
+
+  it('开始之后的提示', () => {
+    expect(regenerateStartedNote()).toEqual({
+      title: '已开始重新整理这一张',
+      sub: '一般一两分钟。好了以后重新打开这一张，就能看到新的说明。',
     });
   });
 
-  it('没开的时候不许说「会在后台重新整理」「好了会自动更新」（那是不会兑现的承诺）', () => {
-    const note = regenerateToast(status({ enabled: false }));
-    expect(`${note.title}${note.sub}`).not.toContain('后台重新整理');
-    expect(`${note.title}${note.sub}`).not.toContain('自动更新');
-  });
-
-  it('没配置服务 / 暂停 / 一次性全部整理，开关关着也各说各的，不套用「没开」那句', () => {
-    expect(regenerateToast(status({ providerConfigured: false, enabled: false }))).toEqual({
-      title: '已加入整理队列',
-      sub: '还没配置 AI 服务，配置好才会重新整理',
-      actionLabel: '去设置 AI',
-    });
-    const paused = regenerateToast(status({ paused: true, enabled: false }));
-    expect(paused.title).toBe('已加入整理队列');
-    expect(paused.sub).toContain('暂停');
-    expect(paused.actionLabel).toBe('继续整理');
-    const fullScan = regenerateToast(status({ unlimited: true, enabled: false }));
-    expect(fullScan.title).toBe('已加入整理队列');
-    expect(fullScan.sub).toBe('「现在整理」进行中，会在后台重新整理，好了会自动更新');
-    expect(fullScan.actionLabel).toBeNull();
-  });
-
-  it('开着的时候照原来的提示：读不到状态只说已加入；额度用完说明过一阵继续和现在整理入口；正常在跑说会在后台重新整理', () => {
-    expect(regenerateToast(null)).toEqual({ title: '已加入整理队列', actionLabel: null });
-    expect(regenerateToast(status({ budgetRemaining: 0 })).sub).toBe('每天自动整理的额度用完了，过一阵会接着整理，也可以到「设置 → 自动整理与备份」点「现在整理」');
-    expect(regenerateToast(status({ queued: 2 }))).toEqual({
-      title: '已加入整理队列',
-      sub: '会在后台重新整理，好了会自动更新',
-      actionLabel: null,
-    });
+  it('失败提示：暂停和没配置 AI 才有「去自动整理」，正在整理中没有', () => {
+    expect(regenerateFailureNote('自动整理现在是暂停的，先到「自动整理」里恢复，再重新整理这一张。').actionLabel).toBe('去自动整理');
+    expect(regenerateFailureNote('还没配置 AI 服务，先到「设置 → AI 设置」里选好服务商和模型、保存密钥。').actionLabel).toBe('去自动整理');
+    expect(regenerateFailureNote('这一张正在整理中，等它结束再试。').actionLabel).toBeNull();
   });
 });
 

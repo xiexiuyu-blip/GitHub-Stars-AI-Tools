@@ -159,8 +159,8 @@ export function confirmLibraryCard(id: string): Promise<null> {
   return call<null>('confirm_library_card', { id });
 }
 
-export function regenerateLibraryCard(id: string): Promise<null> {
-  return call<null>('regenerate_library_card', { id });
+export function regenerateLibraryCard(id: string, confirmed: boolean): Promise<null> {
+  return call<null>('regenerate_library_card', { id, confirmed });
 }
 
 export function commitCaptureBatch(text: string, sourceContext: string): Promise<CaptureCommit> {

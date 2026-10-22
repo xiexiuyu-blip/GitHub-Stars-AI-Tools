@@ -6,8 +6,12 @@
 //! 后一次认领一定看得见前一次的预留；任务结束时预留换成真实用量（失败按种类记）。
 //! 取消、崩溃、被打断的任务保留预留，账不会消失。旧版 AI 功能不走队列，由 `spend_guard` 记进同一本账。
 //!
-//! 唯一的例外是「全量整理」（`fullScan`）：Fox 亲手点了确认之后，这一轮不看每天额度，一直整理到全部完成，
+//! 「全量整理」（`fullScan`）是整轮例外：Fox 亲手点了确认之后，这一轮不看每天额度，一直整理到全部完成，
 //! 最长 `FULL_SCAN_SECS`（48 小时），之后自动回到每天额度。用量照常记账；用量超过「预计 × 4」的刹车线也会自动结束。
+//!
+//! 「重新整理这一张」是另一处例外，只作用在一行上：Fox 在详情页确认之后，这一张 `repo_card` 的
+//! `spend_authorized_until` 还没过期时，认领可以不看每天额度。别的行照旧。暂停照样拦。
+//! 授权写在任务行上，不进控制文件，也不是全局开关。
 //!
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
@@ -382,11 +386,50 @@ const ORDER_WITHIN_PRIORITY: &str = "CASE WHEN ai_jobs.target_type = 'repository
     IFNULL((SELECT r.starred_at FROM repositories r WHERE ai_jobs.target_type = 'repository' AND r.id = ai_jobs.target_id), '') DESC,
     ai_jobs.created_at ASC, ai_jobs.id ASC";
 
+/// 直接可领的类型照旧 `job_type IN (...)`。需授权的类型还要这一行的到期时间没过。
+/// 某一组为空就不写空的 `IN ()`（那句 SQL 不合法），效果和「这一组不参与」一样。
+fn append_job_type_clause(
+    sql: &mut String,
+    bound: &mut Vec<String>,
+    direct: &[&str],
+    needs_auth: &[&str],
+    now: &str,
+) {
+    fn push_in(sql: &mut String, bound: &mut Vec<String>, types: &[&str]) {
+        sql.push_str("job_type IN (");
+        for (index, job_type) in types.iter().enumerate() {
+            if index > 0 {
+                sql.push_str(", ");
+            }
+            sql.push('?');
+            bound.push((*job_type).to_owned());
+        }
+        sql.push(')');
+    }
+    if needs_auth.is_empty() {
+        push_in(sql, bound, direct);
+        return;
+    }
+    sql.push('(');
+    if direct.is_empty() {
+        push_in(sql, bound, needs_auth);
+        sql.push_str(" AND spend_authorized_until IS NOT NULL AND spend_authorized_until >= ?)");
+    } else {
+        push_in(sql, bound, direct);
+        sql.push_str(" OR (");
+        push_in(sql, bound, needs_auth);
+        sql.push_str(" AND spend_authorized_until IS NOT NULL AND spend_authorized_until >= ?))");
+    }
+    bound.push(now.to_owned());
+}
+
 /// 在一个 `BEGIN IMMEDIATE` 里认领下一条任务，两个连接不会领到同一条。
 ///
-/// 暂停时一条都不领，包括不花钱的任务。花钱的任务还要预算大于 0，且最近 24 小时
-/// 已结束任务的 token 之和小于预算。窗口含正好 24 小时前的那一刻（`finished_at >= now-24h`），
-/// 更早的不计入。
+/// 暂停时一条都不领，包括不花钱的任务，也包括带着单张授权的任务。花钱的任务还要预算大于 0，
+/// 且最近 24 小时已结束任务的 token 之和加上这一条的预留放得进额度。窗口含正好 24 小时前的那一刻
+/// （`finished_at >= now-24h`），更早的不计入。预算关着时，花钱的任务不整类丢掉：
+/// `spend_authorized_until` 还没过期的那一行仍可领，并且照样记 `CLAIM_RESERVE_TOKENS`。
+/// 没授权、或授权已过期的，继续不领。
 pub fn claim_next(
     conn: &mut Connection,
     now: &str,
@@ -406,19 +449,25 @@ pub fn claim_next(
         || (budget_gate.daily_budget_tokens > 0
             && (used as u64).saturating_add(CLAIM_RESERVE_TOKENS as u64)
                 <= budget_gate.daily_budget_tokens);
-    let mut eligible: Vec<&str> = Vec::new();
+    // 预算关着时，花钱的类型放进「需授权」：只有这一行的到期时间还没过才领。
+    // 不花钱的、以及预算开着的花钱类型，放进「直接可领」。两组都空才提前返回。
+    let mut direct: Vec<&str> = Vec::new();
+    let mut needs_auth: Vec<&str> = Vec::new();
     for candidate in handled_types {
         if candidate.job_type.is_empty() {
             continue;
         }
-        if candidate.spends_tokens && !spending_open {
-            continue;
-        }
-        if !eligible.contains(&candidate.job_type.as_str()) {
-            eligible.push(candidate.job_type.as_str());
+        let name = candidate.job_type.as_str();
+        if !candidate.spends_tokens || spending_open {
+            if !direct.contains(&name) {
+                direct.push(name);
+            }
+            needs_auth.retain(|item| *item != name);
+        } else if !direct.contains(&name) && !needs_auth.contains(&name) {
+            needs_auth.push(name);
         }
     }
-    if eligible.is_empty() {
+    if direct.is_empty() && needs_auth.is_empty() {
         tx.commit()
             .map_err(|error| format!("任务认领失败：{error}"))?;
         return Ok(None);
@@ -429,23 +478,14 @@ pub fn claim_next(
          FROM ai_jobs
          WHERE status = 'queued'
            AND (not_before IS NULL OR not_before <= ?)
-           AND job_type IN (",
+           AND ",
     );
-    sql.push_str(
-        &std::iter::repeat("?")
-            .take(eligible.len())
-            .collect::<Vec<_>>()
-            .join(", "),
-    );
-    sql.push_str(") ORDER BY MIN(ai_jobs.priority, 5) ASC, ");
+    let mut bound: Vec<String> = Vec::new();
+    bound.push(now.to_owned());
+    append_job_type_clause(&mut sql, &mut bound, &direct, &needs_auth, now);
+    sql.push_str(" ORDER BY MIN(ai_jobs.priority, 5) ASC, ");
     sql.push_str(ORDER_WITHIN_PRIORITY);
     sql.push_str(" LIMIT 1");
-
-    let mut bound: Vec<String> = Vec::with_capacity(1 + eligible.len());
-    bound.push(now.to_owned());
-    for job_type in &eligible {
-        bound.push((*job_type).to_owned());
-    }
     let selected = {
         let mut statement = tx
             .prepare(&sql)
@@ -2500,6 +2540,206 @@ mod tests {
         assert!(claim_one(&mut conn, &free_and_spend(), &gate(true, 1_000_000)).is_none());
         assert_eq!(snap(&conn, "spend").status, "queued");
         assert_eq!(snap(&conn, "free").status, "queued");
+    }
+
+    fn authorize(conn: &Connection, id: &str, until: &str) {
+        conn.execute(
+            "UPDATE ai_jobs SET spend_authorized_until = ?1 WHERE id = ?2",
+            params![until, id],
+        )
+        .unwrap();
+    }
+
+    fn spend_only() -> Vec<ClaimCandidate> {
+        vec![ClaimCandidate {
+            job_type: "repo_card".to_owned(),
+            spends_tokens: true,
+        }]
+    }
+
+    #[test]
+    fn zero_budget_claims_a_spend_job_with_a_live_authorization() {
+        let db = TestDb::new("auth-live");
+        let conn = db.conn();
+        insert_job(
+            &conn,
+            "spend",
+            "repo_card",
+            5,
+            "2026-10-03T08:00:00.000Z",
+            None,
+            "queued",
+        );
+        authorize(&conn, "spend", &shift_db_time(NOW, 1800).unwrap());
+        drop(conn);
+        let mut conn = db.conn();
+        let record = claim_one(&mut conn, &spend_only(), &gate(false, 0)).unwrap();
+        assert_eq!(record.id, "spend");
+        assert_eq!(record.reserved, CLAIM_RESERVE_TOKENS);
+        assert_eq!(snap(&conn, "spend").status, "running");
+    }
+
+    #[test]
+    fn expired_authorization_is_not_claimed() {
+        let db = TestDb::new("auth-expired");
+        let conn = db.conn();
+        insert_job(
+            &conn,
+            "spend",
+            "repo_card",
+            0,
+            "2026-10-03T08:00:00.000Z",
+            None,
+            "queued",
+        );
+        authorize(&conn, "spend", &shift_db_time(NOW, -1).unwrap());
+        drop(conn);
+        let mut conn = db.conn();
+        assert!(claim_one(&mut conn, &spend_only(), &gate(false, 0)).is_none());
+        assert_eq!(snap(&conn, "spend").status, "queued");
+    }
+
+    #[test]
+    fn authorization_at_exactly_now_is_claimed() {
+        let db = TestDb::new("auth-exact");
+        let conn = db.conn();
+        insert_job(
+            &conn,
+            "spend",
+            "repo_card",
+            0,
+            "2026-10-03T08:00:00.000Z",
+            None,
+            "queued",
+        );
+        authorize(&conn, "spend", NOW);
+        drop(conn);
+        let mut conn = db.conn();
+        let record = claim_one(&mut conn, &spend_only(), &gate(false, 0)).unwrap();
+        assert_eq!(record.id, "spend");
+        assert_eq!(snap(&conn, "spend").status, "running");
+    }
+
+    #[test]
+    fn paused_gate_skips_an_authorized_spend_job() {
+        let db = TestDb::new("auth-paused");
+        let conn = db.conn();
+        insert_job(
+            &conn,
+            "spend",
+            "repo_card",
+            0,
+            "2026-10-03T08:00:00.000Z",
+            None,
+            "queued",
+        );
+        authorize(&conn, "spend", &shift_db_time(NOW, 1800).unwrap());
+        drop(conn);
+        let mut conn = db.conn();
+        assert!(claim_one(&mut conn, &spend_only(), &gate(true, 0)).is_none());
+        assert_eq!(snap(&conn, "spend").status, "queued");
+    }
+
+    #[test]
+    fn zero_budget_claims_only_the_authorized_row() {
+        let db = TestDb::new("auth-only-one");
+        let conn = db.conn();
+        insert_job(
+            &conn,
+            "old-higher",
+            "repo_card",
+            0,
+            "2026-10-03T08:00:00.000Z",
+            None,
+            "queued",
+        );
+        insert_job(
+            &conn,
+            "authorized",
+            "repo_card",
+            6,
+            "2026-10-03T09:00:00.000Z",
+            None,
+            "queued",
+        );
+        authorize(&conn, "authorized", &shift_db_time(NOW, 1800).unwrap());
+        drop(conn);
+        let mut conn = db.conn();
+        let first = claim_one(&mut conn, &spend_only(), &gate(false, 0)).unwrap();
+        assert_eq!(first.id, "authorized");
+        assert!(claim_one(&mut conn, &spend_only(), &gate(false, 0)).is_none());
+        assert_eq!(snap(&conn, "old-higher").status, "queued");
+    }
+
+    #[test]
+    fn a_full_daily_budget_still_claims_only_the_authorized_job() {
+        let db = TestDb::new("auth-full-budget");
+        let conn = db.conn();
+        conn.execute(
+            "INSERT INTO ai_jobs(id, account_id, job_type, target_type, target_id, status, input_tokens, output_tokens, finished_at, created_at)
+             VALUES ('used', 'acct', 'repo_card', 'repository', 'used', 'succeeded', 50000, 0, ?1, ?1)",
+            [NOW],
+        )
+        .unwrap();
+        insert_job(
+            &conn,
+            "plain",
+            "repo_card",
+            0,
+            "2026-10-03T08:00:00.000Z",
+            None,
+            "queued",
+        );
+        insert_job(
+            &conn,
+            "authorized",
+            "repo_card",
+            6,
+            "2026-10-03T09:00:00.000Z",
+            None,
+            "queued",
+        );
+        authorize(&conn, "authorized", &shift_db_time(NOW, 1800).unwrap());
+        drop(conn);
+        let mut conn = db.conn();
+        let gate = gate(false, 50_000);
+        let first = claim_one(&mut conn, &spend_only(), &gate).unwrap();
+        assert_eq!(first.id, "authorized");
+        assert_eq!(first.reserved, CLAIM_RESERVE_TOKENS);
+        assert!(claim_one(&mut conn, &spend_only(), &gate).is_none());
+        assert_eq!(snap(&conn, "plain").status, "queued");
+    }
+
+    #[test]
+    fn authorization_does_not_skip_not_before_and_free_jobs_still_claim() {
+        let db = TestDb::new("auth-not-before");
+        let conn = db.conn();
+        insert_job(
+            &conn,
+            "later",
+            "repo_card",
+            0,
+            "2026-10-03T08:00:00.000Z",
+            Some("2026-10-03T12:00:00.001Z"),
+            "queued",
+        );
+        authorize(&conn, "later", &shift_db_time(NOW, 1800).unwrap());
+        insert_job(
+            &conn,
+            "free",
+            "categorize",
+            5,
+            "2026-10-03T09:00:00.000Z",
+            None,
+            "queued",
+        );
+        drop(conn);
+        let mut conn = db.conn();
+        let first = claim_one(&mut conn, &free_and_spend(), &gate(false, 0)).unwrap();
+        assert_eq!(first.id, "free");
+        assert_eq!(first.reserved, 0);
+        assert!(claim_one(&mut conn, &free_and_spend(), &gate(false, 0)).is_none());
+        assert_eq!(snap(&conn, "later").status, "queued");
     }
 
     #[test]

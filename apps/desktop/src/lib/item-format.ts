@@ -1,5 +1,5 @@
 import type { ReadingGroup } from '@/lib/contracts';
-import { regenerateNote, type AutomationStatus, type RegenerateNote } from '@/lib/automation-view';
+import { formatTokens } from '@/lib/automation-view';
 
 const READING_LABEL: Record<ReadingGroup, string> = {
   unseen: '没看',
@@ -386,17 +386,46 @@ export function copiedNotice(kind: CopyKind): string {
   return COPIED_NOTICE[kind];
 }
 
-/**
- * 「不对，请 AI 重写」点完之后的提示。
- * 自动整理没开（服务商配好了、没暂停、也不是一次性全部整理，只是开关关着）时，说清「不会重写」，并保留「去开启」；
- * 其余情况照 regenerateNote。
- */
-export function regenerateToast(status: AutomationStatus | null): RegenerateNote {
-  const note = regenerateNote(status);
-  if (status && status.providerConfigured && !status.paused && status.unlimited !== true && !status.enabled) {
-    return { title: '已记下，但自动整理没开，不会重写。', sub: '开启后才会重写。', actionLabel: note.actionLabel };
+/** 重新整理这一张大约花多少 token。确认条文案里的数字从这里来。 */
+export const SINGLE_REDO_ESTIMATE_TOKENS = 10_000;
+/** 失败之后最多再试几次。确认条文案里的数字从这里来。 */
+export const SINGLE_REDO_EXTRA_TRIES = 2;
+
+/** 点「不对，请 AI 重写」或「重新整理这一张」之后展开的确认条。还没花钱。 */
+export function redoConfirmCopy(wasConfirmed: boolean): {
+  title: string;
+  body: string;
+  confirmLabel: string;
+  cancelLabel: string;
+} {
+  const estimate = formatTokens(SINGLE_REDO_ESTIMATE_TOKENS);
+  const extra = String(SINGLE_REDO_EXTRA_TRIES);
+  let body = `让 AI 重新读一遍这个工具的项目说明，写一份新的中文说明，大约花 ${estimate} token。失败了会自动再试，最多再试 ${extra} 次，每次试都可能再花一点。`;
+  if (wasConfirmed) {
+    body += '你之前点过「对」，重新整理后会换成新的说明，需要你再看一眼。';
   }
-  return note;
+  return {
+    title: '重新整理这一张？',
+    body,
+    confirmLabel: '确认，重新整理',
+    cancelLabel: '先不了',
+  };
+}
+
+/** 点了确认、命令已经收下之后的提示。 */
+export function regenerateStartedNote(): { title: string; sub: string } {
+  return {
+    title: '已开始重新整理这一张',
+    sub: '一般一两分钟。好了以后重新打开这一张，就能看到新的说明。',
+  };
+}
+
+/** 命令拒绝时，暂停或没配置 AI 才给「去自动整理」；其它失败不带按钮。 */
+export function regenerateFailureNote(message: string): { actionLabel: string | null } {
+  if (message.includes('暂停') || message.includes('还没配置 AI')) {
+    return { actionLabel: '去自动整理' };
+  }
+  return { actionLabel: null };
 }
 
 export function applyReadingOverrides<T extends { id: string; readingGroup: string }>(
