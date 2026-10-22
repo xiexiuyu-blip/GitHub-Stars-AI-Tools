@@ -69,6 +69,13 @@ describe('api 命令名和参数', () => {
     expect(calls).toEqual([{ command: 'list_library_view', args: { filters } }]);
   });
 
+  it('listLibraryView 的参数原样带上 maintenance', async () => {
+    const calls = installInvoke();
+    const filters = { cardState: 'all' as const, maintenance: 'stale' as const, limit: 1 };
+    await listLibraryView(filters);
+    expect(calls).toEqual([{ command: 'list_library_view', args: { filters } }]);
+  });
+
   it('getLibraryDetail 传 { id }', async () => {
     const calls = installInvoke();
     await getLibraryDetail('repo-1');

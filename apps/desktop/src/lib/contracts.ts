@@ -6,6 +6,9 @@
  * 命令名与参数写在每个类型上方的注释里。
  */
 
+/** 维护状态。按最近推送距今多久：active 活跃（≤ 90 天）、slow 放缓（> 90 天且 ≤ 365 天）、stale 疑似停更（> 365 天）。没有推送时间是 null，不算任何一档。 */
+export type MaintenanceTier = 'active' | 'slow' | 'stale';
+
 /** 「我的状态」五档。库里存的是上游的 8 个状态值，按组归并：
  *  unseen = unread + later；want = want_to_try + watching；tried = tried + read；in_use = in_use；dropped = deprecated。
  *  界面上五档的中文：没看 / 想试 / 试过 / 在用 / 不要了。 */
@@ -30,6 +33,8 @@ export type LibraryFilters = {
   /** done = 已有理解卡（卡片一句话非空）；pending = 还没有；all = 不筛。默认 done */
   cardState?: 'done' | 'pending' | 'all';
   form?: string | null;
+  /** 不传 = 不筛。active / slow / stale 三档互斥。 */
+  maintenance?: MaintenanceTier | null;
   keyword?: string;
   /** starred = 按收藏时间新到旧（默认）；stars = 按星数；updated = 按最近更新；relevance = 按相关度（有关键词时用） */
   sort?: 'starred' | 'stars' | 'updated' | 'relevance';
@@ -77,6 +82,8 @@ export type LibraryCounts = {
   /** 已整理 / 整理中的数量；按其他筛选条件算，不按卡片状态本身算 */
   cardState: { done: number; pending: number };
   forms: Record<string, number>;
+  /** 活跃 / 放缓 / 疑似停更的个数。按其他筛选算，不按自己算；没有推送时间的不计。 */
+  maintenance: { active: number; slow: number; stale: number };
 };
 
 export type LibraryPage = {

@@ -1,7 +1,8 @@
+import { isValidElement, type ReactElement, type ReactNode } from 'react';
 import { describe, expect, it } from 'vitest';
 import { renderToStaticMarkup } from 'react-dom/server';
 import type { ReadingGroup } from '@/lib/contracts';
-import { formOptions, type ScenarioFilterRow } from '@/lib/library-filters';
+import { formOptions, maintenanceOptions, type ScenarioFilterRow } from '@/lib/library-filters';
 import { FilterPanel } from './filter-panel';
 import { ThinTag } from './thin-tag';
 
@@ -22,13 +23,16 @@ function render(scenarios: ScenarioFilterRow[]): string {
       scenarioStatus="ready"
       readingCounts={READING}
       forms={formOptions({ skill: 3, cli: 2, app: 1 })}
+      maintenance={[]}
       countsKnown
       scenario={null}
       reading={null}
       form={null}
+      maintenanceTier={null}
       onScenario={() => {}}
       onReading={() => {}}
       onForm={() => {}}
+      onMaintenance={() => {}}
     />,
   );
 }
@@ -136,5 +140,100 @@ describe('资料库左栏：分组名和类型', () => {
     const text = textOf(render([]));
     expect(text.indexOf('场景')).toBeLessThan(text.indexOf('我的状态'));
     expect(text.indexOf('我的状态')).toBeLessThan(text.indexOf('类型'));
+  });
+});
+
+function walk(node: ReactNode, visit: (el: ReactElement<unknown>) => void): void {
+  if (node == null || typeof node === 'boolean' || typeof node === 'string' || typeof node === 'number') return;
+  if (Array.isArray(node)) {
+    for (const child of node) walk(child, visit);
+    return;
+  }
+  if (!isValidElement(node) || !('type' in node)) return;
+  const element = node as ReactElement<unknown>;
+  if (typeof element.type === 'function') {
+    walk((element.type as (props: unknown) => ReactNode)(element.props), visit);
+    return;
+  }
+  visit(element);
+  walk((element.props as { children?: ReactNode } | null)?.children, visit);
+}
+
+function hostText(node: ReactNode): string {
+  if (node == null || typeof node === 'boolean') return '';
+  if (typeof node === 'string' || typeof node === 'number') return String(node);
+  if (Array.isArray(node)) return node.map(hostText).join('');
+  if (!isValidElement(node)) return '';
+  if (typeof node.type === 'function') return hostText((node.type as (props: unknown) => ReactNode)(node.props));
+  return hostText((node.props as { children?: ReactNode }).children);
+}
+
+describe('资料库左栏：维护状态', () => {
+  it('有分组、三项和个数，选中能点，个数为 0 的淡一点，个数未知显示省略号，悬停是门槛说明', () => {
+    const calls: string[] = [];
+    const rows = maintenanceOptions({ active: 0, slow: 0, stale: 2 });
+    const element = (
+      <FilterPanel
+        scenarios={[]}
+        scenarioStatus="ready"
+        readingCounts={READING}
+        forms={[]}
+        maintenance={rows}
+        countsKnown
+        scenario={null}
+        reading={null}
+        form={null}
+        maintenanceTier="slow"
+        onScenario={() => {}}
+        onReading={() => {}}
+        onForm={() => {}}
+        onMaintenance={(tier) => calls.push(tier)}
+      />
+    );
+    const html = renderToStaticMarkup(element);
+    const text = textOf(html);
+    expect(text.indexOf('类型')).toBeLessThan(text.indexOf('维护状态'));
+    expect(text.indexOf('活跃')).toBeLessThan(text.indexOf('放缓'));
+    expect(text.indexOf('放缓')).toBeLessThan(text.indexOf('疑似停更'));
+    expect(textOf(rowOf(html, '活跃'))).toBe('活跃 0');
+    expect(textOf(rowOf(html, '放缓'))).toBe('放缓 0');
+    expect(textOf(rowOf(html, '疑似停更'))).toBe('疑似停更 2');
+    expect(rowOf(html, '放缓')).toContain('aria-pressed="true"');
+    expect(rowOf(html, '活跃')).toContain('aria-pressed="false"');
+    expect(rowOf(html, '活跃')).toContain('title="最近 3 个月内有更新"');
+    expect(rowOf(html, '放缓')).toContain('title="3 到 12 个月没有更新"');
+    expect(rowOf(html, '疑似停更')).toContain('title="超过 1 年没有更新，可能已经不维护了"');
+    expect(rowOf(html, '活跃')).toContain('opacity-50');
+    expect(rowOf(html, '放缓')).not.toContain('opacity-50');
+
+    const buttons: ReactElement<unknown>[] = [];
+    walk(element, (el) => {
+      if (el.type === 'button') buttons.push(el);
+    });
+    const active = buttons.find((button) => hostText(button).includes('活跃'));
+    const stale = buttons.find((button) => hostText(button).includes('疑似停更'));
+    (active?.props as { onClick?: () => void } | null)?.onClick?.();
+    (stale?.props as { onClick?: () => void } | null)?.onClick?.();
+    expect(calls).toEqual(['active', 'stale']);
+
+    const unknown = renderToStaticMarkup(
+      <FilterPanel
+        scenarios={[]}
+        scenarioStatus="ready"
+        readingCounts={READING}
+        forms={[]}
+        maintenance={rows}
+        countsKnown={false}
+        scenario={null}
+        reading={null}
+        form={null}
+        maintenanceTier={null}
+        onScenario={() => {}}
+        onReading={() => {}}
+        onForm={() => {}}
+        onMaintenance={() => {}}
+      />,
+    );
+    expect(textOf(rowOf(unknown, '疑似停更'))).toBe('疑似停更 …');
   });
 });

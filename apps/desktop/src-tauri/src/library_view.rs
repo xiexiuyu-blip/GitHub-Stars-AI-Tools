@@ -11,6 +11,8 @@ use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 use std::time::Duration;
+use time::format_description::well_known::Rfc3339;
+use time::OffsetDateTime;
 
 const CORE_SORT_MAX: i64 = 7;
 const NON_CORE_RANK: i64 = 99;
@@ -54,6 +56,49 @@ macro_rules! keyword_term {
 /// 最多支持几个关键词词项（超出的忽略）。
 const MAX_KEYWORD_TERMS: usize = 4;
 
+/// 活跃：距今不超过这么多天（含正好等于，也含比现在还晚的时钟误差）。
+const MAINTENANCE_ACTIVE_DAYS: i64 = 90;
+/// 疑似停更：距今超过这么多天。放缓是两者之间（含正好等于这一天）。
+const MAINTENANCE_STALE_DAYS: i64 = 365;
+/// 一天的秒数。门槛用「天数 × 这个数」绑进 SQL，语句里不写 90 / 365。
+const SECONDS_PER_DAY: i64 = 86400;
+
+/// 最近推送能解析成整数秒，并且距 `:now` 不超过活跃门槛。解析不了的不算。
+macro_rules! is_active {
+    () => {
+        concat!(
+            "CAST(strftime('%s', r.pushed_at) AS INTEGER) IS NOT NULL AND ",
+            "(CAST(strftime('%s', :now) AS INTEGER) - CAST(strftime('%s', r.pushed_at) AS INTEGER)) <= :active_secs"
+        )
+    };
+}
+
+/// 超过活跃门槛，并且不超过停更门槛。
+macro_rules! is_slow {
+    () => {
+        concat!(
+            "CAST(strftime('%s', r.pushed_at) AS INTEGER) IS NOT NULL AND ",
+            "(CAST(strftime('%s', :now) AS INTEGER) - CAST(strftime('%s', r.pushed_at) AS INTEGER)) > :active_secs AND ",
+            "(CAST(strftime('%s', :now) AS INTEGER) - CAST(strftime('%s', r.pushed_at) AS INTEGER)) <= :stale_secs"
+        )
+    };
+}
+
+/// 超过停更门槛。没有推送时间、空白、解析不了的都不算。
+macro_rules! is_stale {
+    () => {
+        concat!(
+            "CAST(strftime('%s', r.pushed_at) AS INTEGER) IS NOT NULL AND ",
+            "(CAST(strftime('%s', :now) AS INTEGER) - CAST(strftime('%s', r.pushed_at) AS INTEGER)) > :stale_secs"
+        )
+    };
+}
+
+/// 计数和筛选共用这一份，避免两边门槛各写各的。
+const IS_ACTIVE: &str = is_active!();
+const IS_SLOW: &str = is_slow!();
+const IS_STALE: &str = is_stale!();
+
 const FILTER_WHERE: &str = concat!(
     r#"
 r.sync_status = 'active'
@@ -91,6 +136,18 @@ AND (
     END
   ) = :form
 )
+AND (
+  :maintenance = ''
+  OR (:maintenance = 'active' AND "#,
+    is_active!(),
+    r#")
+  OR (:maintenance = 'slow' AND "#,
+    is_slow!(),
+    r#")
+  OR (:maintenance = 'stale' AND "#,
+    is_stale!(),
+    r#")
+)
 "#,
     keyword_term!(":pattern"),
     keyword_term!(":pattern1"),
@@ -127,6 +184,9 @@ pub struct LibraryFilters {
     pub card_state: Option<String>,
     #[serde(default)]
     pub form: Option<String>,
+    /// `active` / `slow` / `stale`。空、缺省 = 不筛。
+    #[serde(default)]
+    pub maintenance: Option<String>,
     #[serde(default)]
     pub keyword: Option<String>,
     #[serde(default)]
@@ -182,6 +242,15 @@ pub struct CardStateCounts {
     pub pending: i64,
 }
 
+/// 维护状态三档的个数。没有推送时间的不计入任何一档。
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MaintenanceCounts {
+    pub active: i64,
+    pub slow: i64,
+    pub stale: i64,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LibraryCounts {
@@ -190,6 +259,8 @@ pub struct LibraryCounts {
     pub reading: ReadingCounts,
     pub card_state: CardStateCounts,
     pub forms: BTreeMap<String, i64>,
+    /// 按其他筛选算，不按维护状态本身算。
+    pub maintenance: MaintenanceCounts,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -255,6 +326,10 @@ struct Normalized {
     terms: Vec<String>,
     /// 有关键词且 sort = relevance：取出全部匹配后再打分、排序、分页。
     rank_by_relevance: bool,
+    /// `active` / `slow` / `stale`；空 = 不筛。
+    maintenance: String,
+    /// 调用方给的当前时间（RFC 3339）。门槛按它和 `pushed_at` 的整数秒差算。
+    now: String,
     order_sql: &'static str,
     limit: i64,
     offset: i64,
@@ -321,8 +396,31 @@ pub fn reading_status_to_store(group: &str) -> Result<&'static str, String> {
 }
 
 pub fn list_library_view(path: &Path, filters: &LibraryFilters) -> Result<LibraryPage, String> {
-    let normalized = normalize(filters)?;
+    let now = OffsetDateTime::now_utc()
+        .format(&Rfc3339)
+        .map_err(|_| "当前时间格式化失败".to_owned())?;
+    list_library_view_at(path, filters, &now)
+}
+
+/// 和 `list_library_view` 一样，只是「现在」由调用方给。测试用它固定时间。
+/// `now` 不是合法时间时返回「时间格式无效」（和今日视图同一套检查）。
+pub fn list_library_view_at(
+    path: &Path,
+    filters: &LibraryFilters,
+    now: &str,
+) -> Result<LibraryPage, String> {
     let connection = open_read(path)?;
+    let now_ok: i64 = connection
+        .query_row(
+            "SELECT CASE WHEN julianday(?1) IS NULL THEN 0 ELSE 1 END",
+            params![now],
+            |row| row.get(0),
+        )
+        .map_err(|error| format!("时间读取失败：{error}"))?;
+    if now_ok == 0 {
+        return Err("时间格式无效".to_owned());
+    }
+    let normalized = normalize(filters, now)?;
     let total = scalar(
         &connection,
         "SELECT COUNT(*) FROM repositories WHERE sync_status = 'active'",
@@ -342,6 +440,7 @@ pub fn list_library_view(path: &Path, filters: &LibraryFilters) -> Result<Librar
         reading: reading_counts(&connection, &normalized.cleared_reading())?,
         card_state: card_state_counts(&connection, &normalized.cleared_card())?,
         forms: form_counts(&connection, &normalized.cleared_form())?,
+        maintenance: maintenance_counts(&connection, &normalized.cleared_maintenance())?,
     };
     Ok(LibraryPage {
         items,
@@ -490,7 +589,7 @@ pub fn get_today_view(path: &Path, now: &str) -> Result<TodayView, String> {
     })
 }
 
-fn normalize(filters: &LibraryFilters) -> Result<Normalized, String> {
+fn normalize(filters: &LibraryFilters, now: &str) -> Result<Normalized, String> {
     let scenario = filters.scenario.as_deref().unwrap_or("").trim().to_owned();
     let reading_raw = filters.reading.as_deref().unwrap_or("").trim();
     if !reading_raw.is_empty() && reading_statuses_for_group(reading_raw).is_err() {
@@ -502,6 +601,10 @@ fn normalize(filters: &LibraryFilters) -> Result<Normalized, String> {
         "all" => "all",
         _ => return Err("卡片状态筛选无效".to_owned()),
     };
+    let maintenance = filters.maintenance.as_deref().unwrap_or("").trim();
+    if !matches!(maintenance, "" | "active" | "slow" | "stale") {
+        return Err("维护状态筛选无效".to_owned());
+    }
     let terms = keyword_terms(filters.keyword.as_deref().unwrap_or(""));
     let sort = filters.sort.as_deref().unwrap_or("").trim();
     // 相关度但没有关键词：当作按收藏时间，不报错。有关键词才在取出之后按分数排。
@@ -522,6 +625,8 @@ fn normalize(filters: &LibraryFilters) -> Result<Normalized, String> {
         patterns: patterns_for_terms(&terms),
         terms,
         rank_by_relevance,
+        maintenance: maintenance.to_owned(),
+        now: now.to_owned(),
         order_sql,
         limit: filters.limit.unwrap_or(80).clamp(1, 200),
         offset: filters.offset.unwrap_or(0).max(0),
@@ -550,6 +655,12 @@ impl Normalized {
     fn cleared_form(&self) -> Self {
         let mut copy = self.clone();
         copy.form.clear();
+        copy
+    }
+
+    fn cleared_maintenance(&self) -> Self {
+        let mut copy = self.clone();
+        copy.maintenance.clear();
         copy
     }
 }
@@ -832,6 +943,10 @@ macro_rules! filter_params {
             ":reading": $filters.reading,
             ":card": $filters.card,
             ":form": $filters.form,
+            ":maintenance": $filters.maintenance,
+            ":now": $filters.now,
+            ":active_secs": MAINTENANCE_ACTIVE_DAYS * SECONDS_PER_DAY,
+            ":stale_secs": MAINTENANCE_STALE_DAYS * SECONDS_PER_DAY,
             ":pattern": $filters.patterns[0],
             ":pattern1": $filters.patterns[1],
             ":pattern2": $filters.patterns[2],
@@ -872,6 +987,10 @@ fn query_items(connection: &Connection, filters: &Normalized) -> Result<Vec<Libr
                 ":reading": filters.reading,
                 ":card": filters.card,
                 ":form": filters.form,
+                ":maintenance": filters.maintenance,
+                ":now": filters.now,
+                ":active_secs": MAINTENANCE_ACTIVE_DAYS * SECONDS_PER_DAY,
+                ":stale_secs": MAINTENANCE_STALE_DAYS * SECONDS_PER_DAY,
                 ":pattern": filters.patterns[0],
                 ":pattern1": filters.patterns[1],
                 ":pattern2": filters.patterns[2],
@@ -1073,6 +1192,29 @@ fn form_counts(
         counts.insert(form, count);
     }
     Ok(counts)
+}
+
+fn maintenance_counts(
+    connection: &Connection,
+    filters: &Normalized,
+) -> Result<MaintenanceCounts, String> {
+    let sql = format!(
+        "SELECT
+            COALESCE(SUM(CASE WHEN {IS_ACTIVE} THEN 1 ELSE 0 END), 0),
+            COALESCE(SUM(CASE WHEN {IS_SLOW} THEN 1 ELSE 0 END), 0),
+            COALESCE(SUM(CASE WHEN {IS_STALE} THEN 1 ELSE 0 END), 0)
+         {JOINS}
+         WHERE {FILTER_WHERE}"
+    );
+    connection
+        .query_row(&sql, filter_params!(filters), |row| {
+            Ok(MaintenanceCounts {
+                active: row.get(0)?,
+                slow: row.get(1)?,
+                stale: row.get(2)?,
+            })
+        })
+        .map_err(|error| format!("维护状态计数失败：{error}"))
 }
 
 fn scenario_ids_for(
@@ -3454,15 +3596,34 @@ mod tests {
                 pending: 0,
             },
             forms: BTreeMap::from([("cli".to_owned(), 1)]),
+            maintenance: MaintenanceCounts {
+                active: 2,
+                slow: 3,
+                stale: 4,
+            },
         };
         let counts_json = serde_json::to_value(&counts).unwrap();
         assert_eq!(
             object_keys(&counts_json),
-            set(&["total", "scenarios", "reading", "cardState", "forms"])
+            set(&[
+                "total",
+                "scenarios",
+                "reading",
+                "cardState",
+                "forms",
+                "maintenance"
+            ])
         );
         assert!(counts_json["total"].is_number());
         assert!(counts_json["scenarios"].is_object());
         assert!(counts_json["forms"].is_object());
+        assert_eq!(
+            object_keys(&counts_json["maintenance"]),
+            set(&["active", "slow", "stale"])
+        );
+        assert!(counts_json["maintenance"]["active"].is_number());
+        assert!(counts_json["maintenance"]["slow"].is_number());
+        assert!(counts_json["maintenance"]["stale"].is_number());
         assert_eq!(
             object_keys(&counts_json["reading"]),
             set(&["unseen", "want", "tried", "in_use", "dropped"])
@@ -4622,5 +4783,510 @@ mod tests {
         let item_json = serde_json::to_string(&page.items[0]).expect("条目应能序列化");
         assert!(item_json.contains("\"matchReasons\":[]"), "{item_json}");
         assert!(item_json.contains("\"matchScore\":null"), "{item_json}");
+    }
+
+    // ───────────── 卡 49：维护状态 ─────────────
+
+    const MAINT_NOW: &str = "2026-10-22T12:00:00Z";
+
+    fn maint_filters(maintenance: Option<&str>) -> LibraryFilters {
+        LibraryFilters {
+            card_state: Some("all".to_owned()),
+            maintenance: maintenance.map(str::to_owned),
+            limit: Some(50),
+            ..LibraryFilters::default()
+        }
+    }
+
+    fn maint_page(path: &Path, filters: LibraryFilters) -> LibraryPage {
+        list_library_view_at(path, &filters, MAINT_NOW).expect("维护状态查询应成功")
+    }
+
+    fn maint_ids(path: &Path, maintenance: Option<&str>) -> Vec<String> {
+        maint_page(path, maint_filters(maintenance))
+            .items
+            .into_iter()
+            .map(|item| item.id)
+            .collect()
+    }
+
+    fn sorted_ids(mut ids: Vec<String>) -> Vec<String> {
+        ids.sort();
+        ids
+    }
+
+    fn card_form(form: &str) -> String {
+        format!(r#"{{"form":"{form}"}}"#)
+    }
+
+    /// 固定 now = 2026-10-22T12:00:00Z 的边界仓库。每个 pushed_at 一条。
+    fn seed_boundary(conn: &mut Connection) {
+        let rows: &[(&str, Option<&str>)] = &[
+            ("at-now", Some(MAINT_NOW)),
+            ("future", Some("2026-10-23T12:00:00Z")),
+            ("d90", Some("2026-07-24T12:00:00Z")),
+            ("d90-plus", Some("2026-07-24T11:59:59Z")),
+            ("d365", Some("2025-10-22T12:00:00Z")),
+            ("d365-plus", Some("2025-10-22T11:59:59Z")),
+            ("years", Some("2021-10-22T12:00:00Z")),
+            ("null-at", None),
+            ("empty-at", Some("")),
+            ("blank-at", Some("   ")),
+            ("bad-at", Some("not-a-date")),
+        ];
+        for (id, pushed) in rows {
+            let mut repo = Repo::new(id);
+            repo.pushed_at = pushed.map(str::to_owned);
+            repo.save(conn);
+        }
+    }
+
+    fn tier_of(
+        active: &BTreeSet<String>,
+        slow: &BTreeSet<String>,
+        stale: &BTreeSet<String>,
+        id: &str,
+    ) -> Option<&'static str> {
+        let hits = [active.contains(id), slow.contains(id), stale.contains(id)]
+            .iter()
+            .filter(|hit| **hit)
+            .count();
+        assert!(hits <= 1, "{id} 同时落在 {hits} 档");
+        if active.contains(id) {
+            Some("active")
+        } else if slow.contains(id) {
+            Some("slow")
+        } else if stale.contains(id) {
+            Some("stale")
+        } else {
+            None
+        }
+    }
+
+    #[test]
+    fn maintenance_boundary_table() {
+        assert_eq!(MAINTENANCE_ACTIVE_DAYS, 90);
+        assert_eq!(MAINTENANCE_STALE_DAYS, 365);
+        let lab = Lab::new("maint-boundary");
+        lab.with(seed_boundary);
+        let active: BTreeSet<String> = maint_ids(&lab.path, Some("active")).into_iter().collect();
+        let slow: BTreeSet<String> = maint_ids(&lab.path, Some("slow")).into_iter().collect();
+        let stale: BTreeSet<String> = maint_ids(&lab.path, Some("stale")).into_iter().collect();
+        let expect = [
+            ("at-now", Some("active")),
+            ("future", Some("active")),
+            ("d90", Some("active")),
+            ("d90-plus", Some("slow")),
+            ("d365", Some("slow")),
+            ("d365-plus", Some("stale")),
+            ("years", Some("stale")),
+            ("null-at", None),
+            ("empty-at", None),
+            ("blank-at", None),
+            ("bad-at", None),
+        ];
+        for (id, tier) in expect {
+            assert_eq!(tier_of(&active, &slow, &stale, id), tier, "{id}");
+        }
+        let all = maint_ids(&lab.path, None);
+        assert_eq!(all.len(), expect.len());
+    }
+
+    #[test]
+    fn maintenance_filter_returns_only_that_tier() {
+        let lab = Lab::new("maint-filter");
+        lab.with(seed_boundary);
+        let active = maint_page(&lab.path, maint_filters(Some("active")));
+        assert_eq!(
+            sorted_ids(active.items.iter().map(|item| item.id.clone()).collect()),
+            owned(&["at-now", "d90", "future"])
+        );
+        assert_eq!(active.total_count, 3);
+
+        let slow = maint_page(&lab.path, maint_filters(Some("slow")));
+        assert_eq!(
+            sorted_ids(slow.items.iter().map(|item| item.id.clone()).collect()),
+            owned(&["d365", "d90-plus"])
+        );
+        assert_eq!(slow.total_count, 2);
+
+        let stale = maint_page(&lab.path, maint_filters(Some("stale")));
+        assert_eq!(
+            sorted_ids(stale.items.iter().map(|item| item.id.clone()).collect()),
+            owned(&["d365-plus", "years"])
+        );
+        assert_eq!(stale.total_count, 2);
+
+        let all = maint_page(&lab.path, maint_filters(None));
+        assert_eq!(all.total_count, 11);
+        assert_eq!(all.items.len(), 11);
+        for id in [
+            "null-at", "empty-at", "blank-at", "bad-at", "at-now", "years",
+        ] {
+            assert!(all.items.iter().any(|item| item.id == id), "{id}");
+        }
+    }
+
+    #[test]
+    fn maintenance_counts_ignore_their_own_filter() {
+        let lab = Lab::new("maint-counts");
+        lab.with(|conn| {
+            scenario(conn, "scn-a", "a", "甲", 1, 0);
+            scenario(conn, "scn-b", "b", "乙", 2, 0);
+
+            let mut active = Repo::new("active-one");
+            active.pushed_at = Some(MAINT_NOW.to_owned());
+            active.reading = Some("want_to_try".to_owned());
+            active.card_json = Some(card_form("cli"));
+            active.save(conn);
+            link(conn, "active-one", "scn-a", "suggested");
+
+            let mut slow = Repo::new("slow-one");
+            slow.pushed_at = Some("2026-01-01T00:00:00Z".to_owned());
+            slow.reading = Some("tried".to_owned());
+            slow.card_json = Some(card_form("library"));
+            slow.save(conn);
+            link(conn, "slow-one", "scn-a", "suggested");
+
+            let mut stale = Repo::new("stale-one");
+            stale.pushed_at = Some("2020-01-01T00:00:00Z".to_owned());
+            stale.reading = Some("deprecated".to_owned());
+            stale.one_liner = Some("   ".to_owned());
+            stale.card_json = Some(card_form("skill"));
+            stale.save(conn);
+            link(conn, "stale-one", "scn-b", "suggested");
+
+            let mut none = Repo::new("none-one");
+            none.reading = Some("in_use".to_owned());
+            none.card_json = Some(card_form("app"));
+            none.save(conn);
+            link(conn, "none-one", "scn-a", "suggested");
+        });
+
+        let open = maint_page(&lab.path, maint_filters(None));
+        assert_eq!(open.total_count, 4);
+        assert_eq!(open.counts.total, 4);
+        assert_eq!(
+            open.counts.maintenance,
+            MaintenanceCounts {
+                active: 1,
+                slow: 1,
+                stale: 1,
+            }
+        );
+        assert_eq!(open.counts.reading.want, 1);
+        assert_eq!(open.counts.reading.tried, 1);
+        assert_eq!(open.counts.reading.dropped, 1);
+        assert_eq!(open.counts.reading.in_use, 1);
+        assert_eq!(open.counts.card_state.done, 3);
+        assert_eq!(open.counts.card_state.pending, 1);
+
+        let narrowed = maint_page(&lab.path, maint_filters(Some("stale")));
+        assert_eq!(
+            narrowed
+                .items
+                .iter()
+                .map(|item| item.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["stale-one"]
+        );
+        assert_eq!(narrowed.total_count, 1);
+        assert_eq!(narrowed.counts.total, 4);
+        assert_eq!(narrowed.counts.maintenance, open.counts.maintenance);
+        assert_eq!(
+            narrowed.counts.reading,
+            ReadingCounts {
+                unseen: 0,
+                want: 0,
+                tried: 0,
+                in_use: 0,
+                dropped: 1,
+            }
+        );
+        assert_eq!(
+            narrowed.counts.card_state,
+            CardStateCounts {
+                done: 0,
+                pending: 1,
+            }
+        );
+        assert_eq!(narrowed.counts.forms.get("skill"), Some(&1));
+        assert_eq!(narrowed.counts.forms.len(), 1);
+        assert_eq!(narrowed.counts.scenarios.get("scn-a"), Some(&0));
+        assert_eq!(narrowed.counts.scenarios.get("scn-b"), Some(&1));
+    }
+
+    #[test]
+    fn maintenance_intersects_other_filters_and_counts_follow() {
+        let lab = Lab::new("maint-mix");
+        lab.with(|conn| {
+            scenario(conn, "scn-x", "x", "场景", 1, 0);
+            let rows: &[(&str, &str, bool, bool, &str, &str)] = &[
+                (
+                    "hit",
+                    "2020-01-01T00:00:00Z",
+                    true,
+                    true,
+                    "want_to_try",
+                    "cli",
+                ),
+                ("active-hit", MAINT_NOW, true, true, "want_to_try", "cli"),
+                (
+                    "no-word",
+                    "2020-01-01T00:00:00Z",
+                    false,
+                    true,
+                    "want_to_try",
+                    "cli",
+                ),
+                (
+                    "no-scn",
+                    "2020-01-01T00:00:00Z",
+                    true,
+                    false,
+                    "want_to_try",
+                    "cli",
+                ),
+                (
+                    "other-read",
+                    "2020-01-01T00:00:00Z",
+                    true,
+                    true,
+                    "tried",
+                    "cli",
+                ),
+                (
+                    "other-form",
+                    "2020-01-01T00:00:00Z",
+                    true,
+                    true,
+                    "want_to_try",
+                    "skill",
+                ),
+                (
+                    "slow-only",
+                    "2026-04-01T12:00:00Z",
+                    false,
+                    false,
+                    "unread",
+                    "library",
+                ),
+            ];
+            for (id, pushed, keyword, linked, reading, form) in rows {
+                let mut repo = Repo::new(id);
+                repo.pushed_at = Some((*pushed).to_owned());
+                repo.description = Some(if *keyword {
+                    "含有 zzmaint 的说明".to_owned()
+                } else {
+                    "别的说明".to_owned()
+                });
+                repo.reading = Some((*reading).to_owned());
+                repo.card_json = Some(card_form(form));
+                repo.save(conn);
+                if *linked {
+                    link(conn, id, "scn-x", "suggested");
+                }
+            }
+        });
+
+        let open = maint_page(&lab.path, maint_filters(None));
+        assert_eq!(
+            open.counts.maintenance,
+            MaintenanceCounts {
+                active: 1,
+                slow: 1,
+                stale: 5,
+            }
+        );
+
+        let mut by_word = maint_filters(None);
+        by_word.keyword = Some("zzmaint".to_owned());
+        let word = maint_page(&lab.path, by_word);
+        assert_eq!(
+            word.counts.maintenance,
+            MaintenanceCounts {
+                active: 1,
+                slow: 0,
+                stale: 4,
+            }
+        );
+
+        let mut by_word_scn = maint_filters(None);
+        by_word_scn.keyword = Some("zzmaint".to_owned());
+        by_word_scn.scenario = Some("scn-x".to_owned());
+        let word_scn = maint_page(&lab.path, by_word_scn);
+        assert_eq!(
+            word_scn.counts.maintenance,
+            MaintenanceCounts {
+                active: 1,
+                slow: 0,
+                stale: 3,
+            }
+        );
+
+        let mut all = maint_filters(Some("stale"));
+        all.keyword = Some("zzmaint".to_owned());
+        all.scenario = Some("scn-x".to_owned());
+        all.reading = Some("want".to_owned());
+        all.form = Some("cli".to_owned());
+        let hit = maint_page(&lab.path, all);
+        assert_eq!(
+            hit.items
+                .iter()
+                .map(|item| item.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["hit"]
+        );
+        assert_eq!(hit.total_count, 1);
+        // 个数不按维护状态自己算：活跃那条仍符合关键词、场景、状态和类型，所以活跃还是 1。
+        assert_eq!(
+            hit.counts.maintenance,
+            MaintenanceCounts {
+                active: 1,
+                slow: 0,
+                stale: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn maintenance_filter_rejects_unknown_values() {
+        let lab = Lab::new("maint-validate");
+        lab.with(|conn| {
+            let mut repo = Repo::new("one");
+            repo.pushed_at = Some(MAINT_NOW.to_owned());
+            repo.save(conn);
+        });
+        for bad in ["dead", "Active"] {
+            let filters = maint_filters(Some(bad));
+            let err = list_library_view_at(&lab.path, &filters, MAINT_NOW)
+                .expect_err("非法维护状态应失败");
+            assert_eq!(err, "维护状态筛选无效", "{bad}");
+        }
+        let baseline = sorted_ids(maint_ids(&lab.path, None));
+        assert_eq!(sorted_ids(maint_ids(&lab.path, Some(""))), baseline);
+        assert_eq!(sorted_ids(maint_ids(&lab.path, Some("  "))), baseline);
+        let mut missing = LibraryFilters::default();
+        missing.card_state = Some("all".to_owned());
+        missing.limit = Some(50);
+        assert!(missing.maintenance.is_none());
+        let page = maint_page(&lab.path, missing);
+        assert_eq!(
+            sorted_ids(page.items.into_iter().map(|item| item.id).collect()),
+            baseline
+        );
+    }
+
+    #[test]
+    fn maintenance_rejects_an_invalid_clock() {
+        let lab = Lab::new("maint-bad-clock");
+        lab.with(|conn| {
+            let mut repo = Repo::new("one");
+            repo.pushed_at = Some(MAINT_NOW.to_owned());
+            repo.save(conn);
+        });
+        for bad in ["not-a-time", "", "2026-13-45T00:00:00Z"] {
+            for filters in [maint_filters(None), maint_filters(Some("active"))] {
+                let err =
+                    list_library_view_at(&lab.path, &filters, bad).expect_err("非法时间应失败");
+                assert_eq!(err, "时间格式无效", "{bad} {:?}", filters.maintenance);
+            }
+        }
+    }
+
+    #[test]
+    fn maintenance_filter_keeps_sort_order() {
+        let lab = Lab::new("maint-sort");
+        lab.with(|conn| {
+            let rows = [
+                ("a", "2026-09-01T00:00:00Z", 10, Some(MAINT_NOW)),
+                (
+                    "b",
+                    "2026-08-01T00:00:00Z",
+                    50,
+                    Some("2026-04-01T12:00:00Z"),
+                ),
+                (
+                    "c",
+                    "2026-07-01T00:00:00Z",
+                    30,
+                    Some("2026-10-01T12:00:00Z"),
+                ),
+                (
+                    "d",
+                    "2026-06-01T00:00:00Z",
+                    40,
+                    Some("2024-01-01T12:00:00Z"),
+                ),
+                ("e", "2026-05-01T00:00:00Z", 60, None),
+            ];
+            for (id, starred, stars, pushed) in rows {
+                let mut repo = Repo::new(id);
+                repo.starred_at = starred.to_owned();
+                repo.stars = stars;
+                repo.pushed_at = pushed.map(str::to_owned);
+                repo.save(conn);
+            }
+        });
+        let members = [
+            ("active", &["a", "c"][..]),
+            ("slow", &["b"][..]),
+            ("stale", &["d"][..]),
+        ];
+        let sorts = [
+            (None, owned(&["a", "b", "c", "d", "e"])),
+            (Some("stars"), owned(&["e", "b", "d", "c", "a"])),
+            (Some("updated"), owned(&["a", "c", "b", "d", "e"])),
+        ];
+        for (sort, expected_full) in sorts {
+            let mut open = maint_filters(None);
+            open.sort = sort.map(str::to_owned);
+            let full = maint_page(&lab.path, open);
+            let full_ids: Vec<String> = full.items.into_iter().map(|item| item.id).collect();
+            assert_eq!(full_ids, expected_full, "{sort:?}");
+            for (tier, keep) in members {
+                let mut filters = maint_filters(Some(tier));
+                filters.sort = sort.map(str::to_owned);
+                let got: Vec<String> = maint_page(&lab.path, filters)
+                    .items
+                    .into_iter()
+                    .map(|item| item.id)
+                    .collect();
+                let expected: Vec<String> = full_ids
+                    .iter()
+                    .filter(|id| keep.contains(&id.as_str()))
+                    .cloned()
+                    .collect();
+                assert_eq!(got, expected, "{sort:?} {tier}");
+            }
+        }
+    }
+
+    #[test]
+    fn maintenance_list_library_view_uses_the_clock() {
+        let lab = Lab::new("maint-clock");
+        let now = OffsetDateTime::now_utc();
+        let recent = (now - time::Duration::days(1))
+            .format(&Rfc3339)
+            .expect("应能格式化时间");
+        let old = (now - time::Duration::days(400))
+            .format(&Rfc3339)
+            .expect("应能格式化时间");
+        lab.with(|conn| {
+            let mut fresh = Repo::new("fresh");
+            fresh.pushed_at = Some(recent);
+            fresh.save(conn);
+            let mut ancient = Repo::new("ancient");
+            ancient.pushed_at = Some(old);
+            ancient.save(conn);
+        });
+        let mut active = LibraryFilters::default();
+        active.card_state = Some("all".to_owned());
+        active.maintenance = Some("active".to_owned());
+        assert_eq!(page_ids(&lab.path, active), vec!["fresh".to_owned()]);
+        let mut stale = LibraryFilters::default();
+        stale.card_state = Some("all".to_owned());
+        stale.maintenance = Some("stale".to_owned());
+        assert_eq!(page_ids(&lab.path, stale), vec!["ancient".to_owned()]);
     }
 }

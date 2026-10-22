@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { renderToStaticMarkup } from 'react-dom/server';
-import type { LibraryItem } from '@/lib/contracts';
+import type { LibraryItem, ScenarioSummary } from '@/lib/contracts';
 import { DROP_HINT_LIBRARY } from '@/lib/item-format';
 // 页面源码原文：守住「资料库传自己的说明、今日页保持原句」（Vite 的 ?raw，不用 node 的类型）
 import librarySource from '../../pages/v2/library.tsx?raw';
@@ -114,6 +114,85 @@ describe('列表行：名字被省略时，悬停能看到全名（agency-agents
     expect(zh).toBe('a/agency-agents-zh');
     expect(en).toBe('a/agency-agents');
     expect(zh).not.toBe(en);
+  });
+});
+
+describe('列表行：维护状态只标放缓和疑似停更', () => {
+  const NOW = '2026-10-22T12:00:00Z';
+  const scenario: ScenarioSummary = {
+    id: 'scn-xhs',
+    slug: 'xhs',
+    nameZh: '小红书',
+    sortOrder: 1,
+    count: 3,
+    thin: false,
+  };
+
+  function row(pushedAt: string | null, now: string = NOW): string {
+    const item: LibraryItem = {
+      ...ITEM,
+      pushedAt,
+      starsCount: 42,
+      scenarioIds: ['scn-xhs'],
+      readingGroup: 'want',
+      readingStatus: 'want_to_try',
+    };
+    return renderToStaticMarkup(
+      <ItemRow item={item} now={now} scenarios={[scenario]} onSelect={() => {}} onWant={() => {}} onDrop={() => {}} />,
+    );
+  }
+
+  function text(html: string): string {
+    return html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+  }
+
+  function keepsTheRow(html: string) {
+    const visible = text(html);
+    expect(visible).toContain('tool');
+    expect(visible).toContain('做封面');
+    expect(visible).toContain('小红书');
+    expect(visible).toContain('42');
+    expect(visible).toContain('想试');
+  }
+
+  it('放缓有灰色标签，疑似停更有红色标签；活跃、没有时间和坏日期都不画', () => {
+    const slow = row('2026-04-01T12:00:00Z');
+    expect(text(slow)).toContain('放缓');
+    expect(slow).toContain('title="3 到 12 个月没有更新"');
+    expect(text(slow)).not.toContain('疑似停更');
+    expect(text(slow)).not.toContain('活跃');
+    keepsTheRow(slow);
+
+    const stale = row('2024-01-01T12:00:00Z');
+    expect(text(stale)).toContain('疑似停更');
+    expect(stale).toContain('title="超过 1 年没有更新，可能已经不维护了"');
+    expect(text(stale)).not.toContain('放缓');
+    keepsTheRow(stale);
+
+    for (const pushedAt of ['2026-10-01T12:00:00Z', null, 'not-a-date']) {
+      const html = row(pushedAt);
+      const visible = text(html);
+      expect(visible, String(pushedAt)).not.toContain('活跃');
+      expect(visible, String(pushedAt)).not.toContain('放缓');
+      expect(visible, String(pushedAt)).not.toContain('疑似停更');
+      expect(html, String(pushedAt)).not.toContain('最近 3 个月内有更新');
+      keepsTheRow(html);
+    }
+  });
+
+  it('用传进来的「现在」算，不看电脑的真实时钟', () => {
+    const past = '2025-06-01T12:00:00Z';
+    const recent = row('2025-05-20T12:00:00Z', past);
+    const visibleRecent = text(recent);
+    expect(visibleRecent).not.toContain('活跃');
+    expect(visibleRecent).not.toContain('放缓');
+    expect(visibleRecent).not.toContain('疑似停更');
+    expect(recent).not.toContain('最近 3 个月内有更新');
+
+    const slow = row('2025-02-01T12:00:00Z', past);
+    expect(text(slow)).toContain('放缓');
+    expect(text(slow)).not.toContain('疑似停更');
+    expect(slow).toContain('title="3 到 12 个月没有更新"');
   });
 });
 
