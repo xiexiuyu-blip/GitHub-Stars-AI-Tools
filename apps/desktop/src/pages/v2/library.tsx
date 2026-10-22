@@ -16,6 +16,7 @@ import {
   clearFilters,
   formOptions,
   hasActiveFilters,
+  isRelevanceSort,
   libraryEmptyNote,
   maintenanceOptions,
   nextPageOffset,
@@ -587,7 +588,7 @@ export function LibraryPage(props: LibraryPageProps) {
         ) : null}
         <Segmented ariaLabel="整理状态" options={cardOptions} value={ui.cardState} onChange={chooseCardState} />
         {filtersActive ? <Button variant="text" onClick={clearAll}>清除筛选</Button> : null}
-        <span className="ml-auto text-xs font-medium text-on-surface-variant">{resultCount == null ? '…' : resultCount} 个</span>
+        <span className="ml-auto text-xs font-medium text-on-surface-variant">{isRelevanceSort(ui) ? '按相关度排序 · ' : null}{resultCount == null ? '…' : resultCount} 个</span>
       </div>
       <AutomationBanner hint={hint} onAction={props.onOpenToolbox} />
       <div className={cn('grid min-h-[420px] flex-1 gap-3', gridClass)}>

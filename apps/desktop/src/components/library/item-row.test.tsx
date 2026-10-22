@@ -219,3 +219,221 @@ describe('「今天值得先看」卡片上的悬停按钮', () => {
     expect(withReason).not.toContain('方向');
   });
 });
+
+/**
+ * 测试跑在 Node 里，没有 DOM。这里把静态 HTML 收成一棵元素树，按文档顺序实现
+ * `compareDocumentPosition`（跟随 4、在前 2、包含对方 16、被对方包含 8），只为核对行内顺序。
+ */
+const POSITION_PRECEDING = 2;
+const POSITION_FOLLOWING = 4;
+const POSITION_CONTAINS = 8;
+const POSITION_CONTAINED_BY = 16;
+
+type DomEl = {
+  tag: string;
+  attrs: Record<string, string>;
+  text: string;
+  children: DomEl[];
+  order: number;
+  end: number;
+  compareDocumentPosition: (other: DomEl) => number;
+  textContent: () => string;
+};
+
+const VOID_TAGS = new Set(['area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input', 'link', 'meta', 'source', 'track', 'wbr']);
+
+function decodeEntities(value: string): string {
+  return value
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&apos;/g, "'")
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&amp;/g, '&');
+}
+
+function parseFragment(html: string): DomEl {
+  const root = makeEl('#root');
+  const stack: DomEl[] = [root];
+  let index = 0;
+  while (index < html.length) {
+    if (html[index] !== '<') {
+      const next = html.indexOf('<', index);
+      const raw = html.slice(index, next === -1 ? html.length : next);
+      stack[stack.length - 1].text += decodeEntities(raw);
+      index = next === -1 ? html.length : next;
+      continue;
+    }
+    if (html.startsWith('<!--', index)) {
+      const end = html.indexOf('-->', index + 4);
+      index = end === -1 ? html.length : end + 3;
+      continue;
+    }
+    const end = tagEnd(html, index);
+    if (end < 0) break;
+    const source = html.slice(index + 1, end);
+    index = end + 1;
+    const closing = source.startsWith('/');
+    const body = closing ? source.slice(1) : source;
+    const name = tagName(body);
+    if (!name) continue;
+    if (closing) {
+      while (stack.length > 1 && stack[stack.length - 1].tag !== name) stack.pop();
+      if (stack.length > 1 && stack[stack.length - 1].tag === name) stack.pop();
+      continue;
+    }
+    const element = makeEl(name);
+    element.attrs = tagAttrs(body);
+    const selfClosing = /\/\s*$/.test(source) || VOID_TAGS.has(name);
+    stack[stack.length - 1].children.push(element);
+    if (!selfClosing) stack.push(element);
+  }
+  assignOrder(root, { n: 0 });
+  return root;
+}
+
+function makeEl(tag: string): DomEl {
+  const element: DomEl = {
+    tag,
+    attrs: {},
+    text: '',
+    children: [],
+    order: 0,
+    end: 0,
+    compareDocumentPosition(other) {
+      if (other === element) return 0;
+      if (element.order < other.order && other.end <= element.end) return POSITION_CONTAINED_BY | POSITION_FOLLOWING;
+      if (other.order < element.order && element.end <= other.end) return POSITION_CONTAINS | POSITION_PRECEDING;
+      if (element.order < other.order) return POSITION_FOLLOWING;
+      return POSITION_PRECEDING;
+    },
+    textContent() {
+      return element.text + element.children.map((child) => child.textContent()).join('');
+    },
+  };
+  return element;
+}
+
+function assignOrder(node: DomEl, state: { n: number }) {
+  node.order = state.n;
+  state.n += 1;
+  for (const child of node.children) assignOrder(child, state);
+  node.end = state.n;
+}
+
+function tagEnd(html: string, start: number): number {
+  let quote: '"' | "'" | null = null;
+  for (let index = start + 1; index < html.length; index += 1) {
+    const ch = html[index];
+    if (quote) {
+      if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      continue;
+    }
+    if (ch === '>') return index;
+  }
+  return -1;
+}
+
+function tagName(body: string): string {
+  const match = /^([A-Za-z][\w:-]*)/.exec(body.trim());
+  return match ? match[1].toLowerCase() : '';
+}
+
+function tagAttrs(body: string): Record<string, string> {
+  const attrs: Record<string, string> = {};
+  const name = tagName(body);
+  let rest = body.trim().slice(name.length);
+  while (rest.length > 0) {
+    rest = rest.trimStart();
+    if (!rest || rest.startsWith('/')) break;
+    const nameMatch = /^([^\s=/>]+)/.exec(rest);
+    if (!nameMatch) break;
+    const key = nameMatch[1];
+    rest = rest.slice(key.length);
+    if (!rest.startsWith('=')) {
+      attrs[key] = '';
+      continue;
+    }
+    rest = rest.slice(1);
+    if (rest.startsWith('"') || rest.startsWith("'")) {
+      const quote = rest[0];
+      const close = rest.indexOf(quote, 1);
+      attrs[key] = decodeEntities(close < 0 ? rest.slice(1) : rest.slice(1, close));
+      rest = close < 0 ? '' : rest.slice(close + 1);
+      continue;
+    }
+    const bare = /^[^\s>]+/.exec(rest);
+    attrs[key] = decodeEntities(bare?.[0] ?? '');
+    rest = rest.slice(bare?.[0].length ?? 0);
+  }
+  return attrs;
+}
+
+function findEl(node: DomEl, pred: (el: DomEl) => boolean): DomEl | null {
+  if (node.tag !== '#root' && pred(node)) return node;
+  for (const child of node.children) {
+    const found = findEl(child, pred);
+    if (found) return found;
+  }
+  return null;
+}
+
+describe('列表行：搜索时在中文说明和语言之间显示命中原因', () => {
+  const scenario: ScenarioSummary = {
+    id: 'scn-xhs',
+    slug: 'xhs',
+    nameZh: '小红书',
+    sortOrder: 1,
+    count: 1,
+    thin: false,
+  };
+
+  it('命中文字和匹配度竖条，排在中文说明之后、语言 / 场景那一行之前', () => {
+    const probe = parseFragment('<div class="line-clamp-2">做封面</div><span class="truncate">命中：项目名</span><div class="flex-wrap">TypeScript</div>');
+    const probeSummary = findEl(probe, (el) => el.attrs.class?.includes('line-clamp-2') === true);
+    const probeHint = findEl(probe, (el) => el.textContent().includes('命中：'));
+    const probeMeta = findEl(probe, (el) => el.attrs.class?.includes('flex-wrap') === true);
+    expect(probeSummary?.compareDocumentPosition(probeHint!)).toBe(POSITION_FOLLOWING);
+    expect(probeHint?.compareDocumentPosition(probeMeta!)).toBe(POSITION_FOLLOWING);
+
+    const html = renderToStaticMarkup(
+      <ItemRow
+        item={{ ...ITEM, matchReasons: ['项目名', '中文说明'], matchStars: 3, scenarioIds: ['scn-xhs'] }}
+        scenarios={[scenario]}
+        onSelect={() => {}}
+        onWant={() => {}}
+        onDrop={() => {}}
+      />,
+    );
+    expect(html).toContain('命中：项目名 / 中文说明');
+    expect(html).toContain('role="img"');
+    expect(html).toContain('aria-label="匹配度 3 / 4"');
+    const root = parseFragment(html);
+    const summary = findEl(root, (el) => el.attrs.class?.includes('line-clamp-2') === true && el.textContent().includes('做封面'));
+    const hint = findEl(root, (el) => el.attrs.class?.includes('truncate') === true && el.textContent().includes('命中：'));
+    const meta = findEl(root, (el) => el.attrs.class?.includes('flex-wrap') === true && el.textContent().includes('TypeScript'));
+    expect(summary, html).not.toBeNull();
+    expect(hint, html).not.toBeNull();
+    expect(meta, html).not.toBeNull();
+    expect(summary!.compareDocumentPosition(hint!)).toBe(POSITION_FOLLOWING);
+    expect(hint!.compareDocumentPosition(meta!)).toBe(POSITION_FOLLOWING);
+  });
+
+  it('不带命中字段，或原因是空数组、档位是空的，行里什么都不加', () => {
+    const plain = renderToStaticMarkup(<ItemRow item={ITEM} onSelect={() => {}} onWant={() => {}} onDrop={() => {}} />);
+    expect(plain).not.toContain('命中：');
+    expect(plain).not.toContain('role="img"');
+    expect(plain).toContain('做封面');
+
+    const empty = renderToStaticMarkup(
+      <ItemRow item={{ ...ITEM, matchReasons: [], matchStars: null }} onSelect={() => {}} onWant={() => {}} onDrop={() => {}} />,
+    );
+    expect(empty).not.toContain('命中：');
+    expect(empty).not.toContain('role="img"');
+    expect(empty).toContain('做封面');
+  });
+});
