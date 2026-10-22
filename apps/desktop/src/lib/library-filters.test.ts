@@ -82,6 +82,20 @@ describe('资料库筛选状态', () => {
     });
   });
 
+  it('有关键词且仍是默认的收藏时间排序时，改发相关度', () => {
+    const ranked = toFilters(state({ keyword: '封面', sort: 'starred' }), 0, 80);
+    expect(ranked.keyword).toBe('封面');
+    expect(ranked.sort).toBe('relevance');
+
+    const blank = toFilters(state({ keyword: '   ', sort: 'starred' }), 0, 80);
+    expect(blank.keyword).toBeUndefined();
+    expect(blank.sort).toBe('starred');
+
+    const stars = toFilters(state({ keyword: '封面', sort: 'stars' }), 0, 80);
+    expect(stars.keyword).toBe('封面');
+    expect(stars.sort).toBe('stars');
+  });
+
   it('场景再点同一项就取消，点另一项就替换', () => {
     const original = state();
     const picked = toggleScenario(original, 'ec');

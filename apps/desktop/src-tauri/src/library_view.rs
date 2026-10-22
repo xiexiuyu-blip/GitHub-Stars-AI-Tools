@@ -109,6 +109,13 @@ SELECT r.id, r.full_name, r.html_url, r.description, r.language, r.stars_count,
        r.starred_at, r.pushed_at, d.one_liner_zh, d.card_json, a.read_status
 ";
 
+/// 相关度排序要在内存里打分，多带摘要、关键词、话题。其它排序仍用 `ITEM_SELECT`。
+const ITEM_SELECT_RANK: &str = "
+SELECT r.id, r.full_name, r.html_url, r.description, r.language, r.stars_count,
+       r.starred_at, r.pushed_at, d.one_liner_zh, d.card_json, a.read_status,
+       d.summary_zh, d.keywords_json, r.topics_json
+";
+
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LibraryFilters {
@@ -151,6 +158,10 @@ pub struct LibraryItem {
     pub has_card: bool,
     pub confidence: Option<f64>,
     pub card_review: Option<String>,
+    /// 命中原因。只有带关键词的相关度排序才填；其它情况是空数组，序列化成 `[]`。
+    pub match_reasons: Vec<String>,
+    /// 相关度总分。只有带关键词的相关度排序才是 `Some`；其它情况是 `None`，序列化成 `null`。
+    pub match_score: Option<i64>,
 }
 
 /// 状态组的键保持契约里的字面量。`in_use` 不能被 serde 写成 `inUse`。
@@ -240,6 +251,10 @@ struct Normalized {
     form: String,
     /// 关键词拆成的词项（LIKE 模式），不足四个的补空串（空串 = 这一项不限制）
     patterns: [String; MAX_KEYWORD_TERMS],
+    /// 与 `patterns` 同一批词项（未转义，最多四个）。评分用这一份。
+    terms: Vec<String>,
+    /// 有关键词且 sort = relevance：取出全部匹配后再打分、排序、分页。
+    rank_by_relevance: bool,
     order_sql: &'static str,
     limit: i64,
     offset: i64,
@@ -258,6 +273,10 @@ struct RawItem {
     one_liner_zh: Option<String>,
     card_json: Option<String>,
     read_status: Option<String>,
+    /// 只有相关度查询会填。其它查询保持 `None`，不参与列表字段。
+    summary_zh: Option<String>,
+    keywords_json: Option<String>,
+    topics_json: Option<String>,
 }
 
 struct Candidate {
@@ -483,8 +502,12 @@ fn normalize(filters: &LibraryFilters) -> Result<Normalized, String> {
         "all" => "all",
         _ => return Err("卡片状态筛选无效".to_owned()),
     };
-    let order_sql = match filters.sort.as_deref().unwrap_or("").trim() {
-        "" | "starred" => "r.starred_at DESC, r.id ASC",
+    let terms = keyword_terms(filters.keyword.as_deref().unwrap_or(""));
+    let sort = filters.sort.as_deref().unwrap_or("").trim();
+    // 相关度但没有关键词：当作按收藏时间，不报错。有关键词才在取出之后按分数排。
+    let rank_by_relevance = sort == "relevance" && !terms.is_empty();
+    let order_sql = match sort {
+        "" | "starred" | "relevance" => "r.starred_at DESC, r.id ASC",
         "stars" => "r.stars_count DESC, r.id ASC",
         "updated" => {
             "CASE WHEN r.pushed_at IS NULL OR TRIM(r.pushed_at) = '' THEN 1 ELSE 0 END, r.pushed_at DESC, r.id ASC"
@@ -496,7 +519,9 @@ fn normalize(filters: &LibraryFilters) -> Result<Normalized, String> {
         reading: reading_raw.to_owned(),
         card: card.to_owned(),
         form: filters.form.as_deref().unwrap_or("").trim().to_owned(),
-        patterns: like_patterns(filters.keyword.as_deref().unwrap_or("")),
+        patterns: patterns_for_terms(&terms),
+        terms,
+        rank_by_relevance,
         order_sql,
         limit: filters.limit.unwrap_or(80).clamp(1, 200),
         offset: filters.offset.unwrap_or(0).max(0),
@@ -569,20 +594,218 @@ fn split_known_words(term: &str) -> Vec<String> {
     }
 }
 
-/// 关键词 → 最多四个词项（空格分开的、或一段连着的已知任务词拆开的），每项一个 LIKE 模式；不足的补空串。
-fn like_patterns(keyword: &str) -> [String; MAX_KEYWORD_TERMS] {
-    let mut terms: Vec<String> = Vec::new();
+/// 关键词 → 最多四个词项（空格分开的、或一段连着的已知任务词拆开的）。
+/// SQL 的 LIKE 和相关度评分共用这一份，不要另写一套拆法。
+fn keyword_terms(keyword: &str) -> Vec<String> {
+    let mut terms = Vec::new();
     for part in keyword
         .split(|ch: char| ch.is_whitespace())
         .filter(|part| !part.is_empty())
     {
-        terms.extend(split_known_words(part));
+        for word in split_known_words(part) {
+            if terms.len() == MAX_KEYWORD_TERMS {
+                return terms;
+            }
+            terms.push(word);
+        }
     }
+    terms
+}
+
+/// 词项 → LIKE 模式；不足四个的补空串（空串 = 这一项不限制）。
+fn patterns_for_terms(terms: &[String]) -> [String; MAX_KEYWORD_TERMS] {
     let mut patterns: [String; MAX_KEYWORD_TERMS] = Default::default();
     for (slot, term) in patterns.iter_mut().zip(terms.iter()) {
         *slot = escape_like(term);
     }
     patterns
+}
+
+/// 关键词 → 最多四个词项，每项一个 LIKE 模式；不足的补空串。
+/// 正式查询走 `keyword_terms` + `patterns_for_terms`；这个包装只留给原有测试。
+#[cfg(test)]
+fn like_patterns(keyword: &str) -> [String; MAX_KEYWORD_TERMS] {
+    patterns_for_terms(&keyword_terms(keyword))
+}
+
+const WEIGHT_NAME: i64 = 100;
+const WEIGHT_ONE_LINER: i64 = 60;
+const WEIGHT_SUMMARY: i64 = 45;
+const WEIGHT_DESCRIPTION: i64 = 30;
+const WEIGHT_TOPIC: i64 = 20;
+const BONUS_WORD_START: i64 = 20;
+const BONUS_EXACT_REPO: i64 = 30;
+
+const REASON_NAME: &str = "项目名";
+const REASON_ZH: &str = "中文说明";
+const REASON_EN: &str = "英文简介";
+const REASON_TOPIC: &str = "话题";
+
+/// 一条资料参与打分的字段。话题和关键词是库里的 JSON 原文，解析失败当没有。
+struct MatchInput<'a> {
+    full_name: &'a str,
+    one_liner_zh: &'a str,
+    summary_zh: &'a str,
+    description: &'a str,
+    topics_json: &'a str,
+    keywords_json: &'a str,
+}
+
+struct MatchScore {
+    score: i64,
+    reasons: Vec<String>,
+}
+
+struct FoldedChar {
+    ch: char,
+    /// 原字符展开成多个小写字符时，只有第一个能当命中起点。
+    origin_start: bool,
+    /// 命中起点的前一个原字符是字母或数字。字符串开头为 false。
+    prev_is_alnum: bool,
+}
+
+fn fold_chars(text: &str) -> Vec<FoldedChar> {
+    let mut folded = Vec::new();
+    let mut prev_is_alnum = false;
+    let mut at_start = true;
+    for ch in text.chars() {
+        let mut origin_start = true;
+        for lower in ch.to_lowercase() {
+            folded.push(FoldedChar {
+                ch: lower,
+                origin_start,
+                prev_is_alnum: !at_start && prev_is_alnum,
+            });
+            origin_start = false;
+        }
+        prev_is_alnum = ch.is_alphanumeric();
+        at_start = false;
+    }
+    folded
+}
+
+/// 词项在项目名里至少有一处落在词首：字符串开头，或前一个字符不是字母 / 数字。
+fn name_has_boundary_hit(full_name: &str, term_lower: &str) -> bool {
+    let term: Vec<char> = term_lower.chars().collect();
+    if term.is_empty() {
+        return false;
+    }
+    let folded = fold_chars(full_name);
+    if term.len() > folded.len() {
+        return false;
+    }
+    let last = folded.len() - term.len();
+    for start in 0..=last {
+        if !folded[start].origin_start {
+            continue;
+        }
+        let matched = folded[start..start + term.len()]
+            .iter()
+            .zip(term.iter())
+            .all(|(item, expected)| item.ch == *expected);
+        if matched && !folded[start].prev_is_alnum {
+            return true;
+        }
+    }
+    false
+}
+
+/// `owner/repo` 取最后一个 `/` 后面的仓库名；没有 `/` 时整段就是仓库名。
+fn repo_name_lower(full_name: &str) -> String {
+    let name = full_name
+        .rsplit_once('/')
+        .map(|(_, name)| name)
+        .unwrap_or(full_name);
+    name.to_lowercase()
+}
+
+fn json_text_list(raw: &str) -> Vec<String> {
+    let parsed = if raw.is_empty() {
+        Vec::new()
+    } else {
+        parse_string_list(Some(raw.to_owned()))
+    };
+    parsed.into_iter().map(|text| text.to_lowercase()).collect()
+}
+
+fn text_has(haystack_lower: &str, term_lower: &str) -> bool {
+    !term_lower.is_empty() && haystack_lower.contains(term_lower)
+}
+
+fn list_has(items: &[String], term_lower: &str) -> bool {
+    !term_lower.is_empty() && items.iter().any(|item| item.contains(term_lower))
+}
+
+/// 纯函数：词项 + 这一条的字段 → 总分和命中原因。不读数据库。
+/// 一个词项只取命中字段里的最高权重，再按词首、仓库名整词加分。各词项相加。
+fn score_keyword_match(terms: &[String], fields: MatchInput<'_>) -> MatchScore {
+    let name_lower = fields.full_name.to_lowercase();
+    let line_lower = fields.one_liner_zh.to_lowercase();
+    let summary_lower = fields.summary_zh.to_lowercase();
+    let description_lower = fields.description.to_lowercase();
+    let topics = json_text_list(fields.topics_json);
+    let keywords = json_text_list(fields.keywords_json);
+    let repo_lower = repo_name_lower(fields.full_name);
+    let mut hit_name = false;
+    let mut hit_zh = false;
+    let mut hit_en = false;
+    let mut hit_topic = false;
+    let mut total = 0i64;
+    for term in terms {
+        let term_lower = term.to_lowercase();
+        if term_lower.is_empty() {
+            continue;
+        }
+        let name_hit = text_has(&name_lower, &term_lower);
+        let exact_repo = repo_lower == term_lower;
+        let mut best = 0i64;
+        if name_hit || exact_repo {
+            best = best.max(WEIGHT_NAME);
+            hit_name = true;
+        }
+        if text_has(&line_lower, &term_lower) {
+            best = best.max(WEIGHT_ONE_LINER);
+            hit_zh = true;
+        }
+        if text_has(&summary_lower, &term_lower) {
+            best = best.max(WEIGHT_SUMMARY);
+            hit_zh = true;
+        }
+        if text_has(&description_lower, &term_lower) {
+            best = best.max(WEIGHT_DESCRIPTION);
+            hit_en = true;
+        }
+        if list_has(&topics, &term_lower) || list_has(&keywords, &term_lower) {
+            best = best.max(WEIGHT_TOPIC);
+            hit_topic = true;
+        }
+        if name_hit || exact_repo {
+            if exact_repo || name_has_boundary_hit(fields.full_name, &term_lower) {
+                best += BONUS_WORD_START;
+            }
+            if exact_repo {
+                best += BONUS_EXACT_REPO;
+            }
+        }
+        total += best;
+    }
+    let mut reasons = Vec::new();
+    if hit_name {
+        reasons.push(REASON_NAME.to_owned());
+    }
+    if hit_zh {
+        reasons.push(REASON_ZH.to_owned());
+    }
+    if hit_en {
+        reasons.push(REASON_EN.to_owned());
+    }
+    if hit_topic {
+        reasons.push(REASON_TOPIC.to_owned());
+    }
+    MatchScore {
+        score: total,
+        reasons,
+    }
 }
 
 fn open_read(path: &Path) -> Result<Connection, String> {
@@ -632,6 +855,9 @@ fn scalar(
 }
 
 fn query_items(connection: &Connection, filters: &Normalized) -> Result<Vec<LibraryItem>, String> {
+    if filters.rank_by_relevance {
+        return query_items_by_relevance(connection, filters);
+    }
     let sql = format!(
         "{ITEM_SELECT} {JOINS} WHERE {FILTER_WHERE} ORDER BY {} LIMIT :limit OFFSET :offset",
         filters.order_sql
@@ -667,6 +893,70 @@ fn query_items(connection: &Connection, filters: &Normalized) -> Result<Vec<Libr
         .map(|raw| {
             let id = raw.id.clone();
             into_item(raw, scenarios.get(&id).cloned().unwrap_or_default())
+        })
+        .collect())
+}
+
+struct RankedRaw {
+    raw: RawItem,
+    score: i64,
+    reasons: Vec<String>,
+}
+
+fn match_input_of(raw: &RawItem) -> MatchInput<'_> {
+    MatchInput {
+        full_name: raw.full_name.as_str(),
+        one_liner_zh: raw.one_liner_zh.as_deref().unwrap_or(""),
+        summary_zh: raw.summary_zh.as_deref().unwrap_or(""),
+        description: raw.description.as_deref().unwrap_or(""),
+        topics_json: raw.topics_json.as_deref().unwrap_or(""),
+        keywords_json: raw.keywords_json.as_deref().unwrap_or(""),
+    }
+}
+
+/// 相关度：先取出全部匹配（不在 SQL 里分页），打分排序后再按 offset / limit 切。
+fn query_items_by_relevance(
+    connection: &Connection,
+    filters: &Normalized,
+) -> Result<Vec<LibraryItem>, String> {
+    let sql = format!("{ITEM_SELECT_RANK} {JOINS} WHERE {FILTER_WHERE}");
+    let mut statement = connection
+        .prepare(&sql)
+        .map_err(|error| format!("资料库查询准备失败：{error}"))?;
+    let rows = statement
+        .query_map(filter_params!(filters), read_ranked)
+        .map_err(|error| format!("资料库查询失败：{error}"))?;
+    let mut ranked = Vec::new();
+    for row in rows {
+        let raw = row.map_err(|error| format!("资料库行读取失败：{error}"))?;
+        let scored = score_keyword_match(&filters.terms, match_input_of(&raw));
+        ranked.push(RankedRaw {
+            raw,
+            score: scored.score,
+            reasons: scored.reasons,
+        });
+    }
+    ranked.sort_by(|left, right| {
+        right
+            .score
+            .cmp(&left.score)
+            .then(right.raw.stars_count.cmp(&left.raw.stars_count))
+            .then(right.raw.starred_at.cmp(&left.raw.starred_at))
+            .then(left.raw.id.cmp(&right.raw.id))
+    });
+    let offset = usize::try_from(filters.offset).unwrap_or(usize::MAX);
+    let limit = usize::try_from(filters.limit).unwrap_or(0);
+    let page: Vec<RankedRaw> = ranked.into_iter().skip(offset).take(limit).collect();
+    let ids: Vec<String> = page.iter().map(|row| row.raw.id.clone()).collect();
+    let scenarios = scenario_ids_for(connection, &ids)?;
+    Ok(page
+        .into_iter()
+        .map(|row| {
+            let id = row.raw.id.clone();
+            let mut item = into_item(row.raw, scenarios.get(&id).cloned().unwrap_or_default());
+            item.match_score = Some(row.score);
+            item.match_reasons = row.reasons;
+            item
         })
         .collect())
 }
@@ -834,7 +1124,18 @@ fn read_raw(row: &Row<'_>) -> rusqlite::Result<RawItem> {
         one_liner_zh: row.get(8)?,
         card_json: row.get(9)?,
         read_status: row.get(10)?,
+        summary_zh: None,
+        keywords_json: None,
+        topics_json: None,
     })
+}
+
+fn read_ranked(row: &Row<'_>) -> rusqlite::Result<RawItem> {
+    let mut raw = read_raw(row)?;
+    raw.summary_zh = row.get(11)?;
+    raw.keywords_json = row.get(12)?;
+    raw.topics_json = row.get(13)?;
+    Ok(raw)
 }
 
 fn into_item(raw: RawItem, scenario_ids: Vec<String>) -> LibraryItem {
@@ -862,6 +1163,8 @@ fn into_item(raw: RawItem, scenario_ids: Vec<String>) -> LibraryItem {
         has_card,
         confidence: card_number(&card, "confidence"),
         card_review: card_review(has_card, &card),
+        match_reasons: Vec::new(),
+        match_score: None,
     }
 }
 
@@ -3111,6 +3414,8 @@ mod tests {
                 "hasCard",
                 "confidence",
                 "cardReview",
+                "matchReasons",
+                "matchScore",
             ])
         );
         for key in [
@@ -3126,6 +3431,8 @@ mod tests {
             assert!(item_json[key].is_null(), "{key}");
         }
         assert!(item_json["scenarioIds"].is_array());
+        assert!(item_json["matchReasons"].as_array().unwrap().is_empty());
+        assert!(item_json["matchScore"].is_null());
         assert!(item_json["hasCard"].is_boolean());
         assert!(item_json["starsCount"].is_number());
         assert!(item_json["id"].is_string());
@@ -3221,6 +3528,8 @@ mod tests {
                 "hasCard",
                 "confidence",
                 "cardReview",
+                "matchReasons",
+                "matchScore",
                 "whatItIs",
                 "capabilities",
                 "problemsSolved",
@@ -3513,6 +3822,8 @@ mod tests {
             has_card: false,
             confidence,
             card_review: None,
+            match_reasons: Vec::new(),
+            match_score: None,
         }
     }
 
@@ -3573,5 +3884,743 @@ mod tests {
         ] {
             assert!(!source.contains(old), "还有旧叫法：{old}");
         }
+    }
+
+    // ───────────── 卡 50：相关度排序 ─────────────
+
+    fn fields<'a>(
+        full_name: &'a str,
+        one_liner: &'a str,
+        summary: &'a str,
+        description: &'a str,
+        topics_json: &'a str,
+        keywords_json: &'a str,
+    ) -> MatchInput<'a> {
+        MatchInput {
+            full_name,
+            one_liner_zh: one_liner,
+            summary_zh: summary,
+            description,
+            topics_json,
+            keywords_json,
+        }
+    }
+
+    fn score_term(term: &str, input: MatchInput<'_>) -> MatchScore {
+        score_keyword_match(&[term.to_owned()], input)
+    }
+
+    fn search_filters(keyword: Option<&str>, sort: Option<&str>) -> LibraryFilters {
+        LibraryFilters {
+            card_state: Some("all".to_owned()),
+            keyword: keyword.map(str::to_owned),
+            sort: sort.map(str::to_owned),
+            limit: Some(50),
+            ..LibraryFilters::default()
+        }
+    }
+
+    fn assert_match_empty(items: &[LibraryItem]) {
+        for item in items {
+            assert!(item.match_reasons.is_empty(), "{}", item.id);
+            assert_eq!(item.match_score, None, "{}", item.id);
+        }
+    }
+
+    #[test]
+    fn relevance_weight_order_is_name_line_description_topic() {
+        let name = score_term("zeta", fields("o/prezeta", "", "", "", "[]", "[]"));
+        assert_eq!(name.score, 100);
+        assert_eq!(name.reasons, owned(&["项目名"]));
+
+        let line = score_term("zeta", fields("o/other", "含有 Zeta", "", "", "[]", "[]"));
+        assert_eq!(line.score, 60);
+        assert_eq!(line.reasons, owned(&["中文说明"]));
+
+        let description = score_term("zeta", fields("o/other", "", "", "Has Zeta", "[]", "[]"));
+        assert_eq!(description.score, 30);
+        assert_eq!(description.reasons, owned(&["英文简介"]));
+
+        let topic = score_term("zeta", fields("o/other", "", "", "", r#"["Zeta"]"#, "[]"));
+        assert_eq!(topic.score, 20);
+        assert_eq!(topic.reasons, owned(&["话题"]));
+    }
+
+    #[test]
+    fn relevance_summary_scores_45_and_keywords_score_20() {
+        let summary = score_term(
+            "zeta",
+            fields("o/other", "", "摘要里有 Zeta", "", "[]", "[]"),
+        );
+        assert_eq!(summary.score, 45);
+        assert_eq!(summary.reasons, owned(&["中文说明"]));
+
+        let keywords = score_term("zeta", fields("o/other", "", "", "", "[]", r#"["Zeta"]"#));
+        assert_eq!(keywords.score, 20);
+        assert_eq!(keywords.reasons, owned(&["话题"]));
+    }
+
+    #[test]
+    fn relevance_keeps_only_the_highest_field_weight() {
+        let both = score_term(
+            "zeta",
+            fields("o/prezeta", "", "", "zeta manual", "[]", "[]"),
+        );
+        assert_eq!(both.score, 100);
+    }
+
+    #[test]
+    fn relevance_adds_word_start_bonus_only_at_a_boundary() {
+        let boundary = score_term("note", fields("o/my-note-app", "", "", "", "[]", "[]"));
+        assert_eq!(boundary.score, 120);
+        let middle = score_term("note", fields("o/footnote", "", "", "", "[]", "[]"));
+        assert_eq!(middle.score, 100);
+        // 多字节字符紧挨分隔符：按字符切，不按下标切。
+        let han = score_term("note", fields("o/笔记-note", "", "", "", "[]", "[]"));
+        assert_eq!(han.score, 120);
+    }
+
+    #[test]
+    fn relevance_adds_exact_repo_name_bonus() {
+        let exact = score_term("react", fields("facebook/react", "", "", "", "[]", "[]"));
+        assert_eq!(exact.score, 150);
+        let partial = score_term(
+            "react",
+            fields("remix-run/react-router", "", "", "", "[]", "[]"),
+        );
+        assert_eq!(partial.score, 120);
+    }
+
+    #[test]
+    fn relevance_sums_scores_across_terms() {
+        let scored = score_keyword_match(
+            &["小红书".to_owned(), "封面".to_owned()],
+            fields("o/xx小红书yy", "做封面", "", "", "[]", "[]"),
+        );
+        assert_eq!(scored.score, 160);
+        assert_eq!(scored.reasons, owned(&["项目名", "中文说明"]));
+    }
+
+    #[test]
+    fn relevance_reasons_are_deduped_in_fixed_order() {
+        let name_and_topic =
+            score_term("zeta", fields("o/prezeta", "", "", "", r#"["zeta"]"#, "[]"));
+        assert_eq!(name_and_topic.reasons, owned(&["项目名", "话题"]));
+
+        let both_zh = score_term(
+            "zeta",
+            fields("o/other", "含 zeta", "zeta 的摘要", "", "[]", "[]"),
+        );
+        assert_eq!(both_zh.reasons, owned(&["中文说明"]));
+        assert_eq!(both_zh.score, 60);
+    }
+
+    #[test]
+    fn relevance_unmatched_term_scores_zero_without_error() {
+        let missed = score_term(
+            "没有这个词",
+            fields("o/other", "填充", "摘要", "plain", "[]", "[]"),
+        );
+        assert_eq!(missed.score, 0);
+        assert!(missed.reasons.is_empty());
+    }
+
+    #[test]
+    fn relevance_bad_topic_or_keyword_json_counts_as_absent() {
+        let bad = score_term("not-json", fields("o/other", "", "", "", "not-json", "[]"));
+        assert_eq!(bad.score, 0);
+        assert!(bad.reasons.is_empty());
+
+        let numbers = score_term("123", fields("o/other", "", "", "", "[]", "[123]"));
+        assert_eq!(numbers.score, 0);
+        assert!(numbers.reasons.is_empty());
+
+        let mixed = score_term(
+            "zeta",
+            fields("o/other", "", "", "", r#"[1, "zeta", 2]"#, "[3]"),
+        );
+        assert_eq!(mixed.score, 20);
+        assert_eq!(mixed.reasons, owned(&["话题"]));
+
+        let ignored_number = score_term("1", fields("o/other", "", "", "", r#"[1, "zeta"]"#, "[]"));
+        assert_eq!(ignored_number.score, 0);
+
+        // 一串括号、多字节紧跟反斜杠：解析失败当没有，并且不能扫很久。
+        let mut hostile = String::from("[\"中文\\");
+        hostile.extend(std::iter::repeat('(').take(100_000));
+        let started = Instant::now();
+        let hostile_score = score_term("中文", fields("o/other", "", "", "", &hostile, "not-json"));
+        assert_eq!(hostile_score.score, 0);
+        assert!(
+            started.elapsed().as_millis() < 1_000,
+            "坏 JSON 耗时 {}ms",
+            started.elapsed().as_millis()
+        );
+    }
+
+    #[test]
+    fn relevance_matches_project_name_case_insensitively() {
+        // 词在大写项目名中间：命中项目名，但不是词首，也不是仓库名整词。
+        let middle = score_term(
+            "widget",
+            fields("Acme/FooWidgetPro", "", "", "", "[]", "[]"),
+        );
+        assert_eq!(middle.score, 100);
+        assert_eq!(middle.reasons, owned(&["项目名"]));
+
+        // 落在分隔符后的词首，仓库名是 Widget-Kit，不等于 widget。
+        let boundary = score_term("widget", fields("Acme/Widget-Kit", "", "", "", "[]", "[]"));
+        assert_eq!(boundary.score, 120);
+        assert_eq!(boundary.reasons, owned(&["项目名"]));
+    }
+
+    #[test]
+    fn keyword_terms_keeps_at_most_four_after_known_word_splits() {
+        assert_eq!(
+            keyword_terms("aa bb cc dd ee"),
+            vec![
+                "aa".to_owned(),
+                "bb".to_owned(),
+                "cc".to_owned(),
+                "dd".to_owned()
+            ]
+        );
+        // 连写的已知任务词先拆开，再和后面的词一起数，第五个丢掉。
+        assert_eq!(
+            split_known_words("小红书封面"),
+            vec!["小红书".to_owned(), "封面".to_owned()]
+        );
+        assert_eq!(
+            keyword_terms("小红书封面 aa bb cc"),
+            vec![
+                "小红书".to_owned(),
+                "封面".to_owned(),
+                "aa".to_owned(),
+                "bb".to_owned()
+            ]
+        );
+    }
+
+    #[test]
+    fn relevance_reasons_list_every_hit_field_in_fixed_order() {
+        let all = score_term(
+            "zeta",
+            fields(
+                "o/zeta-tool",
+                "含 zeta",
+                "",
+                "has zeta",
+                r#"["zeta"]"#,
+                "[]",
+            ),
+        );
+        assert_eq!(
+            all.reasons,
+            owned(&["项目名", "中文说明", "英文简介", "话题"])
+        );
+    }
+
+    #[test]
+    fn relevance_topic_and_keyword_match_by_contains() {
+        let topic = score_term(
+            "learning",
+            fields("o/other", "", "", "", r#"["machine-learning"]"#, "[]"),
+        );
+        assert_eq!(topic.score, 20);
+        assert_eq!(topic.reasons, owned(&["话题"]));
+
+        let keywords = score_term(
+            "learning",
+            fields("o/other", "", "", "", "[]", r#"["deep-learning-kit"]"#),
+        );
+        assert_eq!(keywords.score, 20);
+        assert_eq!(keywords.reasons, owned(&["话题"]));
+    }
+
+    #[test]
+    fn relevance_word_start_bonus_applies_at_full_name_start() {
+        // remix 在 full_name 开头；仓库名是 react-router，没有整词加分。
+        let started = score_term(
+            "remix",
+            fields("remix-run/react-router", "", "", "", "[]", "[]"),
+        );
+        assert_eq!(started.score, 120);
+        assert_eq!(started.reasons, owned(&["项目名"]));
+    }
+
+    #[test]
+    fn relevance_word_start_bonus_accepts_any_boundary_occurrence() {
+        // 第一处在 foot 里面，第二处在连字符后面。
+        let later = score_term("note", fields("o/footnote-note", "", "", "", "[]", "[]"));
+        assert_eq!(later.score, 120);
+        // 第一处就是词首。
+        let earlier = score_term("note", fields("o/note-footnote", "", "", "", "[]", "[]"));
+        assert_eq!(earlier.score, 120);
+        // 两处都在词中间。
+        let neither = score_term("note", fields("o/footnote-xnote", "", "", "", "[]", "[]"));
+        assert_eq!(neither.score, 100);
+    }
+
+    #[test]
+    fn relevance_sort_orders_name_then_zh_then_description_then_topic() {
+        let lab = Lab::new("rank-order");
+        lab.with(|conn| {
+            let mut name = Repo::new("name");
+            name.full_name = "o/prezeta".to_owned();
+            name.one_liner = Some("填充".to_owned());
+            name.save(conn);
+            let mut zh = Repo::new("zh");
+            zh.full_name = "o/zh".to_owned();
+            zh.one_liner = Some("含有 zeta".to_owned());
+            zh.summary = "摘要".to_owned();
+            zh.save(conn);
+            let mut en = Repo::new("en");
+            en.full_name = "o/en".to_owned();
+            en.description = Some("has zeta".to_owned());
+            en.one_liner = Some("填充".to_owned());
+            en.save(conn);
+            let mut topic = Repo::new("topic");
+            topic.full_name = "o/topic".to_owned();
+            topic.topics_json = r#"["Zeta"]"#.to_owned();
+            topic.one_liner = Some("填充".to_owned());
+            topic.save(conn);
+        });
+        let page = list_library_view(&lab.path, &search_filters(Some("Zeta"), Some("relevance")))
+            .expect("相关度查询应成功");
+        assert_eq!(
+            page.items
+                .iter()
+                .map(|item| item.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["name", "zh", "en", "topic"]
+        );
+        let reasons: Vec<_> = page
+            .items
+            .iter()
+            .map(|item| item.match_reasons.clone())
+            .collect();
+        assert_eq!(
+            reasons,
+            vec![
+                owned(&["项目名"]),
+                owned(&["中文说明"]),
+                owned(&["英文简介"]),
+                owned(&["话题"]),
+            ]
+        );
+        let scores: Vec<_> = page.items.iter().map(|item| item.match_score).collect();
+        assert_eq!(scores, vec![Some(100), Some(60), Some(30), Some(20)]);
+    }
+
+    #[test]
+    fn relevance_breaks_ties_by_stars_then_starred_at_then_id() {
+        let lab = Lab::new("rank-ties");
+        lab.with(|conn| {
+            for (id, stars, starred_at) in [
+                ("s-high", 9, "2026-01-01T00:00:00Z"),
+                ("s-low", 1, "2026-09-01T00:00:00Z"),
+                ("t-new", 5, "2026-08-01T00:00:00Z"),
+                ("t-old", 5, "2026-02-01T00:00:00Z"),
+                ("a", 4, "2026-04-01T00:00:00Z"),
+                ("b", 4, "2026-04-01T00:00:00Z"),
+            ] {
+                let mut repo = Repo::new(id);
+                repo.description = Some("has zeta".to_owned());
+                repo.one_liner = Some("填充".to_owned());
+                repo.stars = stars;
+                repo.starred_at = starred_at.to_owned();
+                repo.save(conn);
+            }
+        });
+        let ids = page_ids(&lab.path, search_filters(Some("zeta"), Some("relevance")));
+        assert_eq!(ids, owned(&["s-high", "t-new", "t-old", "a", "b", "s-low"]));
+        let high = ids.iter().position(|id| id == "s-high").unwrap();
+        let low = ids.iter().position(|id| id == "s-low").unwrap();
+        assert!(high < low, "星数多的应在前");
+        let newer = ids.iter().position(|id| id == "t-new").unwrap();
+        let older = ids.iter().position(|id| id == "t-old").unwrap();
+        assert!(newer < older, "星数相同时收藏时间新的应在前");
+        let first = ids.iter().position(|id| id == "a").unwrap();
+        let second = ids.iter().position(|id| id == "b").unwrap();
+        assert!(first < second, "星数和收藏时间都相同时 id 小的应在前");
+    }
+
+    #[test]
+    fn relevance_paginates_after_sorting() {
+        let lab = Lab::new("rank-page");
+        lab.with(|conn| {
+            for index in 1..=6 {
+                let mut repo = Repo::new(&format!("p{index}"));
+                repo.description = Some("has zeta".to_owned());
+                repo.stars = index;
+                repo.one_liner = Some("填充".to_owned());
+                repo.save(conn);
+            }
+            let mut nope = Repo::new("nope");
+            nope.one_liner = Some("填充".to_owned());
+            nope.save(conn);
+        });
+        let mut full = search_filters(Some("zeta"), Some("relevance"));
+        full.limit = Some(10);
+        let full_page = list_library_view(&lab.path, &full).expect("整页应成功");
+        assert_eq!(full_page.total_count, 6);
+        let all = page_ids(&lab.path, full);
+        assert_eq!(all, owned(&["p6", "p5", "p4", "p3", "p2", "p1"]));
+
+        let mut paged = Vec::new();
+        for offset in [0_i64, 2, 4] {
+            let mut filters = search_filters(Some("zeta"), Some("relevance"));
+            filters.limit = Some(2);
+            filters.offset = Some(offset);
+            let page = list_library_view(&lab.path, &filters).expect("分页应成功");
+            assert_eq!(page.total_count, 6, "offset {offset}");
+            paged.extend(page.items.into_iter().map(|item| item.id));
+        }
+        assert_eq!(paged, all);
+    }
+
+    #[test]
+    fn relevance_without_keyword_falls_back_to_starred() {
+        let lab = Lab::new("rank-empty");
+        lab.with(|conn| {
+            let mut new_repo = Repo::new("new");
+            new_repo.stars = 1;
+            new_repo.starred_at = "2026-09-01T00:00:00Z".to_owned();
+            new_repo.save(conn);
+            let mut mid = Repo::new("mid");
+            mid.stars = 100;
+            mid.starred_at = "2026-05-01T00:00:00Z".to_owned();
+            mid.save(conn);
+            let mut old = Repo::new("old");
+            old.stars = 50;
+            old.starred_at = "2026-01-01T00:00:00Z".to_owned();
+            old.save(conn);
+        });
+        let starred = page_ids(&lab.path, search_filters(None, Some("starred")));
+        assert_eq!(starred, owned(&["new", "mid", "old"]));
+        for keyword in [None, Some(""), Some("   "), Some(" \t\n ")] {
+            let page = list_library_view(&lab.path, &search_filters(keyword, Some("relevance")))
+                .unwrap_or_else(|error| panic!("空关键词不应报错：{error}；keyword={keyword:?}"));
+            let ids: Vec<_> = page.items.into_iter().map(|item| item.id).collect();
+            assert_eq!(ids, starred, "{keyword:?}");
+            let again = list_library_view(&lab.path, &search_filters(keyword, Some("relevance")))
+                .expect("应能再查一次");
+            assert_match_empty(&again.items);
+        }
+    }
+
+    #[test]
+    fn other_sorts_ignore_relevance_when_keyword_is_set() {
+        let lab = Lab::new("rank-other-sorts");
+        lab.with(|conn| {
+            let mut name = Repo::new("name");
+            name.full_name = "o/alpha-tool".to_owned();
+            name.one_liner = Some("填充".to_owned());
+            name.stars = 10;
+            name.starred_at = "2026-01-01T00:00:00Z".to_owned();
+            name.pushed_at = Some("2026-01-01T00:00:00Z".to_owned());
+            name.save(conn);
+            let mut line = Repo::new("line");
+            line.full_name = "o/line".to_owned();
+            line.one_liner = Some("有 alpha".to_owned());
+            line.stars = 50;
+            line.starred_at = "2026-06-01T00:00:00Z".to_owned();
+            line.pushed_at = Some("2026-03-01T00:00:00Z".to_owned());
+            line.save(conn);
+            let mut desc = Repo::new("desc");
+            desc.full_name = "o/desc".to_owned();
+            desc.description = Some("Alpha here".to_owned());
+            desc.one_liner = Some("填充".to_owned());
+            desc.stars = 5;
+            desc.starred_at = "2026-03-01T00:00:00Z".to_owned();
+            desc.pushed_at = None;
+            desc.save(conn);
+            let mut topic = Repo::new("topic");
+            topic.full_name = "o/topic".to_owned();
+            topic.topics_json = r#"["alpha"]"#.to_owned();
+            topic.one_liner = Some("填充".to_owned());
+            topic.stars = 80;
+            topic.starred_at = "2026-09-01T00:00:00Z".to_owned();
+            topic.pushed_at = Some("2026-08-01T00:00:00Z".to_owned());
+            topic.save(conn);
+        });
+        let cases = [
+            ("starred", vec!["topic", "line", "desc", "name"]),
+            ("stars", vec!["topic", "line", "name", "desc"]),
+            ("updated", vec!["topic", "line", "name", "desc"]),
+        ];
+        for (sort, expected) in cases {
+            let page = list_library_view(&lab.path, &search_filters(Some("alpha"), Some(sort)))
+                .expect("查询应成功");
+            let ids: Vec<_> = page.items.iter().map(|item| item.id.clone()).collect();
+            assert_eq!(ids, owned(&expected), "{sort}");
+            assert_match_empty(&page.items);
+        }
+    }
+
+    #[test]
+    fn unknown_sort_is_still_rejected() {
+        let lab = Lab::new("rank-bad-sort");
+        let error = list_library_view(&lab.path, &search_filters(Some("alpha"), Some("foo")))
+            .expect_err("不认识的排序应失败");
+        assert_eq!(error, "排序方式无效");
+    }
+
+    #[test]
+    fn relevance_returns_the_same_rows_as_starred_for_keyword_matches() {
+        let lab = Lab::new("rank-same-rows");
+        lab.with(|conn| {
+            let mut name = Repo::new("name");
+            name.full_name = "Alpha/Widget".to_owned();
+            name.one_liner = Some("填充".to_owned());
+            name.save(conn);
+            let mut desc = Repo::new("desc");
+            desc.description = Some("描述专用".to_owned());
+            desc.one_liner = Some("填充".to_owned());
+            desc.save(conn);
+            let mut line = Repo::new("line");
+            line.one_liner = Some("一句话专用".to_owned());
+            line.save(conn);
+            let mut summary = Repo::new("summary");
+            summary.summary = "摘要专用".to_owned();
+            summary.one_liner = Some("填充".to_owned());
+            summary.save(conn);
+            let mut keywords = Repo::new("keywords");
+            keywords.keywords_json = r#"["关键词专用"]"#.to_owned();
+            keywords.one_liner = Some("填充".to_owned());
+            keywords.save(conn);
+            let mut topics = Repo::new("topics");
+            topics.topics_json = r#"["主题专用"]"#.to_owned();
+            topics.one_liner = Some("填充".to_owned());
+            topics.save(conn);
+            let mut both = Repo::new("both");
+            both.full_name = "foo/xiaohongshu-tool".to_owned();
+            both.description = Some("批量生成封面".to_owned());
+            both.one_liner = Some("填充".to_owned());
+            both.save(conn);
+            let mut only_one = Repo::new("only-one");
+            only_one.description = Some("只和封面有关".to_owned());
+            only_one.one_liner = Some("填充".to_owned());
+            only_one.save(conn);
+            let mut compound = Repo::new("compound");
+            compound.full_name = "foo/xhs-helper".to_owned();
+            compound.description = Some("做小红书笔记和封面图".to_owned());
+            compound.one_liner = Some("填充".to_owned());
+            compound.save(conn);
+            let mut compound_other = Repo::new("compound-other");
+            compound_other.description = Some("只做小红书运营".to_owned());
+            compound_other.one_liner = Some("填充".to_owned());
+            compound_other.save(conn);
+            let mut split_rank = Repo::new("split-rank");
+            split_rank.full_name = "o/xx小红书yy".to_owned();
+            split_rank.description = Some("做封面".to_owned());
+            split_rank.one_liner = Some("填充".to_owned());
+            split_rank.save(conn);
+            let mut literal = Repo::new("literal");
+            literal.full_name = "o/100%_pure".to_owned();
+            literal.save(conn);
+            let mut other = Repo::new("other-escape");
+            other.full_name = "o/100XYpure".to_owned();
+            other.save(conn);
+            let mut plain = Repo::new("plain");
+            plain.full_name = "o/plain".to_owned();
+            plain.save(conn);
+            let mut numeric = Repo::new("numjson");
+            numeric.keywords_json = "[123]".to_owned();
+            numeric.full_name = "o/numjson".to_owned();
+            numeric.one_liner = Some("填充".to_owned());
+            numeric.save(conn);
+        });
+
+        let cases = [
+            ("wIdGeT", vec!["name"]),
+            ("描述专用", vec!["desc"]),
+            ("一句话专用", vec!["line"]),
+            ("摘要专用", vec!["summary"]),
+            ("关键词专用", vec!["keywords"]),
+            ("主题专用", vec!["topics"]),
+            ("xiaohongshu 封面", vec!["both"]),
+            ("封面 xiaohongshu", vec!["both"]),
+            ("  xiaohongshu   封面  ", vec!["both"]),
+            ("封面", vec!["both", "compound", "only-one", "split-rank"]),
+            ("小红书封面", vec!["compound", "split-rank"]),
+            ("小红书火箭封面", vec![]),
+            ("%", vec!["literal"]),
+            ("_", vec!["literal"]),
+            ("100%_pure", vec!["literal"]),
+            ("123", vec!["numjson"]),
+        ];
+        for (keyword, expected) in cases {
+            let mut starred_ids =
+                page_ids(&lab.path, search_filters(Some(keyword), Some("starred")));
+            let ranked =
+                list_library_view(&lab.path, &search_filters(Some(keyword), Some("relevance")))
+                    .unwrap_or_else(|error| panic!("{keyword} 相关度查询失败：{error}"));
+            let mut ranked_ids: Vec<_> = ranked.items.iter().map(|item| item.id.clone()).collect();
+            starred_ids.sort();
+            ranked_ids.sort();
+            assert_eq!(
+                ranked_ids, starred_ids,
+                "{keyword} 出现的记录应与收藏时间排序相同"
+            );
+            assert_eq!(ranked_ids, owned(&expected), "{keyword}");
+        }
+
+        let widget = list_library_view(
+            &lab.path,
+            &search_filters(Some("wIdGeT"), Some("relevance")),
+        )
+        .unwrap();
+        let name = widget.items.iter().find(|item| item.id == "name").unwrap();
+        assert_eq!(name.match_reasons, owned(&["项目名"]));
+        assert_eq!(name.match_score, Some(150));
+
+        let split = list_library_view(
+            &lab.path,
+            &search_filters(Some("小红书封面"), Some("relevance")),
+        )
+        .unwrap();
+        let split_rank = split
+            .items
+            .iter()
+            .find(|item| item.id == "split-rank")
+            .unwrap();
+        assert_eq!(split_rank.match_reasons, owned(&["项目名", "英文简介"]));
+        assert_eq!(split_rank.match_score, Some(130));
+
+        let numeric =
+            list_library_view(&lab.path, &search_filters(Some("123"), Some("relevance"))).unwrap();
+        let numjson = numeric
+            .items
+            .iter()
+            .find(|item| item.id == "numjson")
+            .unwrap();
+        assert_eq!(numjson.match_score, Some(0));
+        assert!(numjson.match_reasons.is_empty());
+    }
+
+    #[test]
+    fn relevance_keeps_filter_set_and_counts() {
+        let lab = Lab::new("rank-filters");
+        lab.with(|conn| {
+            scenario(conn, "scn-a", "a", "甲", 1, 0);
+            let mut high = Repo::new("high");
+            high.full_name = "o/专用词工具".to_owned();
+            high.one_liner = Some("填充".to_owned());
+            high.reading = Some("want_to_try".to_owned());
+            high.card_json = Some(r#"{"form":"skill"}"#.to_owned());
+            high.stars = 10;
+            high.save(conn);
+            link(conn, "high", "scn-a", "suggested");
+
+            let mut low = Repo::new("low");
+            low.description = Some("这里有专用词".to_owned());
+            low.one_liner = Some("填充".to_owned());
+            low.reading = Some("watching".to_owned());
+            low.card_json = Some(r#"{"form":"skill"}"#.to_owned());
+            low.stars = 1;
+            low.save(conn);
+            link(conn, "low", "scn-a", "suggested");
+
+            let mut zero = Repo::new("zero");
+            zero.full_name = "o/zero".to_owned();
+            zero.keywords_json = "not-json-专用词".to_owned();
+            zero.one_liner = Some("填充".to_owned());
+            zero.summary = "摘要".to_owned();
+            zero.reading = Some("want_to_try".to_owned());
+            zero.card_json = Some(r#"{"form":"skill"}"#.to_owned());
+            zero.save(conn);
+            link(conn, "zero", "scn-a", "suggested");
+
+            let mut wrong_form = Repo::new("wrong-form");
+            wrong_form.description = Some("这里有专用词".to_owned());
+            wrong_form.one_liner = Some("填充".to_owned());
+            wrong_form.reading = Some("want_to_try".to_owned());
+            wrong_form.card_json = Some(r#"{"form":"app"}"#.to_owned());
+            wrong_form.save(conn);
+            link(conn, "wrong-form", "scn-a", "suggested");
+
+            let mut wrong_reading = Repo::new("wrong-reading");
+            wrong_reading.description = Some("这里有专用词".to_owned());
+            wrong_reading.one_liner = Some("填充".to_owned());
+            wrong_reading.reading = Some("unread".to_owned());
+            wrong_reading.card_json = Some(r#"{"form":"skill"}"#.to_owned());
+            wrong_reading.save(conn);
+            link(conn, "wrong-reading", "scn-a", "suggested");
+
+            let mut wrong_keyword = Repo::new("wrong-keyword");
+            wrong_keyword.one_liner = Some("填充".to_owned());
+            wrong_keyword.reading = Some("want_to_try".to_owned());
+            wrong_keyword.card_json = Some(r#"{"form":"skill"}"#.to_owned());
+            wrong_keyword.save(conn);
+            link(conn, "wrong-keyword", "scn-a", "suggested");
+
+            let mut wrong_scenario = Repo::new("wrong-scenario");
+            wrong_scenario.description = Some("这里有专用词".to_owned());
+            wrong_scenario.one_liner = Some("填充".to_owned());
+            wrong_scenario.reading = Some("want_to_try".to_owned());
+            wrong_scenario.card_json = Some(r#"{"form":"skill"}"#.to_owned());
+            wrong_scenario.save(conn);
+        });
+        let mut filters = search_filters(Some("专用词"), None);
+        filters.scenario = Some("scn-a".to_owned());
+        filters.reading = Some("want".to_owned());
+        filters.form = Some("skill".to_owned());
+        let mut relevance = filters.clone();
+        relevance.sort = Some("relevance".to_owned());
+        let starred = list_library_view(&lab.path, &filters).expect("收藏时间查询应成功");
+        let ranked = list_library_view(&lab.path, &relevance).expect("相关度查询应成功");
+        let mut starred_ids: Vec<_> = starred.items.iter().map(|item| item.id.clone()).collect();
+        let mut ranked_ids: Vec<_> = ranked.items.iter().map(|item| item.id.clone()).collect();
+        starred_ids.sort();
+        ranked_ids.sort();
+        assert_eq!(ranked_ids, owned(&["high", "low", "zero"]));
+        assert_eq!(ranked_ids, starred_ids);
+        assert_eq!(ranked.total_count, starred.total_count);
+        assert_eq!(ranked.total_count, 3);
+        assert_eq!(ranked.counts, starred.counts);
+        assert_eq!(ranked.counts.reading.want, 3);
+        let zero = ranked.items.iter().find(|item| item.id == "zero").unwrap();
+        assert_eq!(zero.match_score, Some(0));
+        assert!(zero.match_reasons.is_empty());
+    }
+
+    #[test]
+    fn today_and_detail_leave_match_fields_empty() {
+        let lab = Lab::new("rank-other-views");
+        lab.with(|conn| {
+            let mut repo = Repo::new("repo");
+            repo.full_name = "o/zeta-tool".to_owned();
+            repo.one_liner = Some("含 zeta".to_owned());
+            repo.starred_at = "2026-10-09T00:00:00Z".to_owned();
+            repo.save(conn);
+        });
+        let today = get_today_view(&lab.path, "2026-10-10T00:00:00Z").expect("今日应成功");
+        assert!(today.picks.iter().any(|item| item.id == "repo"));
+        assert!(today.week_new.iter().any(|item| item.id == "repo"));
+        for item in today.picks.iter().chain(today.week_new.iter()) {
+            assert!(item.match_reasons.is_empty(), "{}", item.id);
+            assert_eq!(item.match_score, None, "{}", item.id);
+        }
+        let detail = get_library_detail(&lab.path, "repo").expect("详情应成功");
+        assert!(detail.item.match_reasons.is_empty());
+        assert_eq!(detail.item.match_score, None);
+    }
+
+    #[test]
+    fn library_item_serializes_empty_match_fields() {
+        let json = serde_json::to_string(&sample_item(None)).expect("应能序列化");
+        assert!(json.contains("\"matchReasons\":[]"), "{json}");
+        assert!(json.contains("\"matchScore\":null"), "{json}");
+
+        let lab = Lab::new("rank-json");
+        lab.with(|conn| {
+            Repo::new("repo").save(conn);
+        });
+        let page = list_library_view(&lab.path, &search_filters(None, Some("starred")))
+            .expect("列表应成功");
+        let item_json = serde_json::to_string(&page.items[0]).expect("条目应能序列化");
+        assert!(item_json.contains("\"matchReasons\":[]"), "{item_json}");
+        assert!(item_json.contains("\"matchScore\":null"), "{item_json}");
     }
 }
