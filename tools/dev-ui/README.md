@@ -7,7 +7,7 @@
 ## 编译（一次）
 
 ```bash
-cd /Users/fox/WorkSpace/_external_tools/fox-stars-lab
+cd /Users/fox/WorkSpace/_infra/fox-stars-lab
 swiftc -O -o /tmp/winlist tools/dev-ui/winlist.swift
 swiftc -O -o /tmp/axui tools/dev-ui/axui.swift
 ```

@@ -4,7 +4,7 @@
 set -euo pipefail
 
 WT="${1:?用法: warm.sh <工作区绝对路径>}"
-REPO="/Users/fox/WorkSpace/_external_tools/fox-stars-lab"
+REPO="/Users/fox/WorkSpace/_infra/fox-stars-lab"
 [ -d "$WT" ] || { echo "没有这个目录：$WT" >&2; exit 1; }
 
 # 1) Rust 编译缓存：克隆（改动互不影响；本地的 app crate 会重编，第三方依赖复用）

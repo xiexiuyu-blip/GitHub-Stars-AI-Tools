@@ -33,7 +33,7 @@ Fox Stars Lab 不再只是“GitHub Stars 管理器”。它面向 Fox 的真实
 
 当前优先方向是可靠性升级 v1.1：AI 请求诊断、批处理任务追踪、长 README 分块摘要、OpenAI 兼容模型适配、标签网络稳定性、本地数据备份/恢复。随后推进知识质量、搜索选型、项目雷达和生态连接能力。
 
-完整路线见 [docs/fox-stars-lab-roadmap.md](/Users/fox/WorkSpace/_external_tools/GitHub-Stars-AI-Tools/GitHub-Stars-AI-Tools/docs/fox-stars-lab-roadmap.md)。
+完整路线见 [docs/fox-stars-lab-roadmap.md](docs/fox-stars-lab-roadmap.md)。
 
 | 项目介绍 | 项目介绍 |
 | --- | --- |

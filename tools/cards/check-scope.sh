@@ -5,7 +5,7 @@
 set -euo pipefail
 
 ID="${1:?用法: check-scope.sh <卡号-短名>}"
-WT="/Users/fox/WorkSpace/_external_tools/fox-stars-lab-wt/$ID"
+WT="/Users/fox/WorkSpace/_infra/fox-stars-lab-wt/$ID"
 CARD="$WT/docs/rebuild/任务卡/$ID.md"
 [ -d "$WT" ] || { echo "没有工作区 $WT" >&2; exit 2; }
 [ -f "$CARD" ] || { echo "没有任务卡 $CARD" >&2; exit 2; }

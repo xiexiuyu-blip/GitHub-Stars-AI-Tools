@@ -2,7 +2,7 @@
 # 把一张任务卡交给 Codex（Grok 额度用完后的开发者），在隔离工作区里无人值守开发。只有总控（Claude）运行。
 # 用法：tools/cards/dispatch-codex.sh <卡号-短名> [交接 / 续作文件]
 # 可选环境变量：CODEX_MODEL（默认 gpt-6.1-sol；难题 gpt-6-astra，纯文案杂活 gpt-6-luna）、CODEX_EFFORT（默认 xhigh）
-# 日志：/Users/fox/WorkSpace/_external_tools/fox-stars-lab-wt/_logs/<卡号>-<时间>.{prompt.md,jsonl,last.md}
+# 日志：/Users/fox/WorkSpace/_infra/fox-stars-lab-wt/_logs/<卡号>-<时间>.{prompt.md,jsonl,last.md}
 #
 # 安全模型（Codex 自带的权限配置，见 codex-fs-profile.txt）：
 #   - 全盘可读，但正式库 / 开发库 / 钥匙串 / ssh / aws / gnupg / gh / Codex 自己的令牌，读写都被禁（报 Operation not permitted）；
@@ -15,7 +15,7 @@ set -euo pipefail
 
 ID="${1:?用法: dispatch-codex.sh <卡号-短名> [交接 / 续作文件]}"
 HANDOFF="${2:-}"
-WT_ROOT="/Users/fox/WorkSpace/_external_tools/fox-stars-lab-wt"
+WT_ROOT="/Users/fox/WorkSpace/_infra/fox-stars-lab-wt"
 WT="$WT_ROOT/$ID"
 LOGDIR="$WT_ROOT/_logs"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"

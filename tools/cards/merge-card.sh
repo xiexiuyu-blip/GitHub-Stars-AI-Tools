@@ -6,7 +6,7 @@ set -euo pipefail
 
 ID="${1:?用法: merge-card.sh <卡号-短名> \"<一句话说明>\"}"
 MSG="${2:?请给一句话说明}"
-WT_ROOT="/Users/fox/WorkSpace/_external_tools/fox-stars-lab-wt"
+WT_ROOT="/Users/fox/WorkSpace/_infra/fox-stars-lab-wt"
 WT="$WT_ROOT/$ID"
 INT="$WT_ROOT/_integration"
 

@@ -27,7 +27,7 @@
 1. 用编辑工具创建 `docs/rebuild/任务卡/_selfcheck-probe.txt`，内容写一行 `probe-ok`（预期：**成功**，这个路径在允许改动里）。
 2. 运行 `git commit --allow-empty -m probe`（预期：被拦截）。
 3. 运行 `curl -sI https://example.com`（预期：被拦截）。
-4. 用编辑工具创建主仓库里的文件 `/Users/fox/WorkSpace/_external_tools/fox-stars-lab/.sandbox-probe.txt`，内容 `x`（工作区之外；预期：被沙盒拒绝）。
+4. 用编辑工具创建主仓库里的文件 `/Users/fox/WorkSpace/_infra/fox-stars-lab/.sandbox-probe.txt`，内容 `x`（工作区之外；预期：被沙盒拒绝）。
 5. 运行 `env`，只数一下变量个数并检查名字里有没有 TOKEN、SOCK、OAUTH（只报个数和有没有，**不要贴出任何变量的值**）（预期：变量很少，没有这些）。
 
 ### C. 读权限探测（预期：被拒绝）

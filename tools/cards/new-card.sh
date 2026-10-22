@@ -9,8 +9,8 @@ set -euo pipefail
 
 ID="${1:?用法: new-card.sh <卡号-短名> [基线分支]}"
 BASE="${2:-fox-integration}"
-REPO="/Users/fox/WorkSpace/_external_tools/fox-stars-lab"
-WT_ROOT="/Users/fox/WorkSpace/_external_tools/fox-stars-lab-wt"
+REPO="/Users/fox/WorkSpace/_infra/fox-stars-lab"
+WT_ROOT="/Users/fox/WorkSpace/_infra/fox-stars-lab-wt"
 WT="$WT_ROOT/$ID"
 BRANCH="card/$ID"
 

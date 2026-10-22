@@ -4,7 +4,7 @@
 #   tools/cards/dispatch.sh <卡号-短名>                  首次派发
 #   tools/cards/dispatch.sh <卡号-短名> <修改意见文件>    审核退回后续作（沿用同一会话）
 # 可选环境变量：MAX_TURNS（默认 200）、GROK_MODEL（默认 grok-4.7）、GROK_EFFORT（默认 high）
-# 日志：/Users/fox/WorkSpace/_external_tools/fox-stars-lab-wt/_logs/
+# 日志：/Users/fox/WorkSpace/_infra/fox-stars-lab-wt/_logs/
 #
 # 安全模型（三层，缺一不可）：
 #   1. 内核沙盒 fsl-dev（.grok/sandbox.toml）：只能写工作区；正式库、开发库、钥匙串、各类凭据读写都被禁。
@@ -16,7 +16,7 @@ set -euo pipefail
 
 ID="${1:?用法: dispatch.sh <卡号-短名> [修改意见文件]}"
 FEEDBACK_SRC="${2:-}"
-WT_ROOT="/Users/fox/WorkSpace/_external_tools/fox-stars-lab-wt"
+WT_ROOT="/Users/fox/WorkSpace/_infra/fox-stars-lab-wt"
 WT="$WT_ROOT/$ID"
 LOGDIR="$WT_ROOT/_logs"
 GROK="$HOME/.grok/bin/grok"

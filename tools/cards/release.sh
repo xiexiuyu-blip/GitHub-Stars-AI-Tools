@@ -6,8 +6,8 @@
 # 用法：tools/cards/release.sh
 set -euo pipefail
 
-REPO="/Users/fox/WorkSpace/_external_tools/fox-stars-lab"
-INT="/Users/fox/WorkSpace/_external_tools/fox-stars-lab-wt/_integration"
+REPO="/Users/fox/WorkSpace/_infra/fox-stars-lab"
+INT="/Users/fox/WorkSpace/_infra/fox-stars-lab-wt/_integration"
 
 cd "$INT"
 git diff --quiet HEAD || { echo "集成区有未提交的改动" >&2; exit 1; }
