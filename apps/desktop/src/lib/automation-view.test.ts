@@ -427,11 +427,11 @@ function lastScan(overrides: Partial<LastFullScan> = {}): LastFullScan {
 }
 
 describe('estimateFullScanTokens', () => {
-  it('按每个 7500 token 估算（v3 第一批 5 张平均约 7.3 千，和后台刹车线保持一致），向最接近的整数取整', () => {
-    expect(FULL_SCAN_TOKENS_PER_REPO).toBe(7500);
-    expect(estimateFullScanTokens(388)).toBe(2_910_000);
-    expect(estimateFullScanTokens(1)).toBe(7500);
-    expect(estimateFullScanTokens(1.2)).toBe(9000);
+  it('按每个 9000 token 估算（切库后全量整理约 500 张，实测每张约 9 千，和后台刹车线保持一致），向最接近的整数取整', () => {
+    expect(FULL_SCAN_TOKENS_PER_REPO).toBe(9000);
+    expect(estimateFullScanTokens(388)).toBe(3_492_000);
+    expect(estimateFullScanTokens(1)).toBe(9000);
+    expect(estimateFullScanTokens(1.2)).toBe(10800);
   });
 
   it('不是有限数或 ≤ 0 时返回 0', () => {
@@ -522,12 +522,12 @@ describe('fullScanPanel', () => {
     expect(panel.last).toBe('上次整理现有收藏：10 月 4 日 12:30 完成，整理了 388 个，用了约 201.8 万 token。');
   });
 
-  it('有要整理的是 ready：388 个约 290 万 token', () => {
+  it('有要整理的是 ready：388 个约 350 万 token', () => {
     const panel = fullScanPanel(status({ needsOrganizing: 388, lastFullScan: lastScan() }));
     expect(panel).toMatchObject({
       kind: 'ready',
       pending: 388,
-      estimate: '290 万',
+      estimate: '350 万',
       last: '上次整理现有收藏：10 月 4 日 12:30 被停止，已整理 120 / 388 个，用了约 62 万 token。',
     });
   });
@@ -607,10 +607,10 @@ describe('fullScanPanel', () => {
       kind: 'ready',
       title: '现在就整理 3 个',
       description: '不想等每天自动整理的时候用：这一轮不受每天额度限制，整理完自动回到每天自动整理。',
-      body: '有 3 个收藏在等整理，预计约 2 万 token（具体花多少钱以你服务商的账单为准）。',
+      body: '有 3 个收藏在等整理，预计约 3 万 token（具体花多少钱以你服务商的账单为准）。',
       buttonLabel: '现在整理 3 个',
       pending: 3,
-      estimate: '2 万',
+      estimate: '3 万',
       last: '上次整理现有收藏：10 月 4 日 12:30 被停止，已整理 120 / 388 个，用了约 62 万 token。',
     });
     expect(fullScanPanel({ ...pending, awaiting: 0 })).toEqual({
@@ -632,10 +632,10 @@ describe('fullScanPanel', () => {
       kind: 'ready',
       title: '第一步：把现有收藏整理一遍',
       description: '只在第一次用、或说明的格式升级之后做一次：一口气把现有收藏整理完，不受每天额度限制。整理完，以后就只剩下面的「每天自动整理」。',
-      body: '需要整理 12 个，预计约 9 万 token（具体花多少钱以你服务商的账单为准）。',
+      body: '需要整理 12 个，预计约 11 万 token（具体花多少钱以你服务商的账单为准）。',
       buttonLabel: '现在整理全部 12 个',
       pending: 12,
-      estimate: '9 万',
+      estimate: '11 万',
       last: lastFullScanText(overrides.lastFullScan),
     });
   });
@@ -649,10 +649,10 @@ describe('fullScanPanel', () => {
       kind: 'ready',
       title: '现在就整理 12 个',
       description: '不想等每天自动整理的时候用：这一轮不受每天额度限制，整理完自动回到每天自动整理。',
-      body: '有 12 个收藏在等整理，预计约 9 万 token（具体花多少钱以你服务商的账单为准）。',
+      body: '有 12 个收藏在等整理，预计约 11 万 token（具体花多少钱以你服务商的账单为准）。',
       buttonLabel: '现在整理 12 个',
       pending: 12,
-      estimate: '9 万',
+      estimate: '11 万',
       last: lastFullScanText(overrides.lastFullScan),
     });
   });
