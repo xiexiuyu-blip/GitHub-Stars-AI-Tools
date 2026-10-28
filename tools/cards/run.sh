@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # AI 开发者唯一的构建/测试入口：固定命令、固定参数，不联网安装任何东西。
-# 用法：tools/cards/run.sh <web-build|web-test [过滤词]|rust-fmt|rust-fmt-fix|rust-check|rust-test [过滤词]>
+# 用法：tools/cards/run.sh <web-build|web-test [过滤词]|rust-fmt|rust-fmt-fix|rust-check|rust-test [过滤词]|script-test|ui-test>
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
@@ -18,6 +18,12 @@ cmd="${1:-}"
 shift || true
 
 case "$cmd" in
+  ui-test)
+    exec node tools/dev-ui/acceptance.mjs "$@"
+    ;;
+  script-test)
+    exec python3 -B -m unittest discover -s tools/cards -p '*_test.py' -v
+    ;;
   web-build)
     exec pnpm build
     ;;
@@ -43,7 +49,7 @@ case "$cmd" in
     exec cargo test --manifest-path "$MANIFEST" --lib -- --test-threads=8 --skip "$SKIP"
     ;;
   *)
-    echo "用法：tools/cards/run.sh <web-build|web-test [过滤词]|rust-fmt|rust-fmt-fix|rust-check|rust-test [过滤词]>" >&2
+    echo "用法：tools/cards/run.sh <web-build|web-test [过滤词]|rust-fmt|rust-fmt-fix|rust-check|rust-test [过滤词]|script-test|ui-test>" >&2
     exit 2
     ;;
 esac

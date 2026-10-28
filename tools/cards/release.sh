@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 把集成线推到 Fox 的开发版（fox-rebuild，主工作区）。只有总控（Claude）运行。
+# 把集成线推到 Fox 的开发版（fox-rebuild，主工作区）。只有总控运行。
 # 先在集成区跑完整检查，全绿才快进合并；之后 Fox 开着的开发版会自动更新。
 # 如果这次带了后台（Rust）改动，开发版会重新编译，macOS 会弹一次钥匙串授权，只有 Fox 能点——
 # 所以发布前要先告诉 Fox。
@@ -13,10 +13,10 @@ cd "$INT"
 git diff --quiet HEAD || { echo "集成区有未提交的改动" >&2; exit 1; }
 echo "== 1/3 集成区完整检查"
 tools/cards/run.sh rust-fmt
-cargo test --manifest-path "$INT/apps/desktop/src-tauri/Cargo.toml" --lib 2>&1 | tee /tmp/fsl-release-rust.log | grep -E "^test result|FAILED"
+tools/cards/run.sh rust-test 2>&1 | tee /tmp/fsl-release-rust.log
 grep -q "^test result: ok" /tmp/fsl-release-rust.log && ! grep -q "FAILED" /tmp/fsl-release-rust.log || { echo "Rust 测试没有全过，不发布" >&2; exit 1; }
-tools/cards/run.sh web-build 2>&1 | grep -E "built in|error" || true
-tools/cards/run.sh web-test 2>&1 | tee /tmp/fsl-release-web.log | grep -E "Test Files|Tests "
+tools/cards/run.sh web-build 2>&1 | tee /tmp/fsl-release-build.log
+tools/cards/run.sh web-test 2>&1 | tee /tmp/fsl-release-web.log
 ! grep -qE "failed|FAIL" /tmp/fsl-release-web.log || { echo "前端测试有失败，不发布" >&2; exit 1; }
 
 cd "$REPO"
@@ -31,25 +31,34 @@ if [ -n "$BACK_CHANGED" ]; then
 fi
 # 钱的闸：开发版的每日 AI 预算必须是 0，除非 Fox 明确批准过。否则新版后台一启动就会自己开始花 token。
 DEV_QUEUE="$HOME/Library/Application Support/com.foxwork.fox-stars-lab.dev/fox-stars-lab.queue.json"
-if [ -f "$DEV_QUEUE" ]; then
-  BUDGET="$(python3 -c 'import json,sys; print(int(json.load(open(sys.argv[1])).get("dailyBudgetTokens", 0)))' "$DEV_QUEUE" 2>/dev/null || echo 0)"
-  if [ "$BUDGET" -gt 0 ]; then
-    if [ "${RESET_DEV_BUDGET:-}" = "1" ]; then
-      python3 - "$DEV_QUEUE" <<'PY'
+if ! BUDGET="$(python3 -c '
+import json, sys
+with open(sys.argv[1]) as handle:
+    value = json.load(handle)["dailyBudgetTokens"]
+if type(value) is not int or value < 0:
+    raise ValueError("invalid dailyBudgetTokens")
+print(value)
+' "$DEV_QUEUE" 2>/dev/null)"; then
+  echo "无法确认开发版 AI 额度，停止发布。请先检查控制文件；不会把读取失败当成额度为 0。" >&2
+  exit 1
+fi
+# 在 Python 校验后比较字符串，避免合法大整数超出 Bash 范围而漏过门禁。
+if [ "$BUDGET" != "0" ]; then
+  if [ "${RESET_DEV_BUDGET:-}" = "1" ]; then
+    python3 - "$DEV_QUEUE" <<'PYRESET'
 import json, sys
 p = sys.argv[1]
 d = json.load(open(p))
 d["dailyBudgetTokens"] = 0
 json.dump(d, open(p, "w"))
-PY
-      echo "!! 已把开发版每日 AI 预算从 $BUDGET 重置为 0（Fox 还没批准花额度）"
-    elif [ "${KEEP_DEV_BUDGET:-}" = "1" ]; then
-      echo "!! 开发版每日 AI 预算是 $BUDGET，按 Fox 明确批准的保留"
-    else
-      echo "开发版的每日 AI 预算是 $BUDGET（大于 0）：发布后后台会自己开始花 token。Fox 没批准前必须是 0。" >&2
-      echo "要重置就加 RESET_DEV_BUDGET=1 再运行；Fox 明确批准过就加 KEEP_DEV_BUDGET=1。" >&2
-      exit 1
-    fi
+PYRESET
+    echo "!! 已把开发版每日 AI 预算从 $BUDGET 重置为 0（Fox 还没批准花额度）"
+  elif [ "${KEEP_DEV_BUDGET:-}" = "1" ]; then
+    echo "!! 开发版每日 AI 预算是 $BUDGET，按 Fox 明确批准的保留"
+  else
+    echo "开发版的每日 AI 预算是 ${BUDGET}（大于 0）：发布后后台会自己开始花 token。Fox 没批准前必须是 0。" >&2
+    echo "要重置就加 RESET_DEV_BUDGET=1 再运行；Fox 明确批准过就加 KEEP_DEV_BUDGET=1。" >&2
+    exit 1
   fi
 fi
 echo "== 3/3 快进合并 fox-rebuild ← fox-integration"

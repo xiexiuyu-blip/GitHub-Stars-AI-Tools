@@ -7,6 +7,8 @@
   - apps/desktop/src/components/command-palette.test.tsx
   - apps/desktop/src/hooks/use-repo-readme.ts
   - apps/desktop/src/hooks/use-repo-readme.test.ts
+  - apps/desktop/src/hooks/use-stars-workspace.ts
+  - apps/desktop/src/hooks/use-stars-workspace.test.ts
   - apps/desktop/src/providers/task-center.tsx
   - apps/desktop/src/providers/task-progress-provider.tsx
   - apps/desktop/src/lib/api.ts
