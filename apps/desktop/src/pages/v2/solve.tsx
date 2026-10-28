@@ -103,6 +103,7 @@ export function SolvePage(props: {
   onOpenDiscover?: (scenarioId: string | null) => void;
   /** 去工具箱（开启 / 调整 AI 自动整理） */
   onOpenToolbox?: () => void;
+  onOpenAiSettings?: () => void;
 }) {
   const copy = useCopy();
   const searchSeq = useRef(0);
@@ -517,6 +518,7 @@ export function SolvePage(props: {
             onMakeMain={() => updatePicked((current) => makeMain(current, hit.id))}
             onClose={() => setOpenedId(null)}
             onOpenToolbox={props.onOpenToolbox}
+            onOpenAiSettings={props.onOpenAiSettings}
           />
         );
       })() : null}

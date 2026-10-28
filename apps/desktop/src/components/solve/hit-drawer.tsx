@@ -26,6 +26,7 @@ export function HitDrawer(props: {
   onMakeMain: () => void;
   onClose: () => void;
   onOpenToolbox?: () => void;
+  onOpenAiSettings?: () => void;
 }) {
   const toast = useToast();
   const copy = useCopy();
@@ -102,6 +103,7 @@ export function HitDrawer(props: {
             }}
             onRegenerate={() => { void regenerate(props.hit.id); }}
             onOpenToolbox={props.onOpenToolbox}
+            onOpenAiSettings={props.onOpenAiSettings}
             onCopyCodex={() => { void copyForCodex(); }}
             onCopyHow={(text) => { void copy(text, '已复制'); }}
             onCopyPrompt={(text) => { void copy(text, copyPromptToast(text)); }}

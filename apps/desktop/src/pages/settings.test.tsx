@@ -32,7 +32,7 @@ describe('设置入口', () => {
     expect(handler).toContain("setSettingsTab('ai')");
     expect(handler).toContain("setCurrentPage('settings')");
     expect(APP_SOURCE).toContain('<SettingsPage initialTab={settingsTab} />');
-    expect(APP_SOURCE.match(/onOpenAiSettings={handleOpenAiSettings}/g)).toHaveLength(2);
+    expect(APP_SOURCE.match(/onOpenAiSettings={handleOpenAiSettings}/g)).toHaveLength(3);
     expect(APP_SOURCE).toContain("onOpenToolbox={() => setCurrentPage('toolbox')}");
   });
 });

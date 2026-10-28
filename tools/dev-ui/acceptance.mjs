@@ -74,6 +74,7 @@ try {
     await page.getByPlaceholder(/直接搜工具|搜工具；/).fill('封面工具');
     await page.keyboard.press('Enter');
     await page.getByRole('heading', { name: '资料库', exact: true }).waitFor();
+    await page.waitForFunction(() => document.querySelector('input[aria-label="搜索资料库"]')?.value === '封面工具');
   });
   await run('04-palette-escape', async (page) => {
     await page.keyboard.press('Meta+k');
@@ -117,6 +118,7 @@ try {
     await find(page);
     assert(await page.getByText('已归档', { exact: true }).count() > 0);
     assert(await page.getByText('疑似停更', { exact: true }).count() > 0);
+    await page.getByRole('heading', { name: '当前交接单', exact: true }).waitFor();
     await page.screenshot({ path: path.join(output, 'solve-maintenance.png'), fullPage: true });
   });
   await run('10-readme-refresh-open-detail', async (page) => {
@@ -132,12 +134,105 @@ try {
   await run('11-narrow-solve', async (page) => {
     await find(page); await copyButton(page).click();
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth + 1), false, '页面不横向溢出');
+    await page.getByText(/^已复制。/).waitFor();
+    // 窄屏提示条会覆盖刚点过的复制位置；移开鼠标才恢复其正常消失计时。
+    await page.mouse.move(10, 10);
+    await page.getByText(/^已复制。/).waitFor({ state: 'hidden', timeout: 10000 });
     await page.screenshot({ path: path.join(output, 'solve-narrow.png'), fullPage: true });
   }, { viewport: { width: 720, height: 600 } });
   await run('12-dark-today', async (page) => {
     assert.equal(await page.evaluate(() => document.documentElement.classList.contains('dark')), true);
     await page.screenshot({ path: path.join(output, 'today-dark.png'), fullPage: true });
   }, { colorScheme: 'dark' });
+  await run('13-palette-keyboard-and-focus', async (page) => {
+    const opener = page.getByRole('button', { name: '打开命令面板', exact: true });
+    await opener.focus(); await page.keyboard.press('Meta+k');
+    const input = page.getByRole('combobox');
+    await input.fill('fixture/');
+    await page.getByRole('option').first().waitFor();
+    await page.keyboard.press('ArrowDown'); await page.keyboard.press('ArrowDown');
+    await page.keyboard.press('ArrowUp');
+    assert.match(await page.getByRole('option', { selected: true }).innerText(), /fixture\/cover/);
+    await page.keyboard.press('Tab');
+    assert.equal(await page.getByRole('button', { name: '关闭', exact: true }).evaluate((element) => element === document.activeElement), true);
+    await page.keyboard.press('Tab');
+    assert.equal(await input.evaluate((element) => element === document.activeElement), true);
+    await page.keyboard.press('Escape');
+    assert.equal(await opener.evaluate((element) => element === document.activeElement), true);
+    await page.keyboard.press('Meta+k'); await input.fill('fixture/');
+    await page.getByRole('option').first().waitFor();
+    await page.keyboard.press('ArrowDown'); await page.keyboard.press('ArrowDown'); await page.keyboard.press('Enter');
+    await page.waitForFunction(() => document.querySelector('input[aria-label="搜索资料库"]')?.value === 'fixture/legacy');
+  });
+  await run('14-pack-race-uses-latest-selection', async (page) => {
+    await find(page); await copyButton(page).click();
+    await page.evaluate(() => { window.__FSL_ACCEPTANCE__.delayPacks = true; });
+    await page.locator('label').filter({ has: page.getByRole('radio', { name: /程序用/ }) }).click();
+    await page.waitForFunction(() => window.__FSL_ACCEPTANCE__.pendingPacks.length === 1);
+    await page.getByRole('button', { name: '加入交接单 fixture/archived', exact: true }).click();
+    await page.waitForFunction(() => window.__FSL_ACCEPTANCE__.pendingPacks.length === 2);
+    await page.evaluate(() => { const pending = window.__FSL_ACCEPTANCE__.pendingPacks.pop(); pending.resolve(pending.output); });
+    await copyButton(page).click();
+    const copied = await page.evaluate(() => window.__FSL_ACCEPTANCE__.clipboard);
+    assert.equal(JSON.parse(copied).items.length, 3);
+    await page.evaluate(() => window.__FSL_ACCEPTANCE__.resolvePacks());
+    await copyButton(page).click();
+    assert.equal(await page.evaluate(() => window.__FSL_ACCEPTANCE__.clipboard), copied, '旧请求不能盖掉当前勾选');
+  });
+  await run('15-new-question-with-same-tools', async (page) => {
+    await find(page); await copyButton(page).click();
+    await find(page, '制作第二张海报'); await copyButton(page).click();
+    const copied = await page.evaluate(() => window.__FSL_ACCEPTANCE__.clipboard);
+    assert(copied.includes('制作第二张海报')); assert(!copied.includes('制作封面'));
+  });
+  await run('16-palette-stale-response', async (page) => {
+    await page.evaluate(() => { window.__FSL_ACCEPTANCE__.delaySearches = true; });
+    await page.keyboard.press('Meta+k');
+    const input = page.getByRole('combobox');
+    await input.fill('cover');
+    await page.waitForFunction(() => window.__FSL_ACCEPTANCE__.pendingSearches.length === 1);
+    await input.fill('legacy');
+    await page.waitForFunction(() => window.__FSL_ACCEPTANCE__.pendingSearches.length === 2);
+    await page.evaluate(() => { const pending = window.__FSL_ACCEPTANCE__.pendingSearches.pop(); pending.resolve(pending.output); });
+    await page.getByRole('option', { name: /fixture\/legacy/ }).waitFor();
+    await page.evaluate(() => { const pending = window.__FSL_ACCEPTANCE__.pendingSearches.pop(); pending.resolve(pending.output); });
+    assert.equal(await page.getByRole('option', { name: /fixture\/cover/ }).count(), 0);
+    await page.keyboard.press('ArrowDown'); await page.keyboard.press('Enter');
+    await page.waitForFunction(() => document.querySelector('input[aria-label="搜索资料库"]')?.value === 'fixture/legacy');
+  });
+  await run('17-explicit-same-question-is-new-task', async (page) => {
+    await page.keyboard.press('Meta+k');
+    await page.getByRole('combobox').fill('?制作封面'); await page.keyboard.press('Enter');
+    await page.getByRole('button', { name: '加入交接单 fixture/archived', exact: true }).click();
+    await nav(page, '今日'); await page.keyboard.press('Meta+k');
+    await page.getByRole('combobox').fill('?制作封面'); await page.keyboard.press('Enter');
+    await page.getByRole('button', { name: '加入交接单 fixture/archived', exact: true }).waitFor();
+    assert.equal(await page.evaluate(() => window.__FSL_ACCEPTANCE__.calls.filter((call) => call.command === 'solve_v2').length), 2);
+  });
+  await run('18-pack-retry', async (page) => {
+    await page.evaluate(() => { window.__FSL_ACCEPTANCE__.failPacks = true; });
+    await find(page);
+    await page.getByText('验收：交接单生成失败', { exact: true }).waitFor();
+    assert.equal(await copyButton(page).isEnabled(), false);
+    await page.evaluate(() => { window.__FSL_ACCEPTANCE__.failPacks = false; });
+    await page.getByRole('button', { name: /重试/ }).click();
+    await copyButton(page).click();
+    assert((await page.evaluate(() => window.__FSL_ACCEPTANCE__.clipboard)).includes('制作封面'));
+  });
+  await run('19-solve-pending-ai-settings', async (page) => {
+    await find(page);
+    await page.getByText('fixture/pending', { exact: true }).click();
+    await page.getByRole('dialog').getByRole('button', { name: '去设置 AI', exact: true }).click();
+    await page.getByRole('heading', { name: 'AI 设置', exact: true }).waitFor();
+  });
+  await run('20-redo-confirmation-request', async (page) => {
+    await nav(page, '资料库');
+    await page.getByRole('button', { name: '不对，请 AI 重写（会花一点钱）', exact: true }).click();
+    await page.getByRole('button', { name: '确认，重新整理', exact: true }).click();
+    await page.getByText('验收：还没配置 AI 服务', { exact: true }).waitFor();
+    const calls = await page.evaluate(() => window.__FSL_ACCEPTANCE__.calls.filter((call) => call.command === 'regenerate_library_card'));
+    assert.equal(calls.length, 1); assert.equal(calls[0].args.confirmed, true);
+  });
 } finally {
   if (browser) await browser.close();
   await new Promise((resolve) => server.close(resolve));

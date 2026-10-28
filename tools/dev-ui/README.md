@@ -1,3 +1,26 @@
+# 界面验收工具
+
+## 当前可重复的隔离验收（2026-10-28）
+
+`acceptance.mjs` 验收生产构建的页面，`acceptance-fixture.js` 替换 Tauri、剪贴板和数据。无需启动开发 App，不访问真实库、账号、预算或 AI。使用独立 Chrome 上下文，仅允许随机本地端口；结束时关闭浏览器与临时 HTTP 服务。
+
+```bash
+cd /Users/fox/WorkSpace/_infra/fox-stars-lab-wt/_integration
+tools/cards/run.sh web-build
+FSL_BROWSER_CHANNEL=chrome \
+FSL_PLAYWRIGHT_PATH=/Users/fox/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright \
+FSL_ACCEPTANCE_OUT=/Users/fox/WorkSpace/_infra/fox-stars-lab-wt/_logs/batch-a-20261028/integrated-ui \
+tools/cards/run.sh ui-test
+```
+
+可设置 `FSL_BUILD_DIR` 指向另一份已构建的 `apps/desktop/dist` 来作原版对照。默认查找现有 `playwright` 包与浏览器；上述路径是本机已有环境，没有安装新依赖。输出 `results.json` 以及截图，任一操作失败返回非零退出码。当前覆盖 20 条主流程及失败恢复；它不等同原生 Tauri / WebKit、系统剪贴板、真实同步、迁移或付费模型验收。
+
+发布脚本故障演练：`tools/cards/run.sh script-test`。只在临时目录替换 Git、构建和预算文件；7 个测试方法、23 个场景，不执行实际发布。
+
+以下保留旧工具说明作参考；旧 App/真实数据操作仍需对应授权，不能因这里有命令就直接执行。
+
+---
+
 # 看真实界面的小工具（macOS）
 
 **为什么有它**：开发版（`pnpm dev:desktop`）是没有 bundle id 的裸可执行文件，computer-use 控制不了它；而「页面能打开、测试通过」不等于「界面能用」。2026-10-02 之前，这个项目从没人真正看过自己做出来的界面。这里的工具只用系统自带能力：窗口截图，加辅助功能接口按名称点按钮、给输入框赋值。
@@ -33,7 +56,7 @@ screencapture -x -o -l <窗口id> /tmp/shot.png   # 只截这个窗口
 
 - `axui` 只认标题含 `Fox Stars Lab Dev` 的窗口，不会操作正式版。
 - 只在 dev 版上用。会写库的按钮（把当前页标为想试、加入收集箱、生成建议卡和分类、重试失败任务、备份、导出）不要乱点；点之前先 `.backup` 一份 dev 库。
-- 命令面板（⌘K）打开后，`Escape` 经这条路径关不掉；直接退出开发版即可。
+- 旧版曾有命令面板（⌘K）无法用 `Escape` 关闭的问题；批次 A 已修复并通过隔离页面验证，原生窗口仍需发布后验证。
 
 ## 假后端看界面（mock-host）
 

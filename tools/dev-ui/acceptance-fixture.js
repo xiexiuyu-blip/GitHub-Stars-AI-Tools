@@ -9,7 +9,7 @@ export function installFixture() {
     oneLiner: title, form: 'app', scenarioIds: ['design'], readingStatus: 'unread', readingGroup: 'unseen',
     hasCard: index !== 3, confidence: 0.8, cardReview: 'suggested', matchReasons: ['name'], matchStars: 4,
   }));
-  const state = { calls: [], pendingPacks: [], delayPacks: false, failPacks: false, readmeVersion: 1, clipboard: '', listeners: {}, callbacks: {}, nextId: 1, items };
+  const state = { calls: [], pendingPacks: [], pendingSearches: [], delaySearches: false, delayPacks: false, failPacks: false, readmeVersion: 1, readmeMissing: false, clipboard: '', listeners: {}, callbacks: {}, nextId: 1, items };
   window.__FSL_ACCEPTANCE__ = state;
   localStorage.setItem('fsl.solve.ai', 'false');
   Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: async (text) => { state.clipboard = text; }, readText: async () => state.clipboard } });
@@ -41,7 +41,7 @@ export function installFixture() {
       return { items: found, totalCount: found.length, counts };
     },
     get_library_detail: ({ id }) => ({ ...items.find((item) => item.id === id), whatItIs: '隔离验收：用于制作封面和海报。', capabilities: ['批量制作封面'], problemsSolved: ['制作封面'], useWhen: ['准备图文素材'], notFor: ['不支持视频剪辑'], howToTry: '打开演示，导入一张图片。', integratesWith: [], alternativesHint: [], inspirationForFox: null, risks: ['请先用测试素材试用'], license: 'MIT', maturity: null, zhFriendly: true, keywords: ['封面'], topics: ['design'], forksCount: 1, readmeExcerpt: null }),
-    get_repository_detail: () => ({ readme: { rawMarkdown: `# 隔离项目说明\n\nREADME验收版本${state.readmeVersion}\n\n用于制作封面。`, sourcePath: 'README.md' } }),
+    get_repository_detail: () => ({ readme: state.readmeMissing ? null : { rawMarkdown: `# 隔离项目说明\n\nREADME验收版本${state.readmeVersion}\n\n用于制作封面。`, sourcePath: 'README.md' } }),
     get_ai_automation: () => ({ enabled: false, dailyBudgetTokens: 0, paused: false, pauseReason: null, tokens24h: 0, budgetRemaining: 0, queued: 1, running: 0, failed: 0, providerConfigured: false, model: null, unlimited: false, fullScan: null, lastFullScan: null, activeRepos: 4, needsOrganizing: 1 }),
     get_ai_queue_status: () => ({ succeeded24h: 0 }),
     get_local_api_status: () => ({ enabled: false, host: '127.0.0.1', port: 39217, listening: false, hasToken: false }),
@@ -55,7 +55,11 @@ export function installFixture() {
       if (state.delayPacks) return new Promise((resolve, reject) => state.pendingPacks.push({ resolve, reject, output }));
       return output;
     },
-    search_command_palette: ({ query }) => items.filter((item) => item.fullName.includes(query) || item.oneLiner.includes(query)).map((item) => ({ kind: 'repository', id: item.id, title: item.fullName, subtitle: item.oneLiner })),
+    search_command_palette: ({ query }) => {
+      const output = items.filter((item) => item.fullName.includes(query) || item.oneLiner.includes(query)).map((item) => ({ kind: 'repository', id: item.id, title: item.fullName, subtitle: item.oneLiner }));
+      if (state.delaySearches) return new Promise((resolve, reject) => state.pendingSearches.push({ query, output, resolve, reject }));
+      return output;
+    },
     confirm_library_card: () => null,
     regenerate_library_card: () => Promise.reject('验收：还没配置 AI 服务'),
     sync_github_stars: () => { state.readmeVersion += 1; emit('task-progress', { taskId: 'sync-stars', taskType: 'sync', status: 'succeeded', stage: 'sync', current: 4, total: 4, message: '隔离同步完成', createdAt: today }); return { fetched: 4, inserted: 0, updated: 4, removed: 0, syncedAt: today }; },

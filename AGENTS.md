@@ -1,5 +1,7 @@
 # AGENTS.md：所有 AI 开发者先读这个
 
+> 2026-10-28 批次 A：Fox 已指定 Codex 接任总控并安排多个 agent。当前卡和状态见 `docs/rebuild/任务卡/README.md`。下文 Claude/Grok 名称描述历史分工；本批总控拥有原总控的本地提交、审查、集成职责，开发者仍遵守各卡边界。没有扩大真实数据、App 启动、凭据或付费权限。
+
 项目：Fox Stars Lab 2.0，Fox 的个人 GitHub Stars 知识库（Tauri 2 + React 19 + Rust + SQLite），用来让 Fox 和他的 AI 助手“找得到、看得懂、用得起来”。
 分工：**Claude 是总控**（写任务卡、审核、合并、兜底）；写代码和文档的执行者由 Fox 每一批确认的分配单决定（可能是 Grok、GLM、Codex 等，你只管做自己这一张卡）。Fox 只在里程碑做最后的亲手验收。
 你在一张任务卡的隔离工作区里干活。先读 `docs/rebuild/命令契约.md` 和 `docs/rebuild/接手说明.md`，再做你的任务卡。
