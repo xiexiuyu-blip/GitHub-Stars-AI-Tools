@@ -432,6 +432,8 @@ pub struct SolveHit {
     pub full_name: String,
     pub html_url: String,
     pub stars_count: i64,
+    pub pushed_at: Option<String>,
+    pub archived: Option<bool>,
     pub one_liner: Option<String>,
     pub form: Option<String>,
     pub scenario_ids: Vec<String>,
@@ -485,6 +487,8 @@ struct RepoRecord {
     full_name: String,
     html_url: String,
     stars: i64,
+    pushed_at: Option<String>,
+    archived: Option<bool>,
     one_liner: String,
     problems: Vec<String>,
     capabilities: Vec<String>,
@@ -623,6 +627,8 @@ pub fn solve_query(db_path: &Path, query: &str) -> Result<SolveResult, String> {
             full_name: repo.full_name.clone(),
             html_url: repo.html_url.clone(),
             stars_count: repo.stars,
+            pushed_at: repo.pushed_at.clone(),
+            archived: repo.archived,
             one_liner: hit_one_liner(repo),
             form: repo.form.clone(),
             scenario_ids: repo.scenario_ids.clone(),
@@ -816,7 +822,8 @@ fn load_repos(
                     IFNULL(repo_ai_documents.summary_zh, ''),
                     IFNULL(repo_ai_documents.keywords_json, '[]'),
                     IFNULL(repo_ai_documents.card_json, ''),
-                    IFNULL(repositories.topics_json, '[]')
+                    IFNULL(repositories.topics_json, '[]'),
+                    repositories.pushed_at, repositories.archived
              FROM repositories
              LEFT JOIN repo_ai_documents ON repo_ai_documents.repo_id = repositories.id
              WHERE repositories.sync_status = 'active'",
@@ -835,6 +842,8 @@ fn load_repos(
                 row.get::<_, String>(7)?,
                 row.get::<_, String>(8)?,
                 row.get::<_, String>(9)?,
+                row.get::<_, Option<String>>(10)?,
+                row.get::<_, Option<bool>>(11)?,
             ))
         })
         .map_err(|error| format!("找方案仓库查询失败：{error}"))?;
@@ -852,6 +861,8 @@ fn load_repos(
             keywords_json,
             card_json,
             topics_json,
+            pushed_at,
+            archived,
         ) = row.map_err(|error| format!("找方案仓库行读取失败：{error}"))?;
         let parsed = read_card_json(&card_json);
         let shown = crate::card_view::display_one_liner(Some(one_liner.as_str()), &parsed)
@@ -882,6 +893,8 @@ fn load_repos(
             id,
             html_url,
             stars,
+            pushed_at,
+            archived,
             problems: problems.clone(),
             capabilities: card.capabilities.clone(),
             form: card
@@ -3462,6 +3475,8 @@ mod tests {
             full_name: "fox/one".to_owned(),
             html_url: "https://github.com/fox/one".to_owned(),
             stars_count: 12,
+            pushed_at: Some("2026-10-22T12:00:00Z".to_owned()),
+            archived: Some(true),
             one_liner: Some("一句话".to_owned()),
             form: Some("app".to_owned()),
             scenario_ids: vec!["sc".to_owned()],
@@ -3473,6 +3488,8 @@ mod tests {
             has_card: true,
         };
         let null_hit = SolveHit {
+            pushed_at: None,
+            archived: None,
             one_liner: None,
             form: None,
             ..hit.clone()
@@ -3498,6 +3515,8 @@ mod tests {
                 "fullName",
                 "htmlUrl",
                 "starsCount",
+                "pushedAt",
+                "archived",
                 "oneLiner",
                 "form",
                 "scenarioIds",
@@ -3513,6 +3532,8 @@ mod tests {
         assert!(hit_value.get("fullName").unwrap().is_string());
         assert!(hit_value.get("htmlUrl").unwrap().is_string());
         assert!(hit_value.get("starsCount").unwrap().is_number());
+        assert!(hit_value.get("pushedAt").unwrap().is_string());
+        assert_eq!(hit_value["archived"], true);
         assert!(hit_value.get("oneLiner").unwrap().is_string());
         assert!(hit_value.get("form").unwrap().is_string());
         assert!(hit_value.get("scenarioIds").unwrap().is_array());
@@ -3524,6 +3545,8 @@ mod tests {
         assert!(hit_value.get("fullMatch").unwrap().is_boolean());
         assert!(hit_value.get("hasCard").unwrap().is_boolean());
         let null_value = serde_json::to_value(&null_hit).unwrap();
+        assert!(null_value["pushedAt"].is_null());
+        assert!(null_value["archived"].is_null());
         assert!(null_value.get("oneLiner").unwrap().is_null());
         assert!(null_value.get("form").unwrap().is_null());
 
@@ -4954,6 +4977,8 @@ mod tests {
             full_name: format!("lab/{id}"),
             html_url: String::new(),
             stars: 1,
+            pushed_at: None,
+            archived: None,
             one_liner: String::new(),
             problems: Vec::new(),
             capabilities: Vec::new(),
@@ -5733,6 +5758,79 @@ mod tests {
         );
         assert_eq!(small.hits.len(), 1);
         assert!(small.more_hits.is_empty());
+    }
+
+    #[test]
+    fn maintenance_facts_survive_all_hits_without_changing_ranking_or_picks() {
+        let db = prepare("maintenance-hits", |conn| {
+            for index in 0..20 {
+                let id = format!("r{index:02}");
+                let name = format!("lab/cover-{index:02}");
+                insert_repo(
+                    conn,
+                    &NewRepo {
+                        id: &id,
+                        full_name: &name,
+                        description: "封面工具",
+                        stars: 1000 - index,
+                        status: "active",
+                        one_liner: if index % 2 == 0 {
+                            Some("封面工具")
+                        } else {
+                            None
+                        },
+                        summary: "封面",
+                        keywords_json: "[]",
+                        card_json: None,
+                    },
+                );
+            }
+        });
+        let before = run(&db, "封面");
+        let conn = Connection::open(&db.path).expect("打开临时测试库");
+        for (index, hit) in before.hits.iter().chain(&before.more_hits).enumerate() {
+            let pushed = match index % 4 {
+                0 => Some("2026-10-22T12:00:00Z"),
+                1 => Some("2020-01-01T00:00:00Z"),
+                2 => Some("not-a-date"),
+                _ => None,
+            };
+            conn.execute(
+                "UPDATE repositories SET pushed_at = ?1, archived = ?2 WHERE id = ?3",
+                params![pushed, index % 3 == 0, hit.id],
+            )
+            .expect("写入维护事实");
+        }
+        let after = run(&db, "封面");
+        assert_eq!(after.hits.len(), HIT_LIMIT);
+        assert_eq!(after.more_hits.len(), MORE_HIT_LIMIT);
+        assert!(after
+            .hits
+            .iter()
+            .chain(&after.more_hits)
+            .any(|hit| !hit.has_card));
+        for (index, hit) in after.hits.iter().chain(&after.more_hits).enumerate() {
+            let pushed = match index % 4 {
+                0 => Some("2026-10-22T12:00:00Z"),
+                1 => Some("2020-01-01T00:00:00Z"),
+                2 => Some("not-a-date"),
+                _ => None,
+            };
+            assert_eq!(hit.pushed_at.as_deref(), pushed, "{}", hit.id);
+            assert_eq!(hit.archived, Some(index % 3 == 0), "{}", hit.id);
+        }
+        let without_maintenance = |result: &SolveResult| {
+            let mut json = serde_json::to_value(result).expect("序列化结果");
+            for key in ["hits", "moreHits"] {
+                for item in json[key].as_array_mut().expect("候选数组") {
+                    let item = item.as_object_mut().expect("候选对象");
+                    item.remove("pushedAt");
+                    item.remove("archived");
+                }
+            }
+            json
+        };
+        assert_eq!(without_maintenance(&before), without_maintenance(&after));
     }
 
     #[test]

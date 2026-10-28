@@ -151,6 +151,10 @@ export type SolveHit = {
   fullName: string;
   htmlUrl: string;
   starsCount: number;
+  /** GitHub 最近推送时间；旧后端或旧草稿可没有，未知不判作停更。 */
+  pushedAt?: string | null;
+  /** GitHub 归档事实；已归档优先于推送时间，旧数据可未知。 */
+  archived?: boolean | null;
   oneLiner: string | null;
   form: string | null;
   scenarioIds: string[];

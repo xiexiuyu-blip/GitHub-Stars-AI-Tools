@@ -377,6 +377,21 @@ describe('后备候选（本地排名 9–16）', () => {
     expect(promotedHits(result, rerank).map((item) => item.id)).toEqual(['m2', 'm1']);
   });
 
+  it('后备候选提升、精选排序和已选交接单都保留维护事实，不自动排除归档项目', () => {
+    const main = hit({ id: 'a', pushedAt: '2020-01-01T00:00:00Z', archived: false });
+    const archived = hit({ id: 'm1', pushedAt: '2026-10-22T12:00:00Z', archived: true, hasCard: false });
+    const legacy = hit({ id: 'm2' });
+    const result = { hits: [main], moreHits: [archived, legacy] };
+    const rerank = ok([{ repoId: 'm1', fit: 'best' }, { repoId: 'm2', fit: 'good' }]);
+    const promoted = promotedHits(result, rerank);
+    expect(promoted).toEqual([archived, legacy]);
+    const sorted = applyRerank([...result.hits, ...promoted], rerank);
+    expect(sorted).toEqual([archived, legacy, main]);
+    expect(sorted[0]).toBe(archived);
+    expect(orderedPicks(sorted, ['a', 'm1'])).toEqual([main, archived]);
+    expect(rerankPicks(rerank, sorted)).toEqual(['m1', 'm2']);
+  });
+
   it('备选 / 不太合适的后备工具不拿出来，已经在列表里的不重复', () => {
     const result = { hits: [hit({ id: 'a' })], moreHits: [hit({ id: 'm1' }), hit({ id: 'a' })] };
     const rerank = ok([

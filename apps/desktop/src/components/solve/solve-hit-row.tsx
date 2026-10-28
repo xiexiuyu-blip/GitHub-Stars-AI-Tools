@@ -5,6 +5,8 @@ import { CoverImage, RepoAvatar, ScenarioChip, StarCount, Tag } from '@/componen
 import { useRepoCover } from '@/hooks/use-repo-cover';
 import { Icon } from '@/components/ui/icon';
 import { cn } from '@/lib/utils';
+import { maintenanceOf } from '@/lib/maintenance';
+import { MaintenanceTag } from '@/components/library/maintenance-tag';
 
 /**
  * 找方案结果里的一行。点这一行（名字、简介任意位置）在右边滑出详情；左边的圆圈只管「放不放进交接单」。
@@ -70,6 +72,7 @@ export function SolveHitRow(props: {
           {props.pressed && props.isMain ? <span className="text-xs text-on-surface-variant">Codex 会优先用它，其余是备选</span> : null}
           {form ? <Tag>{form}</Tag> : null}
           {hit.hasCard === false ? <Tag>待 AI 整理</Tag> : null}
+          <MaintenanceTag tier={maintenanceOf(hit.pushedAt, new Date(), hit.archived === true)} />
           {badge ? <Tag tone={badge.tone}>{badge.text}</Tag> : null}
           {props.ai ? <Tag tone={props.ai.fit === 'best' ? 'blue' : 'gray'}>{RERANK_FIT_LABEL[props.ai.fit]}</Tag> : null}
           {chips.map((scenario) => (
