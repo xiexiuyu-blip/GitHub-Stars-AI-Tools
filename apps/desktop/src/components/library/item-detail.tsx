@@ -48,6 +48,7 @@ export function ItemDetail(props: {
   onRegenerate: () => void;
   /** 去自动整理与备份（开启 / 调整自动整理）。不传就不画这个按钮。 */
   onOpenToolbox?: () => void;
+  onOpenAiSettings?: () => void;
   onCopyCodex: () => void;
   onCopyHow: (text: string) => void;
   /** 复制一段「给 Codex 的话」（安装请求、查别人怎么用）。kind 说明是哪一种，页面据此给不同的提示。不传就用 onCopyHow。 */
@@ -220,7 +221,7 @@ function DetailBody(props: Parameters<typeof ItemDetail>[0] & { detail: LibraryD
               ) : null}
             </div>
           ) : (
-            <PendingNote fullName={detail.fullName} description={detail.description} onOpenToolbox={props.onOpenToolbox} />
+            <PendingNote fullName={detail.fullName} description={detail.description} onOpenToolbox={props.onOpenToolbox} onOpenAiSettings={props.onOpenAiSettings} />
           )}
 
           <div role="tablist" aria-label="工具详情" className="mt-5 flex gap-0.5 overflow-x-auto border-b border-border [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
@@ -426,18 +427,19 @@ function DetailSkeleton() {
   );
 }
 
-/** 还没有中文说明：说清为什么（没开启 / 暂停 / 额度用完 / 在排队），需要你动手时给一个去工具箱的入口，下面先显示 GitHub 原文。 */
-function PendingNote(props: { fullName: string; description: string | null | undefined; onOpenToolbox?: () => void }) {
+/** 还没有中文说明：解释原因，按问题直达 AI 设置或自动整理，下面先显示 GitHub 原文。 */
+export function PendingNote(props: { fullName: string; description: string | null | undefined; onOpenToolbox?: () => void; onOpenAiSettings?: () => void }) {
   const { status } = useAiAutomation();
   const note = itemPendingNote(status);
+  const onAction = note.actionTarget === 'ai-settings' ? props.onOpenAiSettings : props.onOpenToolbox;
   const explainers = explainerLinks(props.fullName);
   return (
     <div className="mt-4 rounded-lg bg-accent px-4 py-3.5">
       <div className="flex items-center gap-1.5 text-xs font-medium text-accent-foreground">
         <Icon name="hourglass_top" size={14} fill />
         还没有中文说明
-        {note.actionLabel && props.onOpenToolbox ? (
-          <Button variant="text" size="sm" className="ml-auto h-6 px-1 text-xs" onClick={props.onOpenToolbox}>{note.actionLabel}</Button>
+        {note.actionLabel && onAction ? (
+          <Button variant="text" size="sm" className="ml-auto h-6 px-1 text-xs" onClick={onAction}>{note.actionLabel}</Button>
         ) : null}
       </div>
       <p className="mt-1.5 text-sm text-on-surface-variant">{note.text}</p>

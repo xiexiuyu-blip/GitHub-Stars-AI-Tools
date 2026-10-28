@@ -184,11 +184,12 @@ type VectorIndexBuildSummary = {
   failures: string[];
 };
 
-export function SettingsPage() {
+export function SettingsPage({ initialTab = 'github' }: { initialTab?: SettingsTab } = {}) {
   const workspace = useWorkspace();
   const settingsHook = useAppSettings();
   const appUpdate = useAppUpdate();
-  const [activeTab, setActiveTab] = useState<SettingsTab>('github');
+  const [activeTab, setActiveTab] = useState<SettingsTab>(initialTab);
+  useEffect(() => setActiveTab(initialTab), [initialTab]);
 
   // 页签：GitHub / AI 设置 / 通用 / GitHub 备份 / 关于（审读第 42 条）。
   // 「向量」页签先藏起来（审读第 15 条）：新界面里没有任何页面用到向量检索，点「下载并启用」却要下载约 490 MB。

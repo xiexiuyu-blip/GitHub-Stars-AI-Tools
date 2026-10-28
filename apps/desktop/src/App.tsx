@@ -43,6 +43,7 @@ function AppContent() {
   const settingsHook = useAppSettings();
   const appUpdate = useAppUpdate();
   const [currentPage, setCurrentPage] = useState<AppPage>('today');
+  const [settingsTab, setSettingsTab] = useState<'github' | 'ai'>('github');
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
   const [solveQuestion, setSolveQuestion] = useState('');
   const [discoverScenario, setDiscoverScenario] = useState<string | null>(null);
@@ -51,6 +52,7 @@ function AppContent() {
   // 离开资料库就忘掉带进来的条件：下次从导航点进去是干净的
   useEffect(() => {
     if (currentPage !== 'library') setLibraryPreset(null);
+    if (currentPage !== 'settings') setSettingsTab('github');
   }, [currentPage]);
   const [showWelcome, setShowWelcome] = useState(false);
   const [hasDismissedWelcome, setHasDismissedWelcome] = useState(false);
@@ -197,6 +199,11 @@ function AppContent() {
     setCurrentPage('library');
   }
 
+  function handleOpenAiSettings() {
+    setSettingsTab('ai');
+    setCurrentPage('settings');
+  }
+
   function handleLegacyRepositorySearch(query: string) {
     setRepositoryNavigation((current) => ({
       query,
@@ -312,7 +319,7 @@ function AppContent() {
   function renderCurrentPage() {
     switch (currentPage) {
       case 'today':
-        return <TodayPage onOpenLibrary={(preset) => { setLibraryPreset(preset ?? null); setCurrentPage('library'); }} onOpenCapture={() => setCurrentPage('capture')} onOpenSolve={() => setCurrentPage('solve')} onOpenToolbox={() => setCurrentPage('toolbox')} />;
+        return <TodayPage onOpenLibrary={(preset) => { setLibraryPreset(preset ?? null); setCurrentPage('library'); }} onOpenCapture={() => setCurrentPage('capture')} onOpenSolve={() => setCurrentPage('solve')} onOpenToolbox={() => setCurrentPage('toolbox')} onOpenAiSettings={handleOpenAiSettings} />;
       case 'capture':
         return <CapturePage />;
       case 'library':
@@ -325,6 +332,7 @@ function AppContent() {
               setCurrentPage('solve');
             }}
             onOpenToolbox={() => setCurrentPage('toolbox')}
+            onOpenAiSettings={handleOpenAiSettings}
           />
         );
       case 'map':
@@ -367,7 +375,7 @@ function AppContent() {
       case 'profile':
         return <ProfilePage onOpenRepository={handleRepositoryOpen} onOpenSettings={() => setCurrentPage('settings')} />;
       case 'settings':
-        return <SettingsPage />;
+        return <SettingsPage initialTab={settingsTab} />;
       default:
         return (
           <DashboardPage

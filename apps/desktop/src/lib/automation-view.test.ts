@@ -175,7 +175,7 @@ describe('automationState', () => {
   it('额度是 0（未开启）：明确说不会花钱', () => {
     const state = automationState(status({ enabled: false, dailyBudgetTokens: 0, budgetRemaining: 0, queued: 401 }));
     expect(state.label).toBe('未开启');
-    expect(state.detail).toBe('还没开启每天自动整理时，应用不会自动调用 AI，也不会花钱；你手动点「现在整理」时才会花钱（会先让你确认）。');
+    expect(state.detail).toBe('后台自动整理已关闭。手动「现在整理」、单张重新整理、AI 问答和连接测试等仍可能产生费用，按各自的确认与额度规则执行。');
   });
 
   it('开了但每天额度用完：黄色，说明滚动额度和手动入口', () => {
@@ -389,7 +389,7 @@ describe('regenerateNote', () => {
   it('没开额度：明说要开启才会重做、不开不花钱，并给「去开启」', () => {
     const note = regenerateNote(status({ enabled: false, dailyBudgetTokens: 0, budgetRemaining: 0 }));
     expect(note.sub).toContain('开启后才会重新整理');
-    expect(note.sub).toContain('不花钱');
+    expect(note.sub).toContain('这部分不开启就不收费');
     expect(note.actionLabel).toBe('去开启');
   });
 
@@ -886,18 +886,18 @@ describe('额度用完时指出可以现在整理', () => {
 describe('自动整理定义、每日档位和慢慢整理说明', () => {
   it('页面定义和每天整理说明逐字匹配任务卡', () => {
     expect(AUTO_ORGANIZE_DEFINITION).toBe('自动整理：应用在后台给「新收藏」和「README 有实质更新的收藏」写（或重写）中文说明——它能做什么、适合解决什么、怎么试。没变化的不会重复整理，也不会重复花钱。整理好的会出现在「今日」和「资料库」里。用的是你自己配置的 AI 服务，具体花多少钱以服务商的账单为准。');
-    expect(DAILY_ORGANIZE_TITLE).toBe('每天自动整理（后台自动做，只处理新增和变化的）');
-    expect(DAILY_ORGANIZE_DESCRIPTION).toBe('第一步做完以后，平时不用管：每次同步到新收藏、或某个收藏的 README 有实质更新，应用会在后台自动整理它。每天最多花你设定的额度；用完这一天的自动整理就先歇着，不影响你随时手动「现在整理」。');
+    expect(DAILY_ORGANIZE_TITLE).toBe('每天自动整理（按滚动 24 小时计额度）');
+    expect(DAILY_ORGANIZE_DESCRIPTION).toBe('第一步做完以后，平时不用管：每次同步到新收藏、或某个收藏的 README 有实质更新，应用会在后台自动整理它。「每天额度」按最近 24 小时滚动累计，不在零点重置；用完后，随着较早用量移出这个窗口，额度逐步恢复。手动「现在整理」另行确认费用。');
     expect(DAILY_ORGANIZE_DURING_SCAN).toBe('整理正在进行，这一轮不受每天额度限制；整理完才按下面的额度。');
   });
 
   it('只改每日档位文案，不改已保存的 token 数值', () => {
     expect(BUDGET_PRESETS.map((preset) => preset.tokens)).toEqual([0, 100000, 200000, 600000]);
     expect(BUDGET_PRESETS).toEqual([
-      { tokens: 0, title: '关闭', hint: '不自动整理，一分钱不花（你仍然可以手动整理）' },
-      { tokens: 100000, title: '试跑', hint: '每天最多约 16 个，先看看效果' },
-      { tokens: 200000, title: '日常', hint: '每天最多约 33 个' },
-      { tokens: 600000, title: '多整理些', hint: '每天最多约 100 个，新收藏很多时用' },
+      { tokens: 0, title: '关闭', hint: '只关闭后台自动整理；手动整理、AI 问答等仍可能收费' },
+      { tokens: 100000, title: '试跑', hint: '每 24 小时最多约 16 个，先看看效果' },
+      { tokens: 200000, title: '日常', hint: '每 24 小时最多约 33 个' },
+      { tokens: 600000, title: '多整理些', hint: '每 24 小时最多约 100 个，新收藏很多时用' },
     ]);
     expect(BUDGET_PRESETS.map((preset) => preset.title)).toContain('多整理些');
     expect(BUDGET_PRESETS.map((preset) => preset.title)).not.toContain('集中补齐');
@@ -922,16 +922,16 @@ describe('dailyBudgetMetric', () => {
     expect(dailyBudgetMetric(status({ dailyTokensUsed: 40000, tokens24h: 2000000, budgetRemaining: 60000 }))).toEqual({
       label: '自动整理额度还剩',
       value: '6 万 token',
-      sub: '约还能整理 10 个 · 已用 4 万 / 额度 10 万（整理现有收藏用的不算）',
+      sub: '约还能整理 10 个 · 最近 24 小时已用 4 万 / 额度 10 万（整理现有收藏用的不算）',
     });
     for (const dailyTokensUsed of [undefined, null]) {
       expect(dailyBudgetMetric(status({ dailyTokensUsed, tokens24h: 40000, budgetRemaining: 60000 }))).toEqual({
         label: '自动整理额度还剩',
         value: '6 万 token',
-        sub: '约还能整理 10 个 · 已用 4 万 / 额度 10 万（整理现有收藏用的不算）',
+        sub: '约还能整理 10 个 · 最近 24 小时已用 4 万 / 额度 10 万（整理现有收藏用的不算）',
       });
     }
-    expect(dailyBudgetMetric(status({ dailyTokensUsed: 0, tokens24h: 2000000 })).sub).toBe('约还能整理 16 个 · 已用 0 / 额度 10 万（整理现有收藏用的不算）');
+    expect(dailyBudgetMetric(status({ dailyTokensUsed: 0, tokens24h: 2000000 })).sub).toBe('约还能整理 16 个 · 最近 24 小时已用 0 / 额度 10 万（整理现有收藏用的不算）');
   });
 
   it('手动整理时无每天限制；未开启时隐藏数字，即使配置过每天额度', () => {
@@ -943,7 +943,7 @@ describe('dailyBudgetMetric', () => {
     });
     expect(dailyBudgetMetric(status({ budgetRemaining: 0, dailyTokensUsed: 100000 }))).toEqual({
       label: '自动整理额度还剩', value: '0 token',
-      sub: '约还能整理 0 个 · 已用 10 万 / 额度 10 万（整理现有收藏用的不算）',
+      sub: '约还能整理 0 个 · 最近 24 小时已用 10 万 / 额度 10 万（整理现有收藏用的不算）',
     });
   });
 });
@@ -1049,8 +1049,8 @@ describe('fullScanConfirmLines', () => {
 
 describe('dailyBudgetConfirmLead', () => {
   it('开头是每天最多整理约 N 个，N 按 6000 token 一个来估', () => {
-    expect(dailyBudgetConfirmLead(100_000)).toBe('每天最多整理约 16 个');
-    expect(dailyBudgetConfirmLead(0)).toBe('每天最多整理约 0 个');
+    expect(dailyBudgetConfirmLead(100_000)).toBe('每 24 小时最多整理约 16 个');
+    expect(dailyBudgetConfirmLead(0)).toBe('每 24 小时最多整理约 0 个');
   });
 });
 
@@ -1729,5 +1729,35 @@ describe('文案守卫：页签名、关于页、导入警告', () => {
   it('同步完成的提示用统一的句子，不再自己拼「更新 N 个」', () => {
     expect(settings).toContain('formatSyncComplete(workspace.syncSummary)');
     expect(settings).not.toContain('updatedCount');
+  });
+});
+
+
+describe('卡 76：费用窗口和关闭含义', () => {
+  it('每天额度明确是滚动 24 小时，逐步恢复而非零点重置', () => {
+    expect(DAILY_ORGANIZE_DESCRIPTION).toContain('最近 24 小时滚动累计');
+    expect(DAILY_ORGANIZE_DESCRIPTION).toContain('不在零点重置');
+    expect(DAILY_ORGANIZE_DESCRIPTION).toContain('额度逐步恢复');
+    expect(BUDGET_PRESETS.filter((preset) => preset.tokens > 0).every((preset) => preset.hint.includes('每 24 小时'))).toBe(true);
+  });
+
+  it('关闭仅关闭后台自动整理，不把全应用说成免费', () => {
+    const closed = BUDGET_PRESETS.find((preset) => preset.tokens === 0)!;
+    expect(closed.hint).toContain('只关闭后台自动整理');
+    expect(closed.hint).toContain('仍可能收费');
+    expect(closed.hint).not.toContain('一分钱不花');
+    const state = automationState(status({ enabled: false, dailyBudgetTokens: 0 }));
+    expect(state.detail).toContain('AI 问答');
+    expect(state.detail).toContain('连接测试');
+    expect(state.detail).toContain('仍可能产生费用');
+  });
+
+  it('未配置 AI 明确去配置页，其余暂停/额度入口保持自动整理', () => {
+    expect(automationHint(status({ providerConfigured: false }), 3)?.actionTarget).toBe('ai-settings');
+    expect(itemPendingNote(status({ providerConfigured: false })).actionTarget).toBe('ai-settings');
+    for (const patch of [{ paused: true }, { enabled: false }, { budgetRemaining: 0 }]) {
+      expect(automationHint(status(patch), 3)?.actionTarget).toBeUndefined();
+      expect(itemPendingNote(status(patch)).actionTarget).toBeUndefined();
+    }
   });
 });

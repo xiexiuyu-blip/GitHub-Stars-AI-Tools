@@ -54,6 +54,7 @@ type LibraryPageProps = {
   onOpenSolve?: (query: string) => void;
   /** 去工具箱（开启 / 调整 AI 自动整理） */
   onOpenToolbox?: () => void;
+  onOpenAiSettings?: () => void;
 };
 
 type ScenarioStatus = 'loading' | 'ready' | 'error';
@@ -590,7 +591,7 @@ export function LibraryPage(props: LibraryPageProps) {
         {filtersActive ? <Button variant="text" onClick={clearAll}>清除筛选</Button> : null}
         <span className="ml-auto text-xs font-medium text-on-surface-variant">{isRelevanceSort(ui) ? '按相关度排序 · ' : null}{resultCount == null ? '…' : resultCount} 个</span>
       </div>
-      <AutomationBanner hint={hint} onAction={props.onOpenToolbox} />
+      <AutomationBanner hint={hint} onAction={props.onOpenToolbox} onOpenAiSettings={props.onOpenAiSettings} />
       <div className={cn('grid min-h-[420px] flex-1 gap-3', gridClass)}>
         {layout === 'wide' ? (
           <Card className="flex min-h-0 flex-col overflow-hidden">
@@ -632,6 +633,7 @@ export function LibraryPage(props: LibraryPageProps) {
             onConfirm={() => { if (selectedId) void confirmCard(selectedId); }}
             onRegenerate={() => { if (selectedId) void regenerateCard(selectedId); }}
             onOpenToolbox={props.onOpenToolbox}
+            onOpenAiSettings={props.onOpenAiSettings}
             onCopyCodex={() => { if (selectedId) void copyForCodex(selectedId); }}
             onCopyHow={(text) => {
               void writeClipboard(text).then((copied) => {

@@ -41,6 +41,7 @@ type TodayPageProps = {
   onOpenSolve: () => void;
   /** 去自动整理与备份（开启 / 调整自动整理） */
   onOpenToolbox?: () => void;
+  onOpenAiSettings?: () => void;
 };
 
 type TodayFilter = 'week' | 'pending' | 'want' | 'in_use';
@@ -396,7 +397,7 @@ export function TodayPage(props: TodayPageProps) {
         <StatCard label="想试" hint="你标的" value={readingCounts ? readingCounts.want : '…'} icon="bookmark" tone="violet" active={filter === 'want'} onClick={() => choose('want')} />
         <StatCard label="在用" hint="你标的" value={readingCounts ? readingCounts.inUse : '…'} icon="task_alt" tone="green" active={filter === 'in_use'} onClick={() => choose('in_use')} />
       </div>
-      <AutomationBanner hint={hint} onAction={props.onOpenToolbox} />
+      <AutomationBanner hint={hint} onAction={props.onOpenToolbox} onOpenAiSettings={props.onOpenAiSettings} />
       {/* 窗口矮的时候整页滚动，不要把列表和详情压成一条缝：下面这一块至少 420px 高 */}
       <div className="grid min-h-[420px] flex-1 grid-cols-1 gap-3 min-[900px]:grid-cols-[minmax(340px,460px)_minmax(0,1fr)]">
         <Card className={cn('flex min-h-0 flex-col overflow-hidden', hideList && 'hidden')}>
@@ -422,6 +423,7 @@ export function TodayPage(props: TodayPageProps) {
             onConfirm={() => { if (selectedId) void confirmCard(selectedId); }}
             onRegenerate={() => { if (selectedId) void regenerateCard(selectedId); }}
             onOpenToolbox={props.onOpenToolbox}
+            onOpenAiSettings={props.onOpenAiSettings}
             onCopyCodex={() => { if (selectedId) void copyForCodex(selectedId); }}
             onCopyHow={(text) => {
               void writeClipboard(text).then((copied) => {
