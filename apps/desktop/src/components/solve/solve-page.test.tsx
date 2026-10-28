@@ -6,10 +6,10 @@ import { saveSolveDraft } from '@/lib/solve-draft';
 import { SolvePage } from '@/pages/v2/solve';
 
 /** 整页渲染一次：确认新的格式列表、「交接单」叫法和复制按钮真的接在页面上。 */
-function renderPage(): string {
+function renderPage(initialQuestion?: string): string {
   return renderToStaticMarkup(
     <ToastProvider>
-      <SolvePage />
+      <SolvePage initialQuestion={initialQuestion} />
     </ToastProvider>,
   );
 }
@@ -60,6 +60,31 @@ function restoreDraft(result: SolveResult, picked: string[], direct = false): vo
 afterEach(() => saveSolveDraft(null));
 
 describe('SolvePage：整页接线', () => {
+  it('生成尚未就绪时，真实复制按钮禁用', () => {
+    restoreDraft(found(['a']), ['a']);
+    const markup = renderPage();
+    const copyButton = markup.match(/<button\b[^>]*>[\s\S]*?<\/button>/g)?.find((button) => button.includes('复制交接单给 Codex')) ?? '';
+    expect(copyButton).toContain('disabled=""');
+    expect(markup).toContain('aria-label="正在整理交接单"');
+  });
+
+  it('消费过带入问题后普通返回恢复草稿，明确再次带入同一句仍开始新任务', () => {
+    const result = found(['a', 'b', 'c']);
+    restoreDraft(result, ['c']);
+    expect(renderPage('')).toContain('已勾 1 个');
+    const newTask = renderPage(result.query);
+    expect(newTask).not.toContain('已勾 1 个');
+    expect(newTask).toContain('aria-label="正在找"');
+  });
+
+  it('AI 精选开关旁写明费用、额度，以及关闭不能撤回已发请求', () => {
+    const markup = renderPage();
+    expect(markup).toContain('aria-describedby="solve-ai-cost"');
+    expect(markup).toContain('会花钱（每次约 4 千 token，受 AI 精选额度限制）');
+    expect(markup).toContain('具体费用以服务商账单为准');
+    expect(markup).toContain('关闭只影响后续精选，已发出的请求可能仍会计费');
+  });
+
   it('右边面板叫「交接单」，复制按钮叫「复制交接单给 Codex」，没有旧叫法', () => {
     const markup = renderPage();
     expect(markup).toContain('找方案');

@@ -27,6 +27,7 @@ export function saveSolveDraft(draft: SolveDraft | null): void {
   current = draft;
 }
 
-export function loadSolveDraft(): SolveDraft | null {
-  return current;
+/** 非空的带入问题代表新任务；父页面消费后清空它，普通返回才恢复草稿。 */
+export function loadSolveDraft(initialQuestion = ''): SolveDraft | null {
+  return initialQuestion.trim() ? null : current;
 }

@@ -1,5 +1,5 @@
-import { FormEvent, Suspense, lazy, useCallback, useEffect, useRef, useState } from 'react';
-import type { LocalCapabilityInput, PackFormat, PackOutput } from '@/lib/api';
+import { FormEvent, Suspense, lazy, useCallback, useEffect, useEffectEvent, useMemo, useRef, useState } from 'react';
+import type { LocalCapabilityInput, PackFormat } from '@/lib/api';
 import { buildReferencePack, describeInvokeError, listScenarios, scanLocalCapabilities, solveRerankV2, solveV2 } from '@/lib/api';
 import type { RerankFit, RerankResult, ScenarioSummary, SolveHit, SolveResult } from '@/lib/contracts';
 import {
@@ -34,6 +34,7 @@ import {
   togglePick,
 } from '@/lib/solve-view';
 import { loadSolveDraft, saveSolveDraft, type SolveRerankPhase } from '@/lib/solve-draft';
+import { currentSolvePack, generateSolvePack, solvePackInput, type SolvePackState } from '@/lib/solve-pack-state';
 import { useCopy } from '@/hooks/use-copy';
 import { Button, Card, CardHeader, EmptyState, PageHeader, Spinner } from '@/components/kit';
 import { Icon } from '@/components/ui/icon';
@@ -95,14 +96,10 @@ function isFit(value: string): value is RerankFit {
 
 const PREVIEW_CLASS = 'm-0 min-h-[180px] flex-1 overflow-auto bg-background px-4 py-3.5 font-mono text-xs leading-[1.7] break-words whitespace-pre-wrap text-foreground [overflow-wrap:anywhere] max-[899px]:max-h-[70vh] min-[900px]:max-h-none';
 
-type PackState = {
-  key: string;
-  output: PackOutput | null;
-  error: string | null;
-};
-
 export function SolvePage(props: {
   initialQuestion?: string;
+  /** 接收一次后由父页面清空带入问题；之后切回来才是恢复草稿。 */
+  onInitialQuestionConsumed?: () => void;
   onOpenDiscover?: (scenarioId: string | null) => void;
   /** 去工具箱（开启 / 调整 AI 自动整理） */
   onOpenToolbox?: () => void;
@@ -112,7 +109,7 @@ export function SolvePage(props: {
   const rerankSeq = useRef(0);
   const openingQuery = props.initialQuestion?.trim() ?? '';
   // 切到别的页面再回来：接着上次的问题、结果和勾选，不要白做一遍
-  const draft = openingQuery ? null : loadSolveDraft();
+  const [draft] = useState(() => loadSolveDraft(openingQuery));
   const restored = restoredRerank(draft);
   // 用户自己改过勾选：AI 精选之后不再替他重勾。ref 给异步回调读最新值，state 给列表顶部那一行用（见 pickListNote）。
   // 从草稿恢复的，分不清是默认的还是改过的，当作改过（只说「已勾 N 个」，不会说错成「替你勾」）。
@@ -135,10 +132,10 @@ export function SolvePage(props: {
   const [openedId, setOpenedId] = useState<string | null>(null);
   const [localCapabilities, setLocalCapabilities] = useState<LocalCapabilityInput[]>([]);
   const [showRaw, setShowRaw] = useState(false);
-  const lastPack = useRef<{ mode: 'direct' | 'pick'; output: PackOutput } | null>(null);
-  const [packState, setPackState] = useState<PackState | null>(null);
+  const [searchVersion, setSearchVersion] = useState(0);
+  const [packState, setPackState] = useState<SolvePackState | null>(null);
   const [packAttempt, setPackAttempt] = useState(0);
-  const [copied, setCopied] = useState(false);
+  const [copiedKey, setCopiedKey] = useState<string | null>(null);
 
   const requestRerank = useCallback((ready: SolveResult, text: string, searchToken: number) => {
     if (!aiEnabledRef.current || ready.hits.length < 2) return;
@@ -177,6 +174,9 @@ export function SolvePage(props: {
     const text = raw.trim();
     if (!text) return;
     const seq = ++searchSeq.current;
+    setSearchVersion(seq);
+    // 新任务取代旧任务；尚未找完就离开，也不能恢复上一个问题的勾选。
+    saveSolveDraft(null);
     rerankSeq.current += 1;
     picksTouched.current = false;
     setPicksEdited(false);
@@ -209,11 +209,13 @@ export function SolvePage(props: {
     };
   }, []);
 
+  const acknowledgeInitialQuestion = useEffectEvent(() => props.onInitialQuestionConsumed?.());
   useEffect(() => {
     const text = props.initialQuestion?.trim() ?? '';
     if (!text) return;
     setQuery(text);
     runSearch(text);
+    acknowledgeInitialQuestion();
   }, [props.initialQuestion, runSearch]);
 
   useEffect(() => {
@@ -244,52 +246,45 @@ export function SolvePage(props: {
   }, [query, activeQuery, result, picked, format, direct, rerank, rerankPhase]);
 
   const selectedHits = result ? orderedPicks(result.hits, picked) : [];
-  // direct 写进 key，免得「一个都没勾」和「直接交给 Codex」共用同一份预览
-  const packKey = `${format}\u0001${direct ? 'direct' : 'pick'}\u0001${selectedHits.map((hit) => hit.id).join('\u0001')}`;
-  const packView = packState && packState.key === packKey ? packState : null;
-  const packMode = direct ? 'direct' : 'pick';
-  if (packView?.output) lastPack.current = { mode: packMode, output: packView.output };
-  const awaitingPack = direct || selectedHits.length > 0;
-  const loadingPack = awaitingPack && !packView?.output && !packView?.error;
-  // 重新生成时先留着同一模式下的上一份，别把预览整块清空；换模式不拿另一份来充数
-  const pack = packView?.output ?? (awaitingPack && lastPack.current?.mode === packMode ? lastPack.current.output : null);
+  const packInput = useMemo(() => {
+    if (!result) return null;
+    const hits = direct ? [] : orderedPicks(result.hits, picked);
+    if (!direct && hits.length === 0) return null;
+    const request = buildPackRequest(
+      result.query.trim() || activeQuery,
+      hits,
+      pickLocalCapabilities(localCapabilities, hits, result.intents),
+      direct,
+    );
+    return solvePackInput(request, format, todayLocalDate(new Date()), searchVersion, packAttempt);
+  }, [result, picked, direct, format, localCapabilities, activeQuery, searchVersion, packAttempt]);
+  const packView = currentSolvePack(packInput, packState);
+  // 问题、工具、格式或本机能力变化时立即收起旧版，等当前版本就绪再允许复制。
+  const pack = packView?.output ?? null;
   const hasResult = result !== null;
   const rerankStatus = rerankStatusText({ phase: rerankPhase, result: rerank, enabled: aiEnabled });
   const showNoneFit = Boolean(rerank && (rerank.status === 'ok' || rerank.status === 'cached') && rerank.noneFit);
-  const canCopy = direct ? Boolean(pack?.content) : selectedHits.length > 0 && Boolean(pack?.content);
+  const canCopy = Boolean(pack?.content) && !packView?.error;
+  const copied = copiedKey !== null && copiedKey === packInput?.key;
 
   useEffect(() => {
-    if (!result) return;
-    const hits = orderedPicks(result.hits, picked);
-    if (!direct && hits.length === 0) return;
-    const key = packKey;
-    const queryText = result.query.trim() || activeQuery;
-    const request = direct
-      ? buildPackRequest(queryText, [], pickLocalCapabilities(localCapabilities, [], result.intents), true)
-      : buildPackRequest(queryText, hits, pickLocalCapabilities(localCapabilities, hits, result.intents));
-    let cancelled = false;
+    if (!packInput) return;
+    let cancelGeneration: (() => void) | undefined;
     const timer = window.setTimeout(() => {
-      if (cancelled) return;
-      void buildReferencePack(request, format, todayLocalDate(new Date())).then((output) => {
-        if (cancelled) return;
-        setPackState({ key, output: readPack(output), error: null });
-      }).catch((reason) => {
-        if (cancelled) return;
-        setPackState({ key, output: null, error: describeInvokeError(reason) });
-      });
+      cancelGeneration = generateSolvePack(packInput, buildReferencePack, setPackState, describeInvokeError);
     }, 250);
     return () => {
-      cancelled = true;
       window.clearTimeout(timer);
+      cancelGeneration?.();
     };
-  }, [packKey, result, picked, format, packAttempt, activeQuery, localCapabilities, direct]);
+  }, [packInput]);
 
   // 复制成功后按钮上显示一会儿「已复制」
   useEffect(() => {
-    if (!copied) return;
-    const timer = window.setTimeout(() => setCopied(false), 1600);
+    if (copiedKey === null) return;
+    const timer = window.setTimeout(() => setCopiedKey(null), 1600);
     return () => window.clearTimeout(timer);
-  }, [copied]);
+  }, [copiedKey]);
 
   function onSubmit(event: FormEvent) {
     event.preventDefault();
@@ -301,11 +296,12 @@ export function SolvePage(props: {
   }
 
   async function copyToCodex() {
-    if (!pack?.content || (!direct && selectedHits.length === 0)) return;
+    if (!canCopy || !pack || !packInput) return;
     const detail = direct
       ? '直接交给 Codex'
       : `${Number.isFinite(pack.itemCount) ? pack.itemCount : selectedHits.length} 个工具`;
-    if (await copy(pack.content, COPY_FOR_CODEX_TOAST, detail)) setCopied(true);
+    const key = packInput.key;
+    if (await copy(pack.content, COPY_FOR_CODEX_TOAST, detail)) setCopiedKey(key);
   }
 
   function updatePicked(update: (current: string[]) => string[]) {
@@ -413,7 +409,11 @@ export function SolvePage(props: {
           ) : null}
           <div className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-1 border-b border-muted px-4 py-1.5">
             {rerankStatus ? <span className="text-xs text-on-surface-variant">{rerankStatus}</span> : null}
-            <Button variant="text" size="sm" aria-pressed={aiEnabled} onClick={toggleAi}>{RERANK_TOGGLE_LABEL(aiEnabled)}</Button>
+            <Button variant="text" size="sm" aria-pressed={aiEnabled} aria-describedby="solve-ai-cost" onClick={toggleAi}>{RERANK_TOGGLE_LABEL(aiEnabled)}</Button>
+            <p id="solve-ai-cost" className="m-0 w-full text-xs leading-5 text-on-surface-variant">
+              开启后会请 AI 帮你挑，会花钱（每次约 4 千 token，受 AI 精选额度限制）。具体费用以服务商账单为准。
+              关闭只影响后续精选，已发出的请求可能仍会计费。
+            </p>
           </div>
           {result ? <GapBanner result={result} onOpenDiscover={openDiscover} /> : null}
           {result ? <NoIntentBanner result={result} /> : null}
@@ -460,7 +460,6 @@ export function SolvePage(props: {
             ) : null}
           </div>
           <FormatPicker options={formatOptions} value={format} onChange={setFormat} />
-          {loadingPack && pack ? <div className="h-0.5 shrink-0 animate-pulse bg-primary/60" role="status" aria-label="正在更新交接单" /> : null}
           {pack && pack.warnings.length > 0 ? (
             <div className="shrink-0 space-y-1 px-4 pt-2.5">
               {pack.warnings.map((warning, index) => (
@@ -698,15 +697,3 @@ function readHits(hits: SolveResult['hits']): SolveResult['hits'] {
   }));
 }
 
-function readPack(output: PackOutput): PackOutput {
-  if (!output || typeof output.content !== 'string') {
-    throw new Error('交接单的结果不完整');
-  }
-  return {
-    format: output.format,
-    content: output.content,
-    itemCount: Number.isFinite(output.itemCount) ? output.itemCount : 0,
-    missing: Array.isArray(output.missing) ? output.missing.filter((item) => typeof item === 'string') : [],
-    warnings: Array.isArray(output.warnings) ? output.warnings.filter((item) => typeof item === 'string') : [],
-  };
-}
