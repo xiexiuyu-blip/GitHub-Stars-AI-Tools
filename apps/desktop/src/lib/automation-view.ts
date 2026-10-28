@@ -97,15 +97,15 @@ export const FULL_SCAN_TOKENS_PER_REPO = 9000;
 
 /** 额度档位：名字 + 每天约整理多少个。0 是关闭。 */
 export const BUDGET_PRESETS: ReadonlyArray<{ tokens: number; title: string; hint: string }> = [
-  { tokens: 0, title: '关闭', hint: '不自动整理，一分钱不花（你仍然可以手动整理）' },
-  { tokens: 100_000, title: '试跑', hint: '每天最多约 16 个，先看看效果' },
-  { tokens: 200_000, title: '日常', hint: '每天最多约 33 个' },
-  { tokens: 600_000, title: '多整理些', hint: '每天最多约 100 个，新收藏很多时用' },
+  { tokens: 0, title: '关闭', hint: '只关闭后台自动整理；手动整理、AI 问答等仍可能收费' },
+  { tokens: 100_000, title: '试跑', hint: '每 24 小时最多约 16 个，先看看效果' },
+  { tokens: 200_000, title: '日常', hint: '每 24 小时最多约 33 个' },
+  { tokens: 600_000, title: '多整理些', hint: '每 24 小时最多约 100 个，新收藏很多时用' },
 ];
 
 export const AUTO_ORGANIZE_DEFINITION = '自动整理：应用在后台给「新收藏」和「README 有实质更新的收藏」写（或重写）中文说明——它能做什么、适合解决什么、怎么试。没变化的不会重复整理，也不会重复花钱。整理好的会出现在「今日」和「资料库」里。用的是你自己配置的 AI 服务，具体花多少钱以服务商的账单为准。';
-export const DAILY_ORGANIZE_TITLE = '每天自动整理（后台自动做，只处理新增和变化的）';
-export const DAILY_ORGANIZE_DESCRIPTION = '第一步做完以后，平时不用管：每次同步到新收藏、或某个收藏的 README 有实质更新，应用会在后台自动整理它。每天最多花你设定的额度；用完这一天的自动整理就先歇着，不影响你随时手动「现在整理」。';
+export const DAILY_ORGANIZE_TITLE = '每天自动整理（按滚动 24 小时计额度）';
+export const DAILY_ORGANIZE_DESCRIPTION = '第一步做完以后，平时不用管：每次同步到新收藏、或某个收藏的 README 有实质更新，应用会在后台自动整理它。「每天额度」按最近 24 小时滚动累计，不在零点重置；用完后，随着较早用量移出这个窗口，额度逐步恢复。手动「现在整理」另行确认费用。';
 export const DAILY_ORGANIZE_DURING_SCAN = '整理正在进行，这一轮不受每天额度限制；整理完才按下面的额度。';
 export const SLOW_ORGANIZE_COPY = {
   title: '只想慢慢整理（可选）',
@@ -384,7 +384,7 @@ export function automationState(status: AutomationStatus | null): AutomationStat
     return { label: '现在整理中', hue: 148, detail: '在后台连续整理，不受每天额度限制；整理完会自动回到每天自动整理。' };
   }
   if (!status.enabled) {
-    return { label: '未开启', hue: 220, detail: '还没开启每天自动整理时，应用不会自动调用 AI，也不会花钱；你手动点「现在整理」时才会花钱（会先让你确认）。' };
+    return { label: '未开启', hue: 220, detail: '后台自动整理已关闭。手动「现在整理」、单张重新整理、AI 问答和连接测试等仍可能产生费用，按各自的确认与额度规则执行。' };
   }
   if (status.budgetRemaining <= 0) {
     const queued = status.queued > 0 ? `；现在有 ${status.queued} 个在排队` : '';
@@ -411,6 +411,8 @@ export type AutomationHint = {
   detail: string;
   /** 没有动作就不画按钮（比如正在整理中，没什么要你做的） */
   actionLabel: string | null;
+  /** 只有未配置 AI 时直达配置页，其余动作去自动整理。 */
+  actionTarget?: 'ai-settings';
 };
 
 /**
@@ -421,7 +423,7 @@ export function automationHint(status: AutomationStatus | null, pending: number)
   if (!status || !Number.isFinite(pending) || pending <= 0) return null;
   const lacking = `还有 ${pending} 个收藏没有中文说明`;
   if (!status.providerConfigured) {
-    return { hue: 36, icon: 'key', title: lacking, detail: '还没配置 AI 服务，配置好才能自动整理。', actionLabel: '去设置 AI' };
+    return { hue: 36, icon: 'key', title: lacking, detail: '还没配置 AI 服务，配置好才能自动整理。', actionLabel: '去设置 AI', actionTarget: 'ai-settings' };
   }
   if (status.paused) {
     return {
@@ -462,7 +464,7 @@ export function automationHint(status: AutomationStatus | null, pending: number)
       hue: 220,
       icon: 'auto_awesome',
       title: lacking,
-      detail: '自动整理还没开启，它们先显示 GitHub 上的原文。开启后会在后台逐个整理，每天最多花你设定的额度。',
+      detail: '自动整理还没开启，它们先显示 GitHub 上的原文。开启后会在后台逐个整理，额度按最近 24 小时滚动累计。',
       actionLabel: '开启自动整理',
     };
   }
@@ -489,10 +491,10 @@ export function automationHint(status: AutomationStatus | null, pending: number)
 }
 
 /** 详情里「还没有中文说明」那一块：这个工具为什么还没整理。 */
-export function itemPendingNote(status: AutomationStatus | null): { text: string; actionLabel: string | null } {
+export function itemPendingNote(status: AutomationStatus | null): { text: string; actionLabel: string | null; actionTarget?: 'ai-settings' } {
   const original = '先看 GitHub 上的原文：';
   if (!status) return { text: `整理好之后，这里会出现中文说明、能做什么、怎么试。${original}`, actionLabel: null };
-  if (!status.providerConfigured) return { text: `还没配置 AI 服务，所以没法自动整理。${original}`, actionLabel: '去设置 AI' };
+  if (!status.providerConfigured) return { text: `还没配置 AI 服务，所以没法自动整理。${original}`, actionLabel: '去设置 AI', actionTarget: 'ai-settings' };
   if (status.paused) {
     const reason = status.pauseReason?.message;
     return { text: `自动整理被暂停了${reason ? `（${reason}）` : ''}。${original}`, actionLabel: '继续整理' };
@@ -523,7 +525,7 @@ export function regenerateNote(status: AutomationStatus | null): RegenerateNote 
   if (status.unlimited === true) {
     return { title: queued, sub: '「现在整理」进行中，会在后台重新整理，好了会自动更新', actionLabel: null };
   }
-  if (!status.enabled) return { title: queued, sub: '自动整理还没开启，开启后才会重新整理（不开启就不花钱）', actionLabel: '去开启' };
+  if (!status.enabled) return { title: queued, sub: '自动整理还没开启，开启后才会重新整理（这部分不开启就不收费）', actionLabel: '去开启' };
   if (status.budgetRemaining <= 0) {
     return { title: queued, sub: '每天自动整理的额度用完了，过一阵会接着整理，也可以到「设置 → 自动整理与备份」点「现在整理」', actionLabel: null };
   }
@@ -579,7 +581,7 @@ export function fullScanConfirmLines(pending: number, estimate: string): [string
 
 /** 每天额度确认框的第一句。N 是预计能整理的个数，不是已经整理的个数。 */
 export function dailyBudgetConfirmLead(tokens: number): string {
-  return `每天最多整理约 ${approxRepos(tokens)} 个`;
+  return `每 24 小时最多整理约 ${approxRepos(tokens)} 个`;
 }
 
 /** 「最近 24 小时」那几句话要用到的字段。`succeeded24h` 不在 get_ai_automation 里，见 `withRecentDone`。 */
@@ -673,7 +675,7 @@ export function dailyBudgetMetric(status: AutomationStatus): { label: string; va
   return {
     label,
     value: `${formatTokens(status.budgetRemaining)} token`,
-    sub: `约还能整理 ${approxRepos(status.budgetRemaining)} 个 · 已用 ${used} / 额度 ${formatTokens(status.dailyBudgetTokens)}（整理现有收藏用的不算）`,
+    sub: `约还能整理 ${approxRepos(status.budgetRemaining)} 个 · 最近 24 小时已用 ${used} / 额度 ${formatTokens(status.dailyBudgetTokens)}（整理现有收藏用的不算）`,
   };
 }
 

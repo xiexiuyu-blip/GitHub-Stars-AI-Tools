@@ -4,6 +4,7 @@ import { FormEvent, useEffect, useMemo, useRef, useState } from 'react';
 import { getAiConfigMessage, toBackendAiRequestConfig } from '@/lib/ai-config';
 import { formatSyncComplete } from '@/lib/automation-view';
 import { getTodayView, plainTechnicalError } from '@/lib/api';
+import { invalidateRepoReadmesForProgress } from '@/hooks/use-repo-readme';
 import { emptyRepositoryFilters, getRepositoryStats } from '@/lib/repository';
 import { optionalRequestText } from '@/lib/format';
 import type {
@@ -140,6 +141,7 @@ export function useStarsWorkspace() {
     let unlistenProgress: (() => void) | null = null;
     let unlistenAiStream: (() => void) | null = null;
     void listen<TaskProgressEvent>('task-progress', (event) => {
+      invalidateRepoReadmesForProgress(event.payload);
       setTaskProgress(event.payload);
     }).then((nextUnlisten) => {
       unlistenProgress = nextUnlisten;

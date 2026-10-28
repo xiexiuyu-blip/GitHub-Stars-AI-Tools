@@ -1,9 +1,50 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+import type { ReactElement, ReactNode } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import type { LibraryDetail, ScenarioSummary } from '@/lib/contracts';
-import { ItemDetail } from './item-detail';
+import { ItemDetail, PendingNote } from './item-detail';
+import { AutomationBanner } from './automation-banner';
+import { automationHint, type AutomationStatus } from '@/lib/automation-view';
+const automation = vi.hoisted(() => ({ status: null as AutomationStatus | null }));
+vi.mock('@/hooks/use-ai-automation', () => ({ useAiAutomation: () => ({ status: automation.status }) }));
 // 源码原文：守住「说什么由 item-format 决定」（Vite 的 ?raw，不用 node 的类型）
 import itemDetailSource from './item-detail.tsx?raw';
+
+function actionOf(node: ReactNode): (() => void) | undefined {
+  if (Array.isArray(node)) return node.map(actionOf).find(Boolean);
+  if (!node || typeof node !== 'object' || !('props' in node)) return undefined;
+  const props = (node as ReactElement<Record<string, unknown>>).props;
+  if (typeof props.onClick === 'function') return props.onClick as () => void;
+  return actionOf(props.children as ReactNode);
+}
+
+describe('未整理提示按钮的真实去向', () => {
+  it('横幅与详情：没配置 AI 去 AI 设置；暂停/额度仍去自动整理', () => {
+    const onOpenAiSettings = vi.fn();
+    const onOpenToolbox = vi.fn();
+    try {
+      for (const [providerConfigured, paused, budgetRemaining] of [[false, false, 0], [true, true, 10], [true, false, 0]] as const) {
+        automation.status = { providerConfigured, paused, budgetRemaining, enabled: true, queued: 0, running: 0 } as AutomationStatus;
+        const hint = automationHint(automation.status, 3);
+        const banner = AutomationBanner({ hint, onOpenAiSettings, onAction: onOpenToolbox });
+        const note = PendingNote({ fullName: 'fox/tool', description: null, onOpenAiSettings, onOpenToolbox });
+        const expected = providerConfigured ? onOpenToolbox : onOpenAiSettings;
+        expect(actionOf(banner)).toBe(expected);
+        expect(actionOf(note)).toBe(expected);
+        actionOf(banner)?.(); actionOf(note)?.();
+      }
+      expect(onOpenAiSettings).toHaveBeenCalledTimes(2);
+      expect(onOpenToolbox).toHaveBeenCalledTimes(4);
+    } finally {
+      automation.status = null;
+    }
+  });
+
+  it('缺 AI 配置入口时不把「去设置 AI」错接到自动整理', () => {
+    const hint = automationHint({ providerConfigured: false } as AutomationStatus, 3);
+    expect(actionOf(AutomationBanner({ hint, onAction: vi.fn() }))).toBeUndefined();
+  });
+});
 
 /** 去掉图标字（Material Symbols 的图标名是文字）和标签，留下用户看得见的字。 */
 function textOf(html: string): string {
