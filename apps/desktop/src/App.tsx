@@ -12,6 +12,7 @@ import { WorkspaceProvider, useWorkspace } from '@/providers/workspace-provider'
 import { SettingsProvider, useAppSettings } from '@/providers/settings-provider';
 import { AppUpdateProvider, useAppUpdate } from '@/providers/app-update-provider';
 import { shouldFlushAiApiKey } from '@/lib/ai-config';
+import type { SettingsTab } from '@/pages/settings';
 import type { AppPage } from '@/types';
 
 const SettingsPage = lazy(() => import('@/pages/settings').then((module) => ({ default: module.SettingsPage })));
@@ -19,7 +20,6 @@ const TodayPage = lazy(() => import('@/pages/v2/today').then((module) => ({ defa
 const V2LibraryPage = lazy(() => import('@/pages/v2/library').then((module) => ({ default: module.LibraryPage })));
 const CapturePage = lazy(() => import('@/pages/v2/capture').then((module) => ({ default: module.CapturePage })));
 const SolvePage = lazy(() => import('@/pages/v2/solve').then((module) => ({ default: module.SolvePage })));
-const ToolboxPage = lazy(() => import('@/pages/v2/toolbox').then((module) => ({ default: module.ToolboxPage })));
 const DiscoverPage = lazy(() => import('@/pages/v2/discover').then((module) => ({ default: module.DiscoverPage })));
 
 function AppContent() {
@@ -27,7 +27,7 @@ function AppContent() {
   const settingsHook = useAppSettings();
   const appUpdate = useAppUpdate();
   const [currentPage, setCurrentPage] = useState<AppPage>('today');
-  const [settingsTab, setSettingsTab] = useState<'github' | 'ai'>('github');
+  const [settingsTab, setSettingsTab] = useState<SettingsTab>('github');
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
   const [solveQuestion, setSolveQuestion] = useState('');
   const [discoverScenario, setDiscoverScenario] = useState<string | null>(null);
@@ -175,6 +175,11 @@ function AppContent() {
     setCurrentPage('settings');
   }
 
+  function handleOpenOrganize() {
+    setSettingsTab('organize');
+    setCurrentPage('settings');
+  }
+
   const failedTaskRetry = getFailedTaskRetry({
     taskId: workspace.taskProgress?.status === 'failed' || workspace.taskProgress?.status === 'partial'
       ? workspace.taskProgress.taskId
@@ -236,7 +241,7 @@ function AppContent() {
         }}
         onOpenCapture={() => setCurrentPage('capture')}
         onOpenSolve={() => setCurrentPage('solve')}
-        onOpenToolbox={() => setCurrentPage('toolbox')}
+        onOpenToolbox={handleOpenOrganize}
         onOpenAiSettings={handleOpenAiSettings}
       />
     );
@@ -257,14 +262,12 @@ function AppContent() {
               setSolveQuestion(query);
               setCurrentPage('solve');
             }}
-            onOpenToolbox={() => setCurrentPage('toolbox')}
+            onOpenToolbox={handleOpenOrganize}
             onOpenAiSettings={handleOpenAiSettings}
           />
         );
       case 'solve':
-        return <SolvePage initialQuestion={solveQuestion} onInitialQuestionConsumed={() => setSolveQuestion('')} onOpenDiscover={(scenarioId) => { setDiscoverScenario(scenarioId ?? null); setCurrentPage('discover'); }} onOpenToolbox={() => setCurrentPage('toolbox')} onOpenAiSettings={handleOpenAiSettings} />;
-      case 'toolbox':
-        return <ToolboxPage />;
+        return <SolvePage initialQuestion={solveQuestion} onInitialQuestionConsumed={() => setSolveQuestion('')} onOpenDiscover={(scenarioId) => { setDiscoverScenario(scenarioId ?? null); setCurrentPage('discover'); }} onOpenToolbox={handleOpenOrganize} onOpenAiSettings={handleOpenAiSettings} />;
       case 'discover':
         return <DiscoverPage key={discoverScenario ?? 'default'} initialScenarioId={discoverScenario} onOpenCapture={() => setCurrentPage('capture')} />;
       case 'settings':
@@ -306,7 +309,7 @@ function AppContent() {
         isSyncing={workspace.isSyncingStars}
         onFetchReadmes={() => void workspace.handleFetchReadmes({ onlyMissing: true })}
         isFetchingReadmes={workspace.isFetchingReadmes}
-        onOpenToolbox={() => setCurrentPage('toolbox')}
+        onOpenToolbox={handleOpenOrganize}
         syncSummary={workspace.syncSummary}
         syncedAt={workspace.lastSyncedAt}
         taskProgress={workspace.taskProgress}

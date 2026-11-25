@@ -14,7 +14,6 @@ const ALL_PAGES: AppPage[] = [
   'capture',
   'discover',
   'settings',
-  'toolbox',
 ];
 
 /** 渲染出来的页签文字（一个 <button> 一个页签）。 */
@@ -46,7 +45,7 @@ describe('导航数据', () => {
     expect(SETTINGS_ITEM).toEqual({ key: 'settings', label: '设置', icon: 'settings' });
   });
 
-  it('navKeyFor 对 7 个现行页面返回正确高亮', () => {
+  it('navKeyFor 对 6 个现行页面返回正确高亮', () => {
     const cases: [AppPage, string | null][] = [
       ['today', 'today'],
       ['library', 'library'],
@@ -54,7 +53,6 @@ describe('导航数据', () => {
       ['capture', 'capture'],
       ['discover', 'discover'],
       ['settings', 'settings'],
-      ['toolbox', 'settings'],
     ];
 
     expect(cases).toHaveLength(ALL_PAGES.length);
@@ -85,44 +83,28 @@ describe('导航数据', () => {
 });
 
 describe('subTabsFor', () => {
-  it('资料库和找方案都只有一项时，不显示二级标签条', () => {
+  it('所有页面都收成单层导航，不显示二级标签条', () => {
     expect(SUB_TABS.library).toEqual([{ key: 'library', label: '资料库' }]);
-    expect(subTabsFor('library')).toBeNull();
-    expect(subTabsFor('solve')).toBeNull();
-    expect(subTabsFor('settings')?.map((tab) => tab.key)).toEqual(['settings', 'toolbox']);
-  });
-
-  it('不在这三组里的页面没有标签条', () => {
-    expect(subTabsFor('today')).toBeNull();
-    expect(subTabsFor('capture')).toBeNull();
-    expect(subTabsFor('discover')).toBeNull();
-  });
-
-  it('设置旁边的子页签叫「自动整理与备份」，页面 key 仍是 toolbox', () => {
-    expect(SUB_TABS.settings).toEqual([
-      { key: 'settings', label: '设置' },
-      { key: 'toolbox', label: '自动整理与备份' },
-    ]);
-    expect(subTabsFor('toolbox')?.map((tab) => tab.label)).toEqual(['设置', '自动整理与备份']);
-    expect(subTabsFor('settings')?.map((tab) => tab.key)).toEqual(['settings', 'toolbox']);
-    expect(navKeyFor('toolbox')).toBe('settings');
+    expect(SUB_TABS.settings).toEqual([{ key: 'settings', label: '设置' }]);
+    for (const page of ALL_PAGES) {
+      expect(subTabsFor(page), page).toBeNull();
+    }
   });
 });
 
 describe('渲染出来的页签文字', () => {
-  it('资料库不显示二级页签，设置那一组是「设置」「自动整理与备份」', () => {
+  it('没有二级页签渲染', () => {
     expect(renderedTabTexts('library')).toEqual([]);
-    expect(renderedTabTexts('settings')).toEqual(['设置', '自动整理与备份']);
-    expect(renderedTabTexts('toolbox')).toEqual(['设置', '自动整理与备份']);
+    expect(renderedTabTexts('settings')).toEqual([]);
   });
 
-  it('所有页面渲染出来的页签文字里，都没有「工具箱」「地图」（左边主导航的文字也一样）', () => {
+  it('主导航文字里没有「工具箱」「地图」', () => {
     const texts = [
       ...ALL_PAGES.flatMap((page) => renderedTabTexts(page)),
       ...NAV_ITEMS.map((item) => item.label),
       SETTINGS_ITEM.label,
     ];
-    expect(texts.length).toBeGreaterThan(6);
+    expect(texts.length).toBeGreaterThan(5);
     for (const text of texts) {
       expect(text, text).not.toContain('工具箱');
       expect(text, text).not.toContain('地图');

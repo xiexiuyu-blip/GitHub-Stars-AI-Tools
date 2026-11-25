@@ -478,6 +478,34 @@ pub struct AutomationStatus {
     pub needs_organizing_outdated: i64,
     /// 缺失、过期，以及已经排队或进行中的理解卡任务，按仓库去重。
     pub awaiting: i64,
+    /// 最近成功整理理解卡的平均总 token（样本 >= 3 时返回，限 2_000..=50_000）。
+    pub avg_tokens_per_card: Option<i64>,
+}
+
+fn recent_avg_tokens_per_card(conn: &Connection) -> Result<Option<i64>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0) AS total_tokens
+             FROM ai_jobs
+             WHERE job_type = 'repo_card'
+               AND status = 'succeeded'
+               AND COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0) > 0
+             ORDER BY COALESCE(finished_at, updated_at, created_at) DESC, rowid DESC
+             LIMIT 50",
+        )
+        .map_err(|error| format!("平均消耗查询失败：{error}"))?;
+    let totals: Vec<i64> = stmt
+        .query_map([], |row| row.get(0))
+        .map_err(|error| format!("平均消耗读取失败：{error}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("平均消耗解析失败：{error}"))?;
+    if totals.len() < 3 {
+        return Ok(None);
+    }
+    let sum: i128 = totals.iter().map(|&value| i128::from(value)).sum();
+    let count = i128::try_from(totals.len()).unwrap_or(1);
+    let rounded = ((sum + count / 2) / count) as i64;
+    Ok(Some(rounded.clamp(2_000, 50_000)))
 }
 
 /// 与 insert_scoped 的 Missing / Outdated 范围一致；拆分计数来自同一次查询。
@@ -538,6 +566,7 @@ pub fn automation_status(db_path: &Path, settings: &Value) -> Result<AutomationS
     };
     let (active_repos, needs_organizing_missing, needs_organizing_outdated, awaiting) =
         organizing_counts(&conn)?;
+    let avg_tokens_per_card = recent_avg_tokens_per_card(&conn)?;
     Ok(AutomationStatus {
         enabled: (control.daily_budget_tokens > 0 || unlimited) && !control.paused,
         daily_budget_tokens: control.daily_budget_tokens,
@@ -560,6 +589,7 @@ pub fn automation_status(db_path: &Path, settings: &Value) -> Result<AutomationS
         needs_organizing_missing,
         needs_organizing_outdated,
         awaiting,
+        avg_tokens_per_card,
     })
 }
 
@@ -2613,10 +2643,77 @@ mod tests {
             "needsOrganizingMissing",
             "needsOrganizingOutdated",
             "awaiting",
+            "avgTokensPerCard",
         ]
         .into_iter()
         .map(str::to_owned)
         .collect()
+    }
+
+    #[test]
+    fn recent_avg_tokens_per_card_requires_three_samples_and_clamps_bounds() {
+        let db = TempDb::new("avg-tokens");
+        let now = now_stamp();
+        let conn = db.open();
+        conn.execute(
+            "INSERT INTO ai_jobs(id, account_id, job_type, target_type, target_id, status, input_tokens, output_tokens, finished_at, created_at)
+             VALUES ('j1', 'acct', 'repo_card', 'repository', 'r1', 'succeeded', 8000, 4000, ?1, ?1),
+                    ('j2', 'acct', 'repo_card', 'repository', 'r2', 'succeeded', 9000, 4000, ?1, ?1)",
+            [&now],
+        )
+        .expect("前两条样本应能写入");
+        assert_eq!(
+            recent_avg_tokens_per_card(&conn).expect("查询应成功"),
+            None,
+            "样本不足 3 条时返回 None"
+        );
+
+        conn.execute(
+            "INSERT INTO ai_jobs(id, account_id, job_type, target_type, target_id, status, input_tokens, output_tokens, finished_at, created_at)
+             VALUES ('j3', 'acct', 'repo_card', 'repository', 'r3', 'succeeded', 8000, 4600, ?1, ?1)",
+            [&now],
+        )
+        .expect("第 3 条样本应能写入");
+        // (12000 + 13000 + 12600) / 3 = 12533.33 -> 12533
+        assert_eq!(
+            recent_avg_tokens_per_card(&conn).expect("查询应成功"),
+            Some(12_533)
+        );
+        drop(conn);
+
+        let low_db = TempDb::new("avg-tokens-low");
+        let low_conn = low_db.open();
+        for idx in 1..=3 {
+            low_conn
+                .execute(
+                    "INSERT INTO ai_jobs(id, account_id, job_type, target_type, target_id, status, input_tokens, output_tokens, finished_at, created_at)
+                     VALUES (?1, 'acct', 'repo_card', 'repository', ?1, 'succeeded', 100, 50, ?2, ?2)",
+                    params![format!("l{idx}"), &now],
+                )
+                .expect("低样本应能写入");
+        }
+        assert_eq!(
+            recent_avg_tokens_per_card(&low_conn).expect("查询应成功"),
+            Some(2_000),
+            "过低均值应被夹到 2000"
+        );
+
+        let high_db = TempDb::new("avg-tokens-high");
+        let high_conn = high_db.open();
+        for idx in 1..=3 {
+            high_conn
+                .execute(
+                    "INSERT INTO ai_jobs(id, account_id, job_type, target_type, target_id, status, input_tokens, output_tokens, finished_at, created_at)
+                     VALUES (?1, 'acct', 'repo_card', 'repository', ?1, 'succeeded', 60000, 20000, ?2, ?2)",
+                    params![format!("h{idx}"), &now],
+                )
+                .expect("高样本应能写入");
+        }
+        assert_eq!(
+            recent_avg_tokens_per_card(&high_conn).expect("查询应成功"),
+            Some(50_000),
+            "过高均值应被夹到 50000"
+        );
     }
 
     #[test]

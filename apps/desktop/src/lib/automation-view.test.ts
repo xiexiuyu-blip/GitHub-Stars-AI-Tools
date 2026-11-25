@@ -683,18 +683,18 @@ describe('fullScanPanel', () => {
 });
 
 describe('organizeCountsLine', () => {
-  it('三个分项齐全时给出新版 / 旧版 / 缺失数量，旧版有值才解释升级', () => {
+  it('三个分项齐全时给出最新 / 待更新 / 缺失数量，旧格式有值才解释升级', () => {
     expect(organizeCountsLine(status({ activeRepos: 500, needsOrganizingMissing: 39, needsOrganizingOutdated: 461 }))).toBe(
-      '现有 500 个收藏：新版说明 0 个 · 旧版说明 461 个 · 还没有说明 39 个。旧版说明是用旧格式写的，还能看，但建议按新格式重写，「找方案」和资料库筛选才更准。',
+      '现有 500 个收藏：中文说明已是最新 0 个 · 中文说明要更新 461 个 · 还没有中文说明 39 个。有部分说明是早期的简要格式，还能看，但建议更新成完整中文说明，「找方案」和资料库筛选才更准。',
     );
     expect(organizeCountsLine(status({ activeRepos: 500, needsOrganizingMissing: 39, needsOrganizingOutdated: 0 }))).toBe(
-      '现有 500 个收藏：新版说明 461 个 · 旧版说明 0 个 · 还没有说明 39 个。',
+      '现有 500 个收藏：中文说明已是最新 461 个 · 中文说明要更新 0 个 · 还没有中文说明 39 个。',
     );
   });
 
-  it('分项合计超过总数时，新版个数不出现负数', () => {
+  it('分项合计超过总数时，最新个数不出现负数', () => {
     expect(organizeCountsLine(status({ activeRepos: 2, needsOrganizingMissing: 2, needsOrganizingOutdated: 1 }))).toBe(
-      '现有 2 个收藏：新版说明 0 个 · 旧版说明 1 个 · 还没有说明 2 个。旧版说明是用旧格式写的，还能看，但建议按新格式重写，「找方案」和资料库筛选才更准。',
+      '现有 2 个收藏：中文说明已是最新 0 个 · 中文说明要更新 1 个 · 还没有中文说明 2 个。有部分说明是早期的简要格式，还能看，但建议更新成完整中文说明，「找方案」和资料库筛选才更准。',
     );
   });
 
@@ -855,7 +855,7 @@ describe('额度用完时指出可以现在整理', () => {
     const hint = automationHint(status({ budgetRemaining: 0, queued: 3 }), 5);
     expect(hint?.title).toBe('每天自动整理的额度用完了');
     expect(hint?.actionLabel).toBe('去整理');
-    expect(hint?.detail).toBe('还有 5 个没整理，过一阵额度恢复会自动接着做；想现在就整理，到「设置 → 自动整理与备份」点「现在整理」。');
+    expect(hint?.detail).toBe('还有 5 个没整理，过一阵额度恢复会自动接着做；想现在就整理，到「设置 → 自动整理」点「现在整理」。');
     expect(`${hint?.title}${hint?.detail}`).not.toMatch(/今天|明天/);
   });
 
@@ -863,12 +863,12 @@ describe('额度用完时指出可以现在整理', () => {
     const item = itemPendingNote(status({ budgetRemaining: 0 }));
     const regenerate = regenerateNote(status({ budgetRemaining: 0 }));
     expect(item).toEqual({
-      text: '每天自动整理的额度用完了，过一阵会接着整理；也可以到「设置 → 自动整理与备份」点「现在整理」。先看 GitHub 上的原文：',
+      text: '每天自动整理的额度用完了，过一阵会接着整理；也可以到「设置 → 自动整理」点「现在整理」。先看 GitHub 上的原文：',
       actionLabel: '去整理',
     });
     expect(regenerate).toEqual({
       title: '已加入整理队列',
-      sub: '每天自动整理的额度用完了，过一阵会接着整理，也可以到「设置 → 自动整理与备份」点「现在整理」',
+      sub: '每天自动整理的额度用完了，过一阵会接着整理，也可以到「设置 → 自动整理」点「现在整理」',
       actionLabel: null,
     });
     expect(`${item.text}${regenerate.sub}`).not.toMatch(/今天|明天/);
@@ -884,10 +884,10 @@ describe('额度用完时指出可以现在整理', () => {
 });
 
 describe('自动整理定义、每日档位和慢慢整理说明', () => {
-  it('页面定义和每天整理说明逐字匹配任务卡', () => {
-    expect(AUTO_ORGANIZE_DEFINITION).toBe('自动整理：应用在后台给「新收藏」和「README 有实质更新的收藏」写（或重写）中文说明——它能做什么、适合解决什么、怎么试。没变化的不会重复整理，也不会重复花钱。整理好的会出现在「今日」和「资料库」里。用的是你自己配置的 AI 服务，具体花多少钱以服务商的账单为准。');
+  it('页面定义精简且每天整理说明首次标明「项目说明（README）」', () => {
+    expect(AUTO_ORGANIZE_DEFINITION).toBe('后台自动给新收藏或说明有更新的项目写中文说明，不重复整理。');
     expect(DAILY_ORGANIZE_TITLE).toBe('每天自动整理（按滚动 24 小时计额度）');
-    expect(DAILY_ORGANIZE_DESCRIPTION).toBe('第一步做完以后，平时不用管：每次同步到新收藏、或某个收藏的 README 有实质更新，应用会在后台自动整理它。「每天额度」按最近 24 小时滚动累计，不在零点重置；用完后，随着较早用量移出这个窗口，额度逐步恢复。手动「现在整理」另行确认费用。');
+    expect(DAILY_ORGANIZE_DESCRIPTION).toBe('第一步做完以后，平时不用管：每次同步到新收藏、或某个收藏的项目说明（README）有实质更新，应用会在后台自动整理它。「每天额度」按最近 24 小时滚动累计，不在零点重置；用完后，随着较早用量移出这个窗口，额度逐步恢复。手动「现在整理」另行确认费用。');
     expect(DAILY_ORGANIZE_DURING_SCAN).toBe('整理正在进行，这一轮不受每天额度限制；整理完才按下面的额度。');
   });
 
@@ -920,13 +920,13 @@ describe('自动整理定义、每日档位和慢慢整理说明', () => {
 describe('dailyBudgetMetric', () => {
   it('只用每天额度口径，新后台排除手动整理用量；旧后台回退 tokens24h', () => {
     expect(dailyBudgetMetric(status({ dailyTokensUsed: 40000, tokens24h: 2000000, budgetRemaining: 60000 }))).toEqual({
-      label: '自动整理额度还剩',
+      label: '今天额度还剩',
       value: '6 万 token',
       sub: '约还能整理 10 个 · 最近 24 小时已用 4 万 / 额度 10 万（整理现有收藏用的不算）',
     });
     for (const dailyTokensUsed of [undefined, null]) {
       expect(dailyBudgetMetric(status({ dailyTokensUsed, tokens24h: 40000, budgetRemaining: 60000 }))).toEqual({
-        label: '自动整理额度还剩',
+        label: '今天额度还剩',
         value: '6 万 token',
         sub: '约还能整理 10 个 · 最近 24 小时已用 4 万 / 额度 10 万（整理现有收藏用的不算）',
       });
@@ -936,15 +936,20 @@ describe('dailyBudgetMetric', () => {
 
   it('手动整理时无每天限制；未开启时隐藏数字，即使配置过每天额度', () => {
     expect(dailyBudgetMetric(status({ unlimited: true, enabled: false, budgetRemaining: 0 }))).toEqual({
-      label: '自动整理额度还剩', value: '不受每天额度限制', sub: '正在整理中',
+      label: '今天额度还剩', value: '不受每天额度限制', sub: '正在整理中',
     });
     expect(dailyBudgetMetric(status({ enabled: false }))).toEqual({
-      label: '自动整理额度还剩', value: '—', sub: '没有开启每天自动整理',
+      label: '今天额度还剩', value: '—', sub: '没有开启每天自动整理',
     });
     expect(dailyBudgetMetric(status({ budgetRemaining: 0, dailyTokensUsed: 100000 }))).toEqual({
-      label: '自动整理额度还剩', value: '0 token',
+      label: '今天额度还剩', value: '0 token',
       sub: '约还能整理 0 个 · 最近 24 小时已用 10 万 / 额度 10 万（整理现有收藏用的不算）',
     });
+  });
+
+  it('有近期实测均值时，fullScanPanel 用实测均值估算 token', () => {
+    const panel = fullScanPanel(status({ awaiting: 10, avgTokensPerCard: 13_000 }));
+    expect(panel).toMatchObject({ kind: 'ready', estimate: '13 万' });
   });
 });
 
@@ -1328,10 +1333,10 @@ describe('导出区块的说明（自动整理与备份页）', () => {
   });
 
   it('页面上这段说明就是它（区块的 hint），两个导出按钮都在：文档（Markdown）、表格（CSV，可用 Excel 打开）', () => {
-    const toolbox = withoutComments(sourceOf('../pages/v2/toolbox.tsx'));
-    expect(toolbox).toContain('title="导出成文档 / 表格" hint={EXPORT_SECTION_HINT}');
-    expect(toolbox).toContain('导出成文档（Markdown）');
-    expect(toolbox).toContain('导出成表格（CSV，可用 Excel 打开）');
+    const backup = withoutComments(sourceOf('../pages/settings/backup-section.tsx'));
+    expect(backup).toMatch(/title="导出成文档 \/ 表格"\s+hint=\{EXPORT_SECTION_HINT\}/);
+    expect(backup).toContain('导出成文档（Markdown）');
+    expect(backup).toContain('导出成表格（CSV，可用 Excel 打开）');
   });
 });
 
@@ -1518,10 +1523,10 @@ describe('设置页文案：令牌、钥匙串、清空本机数据、GitHub 备
     expect(GITHUB_TOKEN_SCOPES).toContain('「gist」（上传备份用）');
   });
 
-  it('设置 → GitHub 页：令牌是什么那一句后面直接接权限，不再多一个句号（原来「令牌（…）。」是半截句）', () => {
-    const settings = withoutComments(sourceOf('../pages/settings.tsx'));
-    expect(settings).toContain('{GITHUB_TOKEN_EXPLAINER}{GITHUB_TOKEN_SCOPES}');
-    expect(settings).not.toContain('{GITHUB_TOKEN_EXPLAINER}。');
+  it('设置 → 账号与同步：令牌是什么那一句后面直接接权限，不再多一个句号（原来「令牌（…）。」是半截句）', () => {
+    const githubSettings = withoutComments(sourceOf('../pages/settings/github-section.tsx'));
+    expect(githubSettings).toContain('{GITHUB_TOKEN_EXPLAINER}{GITHUB_TOKEN_SCOPES}');
+    expect(githubSettings).not.toContain('{GITHUB_TOKEN_EXPLAINER}。');
   });
 
   it('连接慢的提示：设置里一句、欢迎引导里多一句「先进入」', () => {
@@ -1531,7 +1536,7 @@ describe('设置页文案：令牌、钥匙串、清空本机数据、GitHub 备
   });
 
   it('清空本机数据：列出现在真会丢的东西，说清 GitHub 上的收藏不受影响，提醒先备份', () => {
-    for (const piece of ['想试 / 在用', '收集箱里的链接', '中文说明（重做要重新花钱）', 'GitHub 令牌', 'AI 密钥', '你在 GitHub 上的收藏不受影响', '「设置 → 自动整理与备份」点「现在备份」', '刚安装的样子']) {
+    for (const piece of ['想试 / 在用', '收集箱里的链接', '中文说明（重做要重新花钱）', 'GitHub 令牌', 'AI 密钥', '你在 GitHub 上的收藏不受影响', '「设置 → 备份与导出」点「现在备份」', '刚安装的样子']) {
       expect(CLEAR_LOCAL_DATA_WARNING).toContain(piece);
     }
     expect(CLEAR_LOCAL_DATA_WARNING).not.toMatch(/SQLite|Stars|README|AI 摘要|API Key|Token/);
@@ -1572,7 +1577,7 @@ describe('设置页文案：令牌、钥匙串、清空本机数据、GitHub 备
 
 describe('欢迎引导文案', () => {
   it('标题、说明、三条提示都按新界面写', () => {
-    expect(WELCOME_COPY.titleLines).toEqual(['让每一颗 Star，', '都变成找得到、看得懂的工具']);
+    expect(WELCOME_COPY.titleLines).toEqual(['让你的每一份收藏，', '都变成找得到、看得懂的工具']);
     expect(WELCOME_COPY.subtitle).toBe('把你在 GitHub 上收藏的项目同步到这台电脑；需要时再让 AI 写中文说明（按服务商价格收费，默认不开）');
     expect(WELCOME_COPY.tips).toEqual([
       '在「资料库」按场景找工具',
@@ -1631,17 +1636,23 @@ function withoutComments(source: string): string {
     .join('\n');
 }
 
-describe('文案守卫：设置页里不再出现旧叫法（卡 33 验收第 3 条）', () => {
-  const settings = withoutComments(sourceOf('../pages/settings.tsx'));
-  // 「向量」页签藏起来了：面板代码还在，但没有任何入口能打开它。守卫只看能被看见的那一部分。
-  const hiddenStart = settings.indexOf('function EmbeddingSettingsPanel(');
-  const hiddenEnd = settings.indexOf('function AiRequestDiagnosticsPanel(');
-  const visible = hiddenStart >= 0 && hiddenEnd > hiddenStart ? settings.slice(0, hiddenStart) + settings.slice(hiddenEnd) : settings;
+describe('文案守卫：设置页里不再出现旧叫法（卡 33 验收第 3 条 & M2 合并重构）', () => {
+  const settingsFiles = [
+    '../pages/settings/index.tsx',
+    '../pages/settings/shared.tsx',
+    '../pages/settings/github-section.tsx',
+    '../pages/settings/ai-section.tsx',
+    '../pages/settings/organize-section.tsx',
+    '../pages/settings/backup-section.tsx',
+    '../pages/settings/connect-section.tsx',
+    '../pages/settings/general-about-section.tsx',
+  ] as const;
+  const settingsIndex = withoutComments(sourceOf('../pages/settings/index.tsx'));
+  const settingsAll = settingsFiles.map((file) => withoutComments(sourceOf(file))).join('\n');
 
-  it('隐藏的向量面板确实被排除在外，而且没有页签能打开它', () => {
-    expect(hiddenStart).toBeGreaterThan(0);
-    expect(hiddenEnd).toBeGreaterThan(hiddenStart);
-    expect(settings).not.toMatch(/key: 'embedding', icon/);
+  it('隐藏的向量面板已彻底从设置 UI 移除，没有页签能打开它', () => {
+    expect(settingsAll).not.toContain('EmbeddingSettingsPanel');
+    expect(settingsIndex).not.toMatch(/key:\s*'embedding'/);
   });
 
   it.each([
@@ -1668,15 +1679,16 @@ describe('文案守卫：设置页里不再出现旧叫法（卡 33 验收第 3 
     'weiloo',
     '模型 ID',
   ])('设置页看得见的文字里没有「%s」', (term) => {
-    expect(linesContaining(visible, term)).toEqual([]);
+    expect(linesContaining(settingsAll, term)).toEqual([]);
   });
 
-  it('页签是 GitHub / AI 设置 / 通用 / GitHub 备份 / 关于，向量页签没有了', () => {
-    expect(settings).toContain("label: 'GitHub', shortLabel: 'GitHub'");
-    expect(settings).toContain("label: 'AI 设置', shortLabel: 'AI 设置'");
-    expect(settings).toContain("label: '通用', shortLabel: '通用'");
-    expect(settings).toContain("label: 'GitHub 备份', shortLabel: 'GitHub 备份'");
-    expect(settings).toContain("label: '关于', shortLabel: '关于'");
+  it('设置合并为单层 6 个页签：账号与同步 / AI 设置 / 自动整理 / 备份与导出 / 外部连接 / 外观与关于', () => {
+    expect(settingsIndex).toContain("label: '账号与同步'");
+    expect(settingsIndex).toContain("label: 'AI 设置'");
+    expect(settingsIndex).toContain("label: '自动整理'");
+    expect(settingsIndex).toContain("label: '备份与导出'");
+    expect(settingsIndex).toContain("label: '外部连接'");
+    expect(settingsIndex).toContain("label: '外观与关于'");
   });
 });
 
@@ -1697,38 +1709,41 @@ describe('文案守卫：欢迎引导、更新、侧栏里不再出现旧叫法'
   });
 });
 
-describe('文案守卫：页签名、关于页、导入警告', () => {
-  const settings = withoutComments(sourceOf('../pages/settings.tsx'));
+describe('文案守卫：单层设置页、关于页、导入警告', () => {
+  const githubSection = withoutComments(sourceOf('../pages/settings/github-section.tsx'));
+  const backupSection = withoutComments(sourceOf('../pages/settings/backup-section.tsx'));
+  const generalAboutSection = withoutComments(sourceOf('../pages/settings/general-about-section.tsx'));
 
-  it('「工具箱」页签改叫「自动整理与备份」，页面标题同步（页签名现在只在 lib/nav.ts 里定义，App.tsx 不再覆盖）', () => {
-    expect(withoutComments(sourceOf('./nav.ts'))).toContain("label: '自动整理与备份'");
+  it('设置改为单层导航，不再有工具箱和旧二级页签', () => {
+    const navSource = withoutComments(sourceOf('./nav.ts'));
+    expect(navSource).not.toContain('toolbox');
+    expect(navSource).not.toContain("label: '自动整理与备份'");
     expect(withoutComments(sourceOf('../App.tsx'))).not.toContain("label: '自动整理与备份'");
-    expect(withoutComments(sourceOf('../pages/v2/toolbox.tsx'))).toContain('title="设置 · 自动整理与备份"');
+    expect(withoutComments(sourceOf('../pages/settings/index.tsx'))).toContain("label: '自动整理'");
   });
 
-  it('关于页只留版本号、数据放在哪个文件夹、许可证，其余折进「开发者信息」', () => {
-    const about = settings.slice(settings.indexOf('function AboutSettings('), settings.indexOf('function normalizeSyncIntervalInput('));
-    expect(about).toContain('label="版本号"');
-    expect(about).toContain('label="数据放在哪个文件夹"');
-    expect(about).toContain('>许可证</dt>');
-    const developerInfoAt = about.indexOf('开发者信息');
+  it('关于页只留版本号、数据放在哪个文件夹、许可证，其余折进「开发者与运行明细」', () => {
+    expect(generalAboutSection).toContain('label="版本号"');
+    expect(generalAboutSection).toContain('label="数据放在哪个文件夹"');
+    expect(generalAboutSection).toContain('>许可证</dt>');
+    const developerInfoAt = generalAboutSection.indexOf('开发者与运行明细');
     expect(developerInfoAt).toBeGreaterThan(0);
-    // 身份明细（Bundle ID 之类）和链接都在「开发者信息」之后，不在外面
-    expect(about.indexOf('<AppIdentityDetails')).toBeGreaterThan(developerInfoAt);
-    expect(about.indexOf('href={PROJECT_REPOSITORY_URL}')).toBeGreaterThan(developerInfoAt);
-    expect(settings).not.toMatch(/技术资产|凭据服务|本地优先客户端/);
+    // 身份明细（Bundle ID 之类）和链接都在「开发者与运行明细」之后，不在外面
+    expect(generalAboutSection.indexOf('<AppIdentityDetails')).toBeGreaterThan(developerInfoAt);
+    expect(generalAboutSection.indexOf('href={PROJECT_REPOSITORY_URL}')).toBeGreaterThan(developerInfoAt);
+    expect(generalAboutSection).not.toMatch(/技术资产|凭据服务|本地优先客户端/);
   });
 
   it('导入的覆盖警告不放在任何条件后面：一直显示', () => {
-    const at = settings.indexOf('{GIST_IMPORT_WARNING}');
+    const at = backupSection.indexOf('{GIST_IMPORT_WARNING}');
     expect(at).toBeGreaterThan(0);
-    const before = settings.slice(Math.max(0, at - 260), at);
+    const before = backupSection.slice(Math.max(0, at - 260), at);
     expect(before).not.toMatch(/&&\s*\(|\?\s*\(|\?\s*['"`]/);
   });
 
   it('同步完成的提示用统一的句子，不再自己拼「更新 N 个」', () => {
-    expect(settings).toContain('formatSyncComplete(workspace.syncSummary)');
-    expect(settings).not.toContain('updatedCount');
+    expect(githubSection).toContain('formatSyncComplete(workspace.syncSummary)');
+    expect(githubSection).not.toContain('updatedCount');
   });
 });
 

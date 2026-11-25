@@ -135,7 +135,7 @@ describe('欢迎引导里的任务条和主界面是同一种写法', () => {
 describe('顶栏快速操作菜单精简', () => {
   it('不再包含重复搜索框、重复同步、旧版批量生成和失效的检查更新', () => {
     expect(appLayoutSource).toContain('下载项目说明');
-    expect(appLayoutSource).toContain('自动整理与备份');
+    expect(appLayoutSource).toContain('自动整理与额度');
     expect(appLayoutSource).not.toContain('检查更新');
     expect(appLayoutSource).not.toContain('给没有说明的收藏写中文说明');
     expect(appLayoutSource).not.toContain('同步我的收藏');

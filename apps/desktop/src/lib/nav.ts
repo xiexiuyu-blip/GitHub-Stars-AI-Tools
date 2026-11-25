@@ -13,7 +13,7 @@ export type SubTab = {
   label: string;
 };
 
-/** 主导航只有这 5 项，顺序固定。「按类型看」（原来叫地图）、参考包、工具箱不在这里。 */
+/** 主导航只有这 5 项，顺序固定。「按类型看」、参考包不在这里；设置已收成单层分类。 */
 export const NAV_ITEMS: NavItem[] = [
   { key: 'today', label: '今日', icon: 'home' },
   { key: 'library', label: '资料库', icon: 'folder_special' },
@@ -28,15 +28,11 @@ export const SETTINGS_ITEM: NavItem = {
   icon: 'settings',
 };
 
-/** 二级切换。key 是导航高亮，值是这一组里的页面。 */
+/** 二级切换。现在全应用都收成单层导航，只留一项时不显示二级标签条。 */
 export const SUB_TABS: Record<'library' | 'solve' | 'settings', SubTab[]> = {
   library: [{ key: 'library', label: '资料库' }],
-  // 参考包已经在「找方案」页右边了；旧的单独「参考包」页不再放进标签条（只有一项就不显示标签条）
   solve: [{ key: 'solve', label: '找方案' }],
-  settings: [
-    { key: 'settings', label: '设置' },
-    { key: 'toolbox', label: '自动整理与备份' },
-  ],
+  settings: [{ key: 'settings', label: '设置' }],
 };
 
 const PAGE_NAV: Record<AppPage, NavKey | null> = {
@@ -46,7 +42,6 @@ const PAGE_NAV: Record<AppPage, NavKey | null> = {
   capture: 'capture',
   discover: 'discover',
   settings: 'settings',
-  toolbox: 'settings',
 };
 
 export function navKeyFor(page: AppPage): NavKey | null {

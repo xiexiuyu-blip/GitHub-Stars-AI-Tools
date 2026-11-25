@@ -71,7 +71,7 @@ export function WelcomeShell({ currentStep, onSkip, isCompleting, children }: We
               <p className="truncate text-lg font-bold leading-tight text-on-surface">
                 Fox Stars Lab
               </p>
-              <p className="truncate text-sm text-on-surface-variant">FSL 本地 Stars 知识库</p>
+              <p className="truncate text-sm text-on-surface-variant">FSL · 收藏资料库</p>
             </div>
           </div>
           <Button

@@ -300,8 +300,8 @@ function TopbarQuickActionsMenu(props: {
         />
         <QuickActionMenuItem
           icon="auto_awesome"
-          label="自动整理与备份"
-          description="查看整理进度、每天额度与本机备份。"
+          label="自动整理与额度"
+          description="查看整理进度、每天额度与费用说明。"
           disabled={false}
           loading={false}
           onClick={props.onOpenToolbox}

@@ -72,7 +72,7 @@ export function InboxCard(props: {
       {props.filter === 'pending' && props.page && props.page.items.length > 0 ? (
         <div className="m-0 border-b border-muted bg-surface-container-low px-4 py-2 text-xs leading-[1.6] text-on-surface-variant">
           <p className="m-0">收集箱：链接先放这里，还没有进资料库。</p>
-          <p className="m-0">GitHub 项目：想留的，去 GitHub 上点 Star（收藏），再点顶部「同步」，就会进资料库。是否自动写中文说明，看「设置 → 自动整理与备份」里自动整理开没开。</p>
+          <p className="m-0">GitHub 项目：想留的，去 GitHub 上点 Star（收藏），再点顶部「同步」，就会进资料库。是否自动写中文说明，看「设置 → 自动整理」里自动整理开没开。</p>
           <p className="m-0">文章 / 帖子：里面提到的 GitHub 项目会列出来，可以一键放进收集箱；没用的点「归档」。</p>
         </div>
       ) : null}

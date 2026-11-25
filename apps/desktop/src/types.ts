@@ -41,7 +41,6 @@ export type AppPage =
   | 'library'
   | 'solve'
   | 'discover'
-  | 'toolbox'
   | 'settings';
 
 export type RankingSection = 'global' | 'personal';

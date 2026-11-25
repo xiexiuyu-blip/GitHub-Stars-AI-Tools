@@ -419,7 +419,7 @@ export function describeCurrentAiService(label: string, disabled: boolean): stri
 export const AI_TEST_COST_NOTE = '会真实调用一次 AI，会产生很少的费用。';
 
 /** 自动整理的开关和额度不在这一页：只指路，不再放一个会花钱的开关。 */
-export const AI_AUTO_ORGANIZE_POINTER = '要不要自动整理、每天最多花多少，在「设置 → 自动整理与备份」里设';
+export const AI_AUTO_ORGANIZE_POINTER = '要不要自动整理、每天最多花多少，在「设置 → 自动整理」里设';
 
 /** 请求地址下面的帮助：协议名只在「高级」里出现。 */
 export function aiBaseUrlHelp(provider: AISettings['provider']): string {

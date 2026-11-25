@@ -10,7 +10,7 @@ const COMMANDS = [
   { id: 'export', label: '导出成文档（存到「下载」文件夹）', hint: '>导出' },
   { id: 'pause', label: '暂停自动整理', hint: '>暂停' },
   { id: 'resume', label: '继续自动整理', hint: '>继续' },
-  { id: 'retry', label: '重新整理失败的', hint: '>重新整理失败的' },
+  { id: 'retry', label: '重试失败的整理（受每天额度限制）', hint: '>重试失败的整理' },
 ];
 
 export function CommandPalette(props: {
@@ -97,7 +97,7 @@ export function CommandPalette(props: {
       setMessage('自动整理已继续');
       return;
     }
-    setMessage('可用命令：同步我的收藏、导出成文档、暂停自动整理、继续自动整理、重新整理失败的');
+    setMessage('可用命令：同步我的收藏、导出成文档、暂停自动整理、继续自动整理、重试失败的整理（受每天额度限制）');
   }
 
   function openLibrary(text: string) {

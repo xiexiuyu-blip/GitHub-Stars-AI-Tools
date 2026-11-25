@@ -66,6 +66,8 @@ export type AutomationStatus = {
   needsOrganizingOutdated?: number | null;
   /** 按收藏去重的待整理数（包含 README 变化后重新排队的）。 */
   awaiting?: number | null;
+  /** 最近成功整理一张中文说明的平均 token（样本不足时为 null）。 */
+  avgTokensPerCard?: number | null;
   /** 每天额度已用，不含「现在整理」；旧后台回退到 tokens24h。 */
   dailyTokensUsed?: number | null;
   /**
@@ -103,9 +105,10 @@ export const BUDGET_PRESETS: ReadonlyArray<{ tokens: number; title: string; hint
   { tokens: 600_000, title: '多整理些', hint: '每 24 小时最多约 100 个，新收藏很多时用' },
 ];
 
-export const AUTO_ORGANIZE_DEFINITION = '自动整理：应用在后台给「新收藏」和「README 有实质更新的收藏」写（或重写）中文说明——它能做什么、适合解决什么、怎么试。没变化的不会重复整理，也不会重复花钱。整理好的会出现在「今日」和「资料库」里。用的是你自己配置的 AI 服务，具体花多少钱以服务商的账单为准。';
+export const AUTO_ORGANIZE_DEFINITION = '后台自动给新收藏或说明有更新的项目写中文说明，不重复整理。';
+export const AUTO_ORGANIZE_DETAIL = '自动整理：应用在后台给「新收藏」和「项目说明（README）有实质更新的收藏」写（或重写）中文说明——它能做什么、适合解决什么、怎么试。没变化的不会重复整理，也不会重复花钱。整理好的会出现在「今日」和「资料库」里。用的是你自己配置的 AI 服务，具体花多少钱以服务商的账单为准。';
 export const DAILY_ORGANIZE_TITLE = '每天自动整理（按滚动 24 小时计额度）';
-export const DAILY_ORGANIZE_DESCRIPTION = '第一步做完以后，平时不用管：每次同步到新收藏、或某个收藏的 README 有实质更新，应用会在后台自动整理它。「每天额度」按最近 24 小时滚动累计，不在零点重置；用完后，随着较早用量移出这个窗口，额度逐步恢复。手动「现在整理」另行确认费用。';
+export const DAILY_ORGANIZE_DESCRIPTION = '第一步做完以后，平时不用管：每次同步到新收藏、或某个收藏的项目说明（README）有实质更新，应用会在后台自动整理它。「每天额度」按最近 24 小时滚动累计，不在零点重置；用完后，随着较早用量移出这个窗口，额度逐步恢复。手动「现在整理」另行确认费用。';
 export const DAILY_ORGANIZE_DURING_SCAN = '整理正在进行，这一轮不受每天额度限制；整理完才按下面的额度。';
 export const SLOW_ORGANIZE_COPY = {
   title: '只想慢慢整理（可选）',
@@ -144,10 +147,13 @@ export function formatTokens(value: number): string {
   return String(Math.floor(value));
 }
 
-/** 一次性全部整理预计要多少 token。个数不是有限数或 ≤ 0 时不估。 */
-export function estimateFullScanTokens(count: number): number {
+/** 一次性全部整理预计要多少 token。优先用近期实测均值，缺省按 9000；个数不是有限数或 ≤ 0 时不估。 */
+export function estimateFullScanTokens(count: number, avgTokensPerCard?: number | null): number {
   if (!Number.isFinite(count) || count <= 0) return 0;
-  const tokens = Math.round(count * FULL_SCAN_TOKENS_PER_REPO);
+  const perCard = avgTokensPerCard != null && Number.isFinite(avgTokensPerCard) && avgTokensPerCard > 0
+    ? avgTokensPerCard
+    : FULL_SCAN_TOKENS_PER_REPO;
+  const tokens = Math.round(count * perCard);
   if (!Number.isFinite(tokens) || tokens <= 0) return 0;
   return tokens;
 }
@@ -182,8 +188,8 @@ export function organizeCountsLine(status: AutomationStatus | null): string | nu
   const counts = status ? organizeCounts(status) : null;
   if (!counts) return null;
   const { total, organized, outdated, missing } = counts;
-  const note = outdated > 0 ? '旧版说明是用旧格式写的，还能看，但建议按新格式重写，「找方案」和资料库筛选才更准。' : '';
-  return `现有 ${total} 个收藏：新版说明 ${organized} 个 · 旧版说明 ${outdated} 个 · 还没有说明 ${missing} 个。${note}`;
+  const note = outdated > 0 ? '有部分说明是早期的简要格式，还能看，但建议更新成完整中文说明，「找方案」和资料库筛选才更准。' : '';
+  return `现有 ${total} 个收藏：中文说明已是最新 ${organized} 个 · 中文说明要更新 ${outdated} 个 · 还没有中文说明 ${missing} 个。${note}`;
 }
 
 /** 只排队的结果；是否开始花钱仍由队列和授权决定。 */
@@ -347,7 +353,7 @@ export function fullScanPanel(status: AutomationStatus | null): FullScanPanel {
   };
   const counts = organizeCounts(status);
   const firstStep = counts ? counts.organized * 2 < counts.total : status.lastFullScan == null;
-  const estimate = roundedEstimate(estimateFullScanTokens(pending));
+  const estimate = roundedEstimate(estimateFullScanTokens(pending, status.avgTokensPerCard));
   return {
     kind: 'ready',
     title: firstStep ? '第一步：把现有收藏整理一遍' : `现在就整理 ${pending} 个`,
@@ -474,7 +480,7 @@ export function automationHint(status: AutomationStatus | null, pending: number)
       hue: 36,
       icon: 'schedule',
       title: '每天自动整理的额度用完了',
-      detail: `还有 ${pending} 个没整理，过一阵额度恢复会自动接着做；想现在就整理，到「设置 → 自动整理与备份」点「现在整理」。`,
+      detail: `还有 ${pending} 个没整理，过一阵额度恢复会自动接着做；想现在就整理，到「设置 → 自动整理」点「现在整理」。`,
       actionLabel: '去整理',
     };
   }
@@ -505,7 +511,7 @@ export function itemPendingNote(status: AutomationStatus | null): { text: string
   }
   if (!status.enabled) return { text: `自动整理还没开启，所以这里还没有说明。${original}`, actionLabel: '开启自动整理' };
   if (status.budgetRemaining <= 0) {
-    return { text: `每天自动整理的额度用完了，过一阵会接着整理；也可以到「设置 → 自动整理与备份」点「现在整理」。${original}`, actionLabel: '去整理' };
+    return { text: `每天自动整理的额度用完了，过一阵会接着整理；也可以到「设置 → 自动整理」点「现在整理」。${original}`, actionLabel: '去整理' };
   }
   if (status.queued + status.running > 0) return { text: `已经在整理队列里了，整理好会自动出现在这里。${original}`, actionLabel: null };
   return { text: `整理好之后，这里会出现中文说明、能做什么、怎么试。${original}`, actionLabel: null };
@@ -527,7 +533,7 @@ export function regenerateNote(status: AutomationStatus | null): RegenerateNote 
   }
   if (!status.enabled) return { title: queued, sub: '自动整理还没开启，开启后才会重新整理（这部分不开启就不收费）', actionLabel: '去开启' };
   if (status.budgetRemaining <= 0) {
-    return { title: queued, sub: '每天自动整理的额度用完了，过一阵会接着整理，也可以到「设置 → 自动整理与备份」点「现在整理」', actionLabel: null };
+    return { title: queued, sub: '每天自动整理的额度用完了，过一阵会接着整理，也可以到「设置 → 自动整理」点「现在整理」', actionLabel: null };
   }
   return { title: queued, sub: '会在后台重新整理，好了会自动更新', actionLabel: null };
 }
@@ -668,7 +674,7 @@ export function recentUsageMetric(status: RecentUsage, now = new Date()): { labe
 
 /** 自动整理额度那一格。手动整理的用量不从每天额度里扣。 */
 export function dailyBudgetMetric(status: AutomationStatus): { label: string; value: string; sub: string } {
-  const label = '自动整理额度还剩';
+  const label = '今天额度还剩';
   if (status.unlimited === true) return { label, value: '不受每天额度限制', sub: '正在整理中' };
   if (!status.enabled) return { label, value: '—', sub: '没有开启每天自动整理' };
   const used = formatTokens(status.dailyTokensUsed ?? status.tokens24h);
@@ -803,7 +809,7 @@ export function buildReadinessRows(input: ReadinessInput): ReadinessRow[] {
       title: 'AI 设置',
       done: aiReady,
       detail: aiReady
-        ? `AI 已设置：${model}${cards > 0 ? `；已写好 ${cards} 个中文说明` : ''}${cardsNeedTopUp ? '。给还没有说明的收藏写中文说明会花钱，受「设置 → 自动整理与备份」里的每天额度限制' : ''}`
+        ? `AI 已设置：${model}${cards > 0 ? `；已写好 ${cards} 个中文说明` : ''}${cardsNeedTopUp ? '。给还没有说明的收藏写中文说明会花钱，受「设置 → 自动整理」里的每天额度限制' : ''}`
         : input.aiConfigMessage ?? '还没设置 AI',
       actionLabel: aiReady
         ? input.writingCards ? '整理中…' : cards > 0 ? '继续写还没有的中文说明' : '给没有说明的收藏写中文说明'
@@ -859,14 +865,14 @@ export function autoSyncDescription(minutes: number): string {
 }
 
 /** 「清空本机数据」区块和确认框里的说明：列出现在真会丢的东西，说清 GitHub 上的收藏不受影响，提醒先备份。 */
-export const CLEAR_LOCAL_DATA_WARNING = '会清空这台电脑上的全部资料：你标的「想试 / 在用」、收集箱里的链接、已整理好的中文说明（重做要重新花钱）、GitHub 令牌和 AI 密钥。你在 GitHub 上的收藏不受影响。建议先到「设置 → 自动整理与备份」点「现在备份」。清空后应用回到刚安装的样子。';
+export const CLEAR_LOCAL_DATA_WARNING = '会清空这台电脑上的全部资料：你标的「想试 / 在用」、收集箱里的链接、已整理好的中文说明（重做要重新花钱）、GitHub 令牌和 AI 密钥。你在 GitHub 上的收藏不受影响。建议先到「设置 → 备份与导出」点「现在备份」。清空后应用回到刚安装的样子。';
 export const CLEAR_LOCAL_DATA_DONE = '本机数据已清空。重新连接 GitHub 后，点「同步我的收藏」就能重新开始。';
 export const CLEAR_LOCAL_DATA_FAILED = '没能清空。你在 GitHub 上的收藏不受影响。再点一次「清空本机数据」；还不行就重启应用，再不行把这条截图发给开发者。';
 
 /* ───────── 设置页：上传备份到 GitHub（私密 Gist） ───────── */
 
 export const GIST_SECTION_TITLE = '上传备份到 GitHub（私密 Gist）';
-export const GIST_NEEDS_SCOPE = '请先连接 GitHub 账号。上传备份需要令牌勾选「gist」权限。';
+export const GIST_NEEDS_SCOPE = '请先连接 GitHub 账号。上传备份用的 GitHub 令牌要勾选「gist」这一项：到 GitHub 的 Settings → Developer settings → Personal access tokens 生成或修改，再回到「账号与同步」重新粘贴。';
 export const GIST_BACKUP_MARKS = {
   title: '备份我的标记',
   body: '把你标的「想试 / 在用 / 不要了」、标签和笔记上传到你 GitHub 账号下的一个私密 Gist（别人看不到）。',
@@ -888,7 +894,7 @@ export function gistImportHint(connected: boolean, hasGistId: boolean): string |
 /* ───────── 欢迎引导 ───────── */
 
 export const WELCOME_COPY = {
-  titleLines: ['让每一颗 Star，', '都变成找得到、看得懂的工具'],
+  titleLines: ['让你的每一份收藏，', '都变成找得到、看得懂的工具'],
   subtitle: '把你在 GitHub 上收藏的项目同步到这台电脑；需要时再让 AI 写中文说明（按服务商价格收费，默认不开）',
   features: [
     { title: '本地优先', description: '你的收藏只保存在这台电脑上' },
@@ -909,9 +915,9 @@ export const WELCOME_COPY = {
   tokenPlaceholder: '粘贴 GitHub 令牌',
   syncTitle: '同步我的收藏',
   syncIntro: '首次同步可能需要几分钟，请耐心等待',
-  syncBody: '连接已完成，接下来把你在 GitHub 上收藏的项目同步到这台电脑，并下载每个工具的项目说明（README）。项目说明是 AI 写中文说明时要读的资料；要不要让 AI 写、每天最多花多少，之后到「设置 → 自动整理与备份」里设（默认不开）。',
+  syncBody: '连接已完成，接下来把你在 GitHub 上收藏的项目同步到这台电脑，并下载每个工具的项目说明（README）。项目说明是 AI 写中文说明时要读的资料；要不要让 AI 写、每天最多花多少，之后到「设置 → 自动整理」里设（默认不开）。',
   syncing: '收藏已同步，正在下载项目说明…',
-  syncPartial: '收藏已同步，但项目说明没有全部下载完。你的资料都还在。进入后可以到「设置 → GitHub」再点「下载项目说明」。',
+  syncPartial: '收藏已同步，但项目说明没有全部下载完。你的资料都还在。进入后可以到「设置 → 账号与同步」再点「下载项目说明」。',
   completeTitle: '一切就绪',
   completeIntro: '你的收藏已经同步完成，现在可以开始用了',
   tips: [

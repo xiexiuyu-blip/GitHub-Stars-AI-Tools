@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { DEFAULT_SETTINGS } from '@/types-settings';
 // 设置页源码原文：守住「哪一页用哪种说法」（Vite 的 ?raw，不用 node 的类型）
-import settingsSource from '../pages/settings.tsx?raw';
+import aiSectionSource from '../pages/settings/ai-section.tsx?raw';
+import githubSectionSource from '../pages/settings/github-section.tsx?raw';
 import {
   AI_AUTO_ORGANIZE_POINTER,
   AI_PROVIDER_PRESETS,
@@ -163,14 +164,12 @@ describe('getAiConfigMessage：人已经在「AI 设置」这一页里', () => {
   });
 
   it('接线：AI 设置页自己用「这一页」的说法；GitHub 页的运行检查（人不在 AI 设置页）仍指路到「设置 → AI 设置」', () => {
-    const aiPage = settingsSource.slice(settingsSource.indexOf('function AISettings('), settingsSource.indexOf('function AIProviderOption('));
-    expect(aiPage.length).toBeGreaterThan(1000);
+    expect(aiSectionSource.length).toBeGreaterThan(1000);
     // AI 设置页里的两处（页面最下面的提示、点「测试连接」时的检查）都用「这一页」的说法
-    expect(aiPage.match(/getAiConfigMessage\(/g)?.length).toBe(2);
-    expect(aiPage.match(/onAiSettingsPage: true/g)?.length).toBe(2);
-    const githubPage = settingsSource.slice(settingsSource.indexOf('function GitHubSettings('), settingsSource.indexOf('function RuntimeReadinessPanel('));
-    expect(githubPage).not.toContain('onAiSettingsPage');
-    expect(githubPage).toContain('getAiConfigMessage(settingsHook.settings.ai)');
+    expect(aiSectionSource.match(/getAiConfigMessage\(/g)?.length).toBe(2);
+    expect(aiSectionSource.match(/onAiSettingsPage: true/g)?.length).toBe(2);
+    expect(githubSectionSource).not.toContain('onAiSettingsPage');
+    expect(githubSectionSource).toContain('getAiConfigMessage(settingsHook.settings.ai)');
   });
 });
 
@@ -262,8 +261,8 @@ describe('设置 → AI 设置：服务商卡片', () => {
     expect(AI_TEST_COST_NOTE).toBe('会真实调用一次 AI，会产生很少的费用。');
   });
 
-  it('自动整理的开关换成指路：在「设置 → 自动整理与备份」里设', () => {
-    expect(AI_AUTO_ORGANIZE_POINTER).toBe('要不要自动整理、每天最多花多少，在「设置 → 自动整理与备份」里设');
+  it('自动整理的开关换成指路：在「设置 → 自动整理」里设', () => {
+    expect(AI_AUTO_ORGANIZE_POINTER).toBe('要不要自动整理、每天最多花多少，在「设置 → 自动整理」里设');
   });
 
   it('协议名只在「高级」里的请求地址帮助里出现', () => {

@@ -51,7 +51,11 @@ describe('文案守卫：新界面的源码里没有旧叫法', () => {
       '/src/pages/v2/today.tsx',
       '/src/pages/v2/solve.tsx',
       '/src/pages/v2/capture.tsx',
-      '/src/pages/v2/toolbox.tsx',
+      '/src/pages/settings/index.tsx',
+      '/src/pages/settings/organize-section.tsx',
+      '/src/pages/settings/backup-section.tsx',
+      '/src/pages/settings/connect-section.tsx',
+      '/src/pages/settings/general-about-section.tsx',
     ]) {
       expect(paths, expected).toContain(expected);
     }
