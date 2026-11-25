@@ -45,11 +45,11 @@ fi
 ''')
                 runner.chmod(0o755)
             content = (ROOT / 'tools/cards' / script).read_text()
+            content = content.replace('/tmp/fsl-', str(base / 'fsl-'))
             content = content.replace('REPO="/Users/fox/WorkSpace/_infra/fox-stars-lab"', f'REPO="{repo}"')
             content = content.replace('INT="/Users/fox/WorkSpace/_infra/fox-stars-lab-wt/_integration"', f'INT="{integration}"')
             content = content.replace('WT_ROOT="/Users/fox/WorkSpace/_infra/fox-stars-lab-wt"', f'WT_ROOT="{base / "wt"}"')
             content = content.replace('DEV_QUEUE="$HOME/Library/Application Support/com.foxwork.fox-stars-lab.dev/fox-stars-lab.queue.json"', f'DEV_QUEUE="{queue}"')
-            content = content.replace('/tmp/fsl-', str(base / 'fsl-'))
             executable = base / script
             executable.write_text(content)
             env = os.environ.copy()
