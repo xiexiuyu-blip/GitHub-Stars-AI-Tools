@@ -26,7 +26,7 @@ export function installFixture() {
   const handlers = {
     get_app_settings: () => ({ general: { showWelcomeOnStartup: false }, sync: { autoSync: false, autoSyncOnStartup: false }, ai: { enableAutoSummary: false }, theme: { mode: 'system' } }),
     get_github_auth_state: () => auth,
-    get_app_identity: () => ({ productName: 'Fox Stars Lab Dev', identifier: 'com.foxwork.fox-stars-lab.dev', version: '2.0.0-fox.2', isDev: true }),
+    get_app_identity: () => ({ productName: 'Fox Stars Lab Dev', identifier: 'com.foxwork.fox-stars-lab.dev', version: '2.1.0-fox.1', isDev: true }),
     get_backend_status: () => ({ backend: '隔离验收', storage: '测试夹具', worker: '未启动', provider: '无真实服务' }),
     has_ai_api_key: () => false, has_embedding_api_key: () => false,
     list_repositories: () => ({ items: [], totalCount: 0, limit: 80, offset: 0 }),

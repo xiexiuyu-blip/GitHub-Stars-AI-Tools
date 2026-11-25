@@ -10141,6 +10141,6 @@ mod tests {
             .and_then(serde_json::Value::as_str)
             .expect("顶层 version 应当是字符串");
         assert_eq!(version, env!("CARGO_PKG_VERSION"));
-        assert_eq!(version, "2.0.0-fox.2");
+        assert_eq!(version, "2.1.0-fox.1");
     }
 }

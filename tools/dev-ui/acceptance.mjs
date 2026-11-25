@@ -52,10 +52,10 @@ try {
     await nav(page, '找方案');
     await page.getByRole('textbox', { name: '你想解决什么' }).fill(query);
     await page.getByRole('button', { name: '找', exact: true }).click();
-    await page.getByRole('button', { name: '复制交接单给 Codex', exact: true }).waitFor();
+    await page.getByRole('button', { name: '复制交接单给 AI 助手', exact: true }).waitFor();
     await page.waitForFunction(() => window.__FSL_ACCEPTANCE__.calls.some((call) => call.command === 'build_reference_pack_v2'));
   };
-  const copyButton = (page) => page.getByRole('button', { name: /^(复制交接单给 Codex|已复制)$/ });
+  const copyButton = (page) => page.getByRole('button', { name: /^(复制交接单给 AI 助手|已复制)$/ });
   await run('01-today-and-library', async (page) => {
     await nav(page, '资料库');
     await page.getByText('cover', { exact: true }).first().waitFor();
@@ -64,7 +64,7 @@ try {
   });
   await run('02-redo-confirm-cancel', async (page) => {
     await nav(page, '资料库');
-    await page.getByRole('button', { name: '不对，请 AI 重写（会花一点钱）', exact: true }).click();
+    await page.getByRole('button', { name: '不太准，让 AI 重写（会花一点钱）', exact: true }).click();
     await page.getByRole('button', { name: '确认，重新整理', exact: true }).waitFor();
     await page.getByRole('button', { name: '先不了', exact: true }).click();
     assert.equal(await page.evaluate(() => window.__FSL_ACCEPTANCE__.calls.filter((call) => call.command === 'regenerate_library_card').length), 0);
@@ -227,7 +227,7 @@ try {
   });
   await run('20-redo-confirmation-request', async (page) => {
     await nav(page, '资料库');
-    await page.getByRole('button', { name: '不对，请 AI 重写（会花一点钱）', exact: true }).click();
+    await page.getByRole('button', { name: '不太准，让 AI 重写（会花一点钱）', exact: true }).click();
     await page.getByRole('button', { name: '确认，重新整理', exact: true }).click();
     await page.getByText('验收：还没配置 AI 服务', { exact: true }).waitFor();
     const calls = await page.evaluate(() => window.__FSL_ACCEPTANCE__.calls.filter((call) => call.command === 'regenerate_library_card'));
