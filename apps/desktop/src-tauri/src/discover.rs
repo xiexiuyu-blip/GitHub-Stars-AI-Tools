@@ -14,13 +14,11 @@ use crate::web_fetch::{
 const QUERIES: &str = include_str!("../../../../docs/rebuild/spec/discover_queries.json");
 /// 候选的 GitHub 描述超过这个长度就当垃圾丢掉（实测有「个人收藏书籍列表」这类仓库，描述里塞满关键词，搜什么都出现）。
 const MAX_DESCRIPTION_CHARS: usize = 300;
+/// 每个场景里保留的「近 90 天新建高星」名额，避免全被数万星老项目挤掉。
+const RECENT_RESERVE_LIMIT: usize = 6;
 /// 查得太频繁时给用户看的那句。不把还要等几秒写进去。
 const RATE_LIMIT_MESSAGE: &str =
     "GitHub 暂时不让查太频繁，过几分钟再点「重新找找」，已找到的先列在下面";
-const GITHUB_HEADERS: &[(&str, &str)] = &[
-    ("Accept", "application/vnd.github+json"),
-    ("X-GitHub-Api-Version", "2022-11-28"),
-];
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -91,12 +89,20 @@ struct ScenarioRef {
     account_id: String,
 }
 
+fn default_recent_days() -> i64 {
+    90
+}
+
 #[derive(Debug, serde::Deserialize)]
 struct QueryFile {
     version: i64,
     since_days: i64,
+    #[serde(default = "default_recent_days")]
+    recent_days: i64,
     per_scenario_limit: usize,
     scenarios: HashMap<String, Vec<String>>,
+    #[serde(default)]
+    recent_scenarios: HashMap<String, String>,
 }
 
 #[derive(Debug)]
@@ -118,7 +124,7 @@ fn open_db(path: &Path) -> Result<Connection, String> {
 fn load_queries() -> Result<QueryFile, String> {
     let file: QueryFile =
         serde_json::from_str(QUERIES).map_err(|_| "搜索词配置读不出来".to_owned())?;
-    if file.version != 1 || file.since_days < 0 {
+    if file.version != 1 || file.since_days < 0 || file.recent_days < 0 {
         return Err("搜索词配置版本不对".to_owned());
     }
     Ok(file)
@@ -159,6 +165,10 @@ fn load_scenario(path: &Path, scenario_id: &str) -> Result<ScenarioRef, String> 
 
 fn expand_since(template: &str, since: &str) -> String {
     template.replace("{since}", since)
+}
+
+fn expand_recent(template: &str, recent: &str) -> String {
+    template.replace("{recent}", recent)
 }
 
 fn github_search_url(query: &str) -> String {
@@ -232,7 +242,7 @@ fn parse_search_body(body: &str) -> Result<Vec<SearchRepo>, String> {
     Ok(repos)
 }
 
-fn select_candidates(repos: Vec<SearchRepo>, limit: usize) -> Vec<SearchRepo> {
+fn clean_dedup_sorted(repos: Vec<SearchRepo>) -> Vec<SearchRepo> {
     let mut best: HashMap<String, SearchRepo> = HashMap::new();
     for repo in repos {
         if repo.archived || repo.fork || repo.disabled {
@@ -263,21 +273,84 @@ fn select_candidates(repos: Vec<SearchRepo>, limit: usize) -> Vec<SearchRepo> {
                 .cmp(&right.full_name.to_ascii_lowercase())
         })
     });
+    list
+}
+
+fn select_candidates(repos: Vec<SearchRepo>, limit: usize) -> Vec<SearchRepo> {
+    let mut list = clean_dedup_sorted(repos);
     list.truncate(limit);
     list
 }
 
+fn select_balanced_candidates(
+    classic: Vec<SearchRepo>,
+    recent: Vec<SearchRepo>,
+    limit: usize,
+) -> Vec<SearchRepo> {
+    if limit == 0 {
+        return Vec::new();
+    }
+    let recent_sorted = clean_dedup_sorted(recent);
+    let classic_sorted = clean_dedup_sorted(classic);
+    let mut selected = Vec::with_capacity(limit);
+    let mut seen = HashSet::new();
+
+    let recent_cap = RECENT_RESERVE_LIMIT.min(limit);
+    let mut remaining_recent = Vec::new();
+    for repo in recent_sorted {
+        let key = repo.full_name.to_ascii_lowercase();
+        if selected.len() < recent_cap && seen.insert(key.clone()) {
+            selected.push(repo);
+        } else {
+            remaining_recent.push(repo);
+        }
+    }
+
+    for repo in classic_sorted {
+        if selected.len() >= limit {
+            break;
+        }
+        let key = repo.full_name.to_ascii_lowercase();
+        if seen.insert(key) {
+            selected.push(repo);
+        }
+    }
+
+    for repo in remaining_recent {
+        if selected.len() >= limit {
+            break;
+        }
+        let key = repo.full_name.to_ascii_lowercase();
+        if seen.insert(key) {
+            selected.push(repo);
+        }
+    }
+
+    selected.sort_by(|left, right| {
+        right.stars_count.cmp(&left.stars_count).then_with(|| {
+            left.full_name
+                .to_ascii_lowercase()
+                .cmp(&right.full_name.to_ascii_lowercase())
+        })
+    });
+    selected
+}
+
 /// 一条都没成功（含一开始就限流）时不删旧缓存。`queries` 只记实际发出的请求数。
-fn refresh_with_config(
+#[allow(clippy::too_many_arguments)]
+fn refresh_with_tracks(
     fetcher: &impl HttpFetcher,
     db_path: &Path,
     scenario: &ScenarioRef,
-    queries: &[String],
+    classic_queries: &[String],
+    recent_query: Option<&str>,
     limit: usize,
     since: &str,
+    recent: &str,
     now: i64,
+    github_token: Option<&str>,
 ) -> Result<DiscoverRefreshReport, String> {
-    if queries.is_empty() {
+    if classic_queries.is_empty() && recent_query.is_none() {
         return Ok(DiscoverRefreshReport {
             scenario_id: scenario.id.clone(),
             queries: 0,
@@ -288,15 +361,25 @@ fn refresh_with_config(
             rate_limit_reset_at: None,
         });
     }
-    let mut collected = Vec::new();
+    let mut classic_collected = Vec::new();
+    let mut recent_collected = Vec::new();
     let mut attempted = 0i64;
     let mut failed = 0i64;
     let mut successes = 0i64;
     let mut rate_wait: Option<u64> = None;
-    for template in queries {
+
+    let mut request_plan: Vec<(bool, String)> = classic_queries
+        .iter()
+        .map(|template| (false, expand_since(template, since)))
+        .collect();
+    if let Some(template) = recent_query {
+        request_plan.push((true, expand_recent(template, recent)));
+    }
+
+    for (is_recent, query_text) in request_plan {
         attempted += 1;
-        let url = github_search_url(&expand_since(template, since));
-        match fetcher.get(&url, GITHUB_HEADERS) {
+        let url = github_search_url(&query_text);
+        match crate::discover_feeds::github_api_get(fetcher, &url, github_token) {
             Err(_) => failed += 1,
             Ok(response) => {
                 if let Some(wait) = rate_limit_wait_secs(&response, now) {
@@ -311,7 +394,11 @@ fn refresh_with_config(
                 match parse_search_body(&response.body) {
                     Ok(items) => {
                         successes += 1;
-                        collected.extend(items);
+                        if is_recent {
+                            recent_collected.extend(items);
+                        } else {
+                            classic_collected.extend(items);
+                        }
                     }
                     Err(_) => failed += 1,
                 }
@@ -346,7 +433,7 @@ fn refresh_with_config(
             rate_limit_reset_at,
         });
     }
-    let selected = select_candidates(collected, limit);
+    let selected = select_balanced_candidates(classic_collected, recent_collected, limit);
     let (fetched, skipped_mine) = replace_cache(
         db_path,
         scenario,
@@ -367,11 +454,26 @@ fn refresh_with_config(
     })
 }
 
-pub fn refresh_discover_with(
+fn refresh_with_config(
+    fetcher: &impl HttpFetcher,
+    db_path: &Path,
+    scenario: &ScenarioRef,
+    queries: &[String],
+    limit: usize,
+    since: &str,
+    now: i64,
+) -> Result<DiscoverRefreshReport, String> {
+    refresh_with_tracks(
+        fetcher, db_path, scenario, queries, None, limit, since, "", now, None,
+    )
+}
+
+pub fn refresh_discover_with_token(
     fetcher: &impl HttpFetcher,
     db_path: &Path,
     scenario_id: &str,
     now: i64,
+    github_token: Option<&str>,
 ) -> Result<DiscoverRefreshReport, String> {
     let config = load_queries()?;
     let scenario = load_scenario(db_path, scenario_id)?;
@@ -380,19 +482,39 @@ pub fn refresh_discover_with(
         .get(&scenario.slug)
         .cloned()
         .unwrap_or_default();
+    let recent_query = config
+        .recent_scenarios
+        .get(&scenario.slug)
+        .map(String::as_str);
     let since = since_date(now, config.since_days)?;
-    refresh_with_config(
+    let recent = since_date(now, config.recent_days)?;
+    refresh_with_tracks(
         fetcher,
         db_path,
         &scenario,
         &queries,
+        recent_query,
         config.per_scenario_limit,
         &since,
+        &recent,
         now,
+        github_token,
     )
 }
 
-fn active_names(connection: &Connection, account_id: &str) -> Result<HashSet<String>, String> {
+pub fn refresh_discover_with(
+    fetcher: &impl HttpFetcher,
+    db_path: &Path,
+    scenario_id: &str,
+    now: i64,
+) -> Result<DiscoverRefreshReport, String> {
+    refresh_discover_with_token(fetcher, db_path, scenario_id, now, None)
+}
+
+pub(crate) fn active_names(
+    connection: &Connection,
+    account_id: &str,
+) -> Result<HashSet<String>, String> {
     let mut statement = connection
         .prepare(
             "SELECT full_name FROM repositories WHERE account_id = ?1 AND sync_status = 'active'",
@@ -464,7 +586,10 @@ fn replace_cache(
     Ok((fetched, skipped_mine))
 }
 
-fn inbox_links(connection: &Connection, account_id: &str) -> Result<HashSet<String>, String> {
+pub(crate) fn inbox_links(
+    connection: &Connection,
+    account_id: &str,
+) -> Result<HashSet<String>, String> {
     let mut statement = connection
         .prepare(
             "SELECT normalized_url FROM inbox_items WHERE account_id = ?1 AND status <> 'archived'",
@@ -480,7 +605,7 @@ fn inbox_links(connection: &Connection, account_id: &str) -> Result<HashSet<Stri
     Ok(links)
 }
 
-fn in_inbox(html_url: &str, inbox: &HashSet<String>) -> bool {
+pub(crate) fn in_inbox(html_url: &str, inbox: &HashSet<String>) -> bool {
     crate::capture::extract_links_from_text(html_url)
         .into_iter()
         .any(|link| link.kind == "github_repo" && inbox.contains(&link.normalized_url))
@@ -936,6 +1061,7 @@ mod tests {
         let file = load_queries().expect("配置应能读");
         assert_eq!(file.version, 1);
         assert_eq!(file.since_days, 120);
+        assert_eq!(file.recent_days, 90);
         assert_eq!(file.per_scenario_limit, 20);
         let mut slugs: Vec<&str> = file.scenarios.keys().map(String::as_str).collect();
         slugs.sort_unstable();
@@ -958,6 +1084,23 @@ mod tests {
                     "{slug}：{query} 写了多个 OR"
                 );
             }
+            let recent = file
+                .recent_scenarios
+                .get(slug)
+                .unwrap_or_else(|| panic!("{slug} 缺 recent_scenarios"));
+            assert!(
+                recent.contains("{recent}"),
+                "{slug}：{recent} 缺 {{recent}}"
+            );
+            assert!(recent.contains("stars:>"), "{slug}：{recent} 缺星数下限");
+            assert!(
+                recent.contains("created:>"),
+                "{slug}：{recent} 缺创建时间限定"
+            );
+            assert!(
+                recent.matches(" OR ").count() <= 1,
+                "{slug}：{recent} 写了多个 OR"
+            );
         }
     }
 
@@ -1074,10 +1217,11 @@ mod tests {
                 fork,
             ])),
             ok_body(search_body(vec![repo_value("Extra/One", 2)])),
+            ok_body(search_body(vec![])),
         ]);
         let report =
             refresh_discover_with(&fetcher, &db.0, "scn-xhs", epoch()).expect("刷新应成功");
-        assert_eq!(report.queries, 2);
+        assert_eq!(report.queries, 3);
         assert_eq!(report.failed_queries, 0);
         assert_eq!(report.fetched, 2);
         assert_eq!(report.skipped_mine, 1);
@@ -1093,13 +1237,14 @@ mod tests {
         );
         assert_eq!(candidate_names(&db.0, "scn-wx"), vec!["keep/wx".to_owned()]);
         let calls = fetcher.calls();
-        assert_eq!(calls.len(), 2);
+        assert_eq!(calls.len(), 3);
         assert!(calls[0].contains("topic%3Axiaohongshu"));
         assert!(calls[1].contains("%E5%B0%8F%E7%BA%A2%E4%B9%A6"));
         assert!(calls[0].contains("pushed%3A%3E2026-06-05"));
+        assert!(calls[2].contains("created%3A%3E2026-07-05"));
         let run = run_row(&db.0, "scn-xhs").expect("应有记录");
         assert_eq!(run.0, format_unix_time(epoch()).expect("时间"));
-        assert_eq!(run.1, 2);
+        assert_eq!(run.1, 3);
         assert_eq!(run.2, 0);
         assert_eq!(run.3, None);
     }
@@ -1111,10 +1256,11 @@ mod tests {
         let fetcher = Scripted::new(vec![
             network(),
             ok_body(search_body(vec![repo_value("ok/repo", 3)])),
+            ok_body(search_body(vec![])),
         ]);
         let report =
             refresh_discover_with(&fetcher, &db.0, "scn-xhs", epoch()).expect("部分失败仍成功");
-        assert_eq!(report.queries, 2);
+        assert_eq!(report.queries, 3);
         assert_eq!(report.failed_queries, 1);
         assert_eq!(report.fetched, 1);
         assert_eq!(report.skipped_mine, 0);
@@ -1130,11 +1276,11 @@ mod tests {
         let db = ready("all-fail");
         insert_candidate(&db.0, "scn-xhs", "gone/old", 1, "[]", None);
         insert_run(&db.0, "scn-xhs", "2026-01-01T00:00:00Z", 9, 1, Some("上次"));
-        let fetcher = Scripted::new(vec![network(), network()]);
+        let fetcher = Scripted::new(vec![network(), network(), network()]);
         let report = refresh_discover_with(&fetcher, &db.0, "scn-xhs", epoch()).expect("应返回");
         assert_eq!(report.message.as_deref(), Some("联网失败，保留上次的结果"));
-        assert_eq!(report.queries, 2);
-        assert_eq!(report.failed_queries, 2);
+        assert_eq!(report.queries, 3);
+        assert_eq!(report.failed_queries, 3);
         assert_eq!(report.fetched, 0);
         assert_eq!(report.skipped_mine, 0);
         assert_eq!(report.rate_limit_reset_at, None);
@@ -1236,6 +1382,7 @@ mod tests {
         let fetcher = Scripted::new(vec![
             ok_body(search_body(vec![fork.clone()])),
             ok_body(search_body(vec![fork])),
+            ok_body(search_body(vec![])),
         ]);
         let report = refresh_discover_with(&fetcher, &db.0, "scn-xhs", epoch()).expect("应成功");
         assert_eq!(report.fetched, 0);
@@ -1510,6 +1657,7 @@ mod tests {
         let fetcher = Scripted::new(vec![
             ok_body(search_body(vec![])),
             ok_body(search_body(vec![])),
+            ok_body(search_body(vec![])),
         ]);
         let report =
             refresh_discover_with(&fetcher, &db.0, "scn-seo", epoch()).expect("空结果也成功");
@@ -1620,6 +1768,7 @@ mod tests {
         let fetcher = Scripted::new(vec![
             ok_body(search_body(vec![])),
             ok_body(search_body(vec![])),
+            ok_body(search_body(vec![])),
         ]);
         let report =
             refresh_discover_with(&fetcher, &db.0, "scn-seo", epoch()).expect("空结果也成功");
@@ -1643,5 +1792,76 @@ mod tests {
         );
         assert_eq!(never.candidate_count, 0);
         assert_eq!(never.last_fetched_at, None);
+    }
+
+    #[test]
+    fn recent_candidates_are_preserved_against_high_star_classic_repos() {
+        let classic: Vec<SearchRepo> = (1..=20)
+            .map(|i| SearchRepo {
+                full_name: format!("old/classic-{i}"),
+                html_url: format!("https://github.com/old/classic-{i}"),
+                description: Some("Classic".to_owned()),
+                language: Some("Rust".to_owned()),
+                stars_count: 50_000 - i,
+                pushed_at: None,
+                topics: Vec::new(),
+                archived: false,
+                fork: false,
+                disabled: false,
+            })
+            .collect();
+        let recent = vec![
+            SearchRepo {
+                full_name: "new/rising-1".to_owned(),
+                html_url: "https://github.com/new/rising-1".to_owned(),
+                description: Some("Recent".to_owned()),
+                language: Some("TypeScript".to_owned()),
+                stars_count: 25,
+                pushed_at: None,
+                topics: Vec::new(),
+                archived: false,
+                fork: false,
+                disabled: false,
+            },
+            SearchRepo {
+                full_name: "new/rising-2".to_owned(),
+                html_url: "https://github.com/new/rising-2".to_owned(),
+                description: Some("Recent 2".to_owned()),
+                language: Some("Python".to_owned()),
+                stars_count: 15,
+                pushed_at: None,
+                topics: Vec::new(),
+                archived: false,
+                fork: false,
+                disabled: false,
+            },
+        ];
+        let picked = select_balanced_candidates(classic, recent, 20);
+        assert_eq!(picked.len(), 20);
+        assert!(picked.iter().any(|r| r.full_name == "new/rising-1"));
+        assert!(picked.iter().any(|r| r.full_name == "new/rising-2"));
+    }
+
+    #[test]
+    fn refresh_discover_with_token_sends_bearer_header_to_github_api() {
+        struct TokenRecorder(Mutex<Vec<(String, bool)>>);
+        impl HttpFetcher for TokenRecorder {
+            fn get(&self, url: &str, headers: &[(&str, &str)]) -> Result<HttpResponse, FetchError> {
+                let has_auth = headers
+                    .iter()
+                    .any(|(k, v)| *k == "Authorization" && *v == "Bearer tok_abc");
+                self.0.lock().expect("锁").push((url.to_owned(), has_auth));
+                ok_body(search_body(vec![repo_value("tok/repo", 12)]))
+            }
+        }
+        let db = ready("with-token");
+        let fetcher = TokenRecorder(Mutex::new(Vec::new()));
+        let report =
+            refresh_discover_with_token(&fetcher, &db.0, "scn-xhs", epoch(), Some("tok_abc"))
+                .expect("应成功");
+        assert_eq!(report.fetched, 1);
+        let calls = fetcher.0.lock().expect("锁");
+        assert_eq!(calls.len(), 3);
+        assert!(calls.iter().all(|(_, has_auth)| *has_auth));
     }
 }

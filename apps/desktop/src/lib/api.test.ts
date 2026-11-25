@@ -16,11 +16,16 @@ import {
   getLibraryDetail,
   getTodayView,
   IN_APP_UPDATES_ENABLED,
+  listDiscover,
+  listDiscoverFeed,
   listInbox,
   listLibraryView,
   listScenarios,
   previewCapture,
+  refreshDiscover,
+  refreshDiscoverFeed,
   regenerateLibraryCard,
+  searchDiscoverGithub,
   setInboxNote,
   setInboxStatus,
   setInvokeForTests,
@@ -219,6 +224,25 @@ describe('api 命令名和参数', () => {
     const calls = installInvoke();
     await getGithubAuthState();
     expect(calls).toEqual([{ command: 'get_github_auth_state', args: undefined }]);
+  });
+
+  it('发现页榜单与搜索命令传参正确', async () => {
+    const calls = installInvoke();
+    await listDiscover('scn-xhs');
+    await refreshDiscover('scn-xhs');
+    await listDiscoverFeed('trending_daily', 'rust');
+    await refreshDiscoverFeed('rising_7d', null);
+    await searchDiscoverGithub({ query: 'mcp server', timeRange: '30d', sort: 'stars', language: 'python' });
+    expect(calls).toEqual([
+      { command: 'list_discover', args: { scenarioId: 'scn-xhs' } },
+      { command: 'refresh_discover', args: { scenarioId: 'scn-xhs' } },
+      { command: 'list_discover_feed', args: { feedId: 'trending_daily', language: 'rust' } },
+      { command: 'refresh_discover_feed', args: { feedId: 'rising_7d', language: null } },
+      {
+        command: 'search_discover_github',
+        args: { query: 'mcp server', timeRange: '30d', sort: 'stars', language: 'python' },
+      },
+    ]);
   });
 });
 

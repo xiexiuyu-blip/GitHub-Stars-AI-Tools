@@ -1,17 +1,17 @@
-import type { DiscoverCandidate } from '@/lib/contracts';
+import type { DiscoverCardItem } from '@/lib/contracts';
 import type { CandidateStatus } from '@/lib/discover-view';
 import { COPY_EVALUATE_BUTTON, relativeDays, splitRepoName } from '@/lib/item-format';
 import { Button, LangDot, RepoAvatar, StarCount, Tag } from '@/components/kit';
 import { Icon } from '@/components/ui/icon';
+import { cn } from '@/lib/utils';
 
 const MAX_TOPICS = 3;
 
 /**
- * 「发现」里的一个候选项目：还没收藏的 GitHub 项目。
- * 描述是 GitHub 上的原文（英文居多），所以按钮里有「复制「帮我评估」给 Codex」，让 Codex 读完用中文讲。
+ * 「发现」里的一个候选项目：支持场景发现候选、趋势榜（含排名与当日/本周增量）、HN Show 与自由搜索结果。
  */
 export function CandidateCard(props: {
-  candidate: DiscoverCandidate;
+  candidate: DiscoverCardItem;
   status: CandidateStatus;
   adding?: boolean;
   now: Date;
@@ -22,11 +22,23 @@ export function CandidateCard(props: {
   const { candidate, status } = props;
   const { owner, repo } = splitRepoName(candidate.fullName);
   const description = candidate.description?.trim();
-  const topics = candidate.topics.slice(0, MAX_TOPICS);
+  const topics = candidate.topics.slice(0, candidate.sourceNote ? 2 : MAX_TOPICS);
+  const showStars = candidate.starsCount > 0 || !candidate.deltaLabel;
+  const rank = candidate.rank;
 
   return (
     <article className="flex min-w-0 flex-col gap-2.5 rounded-lg border border-border bg-card p-4 shadow-xs transition-shadow hover:shadow-md">
       <div className="flex min-w-0 items-start gap-3">
+        {typeof rank === 'number' && rank > 0 ? (
+          <span
+            className={cn(
+              'grid size-7 shrink-0 place-items-center rounded-md text-xs font-semibold tabular-nums',
+              rank <= 3 ? 'bg-primary/15 text-primary' : 'bg-surface-container-high text-on-surface-variant',
+            )}
+          >
+            #{rank}
+          </span>
+        ) : null}
         <RepoAvatar name={candidate.fullName} size="md" />
         <div className="min-w-0 flex-1">
           <a
@@ -43,7 +55,14 @@ export function CandidateCard(props: {
             <LangDot language={candidate.language} />
           </div>
         </div>
-        <StarCount value={candidate.starsCount} className="shrink-0" />
+        <div className="flex shrink-0 flex-col items-end gap-1">
+          {showStars ? <StarCount value={candidate.starsCount} className="shrink-0" /> : null}
+          {candidate.deltaLabel ? (
+            <span className="inline-flex shrink-0 items-center rounded-md bg-primary/10 px-1.5 py-0.5 text-[11px] font-medium text-primary tabular-nums">
+              {candidate.deltaLabel}
+            </span>
+          ) : null}
+        </div>
       </div>
 
       <p className="m-0 line-clamp-3 min-h-[3.9em] text-sm leading-[1.55] text-foreground">
@@ -51,10 +70,15 @@ export function CandidateCard(props: {
       </p>
 
       <div className="flex min-w-0 flex-wrap items-center gap-1.5 text-xs text-on-surface-variant">
+        {candidate.sourceNote ? <Tag>{candidate.sourceNote}</Tag> : null}
         {topics.map((topic) => (
           <Tag key={topic}>{topic}</Tag>
         ))}
-        {candidate.pushedAt ? <span className="ml-auto shrink-0">项目最近更新：{relativeDays(candidate.pushedAt, props.now)}</span> : null}
+        {candidate.createdAt && !candidate.pushedAt ? (
+          <span className="ml-auto shrink-0">新建于：{relativeDays(candidate.createdAt, props.now)}</span>
+        ) : candidate.pushedAt ? (
+          <span className="ml-auto shrink-0">项目最近更新：{relativeDays(candidate.pushedAt, props.now)}</span>
+        ) : null}
       </div>
 
       <div className="mt-auto flex flex-wrap items-center gap-2 border-t border-muted pt-2.5">

@@ -132,6 +132,9 @@ commands.allow = [
   "stop_full_scan",
   "list_discover",
   "refresh_discover",
+  "list_discover_feed",
+  "refresh_discover_feed",
+  "search_discover_github",
   "get_repo_community",
   "scan_local_capabilities",
 ]

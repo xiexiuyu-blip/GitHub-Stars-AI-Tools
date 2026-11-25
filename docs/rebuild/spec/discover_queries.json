@@ -1,6 +1,7 @@
 {
   "version": 1,
   "since_days": 120,
+  "recent_days": 90,
   "per_scenario_limit": 20,
   "scenarios": {
     "xhs": [
@@ -56,5 +57,20 @@
       "marketing skills in:name,description stars:>100 pushed:>{since}"
     ]
   },
-  "_说明": "2026-10-04 总控用真实 GitHub 搜索逐条验证过：不要在一条里写多个 OR（会退化成泛泛的 agent / skills），尽量用 topic: 或「单个词 + skill」；中文单词查询会混进商城系统和垃圾合集，所以加 skill 限定。"
+  "recent_scenarios": {
+    "xhs": "xiaohongshu created:>{recent} stars:>10",
+    "wx": "wechat mcp OR wechat skill created:>{recent} stars:>15",
+    "dy": "douyin OR short-video created:>{recent} stars:>20",
+    "img": "image-generation OR flux created:>{recent} stars:>30",
+    "vid": "video-editing OR subtitle created:>{recent} stars:>30",
+    "ppt": "slides OR pptx created:>{recent} stars:>20",
+    "wr": "copywriting OR writing-assistant created:>{recent} stars:>20",
+    "res": "deep-research OR web-scraper created:>{recent} stars:>50",
+    "data": "text-to-sql OR data-agent created:>{recent} stars:>30",
+    "kb": "obsidian OR knowledge-base created:>{recent} stars:>50",
+    "auto": "mcp-server created:>{recent} stars:>50",
+    "ec": "ecommerce created:>{recent} stars:>20",
+    "seo": "seo OR marketing created:>{recent} stars:>20"
+  },
+  "_说明": "2026-10-04 总控用真实 GitHub 搜索逐条验证过：不要在一条里写多个 OR（会退化成泛泛的 agent / skills），尽量用 topic: 或「单个词 + skill」；M3 新增 recent_scenarios 保留近 90 天新建高星，避免被高星老项目完全淹没。"
 }

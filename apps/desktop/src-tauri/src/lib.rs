@@ -9,6 +9,7 @@ mod community;
 mod db;
 mod dev_guard;
 mod discover;
+mod discover_feeds;
 mod embedding;
 mod embedding_state;
 mod github;
@@ -1645,15 +1646,77 @@ async fn refresh_discover(
     tauri::async_runtime::spawn_blocking(move || {
         let storage = AppStorage::from_app_handle(&app_handle)?;
         let now = time::OffsetDateTime::now_utc().unix_timestamp();
-        discover::refresh_discover_with(
+        let token = auth::optional_github_token();
+        discover::refresh_discover_with_token(
             &web_fetch::CurlFetcher,
             storage.database_path(),
             &scenario_id,
             now,
+            token.as_deref(),
         )
     })
     .await
     .map_err(|_| "发现刷新失败".to_owned())?
+}
+
+#[tauri::command]
+fn list_discover_feed(
+    app_handle: tauri::AppHandle,
+    feed_id: String,
+    language: Option<String>,
+) -> Result<discover_feeds::DiscoverFeedView, String> {
+    let storage = AppStorage::from_app_handle(&app_handle)?;
+    discover_feeds::list_discover_feed(storage.database_path(), &feed_id, language.as_deref())
+}
+
+#[tauri::command]
+async fn refresh_discover_feed(
+    app_handle: tauri::AppHandle,
+    feed_id: String,
+    language: Option<String>,
+) -> Result<discover_feeds::DiscoverFeedRefreshReport, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let storage = AppStorage::from_app_handle(&app_handle)?;
+        let now = time::OffsetDateTime::now_utc().unix_timestamp();
+        let token = auth::optional_github_token();
+        discover_feeds::refresh_discover_feed_with(
+            &web_fetch::CurlFetcher,
+            storage.database_path(),
+            &feed_id,
+            language.as_deref(),
+            now,
+            token.as_deref(),
+        )
+    })
+    .await
+    .map_err(|_| "发现榜单刷新失败".to_owned())?
+}
+
+#[tauri::command]
+async fn search_discover_github(
+    app_handle: tauri::AppHandle,
+    query: String,
+    time_range: Option<String>,
+    sort: Option<String>,
+    language: Option<String>,
+) -> Result<discover_feeds::DiscoverSearchResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let storage = AppStorage::from_app_handle(&app_handle)?;
+        let now = time::OffsetDateTime::now_utc().unix_timestamp();
+        let token = auth::optional_github_token();
+        discover_feeds::search_discover_github_with(
+            &web_fetch::CurlFetcher,
+            storage.database_path(),
+            &query,
+            time_range.as_deref(),
+            sort.as_deref(),
+            language.as_deref(),
+            now,
+            token.as_deref(),
+        )
+    })
+    .await
+    .map_err(|_| "发现搜索失败".to_owned())?
 }
 
 /// 社区信息。无论刷不刷新都走 spawn_blocking；不刷新时不会调用 curl。
@@ -7725,6 +7788,9 @@ pub fn run() {
             set_repository_scenario,
             list_discover,
             refresh_discover,
+            list_discover_feed,
+            refresh_discover_feed,
+            search_discover_github,
             get_repo_community,
             list_library_cards,
             get_library_item,

@@ -1,6 +1,15 @@
 /** 「发现」页的纯视图规则：场景排序、提示文案、候选状态、给 Codex 的评估请求。不碰 React 和网络，方便单测。 */
 
-import type { DiscoverCandidate, DiscoverRefreshReport, DiscoverScenario } from '@/lib/contracts';
+import type {
+  DiscoverCandidate,
+  DiscoverFeedId,
+  DiscoverFeedRefreshReport,
+  DiscoverFeedView,
+  DiscoverRefreshReport,
+  DiscoverScenario,
+  DiscoverSearchSort,
+  DiscoverSearchTimeRange,
+} from '@/lib/contracts';
 import { THIN_TAG, THIN_TAG_HINT, relativeDays } from '@/lib/item-format';
 
 /** 偏少的排前面；同样偏少或同样不偏少，保持场景自己的顺序。 */
@@ -33,7 +42,10 @@ const STATUS_RANK: Record<CandidateStatus, number> = { new: 0, inbox: 1, mine: 2
  * 还没放进收集箱的排前面，已在收集箱的其次，已经收藏的沉到最后：「发现」是用来找没见过的，
  * 头两张就是「你已经收藏了」会让人以为这页没东西。同一档里保持后台给的顺序。
  */
-export function sortCandidates(candidates: readonly DiscoverCandidate[], addedNow: ReadonlySet<string>): DiscoverCandidate[] {
+export function sortCandidates<T extends DiscoverCandidate>(
+  candidates: readonly T[],
+  addedNow: ReadonlySet<string>,
+): T[] {
   return candidates
     .map((candidate, index) => ({ candidate, index, rank: STATUS_RANK[candidateStatus(candidate, addedNow)] }))
     .sort((left, right) => left.rank - right.rank || left.index - right.index)
@@ -115,4 +127,133 @@ export function buildEvaluatePrompt(candidate: Pick<DiscoverCandidate, 'fullName
     '4. 值不值得我收藏，适合拿来做什么。',
     '不确定的地方直接说不确定，不要编。',
   ].join('\n');
+}
+
+/* ───────────── 热门趋势榜单 & 自由搜索 ───────────── */
+
+export type DiscoverFeedMeta = {
+  id: DiscoverFeedId;
+  label: string;
+  subtitle: string;
+  supportsLanguage: boolean;
+  emptyTitle: string;
+  emptyDescription: string;
+};
+
+export const DISCOVER_FEEDS: readonly DiscoverFeedMeta[] = [
+  {
+    id: 'trending_daily',
+    label: '今日飙升',
+    subtitle: 'GitHub 今日热度飙升榜，抓不到趋势页时自动改用近期高星项目兜底。',
+    supportsLanguage: true,
+    emptyTitle: '今日飙升榜还没有拉取过',
+    emptyDescription: '点右上角「拉取榜单」，看看今天 GitHub 上哪些项目涨得最快。',
+  },
+  {
+    id: 'trending_weekly',
+    label: '本周热门',
+    subtitle: 'GitHub 本周趋势榜，适合看这一周持续升温的开源工具。',
+    supportsLanguage: true,
+    emptyTitle: '本周热门榜还没有拉取过',
+    emptyDescription: '点右上角「拉取榜单」，看看这周讨论度与增量最高的项目。',
+  },
+  {
+    id: 'rising_7d',
+    label: '本周新锐',
+    subtitle: '最近 7 天刚新建、快速起飞的新工具（20 星以上）。',
+    supportsLanguage: true,
+    emptyTitle: '本周新锐榜还没有拉取过',
+    emptyDescription: '点右上角「拉取榜单」，挖掘最近 7 天刚发布就受关注的新项目。',
+  },
+  {
+    id: 'rising_30d',
+    label: '本月黑马',
+    subtitle: '最近 30 天新建且热度破百的新锐项目。',
+    supportsLanguage: true,
+    emptyTitle: '本月黑马榜还没有拉取过',
+    emptyDescription: '点右上角「拉取榜单」，看看最近一个月冒出来的黑马项目。',
+  },
+  {
+    id: 'hn_show',
+    label: 'HN Show 热门',
+    subtitle: 'Hacker News 社区近两周热议的 Show HN 开源发布（仅保留 GitHub 项目）。',
+    supportsLanguage: false,
+    emptyTitle: 'HN Show 热门还没有拉取过',
+    emptyDescription: '点右上角「拉取榜单」，看看海外开发者最近在 Show 什么新工具。',
+  },
+];
+
+export const DISCOVER_LANGUAGES: ReadonlyArray<{ id: string; label: string }> = [
+  { id: '', label: '全部语言' },
+  { id: 'python', label: 'Python' },
+  { id: 'typescript', label: 'TypeScript' },
+  { id: 'rust', label: 'Rust' },
+  { id: 'go', label: 'Go' },
+];
+
+export const DISCOVER_SEARCH_TIME_RANGES: ReadonlyArray<{ id: DiscoverSearchTimeRange; label: string }> = [
+  { id: '30d', label: '近 30 天新建' },
+  { id: '7d', label: '近 7 天新建' },
+  { id: '90d', label: '近 3 个月新建' },
+  { id: '180d', label: '近半年活跃' },
+  { id: 'all', label: '不限时间' },
+];
+
+export const DISCOVER_SEARCH_SORTS: ReadonlyArray<{ id: DiscoverSearchSort; label: string }> = [
+  { id: 'stars', label: '按星数排序' },
+  { id: 'updated', label: '按最近更新' },
+];
+
+export const DISCOVER_SEARCH_PRESETS: readonly string[] = [
+  'ai agent',
+  'claude skill',
+  'mcp server',
+  'workflow automation',
+  'cli tool',
+];
+
+export function feedMeta(feedId: DiscoverFeedId): DiscoverFeedMeta {
+  return DISCOVER_FEEDS.find((item) => item.id === feedId) ?? DISCOVER_FEEDS[0];
+}
+
+export function feedLead(view: DiscoverFeedView | null | undefined, feedId: DiscoverFeedId, now: Date | number | string): string {
+  const meta = feedMeta(feedId);
+  if (!view?.lastFetchedAt) return meta.subtitle;
+  const fallbackNote = view.usedFallback ? '（当前为近期高星兜底）' : '';
+  return `${meta.subtitle} 上次拉取：${relativeDays(view.lastFetchedAt, now)}${fallbackNote}。`;
+}
+
+export function feedEmptyCopy(
+  feedId: DiscoverFeedId,
+  lastFetchedAt?: string | null,
+): { title: string; description: string } {
+  if (lastFetchedAt) {
+    return {
+      title: '这个榜单这次没有拿到可用项目',
+      description: '可以换个语言或榜单试试，也可以稍后再点「刷新榜单」。',
+    };
+  }
+  const meta = feedMeta(feedId);
+  return { title: meta.emptyTitle, description: meta.emptyDescription };
+}
+
+export function feedRefreshNotice(report: DiscoverFeedRefreshReport): RefreshNotice {
+  const message = report.message?.trim();
+  if (report.rateLimitResetAt) {
+    return {
+      tone: 'warn',
+      text: message || 'GitHub 暂时不让查太频繁，过几分钟再点「刷新」，已找到的先列在下面',
+    };
+  }
+  if (message) return { tone: 'warn', text: message };
+  const skipped = report.skippedMine > 0 ? `，另有 ${report.skippedMine} 个你已经收藏过了` : '';
+  if (report.fetched === 0) return { tone: 'info', text: `这次没有拿到新的项目${skipped}。` };
+  return { tone: 'info', text: `已更新 ${report.fetched} 个项目${skipped}。` };
+}
+
+export function filterDiscoverItems<T extends Pick<DiscoverCandidate, 'mine'>>(
+  items: readonly T[],
+  hideMine: boolean,
+): T[] {
+  return hideMine ? items.filter((item) => !item.mine) : [...items];
 }

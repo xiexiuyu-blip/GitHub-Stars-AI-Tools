@@ -1,7 +1,13 @@
 import { invoke as tauriInvoke } from '@tauri-apps/api/core';
 import type {
   CapturePreview,
+  DiscoverFeedId,
+  DiscoverFeedRefreshReport,
+  DiscoverFeedView,
   DiscoverRefreshReport,
+  DiscoverSearchResult,
+  DiscoverSearchSort,
+  DiscoverSearchTimeRange,
   DiscoverView,
   FetchSummary,
   InboxPage,
@@ -185,9 +191,40 @@ export function listDiscover(scenarioId?: string | null): Promise<DiscoverView> 
   return call<DiscoverView>('list_discover', { scenarioId: scenarioId ?? null });
 }
 
-/** 发现：联网去 GitHub 搜这个场景（不登录，几秒到十几秒），结果写进缓存。 */
+/** 发现：联网去 GitHub 搜这个场景（几秒到十几秒），结果写进缓存。 */
 export function refreshDiscover(scenarioId: string): Promise<DiscoverRefreshReport> {
   return call<DiscoverRefreshReport>('refresh_discover', { scenarioId });
+}
+
+/** 发现榜单：只读本地缓存（Trending / 新锐 / HN Show）。 */
+export function listDiscoverFeed(feedId: DiscoverFeedId, language?: string | null): Promise<DiscoverFeedView> {
+  return call<DiscoverFeedView>('list_discover_feed', { feedId, language: language ?? null });
+}
+
+/** 发现榜单：联网拉取指定榜单并写入本地缓存。 */
+export function refreshDiscoverFeed(
+  feedId: DiscoverFeedId,
+  language?: string | null,
+): Promise<DiscoverFeedRefreshReport> {
+  return call<DiscoverFeedRefreshReport>('refresh_discover_feed', {
+    feedId,
+    language: language ?? null,
+  });
+}
+
+/** 发现自由搜索：按关键词与时间范围/排序/语言实时搜索 GitHub 开源项目。 */
+export function searchDiscoverGithub(params: {
+  query: string;
+  timeRange?: DiscoverSearchTimeRange | null;
+  sort?: DiscoverSearchSort | null;
+  language?: string | null;
+}): Promise<DiscoverSearchResult> {
+  return call<DiscoverSearchResult>('search_discover_github', {
+    query: params.query,
+    timeRange: params.timeRange ?? null,
+    sort: params.sort ?? null,
+    language: params.language ?? null,
+  });
 }
 
 /** 社区：别人怎么用。refresh 为 false 只读缓存；为 true 才联网（Hacker News + GitHub Issues）。 */

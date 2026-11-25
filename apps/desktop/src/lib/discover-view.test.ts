@@ -1,12 +1,17 @@
 import { describe, expect, it } from 'vitest';
-import type { DiscoverCandidate, DiscoverRefreshReport, DiscoverScenario } from './contracts';
+import type { DiscoverCandidate, DiscoverFeedRefreshReport, DiscoverRefreshReport, DiscoverScenario } from './contracts';
 import {
+  DISCOVER_FEEDS,
   addedToInboxToast,
   buildEvaluatePrompt,
   candidateCountHint,
   candidateCountText,
   candidateStatus,
   discoverEmptyCopy,
+  feedEmptyCopy,
+  feedLead,
+  feedRefreshNotice,
+  filterDiscoverItems,
   refreshNotice,
   scenarioLead,
   sortCandidates,
@@ -242,5 +247,67 @@ describe('发现页的新文案', () => {
     });
     expect(addedToInboxToast(0, 'foo/bar')).toEqual({ title: '收集箱里已经有了', sub: 'foo/bar' });
     expect(addedToInboxToast(1, 'foo/bar').title).not.toContain('收进');
+  });
+});
+
+describe('发现页热门趋势榜单规则', () => {
+  const now = new Date('2026-11-25T12:00:00Z');
+
+  it('内置 5 个榜单，只有 HN Show 不按语言筛选', () => {
+    expect(DISCOVER_FEEDS.map((item) => item.id)).toEqual([
+      'trending_daily',
+      'trending_weekly',
+      'rising_7d',
+      'rising_30d',
+      'hn_show',
+    ]);
+    expect(DISCOVER_FEEDS.find((item) => item.id === 'hn_show')?.supportsLanguage).toBe(false);
+    expect(DISCOVER_FEEDS.filter((item) => item.id !== 'hn_show').every((item) => item.supportsLanguage)).toBe(true);
+  });
+
+  it('feedLead 与 feedEmptyCopy 区分没拉过和拉过没结果', () => {
+    expect(feedLead(null, 'trending_daily', now)).toContain('GitHub 今日热度飙升榜');
+    const lead = feedLead(
+      {
+        feedId: 'trending_daily',
+        language: null,
+        feedKey: 'trending_daily',
+        lastFetchedAt: '2026-11-25T11:00:00Z',
+        usedFallback: true,
+        message: null,
+        items: [],
+      },
+      'trending_daily',
+      now,
+    );
+    expect(lead).toContain('近期高星兜底');
+    expect(feedEmptyCopy('rising_7d', null).title).toBe('本周新锐榜还没有拉取过');
+    expect(feedEmptyCopy('rising_7d', '2026-11-25T11:00:00Z').title).toBe('这个榜单这次没有拿到可用项目');
+  });
+
+  it('feedRefreshNotice 与 filterDiscoverItems', () => {
+    const base: DiscoverFeedRefreshReport = {
+      feedId: 'trending_daily',
+      language: null,
+      feedKey: 'trending_daily',
+      fetched: 12,
+      skippedMine: 3,
+      usedFallback: false,
+      message: null,
+      rateLimitResetAt: null,
+    };
+    expect(feedRefreshNotice(base)).toEqual({
+      tone: 'info',
+      text: '已更新 12 个项目，另有 3 个你已经收藏过了。',
+    });
+    expect(feedRefreshNotice({ ...base, message: '兜底提示' })).toEqual({ tone: 'warn', text: '兜底提示' });
+    const filtered = filterDiscoverItems(
+      [
+        { fullName: 'a/1', mine: true },
+        { fullName: 'b/2', mine: false },
+      ],
+      true,
+    );
+    expect(filtered.map((item) => item.fullName)).toEqual(['b/2']);
   });
 });

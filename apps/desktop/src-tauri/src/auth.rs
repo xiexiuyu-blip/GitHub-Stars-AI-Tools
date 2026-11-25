@@ -129,6 +129,14 @@ pub fn require_github_token() -> Result<String, String> {
     read_github_token()?.ok_or_else(|| "请先连接 GitHub 账号".to_owned())
 }
 
+pub fn optional_github_token() -> Option<String> {
+    read_github_token()
+        .ok()
+        .flatten()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+}
+
 pub fn verify_github_token(token: &str) -> Result<GitHubUser, String> {
     let body = github_api_get(token, GITHUB_USER_API, "application/vnd.github+json")?;
     serde_json::from_str::<GitHubUser>(&body)

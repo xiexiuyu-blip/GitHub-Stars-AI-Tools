@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { renderToStaticMarkup } from 'react-dom/server';
-import type { DiscoverCandidate } from '@/lib/contracts';
+import type { DiscoverCardItem } from '@/lib/contracts';
 import type { CandidateStatus } from '@/lib/discover-view';
 import { CandidateCard } from './candidate-card';
 
@@ -12,7 +12,7 @@ function textOf(html: string): string {
     .trim();
 }
 
-const CANDIDATE: DiscoverCandidate = {
+const CANDIDATE: DiscoverCardItem = {
   fullName: 'foo/bar',
   htmlUrl: 'https://github.com/foo/bar',
   description: 'A tool',
@@ -25,7 +25,7 @@ const CANDIDATE: DiscoverCandidate = {
   fetchedAt: '2026-10-03T00:00:00Z',
 };
 
-function render(status: CandidateStatus, overrides: Partial<DiscoverCandidate> = {}): string {
+function render(status: CandidateStatus, overrides: Partial<DiscoverCardItem> = {}): string {
   return renderToStaticMarkup(
     <CandidateCard
       candidate={{ ...CANDIDATE, ...overrides }}
@@ -67,5 +67,33 @@ describe('发现页候选卡', () => {
 
   it('最近更新说明是项目作者更新的：「项目最近更新：」', () => {
     expect(textOf(render('new'))).toContain('项目最近更新：4 天前');
+  });
+
+  it('趋势榜展示排名、热度增量、来源，HN 条目不显示 0 星标', () => {
+    const trending = textOf(
+      render('new', {
+        rank: 1,
+        deltaLabel: '+1,826 今日',
+        sourceNote: 'GitHub 趋势榜',
+      }),
+    );
+    expect(trending).toContain('#1');
+    expect(trending).toContain('+1,826 今日');
+    expect(trending).toContain('GitHub 趋势榜');
+
+    const hn = textOf(
+      render('new', {
+        rank: 2,
+        starsCount: 0,
+        deltaLabel: '240 HN 赞',
+        sourceNote: 'Show HN · 60 条讨论',
+        pushedAt: null,
+        createdAt: '2026-10-02T00:00:00Z',
+      }),
+    );
+    expect(hn).toContain('#2');
+    expect(hn).toContain('240 HN 赞');
+    expect(hn).toContain('Show HN · 60 条讨论');
+    expect(hn).toContain('新建于：3 天前');
   });
 });

@@ -328,8 +328,8 @@ export type DiscoverView = {
   candidates: DiscoverCandidate[];
 };
 
-/** 命令 `refresh_discover({ scenarioId })` → DiscoverRefreshReport。**联网**（GitHub 搜索接口，不登录，一分钟限 10 次），
- *  可能要几秒到十几秒；成功后把候选写进缓存。限流时 `rateLimitResetAt` 有值，`message` 说人话，已拿到的部分照样写入。 */
+/** 命令 `refresh_discover({ scenarioId })` → DiscoverRefreshReport。**联网**（GitHub 搜索接口，几秒到十几秒），
+ *  成功后把候选写进缓存。限流时 `rateLimitResetAt` 有值，`message` 说人话，已拿到的部分照样写入。 */
 export type DiscoverRefreshReport = {
   scenarioId: string;
   queries: number;
@@ -340,6 +340,61 @@ export type DiscoverRefreshReport = {
   message: string | null;
   rateLimitResetAt: string | null;
 };
+
+export type DiscoverFeedId = 'trending_daily' | 'trending_weekly' | 'rising_7d' | 'rising_30d' | 'hn_show';
+
+export type DiscoverFeedItem = {
+  rank: number;
+  fullName: string;
+  htmlUrl: string;
+  description: string | null;
+  language: string | null;
+  starsCount: number;
+  starsDelta: number | null;
+  deltaLabel: string | null;
+  pushedAt: string | null;
+  createdAt: string | null;
+  topics: string[];
+  sourceNote: string | null;
+  mine: boolean;
+  inInbox: boolean;
+  fetchedAt: string;
+};
+
+export type DiscoverFeedView = {
+  feedId: DiscoverFeedId;
+  language: string | null;
+  feedKey: string;
+  lastFetchedAt: string | null;
+  usedFallback: boolean;
+  message: string | null;
+  items: DiscoverFeedItem[];
+};
+
+export type DiscoverFeedRefreshReport = {
+  feedId: DiscoverFeedId;
+  language: string | null;
+  feedKey: string;
+  fetched: number;
+  skippedMine: number;
+  usedFallback: boolean;
+  message: string | null;
+  rateLimitResetAt: string | null;
+};
+
+export type DiscoverSearchTimeRange = '7d' | '30d' | '90d' | '180d' | 'all';
+export type DiscoverSearchSort = 'stars' | 'updated';
+
+export type DiscoverSearchResult = {
+  query: string;
+  totalCount: number;
+  items: DiscoverFeedItem[];
+  message: string | null;
+  rateLimitResetAt: string | null;
+};
+
+export type DiscoverCardItem = DiscoverCandidate &
+  Partial<Pick<DiscoverFeedItem, 'rank' | 'starsDelta' | 'deltaLabel' | 'createdAt' | 'sourceNote'>>;
 
 /* ───────────── 社区：别人怎么用 ───────────── */
 
