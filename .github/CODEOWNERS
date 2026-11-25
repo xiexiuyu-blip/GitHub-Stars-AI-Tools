@@ -1,0 +1,14 @@
+# 默认代码审查负责人（后续新增团队成员时可直接在此追加 GitHub 账号）
+* @xiexiuyu-blip
+
+# 高危安全、预算闸门、数据库迁移与 CI 规则目录
+/apps/desktop/src-tauri/src/spend_guard.rs      @xiexiuyu-blip
+/apps/desktop/src-tauri/src/jobs.rs             @xiexiuyu-blip
+/apps/desktop/src-tauri/src/auth.rs             @xiexiuyu-blip
+/apps/desktop/src-tauri/src/dev_guard.rs        @xiexiuyu-blip
+/apps/desktop/src-tauri/src/local_api.rs        @xiexiuyu-blip
+/apps/desktop/src-tauri/src/capture.rs          @xiexiuyu-blip
+/apps/desktop/src-tauri/src/db/migrations.rs    @xiexiuyu-blip
+/packages/storage/migrations/                   @xiexiuyu-blip
+/docs/rebuild/spec/                             @xiexiuyu-blip
+/.github/                                       @xiexiuyu-blip

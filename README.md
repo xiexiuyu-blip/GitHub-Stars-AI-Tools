@@ -53,6 +53,8 @@ Fox Stars Lab 基于 Tauri 2 + React 19 + Rust + SQLite 构建，围绕真实研
 | [开发者上手与交接](docs/HANDOFF.md) | Day-1 环境搭建、dev 隔离启动、统一测试命令矩阵与正式版 D2 原地升级流程 |
 | [2.1.0-fox.1 发布日志](docs/releases/v2.1.0-fox.1.md) | 2.0 重建至 2.1.0-fox.1 完整变更汇总与验证口径 |
 | [视觉与文案规范](apps/desktop/DESIGN.md) | 色彩/排版/组件设计令牌与设置页文案写法规范 |
+| [贡献指南](CONTRIBUTING.md) | 分支与 PR 流程、SQLite 迁移/额度闸门审阅规范与提测要求 |
+| [安全策略](SECURITY.md) | 本地安全边界说明与私密漏洞报告渠道 |
 
 ---
 
