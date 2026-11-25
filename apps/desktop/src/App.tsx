@@ -12,31 +12,15 @@ import { WorkspaceProvider, useWorkspace } from '@/providers/workspace-provider'
 import { SettingsProvider, useAppSettings } from '@/providers/settings-provider';
 import { AppUpdateProvider, useAppUpdate } from '@/providers/app-update-provider';
 import { shouldFlushAiApiKey } from '@/lib/ai-config';
-import type { AppPage, RepositoryListItem } from '@/types';
+import type { AppPage } from '@/types';
 
-const DashboardPage = lazy(() => import('@/pages/dashboard').then((module) => ({ default: module.DashboardPage })));
-const RepositoriesPage = lazy(() => import('@/pages/repositories').then((module) => ({ default: module.RepositoriesPage })));
-const RankingsPage = lazy(() => import('@/pages/rankings').then((module) => ({ default: module.RankingsPage })));
-const TagNetworkPage = lazy(() => import('@/pages/tag-network').then((module) => ({ default: module.TagNetworkPage })));
-const AISearchPage = lazy(() => import('@/pages/ai-search').then((module) => ({ default: module.AISearchPage })));
-const ProfilePage = lazy(() => import('@/pages/profile').then((module) => ({ default: module.ProfilePage })));
 const SettingsPage = lazy(() => import('@/pages/settings').then((module) => ({ default: module.SettingsPage })));
 const TodayPage = lazy(() => import('@/pages/v2/today').then((module) => ({ default: module.TodayPage })));
 const V2LibraryPage = lazy(() => import('@/pages/v2/library').then((module) => ({ default: module.LibraryPage })));
 const CapturePage = lazy(() => import('@/pages/v2/capture').then((module) => ({ default: module.CapturePage })));
-const MapPage = lazy(() => import('@/pages/v2/map').then((module) => ({ default: module.MapPage })));
 const SolvePage = lazy(() => import('@/pages/v2/solve').then((module) => ({ default: module.SolvePage })));
-const PacksPage = lazy(() => import('@/pages/v2/packs').then((module) => ({ default: module.PacksPage })));
 const ToolboxPage = lazy(() => import('@/pages/v2/toolbox').then((module) => ({ default: module.ToolboxPage })));
 const DiscoverPage = lazy(() => import('@/pages/v2/discover').then((module) => ({ default: module.DiscoverPage })));
-
-type RepositoryNavigationState = {
-  query: string;
-  language: string;
-  tagId: string;
-  selectedRepositoryId: string | null;
-  key: number;
-};
 
 function AppContent() {
   const workspace = useWorkspace();
@@ -58,14 +42,6 @@ function AppContent() {
   const [hasDismissedWelcome, setHasDismissedWelcome] = useState(false);
   const [hasDismissedUpdateNotice, setHasDismissedUpdateNotice] = useState(false);
   const [isUpdateDialogOpen, setIsUpdateDialogOpen] = useState(false);
-  const [notificationOpenSignal, setNotificationOpenSignal] = useState(0);
-  const [repositoryNavigation, setRepositoryNavigation] = useState<RepositoryNavigationState>({
-    query: '',
-    language: '',
-    tagId: '',
-    selectedRepositoryId: null,
-    key: 0,
-  });
   const isWelcomeDecisionPending = settingsHook.isLoading || workspace.isLoadingAuth;
   const shouldShowWelcome = showWelcome || (
     !isWelcomeDecisionPending &&
@@ -194,74 +170,9 @@ function AppContent() {
     return workspace.connectWithToken(token);
   }
 
-  function handleGlobalSearch(query: string) {
-    setLibraryKeyword(query);
-    setCurrentPage('library');
-  }
-
   function handleOpenAiSettings() {
     setSettingsTab('ai');
     setCurrentPage('settings');
-  }
-
-  function handleLegacyRepositorySearch(query: string) {
-    setRepositoryNavigation((current) => ({
-      query,
-      language: '',
-      tagId: '',
-      selectedRepositoryId: null,
-      key: current.key + 1,
-    }));
-    setCurrentPage('repositories');
-  }
-
-  function handleRepositoryLanguageSelect(language: string) {
-    setRepositoryNavigation((current) => ({
-      query: '',
-      language,
-      tagId: '',
-      selectedRepositoryId: null,
-      key: current.key + 1,
-    }));
-    setCurrentPage('repositories');
-  }
-
-  function handleRepositoryTagSelect(tagId: string) {
-    setRepositoryNavigation((current) => ({
-      query: '',
-      language: '',
-      tagId,
-      selectedRepositoryId: null,
-      key: current.key + 1,
-    }));
-    setCurrentPage('repositories');
-  }
-
-  function handleRepositoryOpen(repository: RepositoryListItem) {
-    setRepositoryNavigation((current) => ({
-      query: repository.fullName,
-      language: '',
-      tagId: '',
-      selectedRepositoryId: repository.id,
-      key: current.key + 1,
-    }));
-    setCurrentPage('repositories');
-  }
-
-  async function flushAiApiKeyBeforeBatchTask() {
-    if (shouldFlushAiApiKey(settingsHook.settings.ai)) {
-      await settingsHook.flushAIKey(settingsHook.settings.ai.apiKey);
-    }
-  }
-
-  async function handleQuickBatchGenerateAiDocuments() {
-    await flushAiApiKeyBeforeBatchTask();
-    await workspace.handleBatchGenerateAiDocuments(settingsHook.settings.ai, { onlyMissing: true });
-  }
-
-  async function handleQuickGenerateAiTagNetwork() {
-    await flushAiApiKeyBeforeBatchTask();
-    await workspace.handleGenerateAiTagNetwork(settingsHook.settings.ai);
   }
 
   const failedTaskRetry = getFailedTaskRetry({
@@ -316,10 +227,25 @@ function AppContent() {
     );
   }
 
+  function renderTodayPage() {
+    return (
+      <TodayPage
+        onOpenLibrary={(preset) => {
+          setLibraryPreset(preset ?? null);
+          setCurrentPage('library');
+        }}
+        onOpenCapture={() => setCurrentPage('capture')}
+        onOpenSolve={() => setCurrentPage('solve')}
+        onOpenToolbox={() => setCurrentPage('toolbox')}
+        onOpenAiSettings={handleOpenAiSettings}
+      />
+    );
+  }
+
   function renderCurrentPage() {
     switch (currentPage) {
       case 'today':
-        return <TodayPage onOpenLibrary={(preset) => { setLibraryPreset(preset ?? null); setCurrentPage('library'); }} onOpenCapture={() => setCurrentPage('capture')} onOpenSolve={() => setCurrentPage('solve')} onOpenToolbox={() => setCurrentPage('toolbox')} onOpenAiSettings={handleOpenAiSettings} />;
+        return renderTodayPage();
       case 'capture':
         return <CapturePage />;
       case 'library':
@@ -335,57 +261,16 @@ function AppContent() {
             onOpenAiSettings={handleOpenAiSettings}
           />
         );
-      case 'map':
-        return <MapPage />;
       case 'solve':
         return <SolvePage initialQuestion={solveQuestion} onInitialQuestionConsumed={() => setSolveQuestion('')} onOpenDiscover={(scenarioId) => { setDiscoverScenario(scenarioId ?? null); setCurrentPage('discover'); }} onOpenToolbox={() => setCurrentPage('toolbox')} onOpenAiSettings={handleOpenAiSettings} />;
-      case 'packs':
-        return <PacksPage question={solveQuestion} />;
       case 'toolbox':
         return <ToolboxPage />;
       case 'discover':
         return <DiscoverPage key={discoverScenario ?? 'default'} initialScenarioId={discoverScenario} onOpenCapture={() => setCurrentPage('capture')} />;
-      case 'dashboard':
-        return (
-          <DashboardPage
-            onOpenRepository={(query) => handleLegacyRepositorySearch(query)}
-            onSelectLanguage={handleRepositoryLanguageSelect}
-            onOpenSettings={() => setCurrentPage('settings')}
-            onOpenProfile={() => setCurrentPage('profile')}
-            onOpenNotifications={() => setNotificationOpenSignal((current) => current + 1)}
-          />
-        );
-      case 'repositories':
-        return (
-          <RepositoriesPage
-            navigationKey={repositoryNavigation.key}
-            globalSearchQuery={repositoryNavigation.query}
-            globalLanguageFilter={repositoryNavigation.language}
-            globalTagFilter={repositoryNavigation.tagId}
-            globalSelectedRepositoryId={repositoryNavigation.selectedRepositoryId}
-            onOpenDiscover={() => setCurrentPage('discover')}
-          />
-        );
-      case 'rankings':
-        return <RankingsPage onOpenSettings={() => setCurrentPage('settings')} />;
-      case 'tag-network':
-        return <TagNetworkPage onSelectTag={handleRepositoryTagSelect} />;
-      case 'ai-search':
-        return <AISearchPage onOpenRepository={handleRepositoryOpen} />;
-      case 'profile':
-        return <ProfilePage onOpenRepository={handleRepositoryOpen} onOpenSettings={() => setCurrentPage('settings')} />;
       case 'settings':
         return <SettingsPage initialTab={settingsTab} />;
       default:
-        return (
-          <DashboardPage
-            onOpenRepository={handleLegacyRepositorySearch}
-            onSelectLanguage={handleRepositoryLanguageSelect}
-            onOpenSettings={() => setCurrentPage('settings')}
-            onOpenProfile={() => setCurrentPage('profile')}
-            onOpenNotifications={() => setNotificationOpenSignal((current) => current + 1)}
-          />
-        );
+        return renderTodayPage();
     }
   }
 
@@ -411,11 +296,6 @@ function AppContent() {
     setHasDismissedUpdateNotice(true);
   }
 
-  function handleCheckForUpdate() {
-    setIsUpdateDialogOpen(true);
-    void appUpdate.checkForUpdate();
-  }
-
   return (
     <>
       <AppLayout
@@ -426,22 +306,16 @@ function AppContent() {
         isSyncing={workspace.isSyncingStars}
         onFetchReadmes={() => void workspace.handleFetchReadmes({ onlyMissing: true })}
         isFetchingReadmes={workspace.isFetchingReadmes}
-        onBatchGenerateAiDocuments={() => void handleQuickBatchGenerateAiDocuments()}
-        isBatchGeneratingAiDocuments={workspace.isBatchGeneratingAiDocuments}
-        onGenerateAiTagNetwork={() => void handleQuickGenerateAiTagNetwork()}
-        isGeneratingTagNetwork={workspace.isGeneratingTagNetwork}
-        onCheckForUpdate={handleCheckForUpdate}
-        isCheckingUpdate={appUpdate.status === 'checking'}
+        onOpenToolbox={() => setCurrentPage('toolbox')}
         syncSummary={workspace.syncSummary}
         syncedAt={workspace.lastSyncedAt}
-        onGlobalSearch={handleGlobalSearch}
         taskProgress={workspace.taskProgress}
         onRetryTask={failedTaskRetry?.onRetry ?? null}
         retryTaskLabel={failedTaskRetry?.label ?? null}
         isRetryingTask={failedTaskRetry?.isRetrying ?? false}
         statusMessage={workspace.authMessage}
         errorMessage={workspace.error ?? settingsHook.settingsError}
-        notificationOpenSignal={notificationOpenSignal}
+        notificationOpenSignal={0}
         onOpenCommandPalette={() => setCommandPaletteOpen(true)}
       >
         <Suspense fallback={<PageLoadingFallback />}>

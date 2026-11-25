@@ -30,10 +30,7 @@ export const SETTINGS_ITEM: NavItem = {
 
 /** 二级切换。key 是导航高亮，值是这一组里的页面。 */
 export const SUB_TABS: Record<'library' | 'solve' | 'settings', SubTab[]> = {
-  library: [
-    { key: 'library', label: '资料库' },
-    { key: 'map', label: '按类型看' },
-  ],
+  library: [{ key: 'library', label: '资料库' }],
   // 参考包已经在「找方案」页右边了；旧的单独「参考包」页不再放进标签条（只有一项就不显示标签条）
   solve: [{ key: 'solve', label: '找方案' }],
   settings: [
@@ -45,19 +42,11 @@ export const SUB_TABS: Record<'library' | 'solve' | 'settings', SubTab[]> = {
 const PAGE_NAV: Record<AppPage, NavKey | null> = {
   today: 'today',
   library: 'library',
-  map: 'library',
   solve: 'solve',
-  packs: 'solve',
   capture: 'capture',
   discover: 'discover',
   settings: 'settings',
   toolbox: 'settings',
-  dashboard: null,
-  repositories: null,
-  rankings: null,
-  'tag-network': null,
-  'ai-search': null,
-  profile: null,
 };
 
 export function navKeyFor(page: AppPage): NavKey | null {

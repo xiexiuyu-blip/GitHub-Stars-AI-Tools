@@ -39,18 +39,10 @@ export type AppPage =
   | 'today'
   | 'capture'
   | 'library'
-  | 'map'
   | 'solve'
-  | 'packs'
   | 'discover'
   | 'toolbox'
-  | 'settings'
-  | 'dashboard'
-  | 'repositories'
-  | 'rankings'
-  | 'tag-network'
-  | 'ai-search'
-  | 'profile';
+  | 'settings';
 
 export type RankingSection = 'global' | 'personal';
 export type GithubRankingKind = 'trending' | 'rising' | 'popular';

@@ -3,6 +3,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import type { GitHubUser, TaskProgressEvent } from '@/types';
 // 源码原文：守住「欢迎引导和主界面的任务条是同一种写法」（Vite 的 ?raw，不用 node 的类型）
 import welcomeSource from './welcome-flow.tsx?raw';
+import appLayoutSource from './app-layout.tsx?raw';
 import { AppLayout, TaskProgressCard } from './app-layout';
 
 function textOf(html: string): string {
@@ -25,15 +26,9 @@ function renderLayout(user: GitHubUser | null, taskProgress: TaskProgressEvent |
       isSyncing={false}
       onFetchReadmes={() => {}}
       isFetchingReadmes={false}
-      onBatchGenerateAiDocuments={() => {}}
-      isBatchGeneratingAiDocuments={false}
-      onGenerateAiTagNetwork={() => {}}
-      isGeneratingTagNetwork={false}
-      onCheckForUpdate={() => {}}
-      isCheckingUpdate={false}
+      onOpenToolbox={() => {}}
       syncSummary={null}
       syncedAt={null}
-      onGlobalSearch={() => {}}
       taskProgress={taskProgress}
       onRetryTask={null}
       retryTaskLabel={null}
@@ -134,5 +129,15 @@ describe('欢迎引导里的任务条和主界面是同一种写法', () => {
     expect(welcomeSource).not.toContain('请求数据');
     expect(welcomeSource).not.toContain('写入本地');
     expect(welcomeSource).not.toContain('${safeCurrent}/${progress.total}');
+  });
+});
+
+describe('顶栏快速操作菜单精简', () => {
+  it('不再包含重复搜索框、重复同步、旧版批量生成和失效的检查更新', () => {
+    expect(appLayoutSource).toContain('下载项目说明');
+    expect(appLayoutSource).toContain('自动整理与备份');
+    expect(appLayoutSource).not.toContain('检查更新');
+    expect(appLayoutSource).not.toContain('给没有说明的收藏写中文说明');
+    expect(appLayoutSource).not.toContain('同步我的收藏');
   });
 });

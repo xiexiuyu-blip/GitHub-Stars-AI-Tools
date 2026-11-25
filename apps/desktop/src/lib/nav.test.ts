@@ -10,19 +10,11 @@ import { NAV_ITEMS, SETTINGS_ITEM, SUB_TABS, navKeyFor, subTabsFor } from './nav
 const ALL_PAGES: AppPage[] = [
   'today',
   'library',
-  'map',
   'solve',
-  'packs',
   'capture',
   'discover',
   'settings',
   'toolbox',
-  'dashboard',
-  'repositories',
-  'rankings',
-  'tag-network',
-  'ai-search',
-  'profile',
 ];
 
 /** 渲染出来的页签文字（一个 <button> 一个页签）。 */
@@ -54,26 +46,18 @@ describe('导航数据', () => {
     expect(SETTINGS_ITEM).toEqual({ key: 'settings', label: '设置', icon: 'settings' });
   });
 
-  it('navKeyFor 对 15 个页面返回正确高亮', () => {
+  it('navKeyFor 对 7 个现行页面返回正确高亮', () => {
     const cases: [AppPage, string | null][] = [
       ['today', 'today'],
       ['library', 'library'],
-      ['map', 'library'],
       ['solve', 'solve'],
-      ['packs', 'solve'],
       ['capture', 'capture'],
       ['discover', 'discover'],
       ['settings', 'settings'],
       ['toolbox', 'settings'],
-      ['dashboard', null],
-      ['repositories', null],
-      ['rankings', null],
-      ['tag-network', null],
-      ['ai-search', null],
-      ['profile', null],
     ];
 
-    expect(cases.length).toBeGreaterThanOrEqual(12);
+    expect(cases).toHaveLength(ALL_PAGES.length);
     for (const [page, key] of cases) {
       expect(navKeyFor(page), page).toBe(key);
     }
@@ -92,8 +76,6 @@ describe('导航数据', () => {
 
   it('NAV_ITEMS 里没有地图、参考包、工具箱', () => {
     const keys = NAV_ITEMS.map((item) => item.key);
-    expect(keys).not.toContain('map');
-    expect(keys).not.toContain('packs');
     expect(keys).not.toContain('toolbox');
     const labels = NAV_ITEMS.map((item) => item.label);
     expect(labels).not.toContain('地图');
@@ -103,25 +85,11 @@ describe('导航数据', () => {
 });
 
 describe('subTabsFor', () => {
-  it('资料库右边的子页签叫「按类型看」，页面 key 仍是 map，用户看得见的字里没有「地图」', () => {
-    expect(SUB_TABS.library).toEqual([
-      { key: 'library', label: '资料库' },
-      { key: 'map', label: '按类型看' },
-    ]);
-    expect(subTabsFor('map')?.map((tab) => tab.label)).toEqual(['资料库', '按类型看']);
-    expect(navKeyFor('map')).toBe('library');
-    const allLabels = [
-      ...NAV_ITEMS.map((item) => item.label),
-      ...Object.values(SUB_TABS).flatMap((tabs) => tabs.map((tab) => tab.label)),
-    ];
-    expect(allLabels.filter((label) => label.includes('地图'))).toEqual([]);
-  });
-
-  it('资料库和设置有两个标签，找方案只有一个就不显示标签条', () => {
-    expect(subTabsFor('library')?.map((tab) => tab.key)).toEqual(['library', 'map']);
-    expect(subTabsFor('settings')?.map((tab) => tab.key)).toEqual(['settings', 'toolbox']);
+  it('资料库和找方案都只有一项时，不显示二级标签条', () => {
+    expect(SUB_TABS.library).toEqual([{ key: 'library', label: '资料库' }]);
+    expect(subTabsFor('library')).toBeNull();
     expect(subTabsFor('solve')).toBeNull();
-    expect(subTabsFor('packs')).toBeNull();
+    expect(subTabsFor('settings')?.map((tab) => tab.key)).toEqual(['settings', 'toolbox']);
   });
 
   it('不在这三组里的页面没有标签条', () => {
@@ -142,9 +110,8 @@ describe('subTabsFor', () => {
 });
 
 describe('渲染出来的页签文字', () => {
-  it('资料库那一组是「资料库」「按类型看」，设置那一组是「设置」「自动整理与备份」', () => {
-    expect(renderedTabTexts('library')).toEqual(['资料库', '按类型看']);
-    expect(renderedTabTexts('map')).toEqual(['资料库', '按类型看']);
+  it('资料库不显示二级页签，设置那一组是「设置」「自动整理与备份」', () => {
+    expect(renderedTabTexts('library')).toEqual([]);
     expect(renderedTabTexts('settings')).toEqual(['设置', '自动整理与备份']);
     expect(renderedTabTexts('toolbox')).toEqual(['设置', '自动整理与备份']);
   });
@@ -155,7 +122,7 @@ describe('渲染出来的页签文字', () => {
       ...NAV_ITEMS.map((item) => item.label),
       SETTINGS_ITEM.label,
     ];
-    expect(texts.length).toBeGreaterThan(8);
+    expect(texts.length).toBeGreaterThan(6);
     for (const text of texts) {
       expect(text, text).not.toContain('工具箱');
       expect(text, text).not.toContain('地图');

@@ -7,9 +7,7 @@ import { describe, expect, it } from 'vitest';
  *
  * 不查的（都不是新界面里看得见的文字，也都在卡 36 的报告里列了出来）：
  * - 测试文件；
- * - 旧页面和它们专用的东西：新导航里没有入口，总控决定不动（pages/repositories、ai-search、tag-network、dashboard、profile、rankings、discover，
- *   features/**，components/copy-link-button、app-shell，lib/repository）；
- * - pages/v2/packs.tsx：没有任何入口能打开它的调试页；
+ * - 旧兼容工具文件（features/**，components/copy-link-button、app-shell，lib/repository）；
  * - lib/codex-prompts.ts：复制出去给 Codex 的话，不是界面上的字，按卡 31 / 32 / 33 的约定不改；
  * - pages/settings.tsx：设置页有自己的守卫（automation-view.test.ts），那里已经把藏起来的向量面板排除在外。
  */
@@ -17,11 +15,9 @@ const RAW = import.meta.glob(['../**/*.ts', '../**/*.tsx'], { query: '?raw', imp
 
 const SKIPPED = [
   /\.test\.tsx?$/,
-  /\/pages\/(repositories|ai-search|tag-network|dashboard|profile|rankings|discover)\.tsx$/,
   /\/features\//,
   /\/components\/(copy-link-button|app-shell)\.tsx$/,
   /\/lib\/repository\.ts$/,
-  /\/pages\/v2\/packs\.tsx$/,
   /\/lib\/codex-prompts\.ts$/,
   /\/pages\/settings\.tsx$/,
 ];
@@ -55,7 +51,6 @@ describe('文案守卫：新界面的源码里没有旧叫法', () => {
       '/src/pages/v2/today.tsx',
       '/src/pages/v2/solve.tsx',
       '/src/pages/v2/capture.tsx',
-      '/src/pages/v2/map.tsx',
       '/src/pages/v2/toolbox.tsx',
     ]) {
       expect(paths, expected).toContain(expected);

@@ -1,4 +1,4 @@
-import { FormEvent, ReactNode, useEffect, useRef, useState } from 'react';
+import { ReactNode, useEffect, useRef, useState } from 'react';
 import { BrandIcon } from '@/components/ui/brand-icon';
 import { Icon } from '@/components/ui/icon';
 import { formatSyncComplete, formatSyncStatus } from '@/lib/automation-view';
@@ -15,16 +15,10 @@ type AppLayoutProps = {
   isSyncing: boolean;
   onFetchReadmes: () => void;
   isFetchingReadmes: boolean;
-  onBatchGenerateAiDocuments: () => void;
-  isBatchGeneratingAiDocuments: boolean;
-  onGenerateAiTagNetwork: () => void;
-  isGeneratingTagNetwork: boolean;
-  onCheckForUpdate: () => void;
-  isCheckingUpdate: boolean;
+  onOpenToolbox: () => void;
   syncSummary: StarSyncSummary | null;
   /** 资料库里最近一次同步时间。没有就是还没同步过。 */
   syncedAt: string | null;
-  onGlobalSearch: (query: string) => void;
   taskProgress: TaskProgressEvent | null;
   onRetryTask: (() => void) | null;
   retryTaskLabel: string | null;
@@ -36,7 +30,6 @@ type AppLayoutProps = {
 };
 
 export function AppLayout(props: AppLayoutProps) {
-  const [searchQuery, setSearchQuery] = useState('');
   const [isNotificationOpen, setIsNotificationOpen] = useState(false);
   const [isQuickActionsOpen, setIsQuickActionsOpen] = useState(false);
   const topbarActionsRef = useRef<HTMLDivElement | null>(null);
@@ -85,16 +78,6 @@ export function AppLayout(props: AppLayoutProps) {
     document.addEventListener('pointerdown', handlePointerDown);
     return () => document.removeEventListener('pointerdown', handlePointerDown);
   }, [isQuickActionsOpen, isNotificationOpen]);
-
-  function handleSearchSubmit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    const query = searchQuery.trim();
-    if (!query) {
-      return;
-    }
-    setIsQuickActionsOpen(false);
-    props.onGlobalSearch(query);
-  }
 
   const syncText = props.isSyncing
     ? '正在同步…'
@@ -157,8 +140,6 @@ export function AppLayout(props: AppLayoutProps) {
           {isQuickActionsOpen && (
             <TopbarQuickActionsMenu
               hasGitHubUser={Boolean(props.user)}
-              isSyncing={props.isSyncing}
-              onSyncStars={props.onSyncStars}
               onOpenSettings={() => {
                 setIsQuickActionsOpen(false);
                 props.onNavigate('settings');
@@ -168,24 +149,10 @@ export function AppLayout(props: AppLayoutProps) {
                 props.onFetchReadmes();
               }}
               isFetchingReadmes={props.isFetchingReadmes}
-              onBatchGenerateAiDocuments={() => {
+              onOpenToolbox={() => {
                 setIsQuickActionsOpen(false);
-                props.onBatchGenerateAiDocuments();
+                props.onOpenToolbox();
               }}
-              isBatchGeneratingAiDocuments={props.isBatchGeneratingAiDocuments}
-              onGenerateAiTagNetwork={() => {
-                setIsQuickActionsOpen(false);
-                props.onGenerateAiTagNetwork();
-              }}
-              isGeneratingTagNetwork={props.isGeneratingTagNetwork}
-              onCheckForUpdate={() => {
-                setIsQuickActionsOpen(false);
-                props.onCheckForUpdate();
-              }}
-              isCheckingUpdate={props.isCheckingUpdate}
-              searchQuery={searchQuery}
-              onSearchQueryChange={setSearchQuery}
-              onGlobalSearchSubmit={handleSearchSubmit}
             />
           )}
           <button
@@ -309,48 +276,20 @@ function GlobalStatusBanner(props: { type: 'success' | 'error'; message: string 
 
 function TopbarQuickActionsMenu(props: {
   hasGitHubUser: boolean;
-  isSyncing: boolean;
-  onSyncStars: () => void;
   onOpenSettings: () => void;
   onFetchReadmes: () => void;
   isFetchingReadmes: boolean;
-  onBatchGenerateAiDocuments: () => void;
-  isBatchGeneratingAiDocuments: boolean;
-  onGenerateAiTagNetwork: () => void;
-  isGeneratingTagNetwork: boolean;
-  onCheckForUpdate: () => void;
-  isCheckingUpdate: boolean;
-  searchQuery: string;
-  onSearchQueryChange: (value: string) => void;
-  onGlobalSearchSubmit: (event: FormEvent<HTMLFormElement>) => void;
+  onOpenToolbox: () => void;
 }) {
   const needsGitHub = !props.hasGitHubUser;
 
   return (
     <div className="fixed right-3 top-[46px] z-50 w-[calc(100vw-1.5rem)] max-w-[360px] rounded-lg border border-border bg-card p-2 shadow-lg sm:right-4">
-      <form className="border-b border-border px-2 pb-2" onSubmit={props.onGlobalSearchSubmit}>
-        <p className="px-0.5 pb-1 text-xs font-medium text-on-surface">搜工具</p>
-        <input
-          value={props.searchQuery}
-          onChange={(event) => props.onSearchQueryChange(event.target.value)}
-          placeholder="搜工具、说明或关键词"
-          aria-label="搜工具"
-          className="h-8 w-full rounded-md border border-input bg-card px-2 text-sm text-on-surface outline-none focus:border-primary"
-        />
-      </form>
-      <div className="px-2 pb-2 pt-2">
+      <div className="px-2 pb-2 pt-1">
         <p className="font-body-md text-sm font-semibold text-on-surface">快速操作</p>
-        <p className="mt-0.5 text-xs text-on-surface-variant">常用批量任务会在后台执行。</p>
+        <p className="mt-0.5 text-xs text-on-surface-variant">常用维护与整理入口。</p>
       </div>
       <div className="space-y-1">
-        <QuickActionMenuItem
-          icon="sync"
-          label="同步我的收藏"
-          description={props.hasGitHubUser ? '从 GitHub 同步你最新的收藏。' : '先连接 GitHub 账号。'}
-          disabled={needsGitHub || props.isSyncing}
-          loading={props.isSyncing}
-          onClick={props.onSyncStars}
-        />
         <QuickActionMenuItem
           icon="description"
           label="下载项目说明"
@@ -361,19 +300,11 @@ function TopbarQuickActionsMenu(props: {
         />
         <QuickActionMenuItem
           icon="auto_awesome"
-          label="给没有说明的收藏写中文说明"
-          description="会花钱，受「设置 → 自动整理与备份」里的每天额度限制"
-          disabled={needsGitHub || props.isBatchGeneratingAiDocuments}
-          loading={props.isBatchGeneratingAiDocuments}
-          onClick={props.onBatchGenerateAiDocuments}
-        />
-        <QuickActionMenuItem
-          icon="system_update_alt"
-          label="检查更新"
-          description="查看是否有新的桌面应用版本。"
-          disabled={props.isCheckingUpdate}
-          loading={props.isCheckingUpdate}
-          onClick={props.onCheckForUpdate}
+          label="自动整理与备份"
+          description="查看整理进度、每天额度与本机备份。"
+          disabled={false}
+          loading={false}
+          onClick={props.onOpenToolbox}
         />
       </div>
       {needsGitHub && (
