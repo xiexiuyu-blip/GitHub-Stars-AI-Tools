@@ -31,6 +31,7 @@ import type { LibraryPreset } from '@/lib/library-filters';
 import { useAiAutomation } from '@/hooks/use-ai-automation';
 import { useRegenerate } from '@/hooks/use-regenerate';
 import { useListKeys } from '@/hooks/use-list-keys';
+import { addDetailToSolveDraft } from '@/lib/solve-draft';
 import { Button, Card, EmptyState, Kbd, PageHeader, StatCard, useToast } from '@/components/kit';
 import { AutomationBanner, ItemDetail, ItemRow, PickCard, scenarioChipsOf } from '@/components/library';
 import { cn } from '@/lib/utils';
@@ -64,7 +65,7 @@ export function TodayPage(props: TodayPageProps) {
   const { status: automation } = useAiAutomation();
   const regenerateCard = useRegenerate(props.onOpenToolbox);
   const listScrollRef = useRef<HTMLDivElement | null>(null);
-  const [name, setName] = useState('Fox');
+  const [name, setName] = useState('');
   const [phase, setPhase] = useState<'loading' | 'ready' | 'error'>('loading');
   const [loadError, setLoadError] = useState<string | null>(null);
   const [today, setToday] = useState<TodayView | null>(null);
@@ -126,10 +127,10 @@ export function TodayPage(props: TodayPageProps) {
     });
     void getGithubAuthState().then((state) => {
       if (cancelled) return;
-      const display = state.user?.name?.trim();
-      if (display) setName(display);
+      const display = state.user?.name?.trim() || state.user?.login?.trim() || '';
+      setName(display);
     }).catch(() => {
-      if (!cancelled) setName('Fox');
+      if (!cancelled) setName('');
     });
     return () => {
       cancelled = true;
@@ -355,6 +356,15 @@ export function TodayPage(props: TodayPageProps) {
     if (narrow) setDetailOpen(true);
   }
 
+  function addCurrentToSolve(target: LibraryDetail) {
+    const { mode } = addDetailToSolveDraft(target);
+    toast.show({
+      title: mode === 'already' ? '已在当前方案里' : mode === 'appended' ? '已加入当前方案' : '已新建方案并加入',
+      sub: target.fullName,
+      actions: [{ label: '去「找方案」', onClick: props.onOpenSolve }],
+    });
+  }
+
   const subtitle = !today && phase === 'loading'
     ? '正在整理今天的清单…'
     : !today && phase === 'error'
@@ -388,9 +398,11 @@ export function TodayPage(props: TodayPageProps) {
         : null;
   const hiddenCount = viewAllPreset ? Math.max(0, listedTotal - ordered.length) : 0;
 
+  const greeting = greetingFor(new Date().getHours());
+
   return (
     <section className="flex h-full min-h-0 flex-col gap-3 overflow-auto px-5 pt-4 pb-5 max-[899px]:px-4 max-[899px]:pt-3 max-[899px]:pb-4">
-      <PageHeader title={`${greetingFor(new Date().getHours())}，${name}`} subtitle={subtitle} />
+      <PageHeader title={name ? `${greeting}，${name}` : greeting} subtitle={subtitle} />
       <div className="grid shrink-0 grid-cols-2 gap-3 min-[900px]:grid-cols-4">
         <StatCard label={WEEK_NEW_LABEL} value={today ? (today.counts?.weekNew ?? 0) : '…'} icon="auto_awesome" tone="blue" active={filter === 'week'} onClick={() => choose('week')} />
         <StatCard label="待 AI 整理" hint="还没有中文说明的收藏" value={today ? (today.counts?.cardsPending ?? 0) : '…'} icon="hourglass_top" tone="amber" active={filter === 'pending'} onClick={() => choose('pending')} />
@@ -405,10 +417,10 @@ export function TodayPage(props: TodayPageProps) {
             {renderListBody()}
           </div>
           <div className="flex shrink-0 flex-wrap gap-2.5 border-t border-muted px-4 py-2.5 text-xs text-on-surface-variant">
-            <span className="inline-flex items-center gap-1"><Kbd>J</Kbd> / <Kbd>K</Kbd> 下一个 / 上一个</span>
+            <span className="inline-flex items-center gap-1"><Kbd>↑</Kbd> / <Kbd>↓</Kbd> 或 <Kbd>J</Kbd> / <Kbd>K</Kbd> 切换</span>
             <span className="inline-flex items-center gap-1"><Kbd>T</Kbd> 想试</span>
             <span className="inline-flex items-center gap-1"><Kbd>X</Kbd> 不要了</span>
-            <span className="inline-flex items-center gap-1"><Kbd>C</Kbd> 复制给 Codex</span>
+            <span className="inline-flex items-center gap-1"><Kbd>C</Kbd> 复制给 AI 助手</span>
           </div>
         </Card>
         <Card className={cn('flex min-h-0 flex-col overflow-hidden', hideDetail && 'hidden')}>
@@ -425,6 +437,7 @@ export function TodayPage(props: TodayPageProps) {
             onOpenToolbox={props.onOpenToolbox}
             onOpenAiSettings={props.onOpenAiSettings}
             onCopyCodex={() => { if (selectedId) void copyForCodex(selectedId); }}
+            onAddToSolve={shownDetail ? () => addCurrentToSolve(shownDetail) : undefined}
             onCopyHow={(text) => {
               void writeClipboard(text).then((copied) => {
                 if (copied) toast.show({ title: '已复制' });

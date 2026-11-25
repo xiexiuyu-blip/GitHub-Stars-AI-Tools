@@ -69,7 +69,7 @@ export function SolveHitRow(props: {
           <span className="text-left text-sm font-semibold break-words text-foreground [overflow-wrap:anywhere]">{hit.fullName}</span>
           <StarCount value={hit.starsCount} />
           {props.pressed && props.isMain ? <Tag tone="blue">主参考</Tag> : null}
-          {props.pressed && props.isMain ? <span className="text-xs text-on-surface-variant">Codex 会优先用它，其余是备选</span> : null}
+          {props.pressed && props.isMain ? <span className="text-xs text-on-surface-variant">AI 助手会优先用它，其余是备选</span> : null}
           {form ? <Tag>{form}</Tag> : null}
           {hit.hasCard === false ? <Tag>待 AI 整理</Tag> : null}
           <MaintenanceTag tier={maintenanceOf(hit.pushedAt, new Date(), hit.archived === true)} />

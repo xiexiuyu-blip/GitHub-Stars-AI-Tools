@@ -45,9 +45,9 @@ describe('发现页候选卡', () => {
     expect(text).not.toContain('收进收集箱');
   });
 
-  it('复制按钮写明只是评估：复制「帮我评估」给 Codex', () => {
+  it('复制按钮写明只是评估：复制「帮我评估」给 AI 助手', () => {
     const text = textOf(render('new'));
-    expect(text).toContain('复制「帮我评估」给 Codex');
+    expect(text).toContain('复制「帮我评估」给 AI 助手');
     expect(text).not.toContain('复制给 Codex 评估');
     expect(text).not.toContain('帮我装好并试用');
   });

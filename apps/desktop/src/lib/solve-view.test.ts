@@ -302,12 +302,12 @@ describe('buildPackRequest', () => {
     expect(first.localCapabilities).not.toBe(second.localCapabilities);
   });
 
-  it('直接模式不带项目，mode 是 direct，标题换成直接交给 Codex', () => {
+  it('直接模式不带项目，mode 是 direct，标题换成直接交给 AI 助手', () => {
     const hits = [hit({ id: '1', why: '主因' }), hit({ id: '2', why: '备因' })];
     const request = buildPackRequest('批量改图尺寸和压缩', hits, [], true);
     expect(request.items).toEqual([]);
     expect(request.mode).toBe('direct');
-    expect(request.title).toBe('直接交给 Codex：批量改图尺寸和压缩');
+    expect(request.title).toBe('直接交给 AI 助手：批量改图尺寸和压缩');
     expect(request.problem).toBe('批量改图尺寸和压缩');
     expect(request.localCapabilities).toEqual([]);
     expect(hits.map((item) => item.id)).toEqual(['1', '2']);
@@ -329,9 +329,9 @@ describe('buildPackRequest', () => {
     expect(request.localCapabilities).not.toBe(local);
   });
 
-  it('三个直接交给 Codex 的按钮用同一句', () => {
-    expect(DIRECT_LABEL).toBe('不用这些工具，直接交给 Codex');
-    expect(DIRECT_FROM_PICKS_LABEL).toBe('不用这些工具，直接交给 Codex');
+  it('三个直接交给 AI 助手的按钮用同一句', () => {
+    expect(DIRECT_LABEL).toBe('不用这些工具，直接交给 AI 助手');
+    expect(DIRECT_FROM_PICKS_LABEL).toBe('不用这些工具，直接交给 AI 助手');
     expect(DIRECT_FROM_PICKS_LABEL).toBe(DIRECT_LABEL);
   });
 
@@ -490,7 +490,7 @@ describe('packPlaceholder 和 formatOptions', () => {
   it('格式选项的值和文案', () => {
     expect(formatOptions.map((item) => item.value)).toEqual(['markdown', 'agents', 'json']);
     expect(formatOptions.map((item) => item.label)).toEqual([
-      '文档（Markdown，直接粘给 Codex，默认）',
+      '文档（Markdown，直接粘给 AI 助手，默认）',
       '长期规则（AGENTS.md，存成文件放进工作文件夹）',
       '程序用（JSON，一般不用选）',
     ]);
@@ -596,20 +596,20 @@ describe('pickLocalCapabilities', () => {
 });
 
 describe('交接单文案', () => {
-  it('buildPackRequest 的标题前缀是交接单，直接模式仍是直接交给 Codex', () => {
+  it('buildPackRequest 的标题前缀是交接单，直接模式仍是直接交给 AI 助手', () => {
     expect(buildPackRequest('做小红书封面', [hit({ id: '1' })]).title).toBe('交接单：做小红书封面');
-    expect(buildPackRequest('做小红书封面', [hit({ id: '1' })], [], true).title).toBe('直接交给 Codex：做小红书封面');
+    expect(buildPackRequest('做小红书封面', [hit({ id: '1' })], [], true).title).toBe('直接交给 AI 助手：做小红书封面');
   });
 
   it('统一后的按钮常量', () => {
-    expect(DIRECT_LABEL).toBe('不用这些工具，直接交给 Codex');
+    expect(DIRECT_LABEL).toBe('不用这些工具，直接交给 AI 助手');
     expect(DIRECT_FROM_PICKS_LABEL).toBe(DIRECT_LABEL);
     expect(BACK_TO_PICK_LABEL).toBe('改回挑工具');
   });
 
   it('格式选项只改显示文字，value 仍是 markdown / agents / json', () => {
     expect(formatOptions.map((item) => [item.value, item.label])).toEqual([
-      ['markdown', '文档（Markdown，直接粘给 Codex，默认）'],
+      ['markdown', '文档（Markdown，直接粘给 AI 助手，默认）'],
       ['agents', '长期规则（AGENTS.md，存成文件放进工作文件夹）'],
       ['json', '程序用（JSON，一般不用选）'],
     ]);
@@ -633,7 +633,7 @@ describe('格式选项：名字和一句说明', () => {
     }
     expect(formatOptions.map((item) => item.name)).toEqual(['文档', '长期规则', '程序用']);
     expect(formatOptions.map((item) => item.note)).toEqual([
-      'Markdown，直接粘给 Codex，默认',
+      'Markdown，直接粘给 AI 助手，默认',
       'AGENTS.md，存成文件放进工作文件夹',
       'JSON，一般不用选',
     ]);
@@ -680,7 +680,7 @@ describe('列表顶部那一行：N 和界面上勾着的个数对得上', () =>
     expect(none).toEqual([]);
     expect(pickListNote(found.hits, none ?? [], false, false)).toBeNull();
     // 后端当初默认勾了 a、b，是 AI 把它们清空的（用户没动过）：不是用户取消的，要解释
-    expect(packEmptyNote(found, false)).toBe('没有特别对口的，所以没替你默认勾选。看一眼左边的列表自己勾，或者直接交给 Codex。');
+    expect(packEmptyNote(found, false)).toBe('没有特别对口的，所以没替你默认勾选。看一眼左边的列表自己勾，或者直接交给 AI 助手。');
     // 后端本来就没默认勾：一直是这句
     expect(packEmptyNote({ hits: found.hits, preselected: [] })).toContain('没有特别对口的，所以没替你默认勾选');
     expect(packEmptyNote({ hits: found.hits, preselected: [] }, false)).toContain('没有特别对口的，所以没替你默认勾选');
@@ -803,7 +803,7 @@ describe('界面上残留的旧叫法已换成统一用词', () => {
 
 describe('复制成功的提示', () => {
   it('复制交接单和复制单个工具的话，用同一句（审读第 5 条）', () => {
-    expect(COPY_FOR_CODEX_TOAST).toBe('已复制。粘到 Codex 后，它会先查你电脑上有没有，没有就装进独立文件夹，装完告诉你装在哪、怎么卸载。');
+    expect(COPY_FOR_CODEX_TOAST).toBe('已复制。粘给 AI 助手后，它会先查你电脑上有没有，没有就装进独立文件夹，装完告诉你装在哪、怎么卸载。');
   });
 
   it('「去查别人怎么用」那段话只读资料：提示不能说它会装东西；认不出的话按会装东西的那句说', () => {
@@ -822,8 +822,8 @@ describe('复制成功的提示', () => {
     expect(drawer).toContain('COPY_FOR_CODEX_TOAST');
     expect(drawer).toContain('copyPromptToast');
     for (const [name, text] of [['solve.tsx', page], ['hit-drawer.tsx', drawer]] as const) {
-      expect(text, `${name} 里还有旧提示`).not.toContain('已复制，去 Codex 里粘贴');
-      expect(text, `${name} 里又写了一份提示原文`).not.toContain('粘到 Codex 后');
+      expect(text, `${name} 里还有旧提示`).not.toContain('已复制，去 AI 助手里粘贴');
+      expect(text, `${name} 里又写了一份提示原文`).not.toContain('粘给 AI 助手后');
     }
   });
 });
@@ -882,11 +882,11 @@ describe('previewDisplayText：交接单排版预览里的星数和日期', () =
     expect(shown).toHaveLength(8);
   });
 
-  it('没有这种行的文档（JSON、直接交给 Codex 的交接单）原样返回', () => {
+  it('没有这种行的文档（JSON、直接交给 AI 助手的交接单）原样返回', () => {
     const json = '{"items":[{"stars":27200,"pushedOn":"2026-07-01"}]}';
     expect(previewDisplayText(json, [], now)).toBe(json);
     expect(previewDisplayText('', [], now)).toBe('');
-    expect(previewDisplayText('# 直接交给 Codex：把群聊整理成日报', [], now)).toBe('# 直接交给 Codex：把群聊整理成日报');
+    expect(previewDisplayText('# 直接交给 AI 助手：把群聊整理成日报', [], now)).toBe('# 直接交给 AI 助手：把群聊整理成日报');
   });
 
   it('不改传进来的原文（复制的永远是原文）', () => {
@@ -927,10 +927,10 @@ describe('packEmptyNote', () => {
     expect(packEmptyNote({ hits: [], preselected: [] })).toBe('收藏里没找到相关的工具。');
   });
 
-  it('搜到了但没有默认勾选：说为什么没勾，并指出可以直接交给 Codex', () => {
+  it('搜到了但没有默认勾选：说为什么没勾，并指出可以直接交给 AI 助手', () => {
     const note = packEmptyNote({ hits: [{ id: 'a' }] as never, preselected: [] });
     expect(note).toContain('没替你默认勾选');
-    expect(note).toContain('直接交给 Codex');
+    expect(note).toContain('直接交给 AI 助手');
   });
 
   it('有默认勾选（用户自己取消的）：不解释', () => {

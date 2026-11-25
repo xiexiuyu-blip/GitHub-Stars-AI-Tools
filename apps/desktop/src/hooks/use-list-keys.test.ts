@@ -27,9 +27,19 @@ describe('nextSelection', () => {
     expect(nextSelection(ids, 'a', 'k')).toBe('a');
   });
 
+  it('ArrowDown 向下、ArrowUp 向上，到头停住，空选首个', () => {
+    expect(nextSelection(ids, null, 'ArrowDown')).toBe('a');
+    expect(nextSelection(ids, null, 'ArrowUp')).toBe('a');
+    expect(nextSelection(ids, 'a', 'ArrowDown')).toBe('b');
+    expect(nextSelection(ids, 'c', 'ArrowDown')).toBe('c');
+    expect(nextSelection(ids, 'c', 'ArrowUp')).toBe('b');
+    expect(nextSelection(ids, 'a', 'ArrowUp')).toBe('a');
+  });
+
   it('其他键不移动', () => {
     expect(nextSelection(ids, 'b', 't')).toBeNull();
-    expect(nextSelection(ids, 'b', 'ArrowDown')).toBeNull();
+    expect(nextSelection(ids, 'b', 'ArrowLeft')).toBeNull();
+    expect(nextSelection(ids, 'b', 'ArrowRight')).toBeNull();
     expect(nextSelection(ids, null, 'x')).toBeNull();
   });
 });

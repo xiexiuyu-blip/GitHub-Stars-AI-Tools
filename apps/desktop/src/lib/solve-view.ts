@@ -22,19 +22,19 @@ function formatOption(value: PackFormat, name: string, note: string): FormatOpti
 }
 
 export const formatOptions: readonly FormatOption[] = [
-  formatOption('markdown', '文档', 'Markdown，直接粘给 Codex，默认'),
+  formatOption('markdown', '文档', 'Markdown，直接粘给 AI 助手，默认'),
   formatOption('agents', '长期规则', 'AGENTS.md，存成文件放进工作文件夹'),
   formatOption('json', '程序用', 'JSON，一般不用选'),
 ];
 
 /**
- * 复制成功后的提示：复制交接单（找方案）和复制单个工具的话（详情抽屉）粘到 Codex 之后，做的是同一件事，
+ * 复制成功后的提示：复制交接单（找方案）和复制单个工具的话（详情抽屉）粘给 AI 助手之后，做的是同一件事，
  * 所以是同一句。别在别处再写一份。
  */
-export const COPY_FOR_CODEX_TOAST = '已复制。粘到 Codex 后，它会先查你电脑上有没有，没有就装进独立文件夹，装完告诉你装在哪、怎么卸载。';
+export const COPY_FOR_CODEX_TOAST = '已复制。粘给 AI 助手后，它会先查你电脑上有没有，没有就装进独立文件夹，装完告诉你装在哪、怎么卸载。';
 
-/** 「让 Codex 去查别人怎么用」那段话只查资料、不装东西，提示不能说它会装。 */
-export const COPY_FOR_RESEARCH_TOAST = '已复制。粘到 Codex 后，它只会读资料、给你结论，不会安装。';
+/** 「让 AI 助手去查别人怎么用」那段话只查资料、不装东西，提示不能说它会装。 */
+export const COPY_FOR_RESEARCH_TOAST = '已复制。粘给 AI 助手后，它只会读资料、给你结论，不会安装。';
 
 /**
  * 详情抽屉里复制「给 Codex 的话」之后的提示。抽屉里同一个回调接了两种话：「帮我装好并试用」（会装东西）
@@ -258,16 +258,16 @@ export function pickLocalCapabilities(
   return [...installed, ...scored.slice(0, Math.max(0, limit)).map((entry) => entry.item)];
 }
 
-/** 一个工具都没勾，或勾了又都不合适时，进「直接交给 Codex」。两处同一句。 */
-export const DIRECT_LABEL = '不用这些工具，直接交给 Codex';
+/** 一个工具都没勾，或勾了又都不合适时，进「直接交给 AI 助手」。两处同一句。 */
+export const DIRECT_LABEL = '不用这些工具，直接交给 AI 助手';
 /** 和 DIRECT_LABEL 同一句。勾选留着，「改回挑工具」能回去。 */
-export const DIRECT_FROM_PICKS_LABEL = '不用这些工具，直接交给 Codex';
-/** 从直接交给 Codex 回到勾选工具。 */
+export const DIRECT_FROM_PICKS_LABEL = '不用这些工具，直接交给 AI 助手';
+/** 从直接交给 AI 助手回到勾选工具。 */
 export const BACK_TO_PICK_LABEL = '改回挑工具';
 
 /**
  * 第一个是主参考，其余是备选。why 原样带上。local 是本机已装的相关能力（见 pickLocalCapabilities）。
- * direct 为真时不带任何工具：标题换成「直接交给 Codex」，mode 写成 direct。为假时不写 mode。
+ * direct 为真时不带任何工具：标题换成「直接交给 AI 助手」，mode 写成 direct。为假时不写 mode。
  */
 export function buildPackRequest(
   query: string,
@@ -277,7 +277,7 @@ export function buildPackRequest(
 ): PackRequest {
   if (direct) {
     return {
-      title: `直接交给 Codex：${query}`,
+      title: `直接交给 AI 助手：${query}`,
       problem: query,
       items: [],
       localCapabilities: [...local],
@@ -390,7 +390,7 @@ export function packEmptyNote(result: Pick<SolveResult, 'hits' | 'preselected'> 
   if (!result) return null;
   if (result.hits.length === 0) return '收藏里没找到相关的工具。';
   if (result.preselected.length === 0 || !edited) {
-    return '没有特别对口的，所以没替你默认勾选。看一眼左边的列表自己勾，或者直接交给 Codex。';
+    return '没有特别对口的，所以没替你默认勾选。看一眼左边的列表自己勾，或者直接交给 AI 助手。';
   }
   return null;
 }

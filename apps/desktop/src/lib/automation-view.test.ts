@@ -1581,7 +1581,7 @@ describe('欢迎引导文案', () => {
     expect(WELCOME_COPY.subtitle).toBe('把你在 GitHub 上收藏的项目同步到这台电脑；需要时再让 AI 写中文说明（按服务商价格收费，默认不开）');
     expect(WELCOME_COPY.tips).toEqual([
       '在「资料库」按场景找工具',
-      '在「找方案」说一句想做的事，挑工具交给 Codex',
+      '在「找方案」说一句想做的事，挑工具交给 AI 助手',
       '在「今日」看新收藏',
     ]);
   });

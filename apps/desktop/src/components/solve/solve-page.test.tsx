@@ -63,7 +63,7 @@ describe('SolvePage：整页接线', () => {
   it('生成尚未就绪时，真实复制按钮禁用', () => {
     restoreDraft(found(['a']), ['a']);
     const markup = renderPage();
-    const copyButton = markup.match(/<button\b[^>]*>[\s\S]*?<\/button>/g)?.find((button) => button.includes('复制交接单给 Codex')) ?? '';
+    const copyButton = markup.match(/<button\b[^>]*>[\s\S]*?<\/button>/g)?.find((button) => button.includes('复制交接单给 AI 助手')) ?? '';
     expect(copyButton).toContain('disabled=""');
     expect(markup).toContain('aria-label="正在整理交接单"');
   });
@@ -77,23 +77,23 @@ describe('SolvePage：整页接线', () => {
     expect(newTask).toContain('aria-label="正在找"');
   });
 
-  it('AI 精选开关旁写明费用、额度，以及关闭不能撤回已发请求', () => {
+  it('AI 精选开关旁写明费用、额度、独立于自动整理，以及关闭不能撤回已发请求', () => {
     const markup = renderPage();
     expect(markup).toContain('aria-describedby="solve-ai-cost"');
-    expect(markup).toContain('会花钱（每次约 4 千 token，受 AI 精选额度限制）');
+    expect(markup).toContain('会花钱（每次约 4 千 token，独立于「自动整理」开关，受 AI 精选额度限制）');
     expect(markup).toContain('具体费用以服务商账单为准');
     expect(markup).toContain('关闭只影响后续精选，已发出的请求可能仍会计费');
   });
 
-  it('右边面板叫「交接单」，复制按钮叫「复制交接单给 Codex」，没有旧叫法', () => {
+  it('右边面板叫「交接单」，复制按钮叫「复制交接单给 AI 助手」，没有旧叫法', () => {
     const markup = renderPage();
     expect(markup).toContain('找方案');
     expect(markup).toContain('>交接单</h3>');
-    expect(markup).toContain('复制交接单给 Codex');
-    expect(markup).toContain('再整理成给 Codex 的交接单');
+    expect(markup).toContain('复制交接单给 AI 助手');
+    expect(markup).toContain('再整理成给 AI 助手的交接单');
     expect(markup).not.toContain('参考包');
-    expect(markup).not.toContain('没有合适的？直接交给 Codex');
-    expect(markup).not.toContain('都不合适？直接交给 Codex');
+    expect(markup).not.toContain('没有合适的？直接交给 AI 助手');
+    expect(markup).not.toContain('都不合适？直接交给 AI 助手');
   });
 
   it('格式是竖排的三个单选项，放在面板标题和预览之间，没有不换行的按钮', () => {
@@ -102,7 +102,7 @@ describe('SolvePage：整页接线', () => {
     expect(group).toContain('role="radiogroup"');
     expect((group.match(/type="radio"/g) ?? [])).toHaveLength(3);
     expect(group).toContain('文档');
-    expect(group).toContain('Markdown，直接粘给 Codex，默认');
+    expect(group).toContain('Markdown，直接粘给 AI 助手，默认');
     expect(group).toContain('长期规则');
     expect(group).toContain('AGENTS.md，存成文件放进工作文件夹');
     expect(group).toContain('程序用');
@@ -112,7 +112,7 @@ describe('SolvePage：整页接线', () => {
     // 页面上不再有横排的分段按钮：格式只剩这一组单选框
     expect((markup.match(/role="radiogroup"/g) ?? [])).toHaveLength(1);
     expect(markup.indexOf('>交接单</h3>')).toBeLessThan(markup.indexOf('role="radiogroup"'));
-    expect(markup.indexOf('role="radiogroup"')).toBeLessThan(markup.indexOf('复制交接单给 Codex'));
+    expect(markup.indexOf('role="radiogroup"')).toBeLessThan(markup.indexOf('复制交接单给 AI 助手'));
   });
 
   it('还没搜的时候，列表顶部不说「已替你勾了」，也不说已勾几个', () => {
@@ -131,7 +131,7 @@ describe('SolvePage：整页接线', () => {
     // 列表里每一行都是新的叫法
     expect(markup).toContain('加入交接单 fox/b');
     expect(markup).toContain('从交接单移除 fox/a');
-    expect(markup).toContain('Codex 会优先用它，其余是备选');
+    expect(markup).toContain('AI 助手会优先用它，其余是备选');
     expect(markup).not.toContain('为什么相关');
   });
 
@@ -141,7 +141,7 @@ describe('SolvePage：整页接线', () => {
     expect(markup).toContain('已勾 0 个');
     expect(markup).toContain('已选 0 个');
     expect(markup).toContain('没有特别对口的，所以没替你默认勾选');
-    expect(markup).toContain('不用这些工具，直接交给 Codex');
+    expect(markup).toContain('不用这些工具，直接交给 AI 助手');
   });
 
   it('列表顶上那句提示缩短了，不会在 900 宽的窗口里折成两行、留下孤零零的一个字', () => {
@@ -163,12 +163,12 @@ describe('SolvePage：整页接线', () => {
     expect(markup).not.toContain('看排版效果');
   });
 
-  it('从草稿回来、是直接交给 Codex：顶上不说勾了几个', () => {
+  it('从草稿回来、是直接交给 AI 助手：顶上不说勾了几个', () => {
     restoreDraft(found(['a']), ['a'], true);
     const markup = renderPage();
     expect(markup).not.toContain('已勾 ');
     expect(markup).not.toContain('已替你勾了');
-    expect(markup).toContain('不选工具 · 直接交给 Codex');
+    expect(markup).toContain('不选工具 · 直接交给 AI 助手');
     expect(markup).toContain('改回挑工具');
   });
 });

@@ -144,7 +144,7 @@ export function InstallPanel(props: {
           <Icon name="smart_toy" size={22} fill />
         </span>
         <span className="min-w-0 flex-1">
-          <b className="block text-sm font-semibold text-foreground">让 Codex 帮你装</b>
+          <b className="block text-sm font-semibold text-foreground">让 AI 助手帮你装</b>
           <span className="text-xs leading-[1.6] text-on-surface-variant">{INSTALL_COPY_HINT}</span>
         </span>
         <Button onClick={() => props.onCopyPrompt(buildInstallPrompt({ fullName: detail.fullName, htmlUrl: detail.htmlUrl, form: detail.form, scenarioName: props.scenarioName }), 'install')}>
@@ -296,13 +296,13 @@ export function CommunityPanel(props: { detail: LibraryDetail; scenarioName?: st
           <Icon name="travel_explore" size={22} fill />
         </span>
         <span className="min-w-0 flex-1">
-          <b className="block text-sm font-semibold text-foreground">让 Codex 去查别人怎么用</b>
+          <b className="block text-sm font-semibold text-foreground">让 AI 助手去查别人怎么用</b>
           <span className="block text-xs leading-[1.6] text-on-surface-variant">
-            复制一段话粘给 Codex：它会用你的 web-search，在小红书、知乎、B 站、X、Reddit、YouTube 等地方找真实的使用案例、踩过的坑和替代品，只引用查到的内容，附原帖链接。
+            复制一段话粘给 AI 助手：它会用联网搜索，在小红书、知乎、B 站、X、Reddit、YouTube 等地方找真实的使用案例、踩过的坑和替代品，只引用查到的内容，附原帖链接。
           </span>
           <Button className="mt-2.5" onClick={() => props.onCopyPrompt(buildCommunityPrompt({ fullName: props.detail.fullName, htmlUrl: props.detail.htmlUrl, form: props.detail.form, scenarioName: props.scenarioName }), 'community')}>
             <Icon name="content_copy" size={16} />
-            复制给 Codex
+            复制给 AI 助手
           </Button>
         </span>
       </SoftCard>
@@ -326,7 +326,7 @@ export function CommunityPanel(props: { detail: LibraryDetail; scenarioName?: st
             </a>
           ))}
         </div>
-        <p className="mt-2.5 text-xs leading-[1.6] text-on-surface-variant">这些链接会在浏览器里打开，用的是你自己的登录状态。小红书、知乎、X 要登录才能看，所以只能交给你自己或 Codex。</p>
+        <p className="mt-2.5 text-xs leading-[1.6] text-on-surface-variant">这些链接会在浏览器里打开，用的是你自己的登录状态。小红书、知乎、X 要登录才能看，所以只能交给你自己或 AI 助手。</p>
       </div>
     </div>
   );

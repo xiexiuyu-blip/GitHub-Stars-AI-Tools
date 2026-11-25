@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useEffectEvent, useMemo, useRef, useState } from 'react';
 import type { LibraryCounts, LibraryDetail, LibraryItem, LibraryPage as LibraryPageResult, ReadingGroup, ScenarioSummary } from '@/lib/contracts';
 import { COPY_FAILED_NOTICE, DROP_HINT_LIBRARY, codexFallbackText, copiedNotice, readingGroupLabel } from '@/lib/item-format';
 import {
@@ -33,6 +33,8 @@ import {
   type LibraryUiState,
 } from '@/lib/library-filters';
 import { automationHint } from '@/lib/automation-view';
+import { loadLibrarySession, saveLibrarySession } from '@/lib/library-session';
+import { addDetailToSolveDraft } from '@/lib/solve-draft';
 import { useAiAutomation } from '@/hooks/use-ai-automation';
 import { useRegenerate } from '@/hooks/use-regenerate';
 import { shouldIgnoreKey, useListKeys } from '@/hooks/use-list-keys';
@@ -51,6 +53,7 @@ type LibraryPageProps = {
   initialScenario?: string | null;
   /** 从别处带着整理状态 / 我的状态进来 */
   initialPreset?: LibraryPreset | null;
+  onInitialConsumed?: () => void;
   onOpenSolve?: (query: string) => void;
   /** 去工具箱（开启 / 调整 AI 自动整理） */
   onOpenToolbox?: () => void;
@@ -65,8 +68,16 @@ export function LibraryPage(props: LibraryPageProps) {
   const { status: automation } = useAiAutomation();
   const regenerateCard = useRegenerate(props.onOpenToolbox);
   const listScrollRef = useRef<HTMLDivElement | null>(null);
-  const [ui, setUi] = useState(() => withInitial(props.initialKeyword, props.initialScenario, props.initialPreset));
-  const [keywordDraft, setKeywordDraft] = useState(() => withInitial(props.initialKeyword, props.initialScenario, props.initialPreset).keyword);
+  const hasInitialOverride = Boolean(props.initialKeyword?.trim() || props.initialScenario?.trim() || props.initialPreset);
+  const restoredSession = useMemo(() => loadLibrarySession(hasInitialOverride), []);
+  const initialUi = useMemo(
+    () => restoredSession?.ui ?? withInitial(props.initialKeyword, props.initialScenario, props.initialPreset),
+    // 只在首次挂载求值
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [],
+  );
+  const [ui, setUi] = useState(() => initialUi);
+  const [keywordDraft, setKeywordDraft] = useState(() => restoredSession?.keywordDraft ?? initialUi.keyword);
   const [scenarios, setScenarios] = useState<ScenarioSummary[]>([]);
   const [scenarioStatus, setScenarioStatus] = useState<ScenarioStatus>('loading');
   const [scenarioError, setScenarioError] = useState<string | null>(null);
@@ -79,13 +90,13 @@ export function LibraryPage(props: LibraryPageProps) {
   const [listReloadKey, setListReloadKey] = useState(0);
   const [noMore, setNoMore] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [selectedId, setSelectedId] = useState<string | null>(() => restoredSession?.selectedId ?? null);
   const [detail, setDetail] = useState<LibraryDetail | null>(null);
   const [detailPhase, setDetailPhase] = useState<'idle' | 'loading' | 'error'>('idle');
   const [detailError, setDetailError] = useState<string | null>(null);
   const [detailReloadKey, setDetailReloadKey] = useState(0);
   const [overrides, setOverrides] = useState<Record<string, ReadingGroup>>({});
-  const [cardStateTouched, setCardStateTouched] = useState(false);
+  const [cardStateTouched, setCardStateTouched] = useState(() => restoredSession?.cardStateTouched ?? false);
   const [fallbackHint, setFallbackHint] = useState(false);
   const [filterOpen, setFilterOpen] = useState(false);
   const [detailOpen, setDetailOpen] = useState(false);
@@ -93,6 +104,7 @@ export function LibraryPage(props: LibraryPageProps) {
   const searchRef = useRef<HTMLInputElement>(null);
   const filterRootRef = useRef<HTMLDivElement>(null);
   const uiRef = useRef(ui);
+  const keywordDraftRef = useRef(keywordDraft);
   const overridesRef = useRef(overrides);
   const serverItemsRef = useRef(serverItems);
   const detailRef = useRef(detail);
@@ -100,12 +112,17 @@ export function LibraryPage(props: LibraryPageProps) {
   const selectedIdRef = useRef(selectedId);
   const touchedRef = useRef(cardStateTouched);
   const noMoreRef = useRef(noMore);
+  const scrollTopRef = useRef(restoredSession?.scrollTop ?? 0);
+  const pendingScrollRestoreRef = useRef<number | null>(
+    restoredSession && restoredSession.scrollTop > 0 ? restoredSession.scrollTop : null,
+  );
   const loadingMoreRef = useRef(false);
   const listGeneration = useRef(0);
   const fallbackChecked = useRef(false);
   const changeReadingRef = useRef<(id: string, group: ReadingGroup) => void>(() => {});
   const copyForCodexRef = useRef<(id: string) => void>(() => {});
   uiRef.current = ui;
+  keywordDraftRef.current = keywordDraft;
   overridesRef.current = overrides;
   serverItemsRef.current = serverItems;
   detailRef.current = detail;
@@ -121,10 +138,51 @@ export function LibraryPage(props: LibraryPageProps) {
   const items = useMemo(() => projectItems(serverItems, overrides, ui.reading), [serverItems, overrides, ui.reading]);
   const orderedKey = items.map((item) => item.id).join('\u0001');
   const previousQueryKey = useRef(queryKey);
-  // 换了筛选或搜索词：列表回到顶部，别停在上一个结果的中间
+  const scrollQueryKeyRef = useRef(queryKey);
+  // 换了筛选或搜索词：列表回到顶部，别停在上一个结果的中间（首挂恢复时不归零）
   useEffect(() => {
+    if (scrollQueryKeyRef.current === queryKey) return;
+    scrollQueryKeyRef.current = queryKey;
+    scrollTopRef.current = 0;
+    pendingScrollRestoreRef.current = null;
     if (listScrollRef.current) listScrollRef.current.scrollTop = 0;
   }, [queryKey]);
+
+  const acknowledgeInitial = useEffectEvent(() => props.onInitialConsumed?.());
+  useEffect(() => {
+    if (hasInitialOverride) acknowledgeInitial();
+    // 仅在首次消费传入的初始筛选参数后通知父级清空
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    saveLibrarySession({
+      ui,
+      keywordDraft,
+      selectedId,
+      scrollTop: scrollTopRef.current,
+      cardStateTouched,
+    });
+  }, [ui, keywordDraft, selectedId, cardStateTouched]);
+
+  useEffect(() => () => {
+    saveLibrarySession({
+      ui: uiRef.current,
+      keywordDraft: keywordDraftRef.current,
+      selectedId: selectedIdRef.current,
+      scrollTop: scrollTopRef.current,
+      cardStateTouched: touchedRef.current,
+    });
+  }, []);
+
+  useEffect(() => {
+    if (listPhase !== 'idle' || pendingScrollRestoreRef.current == null) return;
+    const target = pendingScrollRestoreRef.current;
+    pendingScrollRestoreRef.current = null;
+    if (listScrollRef.current && target > 0) {
+      listScrollRef.current.scrollTop = target;
+    }
+  }, [listPhase, serverItems.length]);
   const initialStamp = `${props.initialKeyword ?? ''}\u0001${props.initialScenario ?? ''}`;
   const seenInitial = useRef(initialStamp);
 
@@ -498,6 +556,15 @@ export function LibraryPage(props: LibraryPageProps) {
     if (narrow) setDetailOpen(true);
   }
 
+  function addCurrentToSolve(target: LibraryDetail) {
+    const { mode } = addDetailToSolveDraft(target);
+    toast.show({
+      title: mode === 'already' ? '已在当前方案里' : mode === 'appended' ? '已加入当前方案' : '已新建方案并加入',
+      sub: target.fullName,
+      actions: props.onOpenSolve ? [{ label: '去「找方案」', onClick: () => props.onOpenSolve?.('') }] : undefined,
+    });
+  }
+
   const scenarioRows = visibleScenarios(scenarios, counts);
   const formRows = formOptions(counts?.forms);
   const maintenanceRows = maintenanceOptions(counts?.maintenance);
@@ -604,7 +671,11 @@ export function LibraryPage(props: LibraryPageProps) {
               还没有 AI 整理好的中文说明，先显示全部收藏。
             </p>
           ) : null}
-          <div ref={listScrollRef} className="min-h-0 flex-1 overflow-auto">
+          <div
+            ref={listScrollRef}
+            onScroll={(event) => { scrollTopRef.current = event.currentTarget.scrollTop; }}
+            className="min-h-0 flex-1 overflow-auto"
+          >
             {renderListBody()}
             {hasMore ? (
               <div className="flex justify-center px-4 py-3">
@@ -614,11 +685,11 @@ export function LibraryPage(props: LibraryPageProps) {
           </div>
           <div className="flex shrink-0 flex-wrap gap-2.5 border-t border-muted px-4 py-2.5 text-xs text-on-surface-variant">
             <span className="inline-flex items-center gap-1"><Kbd>/</Kbd> 搜索</span>
-            <span className="inline-flex items-center gap-1"><Kbd>J</Kbd> / <Kbd>K</Kbd> 下一个 / 上一个</span>
+            <span className="inline-flex items-center gap-1"><Kbd>↑</Kbd> / <Kbd>↓</Kbd> 或 <Kbd>J</Kbd> / <Kbd>K</Kbd> 切换</span>
             <span className="inline-flex items-center gap-1"><Kbd>T</Kbd> 想试</span>
             <span className="inline-flex items-center gap-1"><Kbd>U</Kbd> 在用</span>
             <span className="inline-flex items-center gap-1"><Kbd>X</Kbd> 不要了</span>
-            <span className="inline-flex items-center gap-1"><Kbd>C</Kbd> 复制给 Codex</span>
+            <span className="inline-flex items-center gap-1"><Kbd>C</Kbd> 复制给 AI 助手</span>
           </div>
         </Card>
         <Card className={cn('flex min-h-0 flex-col overflow-hidden', hideDetail && 'hidden')}>
@@ -635,6 +706,7 @@ export function LibraryPage(props: LibraryPageProps) {
             onOpenToolbox={props.onOpenToolbox}
             onOpenAiSettings={props.onOpenAiSettings}
             onCopyCodex={() => { if (selectedId) void copyForCodex(selectedId); }}
+            onAddToSolve={shownDetail ? () => addCurrentToSolve(shownDetail) : undefined}
             onCopyHow={(text) => {
               void writeClipboard(text).then((copied) => {
                 if (copied) toast.show({ title: '已复制' });

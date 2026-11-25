@@ -155,7 +155,7 @@ describe('详情：收藏于', () => {
 describe('详情：标签', () => {
   it('类型和成熟度都带分组名；类型用长写法（这里有地方解释）', () => {
     const text = textOf(render(make({ form: 'cli', maturity: 'usable' })));
-    expect(text).toContain('类型：命令行工具（要让 Codex 帮你装）');
+    expect(text).toContain('类型：命令行工具（可让 AI 助手帮你装）');
     expect(text).toContain('成熟度：可用');
   });
 
@@ -257,17 +257,20 @@ describe('详情：中文说明和它的依据', () => {
     expect(text).not.toContain('依据项目说明');
   });
 
-  it('「说得对吗」：说清是哪段话、不对会请 AI 重写、会花一点钱', () => {
-    const text = textOf(render(make()));
-    expect(text).toContain('上面这段说明说得对吗？');
-    expect(text).toContain('不对，请 AI 重写（会花一点钱）');
+  it('确认按钮明确防覆盖语义：未确认说明可点「确认（不再自动覆盖）」，不太准可请 AI 重写', () => {
+    const html = render(make());
+    const text = textOf(html);
+    expect(text).toContain('这段说明准确吗？');
+    expect(text).toContain('确认（不再自动覆盖）');
+    expect(html).toContain('title="确认后，后续自动整理不会覆盖这条说明"');
+    expect(text).toContain('不太准，让 AI 重写（会花一点钱）');
     expect(text).not.toContain('重新整理');
   });
 
-  it('确认过的说明不再问对不对', () => {
+  it('确认过的说明显示「已确认（不会被自动覆盖）」且不再询问是否准确', () => {
     const text = textOf(render(make({ cardReview: 'confirmed' })));
-    expect(text).toContain('你确认过了');
-    expect(text).not.toContain('说得对吗');
+    expect(text).toContain('已确认（不会被自动覆盖）');
+    expect(text).not.toContain('这段说明准确吗');
   });
 });
 
@@ -275,14 +278,14 @@ describe('详情：重新整理这一张', () => {
   it('初始渲染没有确认条；没确认过的看到重写入口，确认过的看到重新整理', () => {
     const suggested = render(make());
     expect(suggested).not.toContain('data-redo-confirm');
-    expect(textOf(suggested)).toContain('不对，请 AI 重写（会花一点钱）');
+    expect(textOf(suggested)).toContain('不太准，让 AI 重写（会花一点钱）');
     expect(textOf(suggested)).not.toContain('重新整理这一张');
 
     const confirmed = render(make({ cardReview: 'confirmed' }));
     expect(confirmed).not.toContain('data-redo-confirm');
-    expect(textOf(confirmed)).toContain('你确认过了');
+    expect(textOf(confirmed)).toContain('已确认（不会被自动覆盖）');
     expect(textOf(confirmed)).toContain('重新整理这一张');
-    expect(textOf(confirmed)).not.toContain('不对，请 AI 重写');
+    expect(textOf(confirmed)).not.toContain('不太准，让 AI 重写');
   });
 
   it('源码里 props.onRegenerate 只出现在「确认，重新整理」的处理函数里', () => {
@@ -301,7 +304,7 @@ describe('详情：重新整理这一张', () => {
       const start = itemDetailSource.lastIndexOf('<Button', end);
       return itemDetailSource.slice(start, end);
     };
-    const rewrite = entry('不对，请 AI 重写（会花一点钱）');
+    const rewrite = entry('不太准，让 AI 重写（会花一点钱）');
     const again = entry('重新整理这一张');
     expect(rewrite).not.toContain('onRegenerate');
     expect(again).not.toContain('onRegenerate');
@@ -349,7 +352,7 @@ describe('详情：页签', () => {
 
   it('没有现成命令时，概览里的链接也叫「怎么试」页', () => {
     const text = textOf(render(make({ howToTry: null })));
-    expect(text).toContain('去「怎么试」页，让 Codex 帮你装 →');
+    expect(text).toContain('去「怎么试」页，让 AI 助手帮你装 →');
     expect(text).not.toContain('去「安装」页');
   });
 
@@ -436,30 +439,45 @@ describe('详情：灵感', () => {
   });
 });
 
-describe('详情：底部的复制按钮', () => {
-  it('写清粘出去会让 Codex 装好并试用', () => {
+describe('详情：底部的复制按钮与加入方案', () => {
+  it('写清粘出去会让 AI 助手装好并试用', () => {
     const text = textOf(render(make()));
-    expect(text).toContain('复制「帮我装好并试用」给 Codex');
+    expect(text).toContain('复制「帮我装好并试用」给 AI 助手');
     expect(text).not.toContain('复制给 Codex');
+  });
+
+  it('传入 onAddToSolve 时展示「加入当前方案」按钮', () => {
+    const html = renderToStaticMarkup(
+      <ItemDetail
+        detail={make()}
+        onReadingChange={() => {}}
+        onConfirm={() => {}}
+        onRegenerate={() => {}}
+        onCopyCodex={() => {}}
+        onCopyHow={() => {}}
+        onAddToSolve={() => {}}
+      />,
+    );
+    expect(textOf(html)).toContain('加入当前方案');
   });
 
   it('类型是「合集」（资源清单）时也写「帮我装好并试用」：粘出去的话是同一套，按钮不能和它说的不一样', () => {
     const text = textOf(render(make({ form: 'collection' })));
-    expect(text).toContain('复制「帮我装好并试用」给 Codex');
+    expect(text).toContain('复制「帮我装好并试用」给 AI 助手');
     expect(text).not.toContain('帮我看看怎么用');
   });
 
   it('其余类型都不变：技能、MCP、命令行、应用、代码库、接口、服务、其他、没填', () => {
     for (const form of ['skill', 'mcp', 'cli', 'app', 'library', 'api', 'service', 'other', '']) {
       const text = textOf(render(make({ form })));
-      expect(text, form).toContain('复制「帮我装好并试用」给 Codex');
+      expect(text, form).toContain('复制「帮我装好并试用」给 AI 助手');
       expect(text, form).not.toContain('帮我看看怎么用');
     }
   });
 
   it('按钮仍是页面主按钮，点它交出去的还是同一个动作（只是字不一样）', () => {
     const html = render(make({ form: 'collection' }));
-    expect(html).toMatch(/<button[^>]*>(?:(?!<\/button>).)*复制「帮我装好并试用」给 Codex<\/button>/);
+    expect(html).toMatch(/<button[^>]*>(?:(?!<\/button>).)*复制「帮我装好并试用」给 AI 助手<\/button>/);
   });
 });
 
@@ -472,8 +490,8 @@ describe('详情：概览里「怎么试」没有现成命令时', () => {
     expect(text).not.toContain('还没下载项目说明，暂时看不到安装步骤');
   });
 
-  it('下面的链接仍在：让 Codex 帮你装', () => {
-    expect(textOf(render(make({ howToTry: null })))).toContain('去「怎么试」页，让 Codex 帮你装 →');
+  it('下面的链接仍在：让 AI 助手帮你装', () => {
+    expect(textOf(render(make({ howToTry: null })))).toContain('去「怎么试」页，让 AI 助手帮你装 →');
   });
 
   it('接线：用 noInstallStepsNote(readme)，按项目说明读到哪一步说话', () => {

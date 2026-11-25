@@ -12,7 +12,7 @@ import { formLabel } from '@/lib/library-filters';
 import { repoNameOf } from '@/lib/repo-assets';
 
 /** 界面上解释「复制出去会发生什么」（安装页里「让 Codex 帮你装」那一块）。复制出去的正文不改。 */
-export const INSTALL_COPY_HINT = '复制一段话，粘给 Codex：它会先查你电脑上有没有、装在哪、要不要花钱；没有风险就直接装进独立文件夹，装完告诉你装了什么、怎么卸载。遇到要管理员密码、要付费或登录的情况，会先停下来问你。';
+export const INSTALL_COPY_HINT = '复制一段话，粘给 AI 助手：它会先查你电脑上有没有、装在哪、要不要花钱；没有风险就直接装进独立文件夹，装完告诉你装了什么、怎么卸载。遇到要管理员密码、要付费或登录的情况，会先停下来问你。';
 
 /** 关于我：每段话开头都带上，Codex 不用每次从零认识 Fox。以后可以做成设置里的「偏好卡」。 */
 export const ABOUT_ME = '我做品牌营销和新媒体运营，不是开发者。请用中文，说人话，少用术语。';

@@ -60,7 +60,7 @@ const FORM_LABELS: Record<string, string> = {
 const FORM_HINT_LABELS: Record<string, string> = {
   skill: '技能包（给 AI 助手装的扩展）',
   mcp: 'MCP 插件（给 AI 接外部工具）',
-  cli: '命令行工具（要让 Codex 帮你装）',
+  cli: '命令行工具（可让 AI 助手帮你装）',
   app: '应用',
   library: '开发用代码库（一般用不上）',
   api: '接口（程序之间对接）',

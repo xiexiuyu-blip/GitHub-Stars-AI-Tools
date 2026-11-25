@@ -62,7 +62,7 @@ describe('FormatPicker：格式选项竖排成单选列表', () => {
       expect(markup).toContain(option.name);
       expect(markup).toContain(option.note);
     }
-    expect(markup).toContain('Markdown，直接粘给 Codex，默认');
+    expect(markup).toContain('Markdown，直接粘给 AI 助手，默认');
     expect(markup).toContain('AGENTS.md，存成文件放进工作文件夹');
     expect(markup).toContain('JSON，一般不用选');
   });

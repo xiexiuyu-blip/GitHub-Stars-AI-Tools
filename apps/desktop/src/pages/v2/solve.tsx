@@ -299,7 +299,7 @@ export function SolvePage(props: {
   async function copyToCodex() {
     if (!canCopy || !pack || !packInput) return;
     const detail = direct
-      ? '直接交给 Codex'
+      ? '直接交给 AI 助手'
       : `${Number.isFinite(pack.itemCount) ? pack.itemCount : selectedHits.length} 个工具`;
     const key = packInput.key;
     if (await copy(pack.content, COPY_FOR_CODEX_TOAST, detail)) setCopiedKey(key);
@@ -349,7 +349,7 @@ export function SolvePage(props: {
   const copyButton = (
     <Button variant={hasResult ? 'primary' : 'default'} disabled={!canCopy} onClick={() => void copyToCodex()}>
       <Icon name={copied ? 'check' : 'content_copy'} size={16} />
-      {copied ? '已复制' : '复制交接单给 Codex'}
+      {copied ? '已复制' : '复制交接单给 AI 助手'}
     </Button>
   );
 
@@ -357,7 +357,7 @@ export function SolvePage(props: {
     <section className="flex h-full min-h-0 flex-col gap-3 overflow-auto px-5 pt-4 pb-5 max-[899px]:px-4 max-[899px]:pt-3 max-[899px]:pb-4">
       <PageHeader
         title="找方案"
-        subtitle="说一句你想做的事，从你收藏的里面挑出能用的，再整理成给 Codex 的交接单。"
+        subtitle="说一句你想做的事，从你收藏的里面挑出能用的，再整理成给 AI 助手的交接单。"
       />
       <Card className="flex shrink-0 flex-col gap-3 p-4">
         <form className="flex gap-2" onSubmit={onSubmit}>
@@ -412,7 +412,7 @@ export function SolvePage(props: {
             {rerankStatus ? <span className="text-xs text-on-surface-variant">{rerankStatus}</span> : null}
             <Button variant="text" size="sm" aria-pressed={aiEnabled} aria-describedby="solve-ai-cost" onClick={toggleAi}>{RERANK_TOGGLE_LABEL(aiEnabled)}</Button>
             <p id="solve-ai-cost" className="m-0 w-full text-xs leading-5 text-on-surface-variant">
-              开启后会请 AI 帮你挑，会花钱（每次约 4 千 token，受 AI 精选额度限制）。具体费用以服务商账单为准。
+              开启后会请 AI 帮你挑，会花钱（每次约 4 千 token，独立于「自动整理」开关，受 AI 精选额度限制）。具体费用以服务商账单为准。
               关闭只影响后续精选，已发出的请求可能仍会计费。
             </p>
           </div>
@@ -447,7 +447,7 @@ export function SolvePage(props: {
           <div className="flex min-h-12 shrink-0 flex-wrap items-center gap-2.5 border-b border-muted px-4 py-2">
             <h3 className="m-0 text-base font-semibold whitespace-nowrap text-foreground">交接单</h3>
             <span className="text-xs font-medium text-on-surface-variant">
-              {direct ? '不选工具 · 直接交给 Codex' : `已选 ${selectedHits.length} 个`}
+              {direct ? '不选工具 · 直接交给 AI 助手' : `已选 ${selectedHits.length} 个`}
               {(direct || selectedHits.length > 0) && pack?.content ? ` · ${packSizeText(pack.content.length)}` : ''}
             </span>
             <div className="min-w-2 flex-1" />

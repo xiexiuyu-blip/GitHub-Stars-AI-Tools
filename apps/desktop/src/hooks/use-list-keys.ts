@@ -9,12 +9,12 @@ export type ListKeyTarget = {
 } | null | undefined;
 
 /**
- * j 向下、k 向上，到头不绕圈。
+ * j / ArrowDown 向下、k / ArrowUp 向上，到头不绕圈。
  * 当前没有选中、或不在列表里时，选第一个。列表为空返回 null。其他键返回 null。
  */
 export function nextSelection(ids: readonly string[], currentId: string | null, key: string): string | null {
   if (ids.length === 0) return null;
-  const normalized = key.toLowerCase();
+  const normalized = key === 'ArrowDown' ? 'j' : key === 'ArrowUp' ? 'k' : key.toLowerCase();
   if (normalized !== 'j' && normalized !== 'k') return null;
   const index = currentId ? ids.indexOf(currentId) : -1;
   if (index < 0) return ids[0] ?? null;
@@ -63,8 +63,8 @@ export function useListKeys(options: ListKeyOptions) {
       }
 
       const key = event.key.toLowerCase();
-      if (key === 'j' || key === 'k') {
-        const next = nextSelection(current.ids, current.currentId, key);
+      if (event.key === 'ArrowDown' || event.key === 'ArrowUp' || key === 'j' || key === 'k') {
+        const next = nextSelection(current.ids, current.currentId, event.key);
         if (!next) return;
         event.preventDefault();
         current.onMove(next);

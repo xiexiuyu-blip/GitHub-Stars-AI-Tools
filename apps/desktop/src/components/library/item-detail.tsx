@@ -51,8 +51,10 @@ export function ItemDetail(props: {
   onOpenAiSettings?: () => void;
   onCopyCodex: () => void;
   onCopyHow: (text: string) => void;
-  /** 复制一段「给 Codex 的话」（安装请求、查别人怎么用）。kind 说明是哪一种，页面据此给不同的提示。不传就用 onCopyHow。 */
+  /** 复制一段「给 AI 助手的话」（安装请求、查别人怎么用）。kind 说明是哪一种，页面据此给不同的提示。不传就用 onCopyHow。 */
   onCopyPrompt?: (text: string, kind: CopyKind) => void;
+  /** 一键加入到当前「找方案」草稿 */
+  onAddToSolve?: () => void;
 }) {
   if (!props.detail) {
     if (props.loading) return <DetailSkeleton />;
@@ -73,7 +75,7 @@ export function ItemDetail(props: {
         <EmptyState
           icon="ads_click"
           title="选一个工具"
-          description="右边会出现它的中文说明、怎么试、截图预览，和复制给 Codex 的按钮"
+          description="右边会出现它的中文说明、怎么试、截图预览，和复制给 AI 助手的按钮"
         />
       </div>
     );
@@ -142,7 +144,7 @@ function DetailBody(props: Parameters<typeof ItemDetail>[0] & { detail: LibraryD
           seed={detail.fullName}
           fit="contain"
           letter={false}
-          className={cn('w-full shrink-0 border-b border-border', cover ? 'h-[200px]' : 'h-[72px]')}
+          className={cn('w-full shrink-0 border-b border-border', cover ? 'h-[156px]' : 'h-[52px]')}
         />
 
         <div className="px-6 pb-6">
@@ -187,15 +189,23 @@ function DetailBody(props: Parameters<typeof ItemDetail>[0] & { detail: LibraryD
                   <>
                     <span className="inline-flex items-center gap-1">
                       <Icon name="check" size={14} />
-                      你确认过了
+                      已确认（不会被自动覆盖）
                     </span>
                     <Button variant="text" size="sm" className="h-7 px-1.5 text-xs" onClick={() => setAskingRedo(true)}>重新整理这一张</Button>
                   </>
                 ) : (
                   <>
-                    上面这段说明说得对吗？
-                    <Button variant="text" size="sm" className="h-7 px-1.5 text-xs" onClick={props.onConfirm}>对</Button>
-                    <Button variant="text" size="sm" className="h-7 px-1.5 text-xs" onClick={() => setAskingRedo(true)}>不对，请 AI 重写（会花一点钱）</Button>
+                    这段说明准确吗？
+                    <Button
+                      variant="text"
+                      size="sm"
+                      className="h-7 px-1.5 text-xs"
+                      title="确认后，后续自动整理不会覆盖这条说明"
+                      onClick={props.onConfirm}
+                    >
+                      确认（不再自动覆盖）
+                    </Button>
+                    <Button variant="text" size="sm" className="h-7 px-1.5 text-xs" onClick={() => setAskingRedo(true)}>不太准，让 AI 重写（会花一点钱）</Button>
                   </>
                 )}
               </div>
@@ -331,7 +341,7 @@ function DetailBody(props: Parameters<typeof ItemDetail>[0] & { detail: LibraryD
                       <p className="m-0 text-sm leading-[1.6] text-on-surface-variant">{noInstallStepsNote(readme)}</p>
                     )}
                     <button type="button" className="mt-2 text-xs text-accent-foreground hover:underline" onClick={() => setTab('install')}>
-                      {tryText ? '看完整的怎么试 →' : '去「怎么试」页，让 Codex 帮你装 →'}
+                      {tryText ? '看完整的怎么试 →' : '去「怎么试」页，让 AI 助手帮你装 →'}
                     </button>
                   </SoftCard>
                 ) : null}
@@ -400,6 +410,12 @@ function DetailBody(props: Parameters<typeof ItemDetail>[0] & { detail: LibraryD
             打开 GitHub
             <Icon name="open_in_new" size={14} />
           </a>
+        ) : null}
+        {props.onAddToSolve ? (
+          <Button onClick={props.onAddToSolve}>
+            <Icon name="playlist_add" size={16} />
+            加入当前方案
+          </Button>
         ) : null}
         <span className="flex-1" />
         {/* 页面主按钮：全页只此一个蓝色实底按钮 */}

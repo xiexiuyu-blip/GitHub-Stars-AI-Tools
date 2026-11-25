@@ -245,7 +245,7 @@ describe('筛选栏的联动计数', () => {
     expect(hints).toEqual({
       skill: '技能包（给 AI 助手装的扩展）',
       mcp: 'MCP 插件（给 AI 接外部工具）',
-      cli: '命令行工具（要让 Codex 帮你装）',
+      cli: '命令行工具（可让 AI 助手帮你装）',
       library: '开发用代码库（一般用不上）',
       api: '接口（程序之间对接）',
       service: '在线服务',
@@ -388,7 +388,7 @@ describe('formLabel', () => {
 
   it('带解释的长写法只给筛选面板和详情页的「类型」一行用：和短名字是两套，没填 / 其他同样不显示，不认识的原样给', () => {
     expect(formLabelWithHint('skill')).toBe('技能包（给 AI 助手装的扩展）');
-    expect(formLabelWithHint(' cli ')).toBe('命令行工具（要让 Codex 帮你装）');
+    expect(formLabelWithHint(' cli ')).toBe('命令行工具（可让 AI 助手帮你装）');
     expect(formLabelWithHint('mcp')).toBe('MCP 插件（给 AI 接外部工具）');
     expect(formLabelWithHint('library')).toBe('开发用代码库（一般用不上）');
     expect(formLabelWithHint('api')).toBe('接口（程序之间对接）');
@@ -406,7 +406,7 @@ describe('formLabel', () => {
   it('详情小标签写成「类型：…」，用长写法；其他和空的不显示', () => {
     expect(formTagLabel('app')).toBe('类型：应用');
     expect(formTagLabel('skill')).toBe('类型：技能包（给 AI 助手装的扩展）');
-    expect(formTagLabel('cli')).toBe('类型：命令行工具（要让 Codex 帮你装）');
+    expect(formTagLabel('cli')).toBe('类型：命令行工具（可让 AI 助手帮你装）');
     expect(formTagLabel('other')).toBeNull();
     expect(formTagLabel(null)).toBeNull();
     expect(formTagLabel('template')).toBe('类型：template');

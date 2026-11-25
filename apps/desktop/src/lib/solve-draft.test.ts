@@ -1,5 +1,44 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { loadSolveDraft, saveSolveDraft, type SolveDraft } from '@/lib/solve-draft';
+import type { LibraryDetail } from '@/lib/contracts';
+import { addDetailToSolveDraft, loadSolveDraft, saveSolveDraft, type SolveDraft } from '@/lib/solve-draft';
+
+function detail(id: string, fullName: string): LibraryDetail {
+  return {
+    id,
+    fullName,
+    htmlUrl: `https://github.com/${fullName}`,
+    description: 'desc',
+    language: 'TypeScript',
+    starsCount: 100,
+    starredAt: '2026-10-01T00:00:00Z',
+    pushedAt: '2026-10-02T00:00:00Z',
+    oneLiner: `一句话：${fullName}`,
+    form: 'cli',
+    scenarioIds: ['scn-1'],
+    readingStatus: 'unread',
+    readingGroup: 'unseen',
+    hasCard: true,
+    confidence: 0.9,
+    cardReview: 'suggested',
+    whatItIs: null,
+    capabilities: [],
+    problemsSolved: [],
+    useWhen: [],
+    notFor: [],
+    howToTry: null,
+    integratesWith: [],
+    alternativesHint: [],
+    inspirationForFox: null,
+    risks: [],
+    license: null,
+    maturity: null,
+    zhFriendly: null,
+    keywords: [],
+    topics: [],
+    forksCount: 1,
+    readmeExcerpt: null,
+  };
+}
 
 function draft(): SolveDraft {
   return {
@@ -35,5 +74,21 @@ describe('找方案会话草稿：新任务与普通返回', () => {
     saveSolveDraft(draft());
     saveSolveDraft(null);
     expect(loadSolveDraft('')).toBeNull();
+  });
+
+  it('addDetailToSolveDraft：无草稿新建、已有追加、已选中提示重复', () => {
+    const d1 = detail('r1', 'acme/first');
+    const d2 = detail('r2', 'acme/second');
+
+    expect(addDetailToSolveDraft(d1)).toEqual({ mode: 'created' });
+    const created = loadSolveDraft('');
+    expect(created?.picked).toEqual(['r1']);
+    expect(created?.result.hits.map((h) => h.id)).toEqual(['r1']);
+
+    expect(addDetailToSolveDraft(d1)).toEqual({ mode: 'already' });
+    expect(addDetailToSolveDraft(d2)).toEqual({ mode: 'appended' });
+    const updated = loadSolveDraft('');
+    expect(updated?.picked).toEqual(['r1', 'r2']);
+    expect(updated?.result.hits.map((h) => h.id)).toEqual(['r1', 'r2']);
   });
 });

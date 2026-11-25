@@ -258,6 +258,10 @@ function AppContent() {
           <V2LibraryPage
             initialKeyword={libraryKeyword}
             initialPreset={libraryPreset}
+            onInitialConsumed={() => {
+              setLibraryKeyword('');
+              setLibraryPreset(null);
+            }}
             onOpenSolve={(query) => {
               setSolveQuestion(query);
               setCurrentPage('solve');

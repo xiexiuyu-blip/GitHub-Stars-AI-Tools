@@ -85,14 +85,14 @@ describe('SolveHitRow：找方案里的一行', () => {
     expect(markup).not.toContain('为什么相关');
   });
 
-  it('主参考旁边说明它是什么：Codex 会优先用它，其余是备选', () => {
+  it('主参考旁边说明它是什么：AI 助手会优先用它，其余是备选', () => {
     const main = render({ pressed: true, isMain: true });
     expect(main).toContain('主参考');
-    expect(main).toContain('Codex 会优先用它，其余是备选');
+    expect(main).toContain('AI 助手会优先用它，其余是备选');
     // 没勾的、或勾了但不是主参考的，不显示这句
-    expect(render({ pressed: false, isMain: true })).not.toContain('Codex 会优先用它');
+    expect(render({ pressed: false, isMain: true })).not.toContain('AI 助手会优先用它');
     const alternative = render({ pressed: true, isMain: false, withMakeMain: true });
-    expect(alternative).not.toContain('Codex 会优先用它');
+    expect(alternative).not.toContain('AI 助手会优先用它');
     expect(alternative).toContain('设为主参考');
   });
 

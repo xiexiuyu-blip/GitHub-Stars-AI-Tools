@@ -128,10 +128,10 @@ describe('资料库左栏：分组名和类型', () => {
     expect(textOf(rowOf(render([]), '应用'))).toBe('应用 1');
   });
 
-  it('长解释放进悬停提示（title）：技能包（给 AI 助手装的扩展）、命令行工具（要让 Codex 帮你装）；应用没有解释，就没有提示', () => {
+  it('长解释放进悬停提示（title）：技能包（给 AI 助手装的扩展）、命令行工具（可让 AI 助手帮你装）；应用没有解释，就没有提示', () => {
     const html = render([]);
     expect(rowOf(html, '技能')).toContain('title="技能包（给 AI 助手装的扩展）"');
-    expect(rowOf(html, '命令行')).toContain('title="命令行工具（要让 Codex 帮你装）"');
+    expect(rowOf(html, '命令行')).toContain('title="命令行工具（可让 AI 助手帮你装）"');
     expect(rowOf(html, '应用')).not.toContain('title=');
     expect(html).not.toContain('装进 Codex 用');
   });

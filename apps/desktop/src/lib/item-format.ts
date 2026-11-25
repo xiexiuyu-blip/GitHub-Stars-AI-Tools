@@ -278,7 +278,7 @@ export type ReadmeLoad =
  * 还没下载项目说明时，怎么补上。两个入口都核对过：顶栏的「同步」会把还没有项目说明的收藏下载下来
  * （后端同步里的项目说明跟进，没有缓存的排在最前面）；「设置 → GitHub」里有「下载项目说明」按钮。
  */
-export const README_DOWNLOAD_HOW = '点顶栏的「同步」，或到「设置 → GitHub」点「下载项目说明」，就会补上。';
+export const README_DOWNLOAD_HOW = '点顶栏的「同步」，或到「设置 → 账号与同步」点「下载项目说明」，就会补上。';
 
 /** 项目说明页：还没下载。 */
 export const README_NOT_DOWNLOADED_TITLE = '还没下载这个工具的项目说明。';
@@ -286,7 +286,7 @@ export const README_NOT_DOWNLOADED_TITLE = '还没下载这个工具的项目说
 /** 怎么试页：还没下载项目说明，所以找不到安装命令。 */
 export const INSTALL_NEEDS_README = `还没下载这个工具的项目说明，所以找不到安装命令。${README_DOWNLOAD_HOW}`;
 
-const HOW_NEXT_STEP = '点「打开 GitHub」看发行版或文档；也可以直接复制给 Codex，让它去读项目说明。';
+const HOW_NEXT_STEP = '点「打开 GitHub」看发行版或文档；也可以直接复制给 AI 助手，让它去读项目说明。';
 
 /**
  * 概览「怎么试」里没有现成命令时说什么。要分清三种情况，别都说成「项目说明里没写」：
@@ -355,9 +355,9 @@ export function maturityTagLabel(raw: string | null | undefined): string | null 
   return label ? `成熟度：${label}` : null;
 }
 
-/** 「复制给 Codex」的按钮字：资料库和今日的详情用安装那条，发现页用评估那条。页面都从这里引用，不要各写一份。 */
-export const COPY_INSTALL_BUTTON = '复制「帮我装好并试用」给 Codex';
-export const COPY_EVALUATE_BUTTON = '复制「帮我评估」给 Codex';
+/** 「复制给 AI 助手」的按钮字：资料库和今日的详情用安装那条，发现页用评估那条。页面都从这里引用，不要各写一份。 */
+export const COPY_INSTALL_BUTTON = '复制「帮我装好并试用」给 AI 助手';
+export const COPY_EVALUATE_BUTTON = '复制「帮我评估」给 AI 助手';
 
 /**
  * 详情底部「复制给 Codex」按钮上的字。所有类型都写「帮我装好并试用」，包括资源清单（form = collection，「合集」）：
@@ -375,10 +375,10 @@ export const COPY_FAILED_NOTICE = '没能自动复制，请手动选中后按 �
 export type CopyKind = 'install' | 'evaluate' | 'community';
 
 const COPIED_NOTICE: Record<CopyKind, string> = {
-  install: '已复制。粘到 Codex 后，它会先查你电脑上有没有，没有就装进独立文件夹，装完告诉你装在哪、怎么卸载。',
+  install: '已复制。粘给 AI 助手后，它会先查你电脑上有没有，没有就装进独立文件夹，装完告诉你装在哪、怎么卸载。',
   evaluate: '已复制。它只会读资料、给你结论，不会安装。',
-  // 只是让 Codex 去搜别人怎么用，不装东西，所以不能套用安装那一句
-  community: '已复制，去 Codex 里粘贴',
+  // 只是让 AI 助手去搜别人怎么用，不装东西，所以不能套用安装那一句
+  community: '已复制，去 AI 助手里粘贴',
 };
 
 /** 复制成功后的提示。粘出去的话让 Codex 做的事不一样，提示也不一样：会装软件的那种要说清楚。 */
@@ -402,7 +402,7 @@ export function redoConfirmCopy(wasConfirmed: boolean): {
   const extra = String(SINGLE_REDO_EXTRA_TRIES);
   let body = `让 AI 重新读一遍这个工具的项目说明，写一份新的中文说明，大约花 ${estimate} token。失败了会自动再试，最多再试 ${extra} 次，每次试都可能再花一点。`;
   if (wasConfirmed) {
-    body += '你之前点过「对」，重新整理后会换成新的说明，需要你再看一眼。';
+    body += '你之前已确认过这条说明，重新整理后会换成新的说明，需要你再看一眼。';
   }
   return {
     title: '重新整理这一张？',

@@ -92,14 +92,14 @@ describe('怎么试页：让 Codex 帮你装', () => {
 
   it('界面上讲清粘出去会发生什么：先查有没有、直接装进独立文件夹、要管理员密码 / 付费 / 登录会先问', () => {
     const text = textOf(renderToStaticMarkup(<InstallPanel {...props} />));
-    expect(text).toContain('让 Codex 帮你装');
-    expect(text).toContain('复制一段话，粘给 Codex：它会先查你电脑上有没有、装在哪、要不要花钱；没有风险就直接装进独立文件夹，装完告诉你装了什么、怎么卸载。遇到要管理员密码、要付费或登录的情况，会先停下来问你。');
+    expect(text).toContain('让 AI 助手帮你装');
+    expect(text).toContain('复制一段话，粘给 AI 助手：它会先查你电脑上有没有、装在哪、要不要花钱；没有风险就直接装进独立文件夹，装完告诉你装了什么、怎么卸载。遇到要管理员密码、要付费或登录的情况，会先停下来问你。');
     expect(text).not.toContain('先读 README、告诉你要改动什么');
   });
 
-  it('没有下载项目说明时，说清为什么找不到命令、怎么补上（顶栏的「同步」，或「设置 → GitHub」里的「下载项目说明」）；用「项目说明」不用「README 缓存」', () => {
+  it('没有下载项目说明时，说清为什么找不到命令、怎么补上（顶栏的「同步」，或「设置 → 账号与同步」里的「下载项目说明」）；用「项目说明」不用「README 缓存」', () => {
     const text = textOf(renderToStaticMarkup(<InstallPanel {...props} />));
-    expect(text).toContain('还没下载这个工具的项目说明，所以找不到安装命令。点顶栏的「同步」，或到「设置 → GitHub」点「下载项目说明」，就会补上。');
+    expect(text).toContain('还没下载这个工具的项目说明，所以找不到安装命令。点顶栏的「同步」，或到「设置 → 账号与同步」点「下载项目说明」，就会补上。');
     expect(text).not.toContain('缓存');
     // 原来指错了地方：自动整理与备份里没有下载项目说明的入口
     expect(text).not.toContain('自动整理与备份');
@@ -121,7 +121,7 @@ describe('怎么试页：让 Codex 帮你装', () => {
       <InstallPanel {...props} readme={{ state: 'ready', readme: { rawMarkdown: '# tool', sourcePath: 'README.md' } }} />,
     ));
     expect(downloaded).not.toContain('下载安装包');
-    expect(downloaded).toContain('让 Codex 帮你装');
+    expect(downloaded).toContain('让 AI 助手帮你装');
   });
 
   it('找到了安装包 / 发行版的迹象就显示；有命令、没有安装包的迹象时不显示', () => {
@@ -160,11 +160,11 @@ describe('怎么试页：让 Codex 帮你装', () => {
   });
 });
 
-describe('社区页：让 Codex 去查别人怎么用', () => {
-  it('点「复制给 Codex」交出来的是查资料的话，标明是 community：它不装东西，不能套用安装类的提示', () => {
+describe('社区页：让 AI 助手去查别人怎么用', () => {
+  it('点「复制给 AI 助手」交出来的是查资料的话，标明是 community：它不装东西，不能套用安装类的提示', () => {
     const copied: { text: string; kind: string }[] = [];
     const tree = CommunityPanel({ detail: DETAIL, scenarioName: '小红书', onCopyPrompt: (text, kind) => copied.push({ text, kind }) });
-    const copy = buttonsIn(tree).filter((button) => button.label === '复制给 Codex');
+    const copy = buttonsIn(tree).filter((button) => button.label === '复制给 AI 助手');
     expect(copy).toHaveLength(1);
     copy[0].onClick?.();
     expect(copied).toHaveLength(1);
@@ -175,9 +175,9 @@ describe('社区页：让 Codex 去查别人怎么用', () => {
 });
 
 describe('项目说明页', () => {
-  it('还没下载时，说清楚、并给出真实存在的两个入口：顶栏的「同步」，或「设置 → GitHub」里的「下载项目说明」', () => {
+  it('还没下载时，说清楚、并给出真实存在的两个入口：顶栏的「同步」，或「设置 → 账号与同步」里的「下载项目说明」', () => {
     const text = textOf(renderToStaticMarkup(<ReadmePanel detail={DETAIL} readme={NO_README} />));
-    expect(text).toContain('还没下载这个工具的项目说明。 点顶栏的「同步」，或到「设置 → GitHub」点「下载项目说明」，就会补上。');
+    expect(text).toContain('还没下载这个工具的项目说明。 点顶栏的「同步」，或到「设置 → 账号与同步」点「下载项目说明」，就会补上。');
     expect(text).not.toContain('缓存');
     // 原来写的是「设置 → 自动整理与备份」里会自动下载：指错了地方，也是半截句
     expect(text).not.toContain('自动整理与备份');
@@ -202,7 +202,7 @@ describe('预览页', () => {
     const html = renderToStaticMarkup(<PreviewPanel detail={DETAIL} readme={NO_README} images={NO_IMAGES} />);
     const text = textOf(html);
     expect(text).toContain('还没下载项目说明，暂时看不到截图。');
-    expect(text).toContain('点顶栏的「同步」，或到「设置 → GitHub」点「下载项目说明」，就会补上。');
+    expect(text).toContain('点顶栏的「同步」，或到「设置 → 账号与同步」点「下载项目说明」，就会补上。');
     expect(text).not.toContain('项目说明里没有截图');
     // 没下载时，「这个工具没有放界面或效果图」「切到项目说明读原文」都不成立
     expect(text).not.toContain('没有放界面或效果图');

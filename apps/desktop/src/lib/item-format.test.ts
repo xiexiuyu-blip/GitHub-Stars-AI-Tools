@@ -560,10 +560,10 @@ describe('灵感里的 Fox 显示成你', () => {
   });
 });
 
-describe('复制给 Codex 之后的提示（按钮上的字见详情页和发现页卡片的渲染测试）', () => {
+describe('复制给 AI 助手之后的提示（按钮上的字见详情页和发现页卡片的渲染测试）', () => {
   it('复制成功的提示：装软件的那种说清装在哪、怎么卸载；只评估的说明不会安装', () => {
     const install = copiedNotice('install');
-    expect(install).toBe('已复制。粘到 Codex 后，它会先查你电脑上有没有，没有就装进独立文件夹，装完告诉你装在哪、怎么卸载。');
+    expect(install).toBe('已复制。粘给 AI 助手后，它会先查你电脑上有没有，没有就装进独立文件夹，装完告诉你装在哪、怎么卸载。');
     expect(install).toContain('装进独立文件夹');
     expect(install).toContain('怎么卸载');
     const evaluate = copiedNotice('evaluate');
@@ -572,9 +572,9 @@ describe('复制给 Codex 之后的提示（按钮上的字见详情页和发现
     expect(evaluate).not.toContain('卸载');
   });
 
-  it('让 Codex 去查别人怎么用不装东西，提示不能说「会装进独立文件夹」', () => {
+  it('让 AI 助手去查别人怎么用不装东西，提示不能说「会装进独立文件夹」', () => {
     const community = copiedNotice('community');
-    expect(community).toBe('已复制，去 Codex 里粘贴');
+    expect(community).toBe('已复制，去 AI 助手里粘贴');
     expect(community).not.toContain('装进');
     expect(community).not.toContain('卸载');
   });
@@ -603,13 +603,13 @@ describe('重新整理这一张：确认文案', () => {
     expect(SINGLE_REDO_EXTRA_TRIES).toBe(2);
   });
 
-  it('点过「对」才加上需要再看一眼那一句', () => {
+  it('确认过的才加上需要再看一眼那一句', () => {
     const copy = redoConfirmCopy(true);
     expect(copy.title).toBe('重新整理这一张？');
     expect(copy.confirmLabel).toBe('确认，重新整理');
     expect(copy.cancelLabel).toBe('先不了');
     expect(copy.body.startsWith(baseBody)).toBe(true);
-    expect(copy.body).toContain('你之前点过「对」，重新整理后会换成新的说明，需要你再看一眼。');
+    expect(copy.body).toContain('你之前已确认过这条说明，重新整理后会换成新的说明，需要你再看一眼。');
   });
 
   it('开始之后的提示', () => {
@@ -639,7 +639,7 @@ describe('项目说明还没下载时：怎么试 / 预览 / 项目说明三处�
 
   it('概览「怎么试」：已经下载、里面确实没写 → 保留原来那句', () => {
     const note = noInstallStepsNote(DOWNLOADED);
-    expect(note).toBe('项目说明里没有现成的安装步骤。点「打开 GitHub」看发行版或文档；也可以直接复制给 Codex，让它去读项目说明。');
+    expect(note).toBe('项目说明里没有现成的安装步骤。点「打开 GitHub」看发行版或文档；也可以直接复制给 AI 助手，让它去读项目说明。');
     expect(note).not.toContain('还没下载');
   });
 
@@ -654,7 +654,7 @@ describe('项目说明还没下载时：怎么试 / 预览 / 项目说明三处�
   it('预览页：还没下载 → 「还没下载项目说明，暂时看不到截图。」；已经下载、里面没有图 → 保留原来那句', () => {
     expect(noScreenshotsNote(false)).toEqual({
       title: '还没下载项目说明，暂时看不到截图。',
-      description: '点顶栏的「同步」，或到「设置 → GitHub」点「下载项目说明」，就会补上。',
+      description: '点顶栏的「同步」，或到「设置 → 账号与同步」点「下载项目说明」，就会补上。',
     });
     expect(noScreenshotsNote(true)).toEqual({
       title: '项目说明里没有截图',
@@ -664,8 +664,8 @@ describe('项目说明还没下载时：怎么试 / 预览 / 项目说明三处�
 
   it('项目说明页和怎么试页：指到真实存在的入口，不再指「设置 → 自动整理与备份」，也没有半截句', () => {
     expect(README_NOT_DOWNLOADED_TITLE).toBe('还没下载这个工具的项目说明。');
-    expect(README_DOWNLOAD_HOW).toBe('点顶栏的「同步」，或到「设置 → GitHub」点「下载项目说明」，就会补上。');
-    expect(INSTALL_NEEDS_README).toBe('还没下载这个工具的项目说明，所以找不到安装命令。点顶栏的「同步」，或到「设置 → GitHub」点「下载项目说明」，就会补上。');
+    expect(README_DOWNLOAD_HOW).toBe('点顶栏的「同步」，或到「设置 → 账号与同步」点「下载项目说明」，就会补上。');
+    expect(INSTALL_NEEDS_README).toBe('还没下载这个工具的项目说明，所以找不到安装命令。点顶栏的「同步」，或到「设置 → 账号与同步」点「下载项目说明」，就会补上。');
     for (const text of [README_NOT_DOWNLOADED_TITLE, README_DOWNLOAD_HOW, INSTALL_NEEDS_README, noScreenshotsNote(false).description]) {
       expect(text).not.toContain('自动整理与备份');
       expect(text).not.toContain('自动下载');
@@ -674,9 +674,9 @@ describe('项目说明还没下载时：怎么试 / 预览 / 项目说明三处�
   });
 });
 
-describe('copyButtonLabel：详情底部「复制给 Codex」按钮上的字', () => {
+describe('copyButtonLabel：详情底部「复制给 AI 助手」按钮上的字', () => {
   it('合集（资源清单）也写「帮我装好并试用」：粘出去的话是「装好并试用」那一套，按钮不能和它说的不一样', () => {
-    expect(copyButtonLabel('collection')).toBe('复制「帮我装好并试用」给 Codex');
+    expect(copyButtonLabel('collection')).toBe('复制「帮我装好并试用」给 AI 助手');
     expect(copyButtonLabel(' collection ')).toBe(COPY_INSTALL_BUTTON);
   });
 
@@ -684,7 +684,7 @@ describe('copyButtonLabel：详情底部「复制给 Codex」按钮上的字', (
     for (const form of ['skill', 'mcp', 'cli', 'app', 'library', 'api', 'service', 'other', '', '  ', null, undefined, 'template']) {
       expect(copyButtonLabel(form), String(form)).toBe(COPY_INSTALL_BUTTON);
     }
-    expect(COPY_INSTALL_BUTTON).toBe('复制「帮我装好并试用」给 Codex');
+    expect(COPY_INSTALL_BUTTON).toBe('复制「帮我装好并试用」给 AI 助手');
   });
 });
 
