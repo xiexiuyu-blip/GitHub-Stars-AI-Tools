@@ -1,7 +1,8 @@
 <div align="center">
   <img src="apps/desktop/public/icon.png" alt="Fox Stars Lab 应用图标" width="128" />
   <h1>Fox Stars Lab</h1>
-  <p><strong>本地优先的开源项目情报库 + AI 工具选型工作台。</strong></p>
+  <p><strong>本地优先的 GitHub Stars 开源项目情报库与 AI 工具选型工作台</strong></p>
+  <p>收进来 · 看得懂 · 找得到 · 选得准 · 交出去给 AI 用</p>
   <p>
     <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-PolyForm%20Noncommercial%201.0.0-111827?style=for-the-badge" /></a>
     <a href="https://tauri.app/"><img alt="Tauri" src="https://img.shields.io/badge/Tauri-2-24C8DB?style=for-the-badge&logo=tauri&logoColor=white" /></a>
@@ -10,118 +11,82 @@
   </p>
 </div>
 
-## Fox 个人版说明
+> **当前版本**：`2.1.0-fox.1` ｜ **默认主分支**：`main`（日常开发与发版基线）
 
-Fox Stars Lab 是 Fox 基于 `fox-product-lab` 分支长期使用的个人定制版，不再和原版 GitHub-Stars-AI-Tools 共用应用身份。
+Fox Stars Lab 基于 Tauri 2 + React 19 + Rust + SQLite 构建，围绕真实研发与效率选型场景演进，把“随手点的 GitHub Stars 和群聊/网页链接”沉淀为可检索、可对比、可直接生成 AI 助手交接单的本机情报库。
 
-- 应用显示名 / 窗口标题：`Fox Stars Lab`
-- Bundle ID：`com.foxwork.fox-stars-lab`
-- App Bundle：`Fox Stars Lab.app`
-- DMG 文件名：`Fox-Stars-Lab_<version>.dmg`
-- 数据目录 / 配置目录：由 Tauri 解析为系统基础目录下的 `com.foxwork.fox-stars-lab` 子目录，macOS 通常为 `~/Library/Application Support/com.foxwork.fox-stars-lab/`
-- 本地数据库：`fox-stars-lab.sqlite3`
-- 设置文件：`fox-stars-lab.settings.json`
-- 系统凭据服务名：`fox-stars-lab`
+---
 
-应用内可在“设置 → 通用设置 → Fox Stars Lab”查看当前 Bundle ID、数据目录、配置目录、数据库路径、设置文件路径、凭据服务名和更新地址。
+## 一、核心工作台（2.1 现行结构）
 
-这个分支面向个人使用，不需要按上游合并取舍；通用 bug 修复后续可以再拆 PR 回上游。
+应用主界面收敛为 **5 大核心工作台 + 单层 6 页签设置**，无多余嵌套入口：
 
-## 长期定位
+| 入口 | 核心职责 |
+|---|---|
+| **今日** | 展示需要优先关注与“值得先看”的收藏、整理进度与待办入口 |
+| **资料库** | 按业务场景、我的状态（没看 / 想试 / 试过 / 在用 / 不要了）、中文说明状态、形态、维护状态多维筛选与排序；支持 `↑/↓` 与 `J/K` 导航、切页状态保持、查看/确认中文说明及一键「加入当前方案」 |
+| **找方案** | 任务驱动检索：描述要解决的事（如“把群聊记录整理成日报”），结合本地匹配、维护状态提醒与可选 AI 精选，一键生成可直接复制给 Claude / Codex 等 AI 助手的**任务交接单**（Markdown / AGENTS.md / JSON） |
+| **发现** | **热门趋势**（GitHub 今日飙升 / 本周热门 / 7 天新锐 / 30 天黑马 / HN Show 热门）、**自由搜索**（关键词 + 时间窗口 + 排序 + 语言）与 **按场景补缺**（经典高星 + 近 90 天新锐），支持复用已连接 GitHub 令牌 |
+| **收集** | 整段群聊/帖子粘贴抽取 GitHub / 网页链接、抓取标题摘要、提取文中提及的 GitHub 项目，并支持通过本机 HTTP 接口接收外部投递 |
+| **设置** | 单层 6 页签：**账号与同步** / **AI 设置** / **自动整理** / **备份与导出** / **外部连接** / **外观与关于** |
 
-Fox Stars Lab 不再只是“GitHub Stars 管理器”。它面向 Fox 的真实工作流：把收藏过的开源项目转成可找回、可判断、可比较、可沉淀、可跟踪、可复用的本地情报库，重点服务 AI 编码代理、Agent Skills、多智能体、知识库、MCP、RAG、桌面应用等工具研究和选型场景。
+---
 
-当前优先方向是可靠性升级 v1.1：AI 请求诊断、批处理任务追踪、长 README 分块摘要、OpenAI 兼容模型适配、标签网络稳定性、本地数据备份/恢复。随后推进知识质量、搜索选型、项目雷达和生态连接能力。
+## 二、设计特性与边界
 
-完整路线见 [docs/fox-stars-lab-roadmap.md](docs/fox-stars-lab-roadmap.md)。
+- **本地优先与凭据隔离**：收藏仓库、README 缓存、中文说明、笔记与收集箱全量保存在本机 SQLite（迁移 `001–039`）；GitHub 令牌与 AI 密钥写入系统钥匙串，不落明文配置。
+- **AI 预算硬闸门**：`dailyBudgetTokens` 默认为 `0`（不自动花钱）。除用户在界面显式确认的「一次性全部整理」与「重新整理这一张」外，所有 AI 调用受滚动 24 小时额度闸门限制；无额度时资料库检索、收集、找方案基础匹配与交接单导出照常可用。
+- **安全与只读兼容**：不可信网页/README 解析采用线性有限状态逻辑与安全切分；开发版（`com.foxwork.fox-stars-lab.dev`）与正式版（`com.foxwork.fox-stars-lab`）数据目录与钥匙串完全隔离。
 
-| 项目介绍 | 项目介绍 |
-| --- | --- |
-| ![AI 搜索正在分阶段筛选仓库](docs/images/ai-search-filtering.png) | ![本地向量检索设置](docs/images/vector-search-settings.png) |
-| ![GitHub-Stars-AI-Tools 首页](https://img1.tucang.cc/api/image/show/be56ddb20e18515e7f11c8586bf5eb86) | ![GitHub-Stars-AI-Tools 发现页](https://img1.tucang.cc/api/image/show/0c9f4a0d7d2f0ea942dcb92bd98cc07f) |
-| ![GitHub-Stars-AI-Tools 排行榜页](https://img1.tucang.cc/api/image/show/bacb1108cf5c9bf7d6a0b73c52888111) | ![GitHub-Stars-AI-Tools 个人主页](https://img1.tucang.cc/api/image/show/9287046286bfccd34e263bcaf10252a1) |
-| ![GitHub-Stars-AI-Tools 搜索聊天页](https://img1.tucang.cc/api/image/show/0380a0d41ecd1cc6cb045a7701f7d8c7) | ![GitHub-Stars-AI-Tools 知识库页](https://img1.tucang.cc/api/image/show/b32c3cb323e3b481d07639dce838269e) |
-| ![GitHub-Stars-AI-Tools 标签页](https://img1.tucang.cc/api/image/show/6c91135f727ce93635cf72e850a0c74c) | ![GitHub-Stars-AI-Tools 设置页](https://img1.tucang.cc/api/image/show/fc31ace9237345be6766ed212427daf8) |
+---
 
-## 适合谁
+## 三、项目全景文档地图
 
-- GitHub Stars 很多，经常想不起某个项目到底解决什么问题的人。
-- 希望把 README、标签、笔记和 AI 摘要沉淀到本机的人。
-- 想用自然语言搜索收藏项目，并继续追问“怎么用、怎么部署、适合什么场景”的人。
-- 想整理技术栈偏好、标签网络和相似项目的人。
+无论是新加入的团队同事、开源贡献者还是 AI 协作者，建议从以下 **现行唯一真源文档** 快速建立全局认知：
 
-## 核心能力
+| 文档 | 内容定位 |
+|---|---|
+| [文档总目录](docs/README.md) | 区分**现行真源 / 运维规范 / 版本日志 / 历史归档**的索引总览 |
+| [产品全景说明](docs/PRODUCT.md) | 产品演进脉络、核心用户旅程、六大模块详述、预算门禁与边界定义 |
+| [代码与技术架构](docs/ARCHITECTURE.md) | Monorepo 目录职责、前后端 IPC 与数据流、SQLite 迁移、`include_str!` 约束与本地 API 契约 |
+| [后续开发路线图](docs/ROADMAP.md) | 下一阶段演进顺序（检索核心与 MCP 只读接入 → 应用内收藏问答 RAG → 体验精修与跨平台发布） |
+| [开发者上手与交接](docs/HANDOFF.md) | Day-1 环境搭建、dev 隔离启动、统一测试命令矩阵与正式版 D2 原地升级流程 |
+| [2.1.0-fox.1 发布日志](docs/releases/v2.1.0-fox.1.md) | 2.0 重建至 2.1.0-fox.1 完整变更汇总与验证口径 |
+| [视觉与文案规范](apps/desktop/DESIGN.md) | 色彩/排版/组件设计令牌与设置页文案写法规范 |
 
-| 能力 | 说明 |
-| --- | --- |
-| Stars 本地知识库 | 同步 GitHub Stars 到本机 SQLite，保留仓库元数据、Topics、语言、README、标签、笔记和选型状态 |
-| README 解析 | 缓存 README，并生成中文摘要、关键词、建议标签和项目知识卡 |
-| 本地向量检索 | 首次启用时下载中英双语 Embedding 模型，通过 SQLite 与 zvec 在本机完成语义召回，下载后可离线检索 |
-| 聊天式 AI 搜索 | 像对话一样描述需求，先从本地向量索引召回候选，再由 AI 筛选并同步生成回答和最终仓库列表 |
-| 搜索结果解释 | 每个结果展示匹配原因、命中字段、README 片段和可继续追问的操作 |
-| AI 标签网络 | 根据收藏仓库生成标签建议和项目关联，帮助整理技术栈 |
-| 相似项目发现 | 基于已收藏项目生成 GitHub Search 策略，发现替代项目或同类项目 |
-| 个人知识画像 | 展示收藏趋势、语言偏好、最近收藏、AI 摘要字数和用量概览 |
-| 注解同步 | 通过私密 Gist 导出和导入标签、笔记、选型状态等个人注解 |
+---
 
-## 最近更新
+## 四、快速开始
 
-- 向量检索新增独立设置页：首次启用会确认并下载本地中英双语模型，展示下载、校验、加载和建库进度。
-- AI 搜索先召回最多 30 个向量候选，再由 AI 筛选 0 到 10 个最终结果；回答和右侧仓库列表保持一致。
-- 搜索过程中展示理解问题、向量召回、核对证据和 AI 筛选阶段，未经确认的候选不会提前显示。
-- README AI 解析改为增量处理，只更新缺少摘要或 README 内容已经变化的仓库。
-- AI 设置新增常用预设：OpenAI、Anthropic、OpenRouter、DeepSeek、Moonshot/Kimi、通义 Qwen、智谱 GLM、硅基流动、Ollama、LM Studio 和自定义 OpenAI 兼容接口。
-- 主题系统支持品牌色、字号和图标联动，应用图标、主要按钮、导航状态和图表颜色会跟随主题色变化。
-- 顶部快捷面板支持常用任务入口，通知面板和快捷面板支持点击空白处关闭。
-- 应用内更新支持启动静默检查、设置页手动检查、下载进度和安装后重启。
+### 桌面端使用（最终用户）
 
-## 快速开始
+- 系统要求：macOS 10.15+（当前主构建为 Apple Silicon）、Windows 10+ 或 Linux（安装包用户无需 Node.js / Rust）。
+- 上手流程：启动应用 → 设置中连接 GitHub Personal Access Token → 同步 Stars 与缓存 README → 按需在「AI 设置」配置服务商并设定每日额度。
+- **macOS 临时签名放行提示**：本地构建或未公证的测试安装包首次打开时，系统可能提示无法验证开发者。可在终端执行 `xattr -dr com.apple.quarantine "/Applications/Fox Stars Lab.app"` 后打开；若替换本地重编包，macOS 钥匙串首次读取凭据会提示一次授权，选择「始终允许」即可。
 
-系统要求：macOS 10.15+、Windows 10+ 或 Linux。安装包用户无需安装 Node.js、pnpm 或 Rust。
+### 开发者本地运行与验证
 
-1. 安装并启动 Fox Stars Lab。
-2. 在欢迎页或设置页连接 GitHub Personal Access Token。
-3. 点击“同步 Stars”，把收藏仓库写入本机数据库。
-4. 点击“抓取 README”，缓存仓库详情。
-5. 可选：在设置页配置 AI 服务，生成摘要、标签网络、AI 搜索解释和相似项目推荐。
-
-### macOS 首次打开提示
-
-当前 macOS 安装包暂未使用 Apple Developer ID 签名，首次打开时可能提示“移动到废纸篓”或“无法打开”。这是系统 Gatekeeper 对未签名应用的拦截，不代表应用损坏。
-
-建议优先使用 Finder 放行：将应用安装到“应用程序”后，在 Finder 中按住 Control 点击 `Fox Stars Lab.app`，选择“打开”，再在系统确认弹窗中继续打开。
-
-如果仍然无法打开，可以在终端移除隔离属性后再启动：
+环境要求：**Node.js >= 24**、**pnpm >= 11**、**Rust 工具链**（`cargo` / `rustfmt`）。
 
 ```bash
-xattr -dr com.apple.quarantine "/Applications/Fox Stars Lab.app"
+# 1. 启动隔离开发版（加载 dev 身份，不触碰正式库）
+COREPACK_HOME="$PWD/.corepack" pnpm dev:desktop
+
+# 2. 统一构建与回归验证入口（自动隔离网络与环境）
+tools/cards/run.sh web-build     # 共享包 + 前端类型检查与 Vite 构建
+tools/cards/run.sh web-test      # 前端 Vitest 单元测试（含文案守卫）
+tools/cards/run.sh rust-fmt      # Rust 代码格式检查
+tools/cards/run.sh rust-test     # Rust 全量单元测试（沙盒外排除 1 条钥匙串用例）
+tools/cards/run.sh script-test   # 发布门禁脚本测试
+tools/cards/run.sh ui-test       # Playwright 隔离端到端验收（见 tools/dev-ui/README.md）
 ```
 
-如果提示权限不足，再使用 `sudo` 重新执行同一命令。建议只安装来自本项目 GitHub Release 的安装包。
+> 请勿直接运行 `pnpm tauri dev`：该命令使用正式版 Bundle ID，会在调试期命中安全防护并退出。详细开发规范见 [CLAUDE.md](CLAUDE.md)、[AGENTS.md](AGENTS.md) 与 [docs/HANDOFF.md](docs/HANDOFF.md)。
 
-## AI 服务
+---
 
-FSL 支持 OpenAI、Anthropic 和 OpenAI 兼容接口。你可以直接选择常用提供商预设，也可以手动填写自定义 Base URL 和模型 ID。
+## 五、许可证
 
-本机服务如 Ollama、LM Studio 可不填写 API Key；云端服务的 API Key 会保存到系统凭据管理器。
+本项目采用 [PolyForm Noncommercial License 1.0.0](LICENSE)。源码可用于个人学习、研究、非营利组织和非商业用途；涉及公司商业使用、商业再分发或商业产品集成前，须先核实并取得对应授权，同时保留原始许可证声明。
 
-## 数据与隐私
-
-- GitHub Token 和 AI API Key 保存到系统凭据管理器，不写入 localStorage。
-- Stars、README、标签、笔记和 AI 文档保存在本机数据库。
-- AI 功能只有在你主动配置并使用时才会请求对应服务。
-- Gist 同步使用私密 Gist，仅包含标签、笔记、选型状态等用户注解数据。
-
-## 应用更新
-
-应用启动时会静默检查新版本；发现更新后会在应用内提示。你也可以在“设置 → 通用设置 → 应用更新”手动检查、安装并重启。
-
-更新日志见 [docs/releases](docs/releases)。
-
-## 许可证
-
-本项目采用 [PolyForm Noncommercial License 1.0.0](LICENSE)。源码可用于个人学习、研究、非营利组织和非商业场景；商业使用、商业再分发或商业产品集成需要先获得书面授权。
-
-## 致谢
-
-感谢 [Tauri](https://tauri.app/)、[React](https://react.dev/)、[Rust](https://www.rust-lang.org/)、[SQLite](https://www.sqlite.org/)、[pnpm](https://pnpm.io/) 以及相关开源生态。
+感谢 [Tauri](https://tauri.app/)、[React](https://react.dev/)、[Rust](https://www.rust-lang.org/)、[SQLite](https://www.sqlite.org/) 与相关开源社区项目。

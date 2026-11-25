@@ -1,205 +1,106 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance to Claude Code (claude.ai/code) and human/AI contributors when working in this repository.
 
-**多个 AI 协作开发本仓库（执行者按 Fox 确认的分配单：Grok / GLM / Codex 等；Claude 总控审核）。先读 `AGENTS.md`（红线）、`docs/rebuild/命令契约.md`、`docs/rebuild/接手说明.md`，再动手。**
+**开始编码前，请先阅读 [docs/README.md](docs/README.md)、[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)、[docs/HANDOFF.md](docs/HANDOFF.md) 与 [AGENTS.md](AGENTS.md)。**
+
+---
 
 ## 项目概述
 
-这是一个基于 Tauri 2 的本地优先 GitHub Stars 管理桌面应用，采用 pnpm monorepo 架构。核心能力包括：GitHub Stars 同步到本地 SQLite、README 抓取与缓存、AI 中文摘要生成、自然语言搜索、标签与笔记管理、Gist 注解同步。
+Fox Stars Lab（当前版本 `2.1.0-fox.1`）是一个基于 Tauri 2 + React 19 + Rust + SQLite 的本地优先 GitHub Stars 开源项目情报库与 AI 工具选型工作台，采用 pnpm monorepo 架构。完整产品设计与边界见 [docs/PRODUCT.md](docs/PRODUCT.md)。
+
+---
 
 ## 环境要求
 
-- Node.js >= 24
-- pnpm >= 11
-- Rust (用于 Tauri 后端)
+- Node.js `>= 24`
+- pnpm `>= 11`
+- Rust 稳定版（`cargo`、`rustc`、`rustfmt`）
 - SQLite 3
 - macOS 需要 Xcode Command Line Tools
 
-所有命令必须设置 `COREPACK_HOME="$PWD/.corepack"` 前缀。
+所有 pnpm 命令须使用仓库内置离线配置前缀：`COREPACK_HOME="$PWD/.corepack"`（或直接调用 `tools/cards/run.sh`）。
+
+---
 
 ## 常用命令
 
 ### 开发与启动
 
 ```bash
-# 启动开发版桌面应用。必须用这条，会加载 dev 身份，不会打开正式库。
+# 启动开发版桌面应用（使用 com.foxwork.fox-stars-lab.dev 隔离身份，不碰正式库）
 COREPACK_HOME="$PWD/.corepack" pnpm dev:desktop
 
-# 仅启动前端开发服务器（无桌面能力）
+# 仅启动前端 Vite 开发服务器（无桌面后端能力）
 COREPACK_HOME="$PWD/.corepack" pnpm dev
 ```
 
-不要用 `pnpm tauri dev`。那条命令仍是正式 bundle id，debug 构建会被启动检查直接退出。
+> 不要用 `pnpm tauri dev`：它加载正式版 Bundle ID，debug 构建会被 `dev_guard.rs` 直接拒绝退出。
 
-### 构建与检查
+### 构建与自动化验收（推荐入口）
 
 ```bash
-# 完整构建流程
-COREPACK_HOME="$PWD/.corepack" pnpm build:packages  # 构建共享包
-COREPACK_HOME="$PWD/.corepack" pnpm build           # 构建桌面应用
-
-# Rust 后端检查
-cargo fmt --manifest-path "$PWD/apps/desktop/src-tauri/Cargo.toml" --check
-cargo check --manifest-path "$PWD/apps/desktop/src-tauri/Cargo.toml"
-
-# Rust 格式化修复
-cargo fmt --manifest-path "$PWD/apps/desktop/src-tauri/Cargo.toml"
+tools/cards/run.sh web-build     # 构建 packages/* 与桌面前端（tsc + vite build）
+tools/cards/run.sh web-test      # 前端 Vitest 单元测试（含文案守卫 old-terms.test.ts）
+tools/cards/run.sh rust-fmt      # 检查 Rust 代码格式（修复可用 rust-fmt-fix）
+tools/cards/run.sh rust-check    # Rust 后端编译检查
+tools/cards/run.sh rust-test     # Rust 后端全量单测（排除 1 条依赖系统钥匙串的用例）
+tools/cards/run.sh script-test   # 发布门禁脚本测试（tools/cards/release_test.py）
+tools/cards/run.sh ui-test       # Playwright 隔离端到端验收（用法见 tools/dev-ui/README.md）
 ```
 
 ### 打包
 
 ```bash
-# 生成安装包
-COREPACK_HOME="$PWD/.corepack" pnpm tauri build
-
-# 查看打包产物
-open apps/desktop/src-tauri/target/release/bundle/
+COREPACK_HOME="$PWD/.corepack" pnpm package:desktop
+COREPACK_HOME="$PWD/.corepack" pnpm package:desktop:dmg
 ```
 
-### 提交前检查顺序
-
-```bash
-COREPACK_HOME="$PWD/.corepack" pnpm build:packages
-COREPACK_HOME="$PWD/.corepack" pnpm build
-cargo fmt --manifest-path "$PWD/apps/desktop/src-tauri/Cargo.toml" --check
-cargo check --manifest-path "$PWD/apps/desktop/src-tauri/Cargo.toml"
-```
+---
 
 ## 架构概览
 
-### Monorepo 结构
-
-```
-apps/desktop/              # Tauri 桌面应用（React + Vite 前端 + Rust 后端）
-  src/                     # React 前端代码
-    features/              # 按功能模块拆分：repositories、knowledge、sidebar
-  src-tauri/               # Rust 后端
-    src/
-      lib.rs               # Tauri 命令注册
-      auth.rs              # GitHub Token 本地存储（macOS Keychain）
-      github.rs            # GitHub API 调用
-      storage.rs           # SQLite 操作封装
-
-packages/domain/           # 领域类型定义（TypeScript）
-packages/storage/          # SQLite Schema 与初始化脚本
-  migrations/              # SQL Schema 文件（如 001_initial_schema.sql）
-packages/github/           # GitHub API 接入边界
-packages/ai/               # AI Provider 抽象层
-packages/search/           # 搜索 DSL 与查询结构
-packages/worker/           # 同步、README 缓存与 AI 摘要任务编排
+```text
+apps/desktop/
+  src/
+    pages/v2/          # 五大业务工作台：today / library / solve / discover / capture
+    pages/settings/    # 单层 6 页签设置模块：github / ai / organize / backup / connect / general
+    components/        # UI 基础件（kit / ui）与业务展示组件
+    lib/               # 契约（contracts.ts / api.ts）、纯视图逻辑与 old-terms 文案守卫
+    hooks/             # 复用 Hooks（键盘导航、自动整理轮询、单张重写、README 缓存失效）
+    features/          # 上游兼容遗留组件（新界面统一落在 pages/v2 与 pages/settings）
+  src-tauri/src/       # Rust 后端：auth / db/migrations / card_pipeline / jobs / spend_guard / solve / discover* / local_api
+packages/{ai,domain,github,search,storage,worker}/
 ```
 
-### 数据流与职责边界
+更完整的模块索引、IPC/本地 HTTP 接口契约与 `include_str!` 内嵌文件路径约束见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
 
-1. **前端 (React)**: 用户交互、状态管理、调用 Tauri 命令
-2. **Tauri 命令 (Rust)**: 安全沙箱层，处理 GitHub Token、SQLite 读写、系统调用
-3. **共享包 (TypeScript)**: 跨前后端的类型定义与业务逻辑
-4. **SQLite**: 本地事实数据存储（仓库元信息、README、AI 摘要、标签、用户注解）
+---
 
-### 关键领域模型 (packages/domain)
+## 核心工程约定
 
-- `RepositoryFacts`: GitHub 仓库元信息（owner、name、stars、topics、syncStatus）
-- `RepositoryAnnotation`: 用户注解层（tags、notes、readStatus）
-- `ReadmeDocument`: README 原始 Markdown 与缓存元信息
-- `AiRepositoryDocument`: AI 生成的中文摘要、关键词、建议标签
-- `RepoQuery`: 统一查询结构，支持 keyword、natural_language、hybrid 三种模式
+### 1. 数据隔离与凭据安全
 
-### Tauri 命令边界
+- 开发只使用 dev 身份：`com.foxwork.fox-stars-lab.dev`（产品名 `Fox Stars Lab Dev`，Keychain 服务名 `fox-stars-lab-dev`）。
+- 正式数据目录 `~/Library/Application Support/com.foxwork.fox-stars-lab/` 与系统钥匙串仅由正式版 App 与用户本人管理，开发或测试代码严禁读取或修改；正式版升级严格遵循 [docs/rebuild/切库清单.md](docs/rebuild/切库清单.md) 的 D2 原地升级流程。
+- GitHub Token 与 AI API Key 仅存系统钥匙串，不写入 `localStorage`、代码、日志或提交记录。
 
-Rust 后端通过 Tauri 命令暴露给前端，主要模块：
+### 2. Schema 与迁移 discipline
 
-- **auth.rs**: `save_github_token`、`load_github_token`（macOS Keychain 读写）
-- **github.rs**: 调用 GitHub API（同步 Stars、抓取 README）
-- **storage.rs**: SQLite CRUD 操作（仓库查询、标签管理、注解读写）
+- `packages/storage/migrations/fox/001–018` 为历史冻结基线，**严禁修改**；当前已按顺序追加至 **`039_discover_feeds.sql`**，统一登记在 `apps/desktop/src-tauri/src/db/migrations.rs` 的 `MIGRATIONS` 数组中。
+- 新增表或字段只能在 `packages/storage/migrations/fox/` 顺序追加（下一个为 `040_*.sql`），并在 `MIGRATIONS` 中登记、补测试；启动迁移自动备份并校验 `PRAGMA integrity_check`。
+- 保持 `repositories`、`repo_ai_documents`、`repo_tags`、`annotations` 现有列与 `v_public_*` 视图向后兼容（不改名、不删除）。
 
-前端通过 `@tauri-apps/api` 的 `invoke` 调用这些命令。
+### 3. 界面文案与设计守卫
 
-### Schema 与迁移（S3 / S4）
+- 修改 UI 文案或新增设置项前，先阅读 [apps/desktop/DESIGN.md](apps/desktop/DESIGN.md)「文案与设置页写法」与 [docs/rebuild/文案审读.md](docs/rebuild/文案审读.md)「统一用词表」，确保 `old-terms.test.ts` 通过。
 
-Fox 的正式库已经有 001–018。这些文件在 `packages/storage/migrations/fox/`，一个字都不能改，也不能删库重建。
+---
 
-禁止：
+## 当前演进入口
 
-- 删除、移动、覆盖 `~/Library/Application Support/com.foxwork.fox-stars-lab/` 里的任何文件
-- `DROP` Fox 已有的表
-- 对正式目录执行 `clear_local_database` 或旧库删除
-- 用 `INSERT OR IGNORE` 写 `schema_migrations`
-- 把 upstream 的 002/003 直接套到 Fox 库上。Fox 的 002/003 已经是别的迁移
-
-规则：
-
-- 新迁移只追加，编号接在最后一个之后（目前最后是 038，下一个是 039；以 `db/migrations.rs` 的 `MIGRATIONS` 为准），放在 `packages/storage/migrations/fox/`，并在 `apps/desktop/src-tauri/src/db/migrations.rs` 的 `MIGRATIONS` 里登记、补测试。`docs/rebuild/migrations/` 里是 001–018 的冻结副本
-- upstream 以后的迁移改编成新的 Fox 编号，名字加 `upstream_` 前缀
-- runner 必须核对版本号和名称都匹配。名称不符就拒绝启动
-- 每次迁移前自动备份，并做 `PRAGMA integrity_check`
-- 每个迁移单独一个事务
-- 开发只用 dev 身份：`com.foxwork.fox-stars-lab.dev`，产品名 `Fox Stars Lab Dev`，Keychain 服务名 `fox-stars-lab-dev`
-- debug 构建或 dev 身份如果解析到正式数据目录，必须立即退出
-
-版本化 runner 已经在用（`db/migrations.rs`，001–038 已登记）。何时切换正式库由 Fox 本人在切换日决定（见 `docs/rebuild/接手说明.md`）；在那之前，不要对正式库启动本仓库。
-
-### 前端架构约定
-
-- **功能模块**: `apps/desktop/src/features/` 按业务领域拆分（repositories、knowledge、sidebar）
-- **UI 组件库**: Radix UI + Tailwind CSS + shadcn/ui
-- **状态管理**: React Hooks（无全局状态库）
-- **样式**: Tailwind 4 + CSS Variables，使用 `@tailwindcss/vite` 插件
-
-### GitHub Token 安全策略
-
-- Token 存储: macOS Keychain（通过 Rust `security-framework` crate）
-- Token 仅用于本地 API 调用，不上传到任何远程服务
-- 禁止在代码、日志、截图、issue 中暴露 Token
-
-### Gist 注解同步机制
-
-仅同步用户注解层数据（tags、repo_tags、notes、read_status），不包括：
-
-- GitHub 仓库事实数据
-- README 缓存
-- AI 摘要、标签网络与自然语言搜索计划
-- 完整 SQLite 数据库
-
-导入时仅合并到本地已存在的仓库记录。
-
-## 开发注意事项
-
-### 修改前端代码
-
-- 前端代码位于 `apps/desktop/src/`
-- 修改后运行 `COREPACK_HOME="$PWD/.corepack" pnpm dev:desktop` 查看效果。不要用 `pnpm tauri dev`。
-- TypeScript 类型错误会在 `pnpm build` 时暴露
-
-### 修改 Rust 后端
-
-- 后端代码位于 `apps/desktop/src-tauri/src/`
-- 修改后通过 `cargo check` 验证编译
-- 修改 Tauri 命令签名时，需同步更新前端调用代码
-
-### 修改共享包
-
-- 共享包位于 `packages/*/src/`
-- 修改后必须运行 `pnpm build:packages` 重新构建
-- `packages/domain` 的类型定义是前后端契约，变更需谨慎
-
-### 修改数据库 Schema
-
-1. 在 `packages/storage/migrations/fox/` 下新建 `.sql` 文件
-2. 文件名按序号递增，接在最后一个之后（如 `035_add_new_table.sql`），并在 `db/migrations.rs` 的 `MIGRATIONS` 里登记版本号、名称和 `include_str!`
-3. 更新后端必需表字段检测
-4. 更新 `packages/domain` 中的 TypeScript 类型
-5. 运行 `pnpm build` 和 `cargo check --manifest-path "$PWD/apps/desktop/src-tauri/Cargo.toml"` 检查
-
-### 清理 Rust 缓存
-
-如果 Rust 编译报错提示旧路径或依赖冲突：
-
-```bash
-cargo clean --manifest-path "$PWD/apps/desktop/src-tauri/Cargo.toml"
-cargo check --manifest-path "$PWD/apps/desktop/src-tauri/Cargo.toml"
-```
-
-## 当前开发阶段
-
-2026-10 起在做 Fox Stars Lab 2.0 重建（分支 `fox-rebuild`）。做到哪了、下一步做什么、谁来做，只看 `docs/rebuild/接手说明.md`（真实状态）和 `docs/rebuild/任务卡/README.md`（任务卡状态）。原来的 Phase 1–6.2 记录已作废。
+- 当前版本：`2.1.0-fox.1`（默认主分支 `main`，`fox-rebuild` 与 `fox-integration` 保持对齐）
+- 产品全景：[docs/PRODUCT.md](docs/PRODUCT.md)
+- 后续开发计划：[docs/ROADMAP.md](docs/ROADMAP.md)
+- 开发者交接清单：[docs/HANDOFF.md](docs/HANDOFF.md)

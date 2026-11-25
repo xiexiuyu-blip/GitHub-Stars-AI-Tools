@@ -5,11 +5,11 @@
 `acceptance.mjs` 验收生产构建的页面，`acceptance-fixture.js` 替换 Tauri、剪贴板和数据。无需启动开发 App，不访问真实库、账号、预算或 AI。使用独立 Chrome 上下文，仅允许随机本地端口；结束时关闭浏览器与临时 HTTP 服务。
 
 ```bash
-cd /Users/fox/WorkSpace/_infra/fox-stars-lab-wt/_integration
+cd <repo-root>
 tools/cards/run.sh web-build
 FSL_BROWSER_CHANNEL=chrome \
-FSL_PLAYWRIGHT_PATH=/Users/fox/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright \
-FSL_ACCEPTANCE_OUT=/Users/fox/WorkSpace/_infra/fox-stars-lab-wt/_logs/batch-a-20261028/integrated-ui \
+FSL_PLAYWRIGHT_PATH=<playwright-path> \
+FSL_ACCEPTANCE_OUT=<output-dir> \
 tools/cards/run.sh ui-test
 ```
 
@@ -30,7 +30,7 @@ tools/cards/run.sh ui-test
 ## 编译（一次）
 
 ```bash
-cd /Users/fox/WorkSpace/_infra/fox-stars-lab
+cd <repo-root>
 swiftc -O -o /tmp/winlist tools/dev-ui/winlist.swift
 swiftc -O -o /tmp/axui tools/dev-ui/axui.swift
 ```
