@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties, FormEvent } from 'react';
 import type {
   DiscoverFeedId,
@@ -99,6 +99,8 @@ export function DiscoverPage(props: { initialScenarioId?: string | null; onOpenC
   const [reloadKey, setReloadKey] = useState(0);
   const [refreshing, setRefreshing] = useState(false);
   const [notice, setNotice] = useState<RefreshNotice | null>(null);
+  const searchSeqRef = useRef(0);
+  const feedRefreshSeqRef = useRef(0);
 
   useEffect(() => {
     if (props.initialScenarioId) {
@@ -109,10 +111,16 @@ export function DiscoverPage(props: { initialScenarioId?: string | null; onOpenC
 
   const activeFeedMeta = useMemo(() => feedMeta(feedId), [feedId]);
   const effectiveFeedLang = activeFeedMeta.supportsLanguage ? feedLanguage || null : null;
+  const feedMatches =
+    feedView !== null
+    && feedView.feedId === feedId
+    && (feedView.language ?? null) === effectiveFeedLang;
+  const matchedFeedView = feedMatches ? feedView : null;
 
   useEffect(() => {
     let cancelled = false;
-    setFeedPhase((current) => (current === 'ready' ? 'ready' : 'loading'));
+    setFeedPhase('loading');
+    setFeedError(null);
     listDiscoverFeed(feedId, effectiveFeedLang)
       .then((next) => {
         if (cancelled) return;
@@ -161,30 +169,45 @@ export function DiscoverPage(props: { initialScenarioId?: string | null; onOpenC
     () => filterDiscoverItems(sortCandidates(view?.candidates ?? [], added), hideMine),
     [view, added, hideMine],
   );
-  const feedItems = useMemo(() => filterDiscoverItems(feedView?.items ?? [], hideMine), [feedView, hideMine]);
+  const feedItems = useMemo(() => filterDiscoverItems(matchedFeedView?.items ?? [], hideMine), [matchedFeedView, hideMine]);
   const searchItems = useMemo(() => filterDiscoverItems(searchResult?.items ?? [], hideMine), [searchResult, hideMine]);
 
   const lead = scenarioLead(current, now);
-  const trendingLead = feedLead(feedView, feedId, now);
+  const trendingLead = feedLead(matchedFeedView, feedId, now);
 
   function chooseFeed(nextId: DiscoverFeedId) {
     if (nextId === feedId) return;
+    feedRefreshSeqRef.current += 1;
+    setFeedRefreshing(false);
     setFeedNotice(null);
     setFeedId(nextId);
   }
 
+  function chooseFeedLanguage(nextLang: string) {
+    if (nextLang === feedLanguage) return;
+    feedRefreshSeqRef.current += 1;
+    setFeedRefreshing(false);
+    setFeedNotice(null);
+    setFeedLanguage(nextLang);
+  }
+
   async function refreshTrending() {
     if (feedRefreshing) return;
+    const seq = ++feedRefreshSeqRef.current;
+    const targetFeedId = feedId;
+    const targetLang = effectiveFeedLang;
     setFeedRefreshing(true);
     setFeedNotice(null);
     try {
-      const report = await refreshDiscoverFeed(feedId, effectiveFeedLang);
+      const report = await refreshDiscoverFeed(targetFeedId, targetLang);
+      if (seq !== feedRefreshSeqRef.current) return;
       setFeedNotice(feedRefreshNotice(report));
       setFeedReloadKey((key) => key + 1);
     } catch (reason) {
+      if (seq !== feedRefreshSeqRef.current) return;
       setFeedNotice({ tone: 'warn', text: describeInvokeError(reason) });
     } finally {
-      setFeedRefreshing(false);
+      if (seq === feedRefreshSeqRef.current) setFeedRefreshing(false);
     }
   }
 
@@ -192,8 +215,10 @@ export function DiscoverPage(props: { initialScenarioId?: string | null; onOpenC
     nextQuery: string,
     opts?: { timeRange?: DiscoverSearchTimeRange; sort?: DiscoverSearchSort; language?: string },
   ) {
+    const seq = ++searchSeqRef.current;
     const trimmed = nextQuery.trim();
     if (!trimmed) {
+      setSearching(false);
       setSearchError('请先输入想搜的关键词');
       return;
     }
@@ -209,12 +234,14 @@ export function DiscoverPage(props: { initialScenarioId?: string | null; onOpenC
         sort,
         language: language || null,
       });
+      if (seq !== searchSeqRef.current) return;
       setSearchResult(res);
       if (res.message) setSearchError(res.message);
     } catch (reason) {
+      if (seq !== searchSeqRef.current) return;
       setSearchError(describeInvokeError(reason));
     } finally {
-      setSearching(false);
+      if (seq === searchSeqRef.current) setSearching(false);
     }
   }
 
@@ -324,7 +351,7 @@ export function DiscoverPage(props: { initialScenarioId?: string | null; onOpenC
                 {hideMineToggle}
                 <Button variant="primary" loading={feedRefreshing} onClick={() => void refreshTrending()}>
                   <Icon name="refresh" size={16} />
-                  {feedView?.lastFetchedAt ? '刷新榜单' : '拉取榜单'}
+                  {matchedFeedView?.lastFetchedAt ? '刷新榜单' : '拉取榜单'}
                 </Button>
               </div>
             </div>
@@ -340,10 +367,7 @@ export function DiscoverPage(props: { initialScenarioId?: string | null; onOpenC
                         key={lang.id || 'all'}
                         type="button"
                         aria-pressed={active}
-                        onClick={() => {
-                          setFeedNotice(null);
-                          setFeedLanguage(lang.id);
-                        }}
+                        onClick={() => chooseFeedLanguage(lang.id)}
                         className={cn(
                           'h-7 rounded-md px-2.5 text-xs font-medium transition-colors',
                           active
@@ -371,9 +395,9 @@ export function DiscoverPage(props: { initialScenarioId?: string | null; onOpenC
             <div className={cn('rounded-lg px-3.5 py-2.5 text-sm', feedNotice.tone === 'warn' ? 'bg-error-container text-on-error-container' : 'bg-accent text-foreground')}>
               {feedNotice.text}
             </div>
-          ) : feedView?.message ? (
+          ) : matchedFeedView?.message ? (
             <div className="rounded-lg bg-surface-container-high px-3.5 py-2.5 text-sm text-on-surface-variant">
-              {feedView.message}
+              {matchedFeedView.message}
             </div>
           ) : null}
 
@@ -390,7 +414,7 @@ export function DiscoverPage(props: { initialScenarioId?: string | null; onOpenC
             <div className="grid grid-cols-1 gap-3 min-[1100px]:grid-cols-2">
               {feedItems.map((item) => (
                 <CandidateCard
-                  key={`${feedView?.feedKey ?? feedId}:${item.fullName}`}
+                  key={`${matchedFeedView?.feedKey ?? feedId}:${item.fullName}`}
                   candidate={item}
                   status={candidateStatus(item, added)}
                   adding={adding === item.fullName}
@@ -401,7 +425,12 @@ export function DiscoverPage(props: { initialScenarioId?: string | null; onOpenC
                 />
               ))}
             </div>
-          ) : feedPhase === 'loading' || feedRefreshing ? null : (feedView?.items.length ?? 0) > 0 && hideMine ? (
+          ) : feedPhase === 'loading' || feedRefreshing || !feedMatches ? (
+            <div className="flex items-center gap-2 rounded-lg border border-card-border bg-card px-4 py-6 text-sm text-on-surface-variant">
+              <Spinner />
+              正在读取「{activeFeedMeta.label}」…
+            </div>
+          ) : (matchedFeedView?.items.length ?? 0) > 0 && hideMine ? (
             <Card className="flex flex-1 p-6">
               <EmptyState
                 icon="done_all"
@@ -412,7 +441,7 @@ export function DiscoverPage(props: { initialScenarioId?: string | null; onOpenC
             </Card>
           ) : (
             <Card className="flex flex-1 p-6">
-              <EmptyState icon="trending_up" {...feedEmptyCopy(feedId, feedView?.lastFetchedAt)} />
+              <EmptyState icon="trending_up" {...feedEmptyCopy(feedId, matchedFeedView?.lastFetchedAt)} />
             </Card>
           )}
         </div>

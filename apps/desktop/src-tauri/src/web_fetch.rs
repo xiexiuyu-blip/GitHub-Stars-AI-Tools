@@ -1,9 +1,10 @@
-//! 不带令牌的联网层。curl 是阻塞的，调用方必须放进 `spawn_blocking`。
-//! 第一个参数 `-q` 让 curl 不读用户配置，避免配置文件夹带请求头。
+//! 阻塞联网层，调用方必须放进 `spawn_blocking`。
+//! curl 仅用于无认证请求，`-q` 禁止读取用户配置。
 
+use std::io::Read;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration as StdDuration, SystemTime, UNIX_EPOCH};
 
 use time::{Duration, OffsetDateTime};
 
@@ -55,11 +56,148 @@ pub trait HttpFetcher {
     fn get(&self, url: &str, headers: &[(&str, &str)]) -> Result<HttpResponse, FetchError>;
 }
 
+const MAX_BODY_BYTES: u64 = 2_000_000;
+const REQUEST_TIMEOUT: StdDuration = StdDuration::from_secs(20);
+
+/// 令牌通过请求头传递，不出现在进程参数中。
+pub struct ReqwestFetcher;
+
+fn build_client() -> Result<reqwest::blocking::Client, FetchError> {
+    reqwest::blocking::Client::builder()
+        .connect_timeout(StdDuration::from_secs(8))
+        .timeout(REQUEST_TIMEOUT)
+        .user_agent("fox-stars-lab")
+        .https_only(true)
+        .redirect(redirect_policy())
+        .build()
+        .map_err(|_| FetchError::other("联网初始化失败"))
+}
+
+fn timed_get(
+    client: &reqwest::blocking::Client,
+    url: impl reqwest::IntoUrl,
+    timeout: StdDuration,
+) -> reqwest::blocking::RequestBuilder {
+    // blocking 客户端的 builder 超时分别作用于等待响应和每次读取；
+    // 请求级超时还会传到内部异步请求，整个连接、重定向和响应体共享同一截止时间。
+    client.get(url).timeout(timeout)
+}
+
+fn redirect_policy() -> reqwest::redirect::Policy {
+    reqwest::redirect::Policy::custom(|attempt| {
+        match redirect_error(attempt.url(), attempt.previous().len()) {
+            Some(message) => attempt.error(message),
+            None => attempt.follow(),
+        }
+    })
+}
+
+fn redirect_error(url: &reqwest::Url, previous_count: usize) -> Option<&'static str> {
+    if !safe_redirect_target(url) {
+        Some("重定向地址无效")
+    } else if previous_count > 5 {
+        Some("重定向次数过多")
+    } else {
+        None
+    }
+}
+
+fn safe_redirect_target(url: &reqwest::Url) -> bool {
+    url.scheme() == "https" && url.username().is_empty() && url.password().is_none()
+}
+
+fn validate_request(url: &str, headers: &[(&str, &str)]) -> Result<reqwest::Url, FetchError> {
+    let url = reqwest::Url::parse(url).map_err(|_| FetchError::other("联网地址无效"))?;
+    if !safe_redirect_target(&url) {
+        return Err(FetchError::other("联网地址无效"));
+    }
+    for (name, _) in headers {
+        if name.eq_ignore_ascii_case("proxy-authorization")
+            || (name.eq_ignore_ascii_case("authorization")
+                && (url.host_str() != Some("api.github.com")
+                    || url.port_or_known_default() != Some(443)))
+        {
+            return Err(FetchError::other("不允许向此地址发送认证信息"));
+        }
+    }
+    Ok(url)
+}
+
+fn fetch_error_for_reqwest(error: &reqwest::Error) -> FetchError {
+    if error.is_timeout() {
+        FetchError::timeout()
+    } else if error.is_connect() {
+        FetchError::network()
+    } else {
+        FetchError::other("联网失败")
+    }
+}
+
+fn read_body(reader: impl Read) -> Result<String, FetchError> {
+    let mut body = Vec::new();
+    reader
+        .take(MAX_BODY_BYTES + 1)
+        .read_to_end(&mut body)
+        .map_err(|error| {
+            if error.kind() == std::io::ErrorKind::TimedOut
+                || error
+                    .get_ref()
+                    .and_then(|source| source.downcast_ref::<reqwest::Error>())
+                    .is_some_and(reqwest::Error::is_timeout)
+            {
+                FetchError::timeout()
+            } else {
+                FetchError::network()
+            }
+        })?;
+    if body.len() as u64 > MAX_BODY_BYTES {
+        return Err(FetchError::other("响应内容过大"));
+    }
+    String::from_utf8(body).map_err(|_| FetchError::other("响应不是 UTF-8"))
+}
+
+impl HttpFetcher for ReqwestFetcher {
+    fn get(&self, url: &str, headers: &[(&str, &str)]) -> Result<HttpResponse, FetchError> {
+        let url = validate_request(url, headers)?;
+        let mut request = timed_get(&build_client()?, url, REQUEST_TIMEOUT);
+        for (name, value) in headers {
+            request = request.header(*name, *value);
+        }
+        // reqwest 在跨 host、端口或协议重定向时会删除 Authorization 等敏感头。
+        let response = request
+            .send()
+            .map_err(|error| fetch_error_for_reqwest(&error))?;
+        let status = response.status().as_u16();
+        let response_headers = response
+            .headers()
+            .iter()
+            .map(|(name, value)| {
+                value
+                    .to_str()
+                    .map(|value| (name.as_str().to_owned(), value.to_owned()))
+                    .map_err(|_| FetchError::other("读不到响应头"))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let body = read_body(response)?;
+        Ok(HttpResponse {
+            status,
+            headers: response_headers,
+            body,
+        })
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct CurlFetcher;
 
 impl HttpFetcher for CurlFetcher {
     fn get(&self, url: &str, headers: &[(&str, &str)]) -> Result<HttpResponse, FetchError> {
+        if headers.iter().any(|(name, _)| {
+            name.eq_ignore_ascii_case("authorization")
+                || name.eq_ignore_ascii_case("proxy-authorization")
+        }) {
+            return Err(FetchError::other("禁止通过 curl 进程参数传递认证头"));
+        }
         let dump = HeaderDump::create()?;
         let args = curl_arguments(url, headers, &dump.path_arg()?);
         let output = std::process::Command::new("curl")
@@ -333,6 +471,247 @@ pub fn parse_unix_time(text: &str) -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn authentication_is_restricted_before_network_access() {
+        let auth = [("Authorization", "Bearer example")];
+        assert!(validate_request("https://api.github.com/search", &auth).is_ok());
+        for url in [
+            "https://example.com/",
+            "https://api.github.com.example.com/",
+            "https://api.github.com:8443/",
+            "http://api.github.com/",
+            "https://user:pass@api.github.com/",
+        ] {
+            assert!(validate_request(url, &auth).is_err(), "{url}");
+        }
+        assert!(validate_request(
+            "https://api.github.com/",
+            &[("pRoXy-aUtHoRiZaTiOn", "secret")]
+        )
+        .is_err());
+        for name in ["Authorization", "authorization", "PROXY-AUTHORIZATION"] {
+            let error = CurlFetcher
+                .get("https://api.github.com/", &[(name, "secret")])
+                .expect_err("不得执行 curl");
+            assert_eq!(error.message, "禁止通过 curl 进程参数传递认证头");
+            assert!(!error.message.contains("secret"));
+        }
+    }
+
+    #[test]
+    fn redirect_target_must_be_https_without_embedded_credentials() {
+        for url in ["http://example.com/", "https://user:pass@example.com/"] {
+            assert!(!safe_redirect_target(
+                &reqwest::Url::parse(url).expect("URL")
+            ));
+        }
+        assert!(safe_redirect_target(
+            &reqwest::Url::parse("https://example.com/path").expect("URL")
+        ));
+        let target = reqwest::Url::parse("https://example.com/path").expect("URL");
+        assert_eq!(redirect_error(&target, 5), None);
+        assert_eq!(redirect_error(&target, 6), Some("重定向次数过多"));
+    }
+
+    #[test]
+    fn actual_redirect_policy_blocks_http_target() {
+        use std::io::{Read as _, Write as _};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("本地端口");
+        let address = listener.local_addr().expect("地址");
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("连接");
+            stream
+                .set_read_timeout(Some(StdDuration::from_secs(2)))
+                .expect("超时");
+            let mut request = [0; 1024];
+            let _ = stream.read(&mut request).expect("请求");
+            stream.write_all(b"HTTP/1.1 302 Found\r\nLocation: http://example.com/\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").expect("响应");
+        });
+        let client = reqwest::blocking::Client::builder()
+            .no_proxy()
+            .redirect(redirect_policy())
+            .timeout(StdDuration::from_secs(2))
+            .build()
+            .expect("客户端");
+        let error = client
+            .get(format!("http://{address}/"))
+            .send()
+            .expect_err("禁止跳转 HTTP");
+        assert!(error.is_redirect());
+        server.join().expect("服务结束");
+    }
+
+    #[test]
+    fn actual_request_timeout_is_classified_without_leaking_url() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("本地端口");
+        let address = listener.local_addr().expect("地址");
+        let server = std::thread::spawn(move || {
+            let (_stream, _) = listener.accept().expect("连接");
+            std::thread::sleep(StdDuration::from_millis(250));
+        });
+        let client = reqwest::blocking::Client::builder()
+            .no_proxy()
+            .timeout(StdDuration::from_millis(50))
+            .build()
+            .expect("客户端");
+        let error = client
+            .get(format!("http://{address}/secret"))
+            .send()
+            .expect_err("请求应超时");
+        let mapped = fetch_error_for_reqwest(&error);
+        assert_eq!(mapped.kind, FetchErrorKind::Timeout);
+        assert!(!mapped.message.contains("secret"));
+        server.join().expect("服务结束");
+    }
+
+    #[test]
+    fn total_timeout_covers_redirect_and_slow_streaming_body() {
+        use std::io::{Read as _, Write as _};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("本地端口");
+        let address = listener.local_addr().expect("地址");
+        let server = std::thread::spawn(move || {
+            let (mut redirect, _) = listener.accept().expect("初始请求");
+            redirect
+                .set_read_timeout(Some(StdDuration::from_secs(2)))
+                .expect("超时");
+            let mut request = [0; 1024];
+            let _ = redirect.read(&mut request).expect("请求");
+            std::thread::sleep(StdDuration::from_millis(90));
+            redirect.write_all(b"HTTP/1.1 302 Found\r\nLocation: /stream\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").expect("重定向");
+            let (mut stream, _) = listener.accept().expect("重定向请求");
+            stream
+                .set_read_timeout(Some(StdDuration::from_secs(2)))
+                .expect("超时");
+            let _ = stream.read(&mut request).expect("请求");
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\nConnection: close\r\n\r\n")
+                .expect("响应头");
+            for _ in 0..100 {
+                if stream.write_all(b"x").is_err() {
+                    break;
+                }
+                std::thread::sleep(StdDuration::from_millis(25));
+            }
+        });
+        // 本地 HTTP 只用于验证同一个请求级超时；生产客户端只允许 HTTPS。
+        let client = reqwest::blocking::Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::limited(5))
+            .timeout(StdDuration::from_secs(2))
+            .build()
+            .expect("客户端");
+        let started = std::time::Instant::now();
+        let response = timed_get(
+            &client,
+            format!("http://{address}/"),
+            StdDuration::from_millis(300),
+        )
+        .send()
+        .expect("应先收到响应头");
+        let error = read_body(response).expect_err("持续送数据也应在总时限内中止");
+        let elapsed = started.elapsed();
+        assert_eq!(error.kind, FetchErrorKind::Timeout);
+        assert!(elapsed < StdDuration::from_secs(2), "实际耗时：{elapsed:?}");
+        server.join().expect("服务结束");
+    }
+
+    #[test]
+    fn reqwest_strips_auth_on_cross_origin_redirect_and_does_not_restore_it() {
+        use std::io::{Read as _, Write as _};
+        fn read_headers(stream: &mut std::net::TcpStream) -> String {
+            stream
+                .set_read_timeout(Some(StdDuration::from_secs(2)))
+                .expect("超时");
+            let mut data = Vec::new();
+            let mut byte = [0; 1];
+            while !data.ends_with(b"\r\n\r\n") && data.len() < 8192 {
+                stream.read_exact(&mut byte).expect("请求头");
+                data.push(byte[0]);
+            }
+            String::from_utf8(data)
+                .expect("请求头编码")
+                .to_ascii_lowercase()
+        }
+        let first = std::net::TcpListener::bind("127.0.0.1:0").expect("端口");
+        let second = std::net::TcpListener::bind("127.0.0.1:0").expect("端口");
+        let first_addr = first.local_addr().expect("地址");
+        let second_addr = second.local_addr().expect("地址");
+        let server = std::thread::spawn(move || {
+            let (mut initial, _) = first.accept().expect("初始请求");
+            let initial_headers = read_headers(&mut initial);
+            initial.write_all(b"HTTP/1.1 302 Found\r\nLocation: /same\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").expect("同源跳转");
+            let (mut same, _) = first.accept().expect("同源请求");
+            let same_headers = read_headers(&mut same);
+            write!(same, "HTTP/1.1 302 Found\r\nLocation: http://{second_addr}/\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").expect("跨源跳转");
+            let (mut other, _) = second.accept().expect("跨源请求");
+            let other_headers = read_headers(&mut other);
+            write!(other, "HTTP/1.1 302 Found\r\nLocation: http://{first_addr}/return\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").expect("跳回");
+            let (mut returned, _) = first.accept().expect("返回请求");
+            let returned_headers = read_headers(&mut returned);
+            returned
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                .expect("响应");
+            (
+                initial_headers,
+                same_headers,
+                other_headers,
+                returned_headers,
+            )
+        });
+        // 本地 HTTP 仅用于测试 reqwest 的跨源头清理，生产策略只放行 HTTPS。
+        let client = reqwest::blocking::Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::limited(5))
+            .timeout(StdDuration::from_secs(2))
+            .build()
+            .expect("客户端");
+        client
+            .get(format!("http://{first_addr}/"))
+            .header("Authorization", "Bearer test-only")
+            .send()
+            .expect("请求完成");
+        let (initial, same, other, returned) = server.join().expect("服务结束");
+        assert!(initial.contains("authorization: bearer test-only"));
+        assert!(same.contains("authorization: bearer test-only"));
+        assert!(!other.contains("authorization:"));
+        assert!(!returned.contains("authorization:"));
+    }
+
+    #[test]
+    fn body_size_and_utf8_are_checked_while_reading() {
+        assert_eq!(
+            read_body(std::io::Cursor::new(vec![b'a'; MAX_BODY_BYTES as usize]))
+                .expect("边界长度")
+                .len(),
+            MAX_BODY_BYTES as usize
+        );
+        assert_eq!(
+            read_body(std::io::Cursor::new(vec![
+                b'a';
+                MAX_BODY_BYTES as usize + 1
+            ]))
+            .expect_err("超限")
+            .message,
+            "响应内容过大"
+        );
+        assert_eq!(
+            read_body(std::io::Cursor::new(vec![0xff]))
+                .expect_err("非 UTF-8")
+                .message,
+            "响应不是 UTF-8"
+        );
+        let timeout = std::io::Error::new(std::io::ErrorKind::TimedOut, "secret");
+        struct Broken(std::io::Error);
+        impl Read for Broken {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::new(self.0.kind(), "secret"))
+            }
+        }
+        let error = read_body(Broken(timeout)).expect_err("超时");
+        assert_eq!(error.kind, FetchErrorKind::Timeout);
+        assert!(!error.message.contains("secret"));
+    }
 
     #[test]
     fn url_encode_encodes_cjk_space_plus_and_colon() {

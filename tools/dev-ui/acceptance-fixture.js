@@ -9,12 +9,53 @@ export function installFixture() {
     oneLiner: title, form: 'app', scenarioIds: ['design'], readingStatus: 'unread', readingGroup: 'unseen',
     hasCard: index !== 3, confidence: 0.8, cardReview: 'suggested', matchReasons: ['name'], matchStars: 4,
   }));
-  const state = { calls: [], pendingPacks: [], pendingSearches: [], delaySearches: false, delayPacks: false, failPacks: false, readmeVersion: 1, readmeMissing: false, clipboard: '', listeners: {}, callbacks: {}, nextId: 1, items };
+  const state = {
+    calls: [],
+    pendingPacks: [],
+    pendingSearches: [],
+    pendingDiscoverSearches: [],
+    pendingDiscoverFeeds: [],
+    delaySearches: false,
+    delayDiscoverSearch: false,
+    delayDiscoverFeed: false,
+    delayPacks: false,
+    failPacks: false,
+    pagedLibrary: false,
+    pagedInserted: false,
+    readmeVersion: 1,
+    readmeMissing: false,
+    clipboard: '',
+    listeners: {},
+    callbacks: {},
+    nextId: 1,
+    items,
+  };
   window.__FSL_ACCEPTANCE__ = state;
   localStorage.setItem('fsl.solve.ai', 'false');
   Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: async (text) => { state.clipboard = text; }, readText: async () => state.clipboard } });
   const tier = (item) => item.archived ? 'archived' : !item.pushedAt ? null : Date.now() - Date.parse(item.pushedAt) > 365 * 86400000 ? 'stale' : 'active';
   const counts = { total: 4, scenarios: { design: 4 }, reading: { unseen: 4, want: 0, tried: 0, in_use: 0, dropped: 0 }, cardState: { done: 3, pending: 1 }, forms: { app: 4 }, maintenance: { active: 1, slow: 0, stale: 1, archived: 1 } };
+  const pagedItems = Array.from({ length: 250 }, (_, idx) => ({
+    id: `paged:${idx + 1}`,
+    fullName: `fixture/paged-${idx + 1}`,
+    htmlUrl: `https://example.invalid/paged/${idx + 1}`,
+    description: `分页项目 ${idx + 1}`,
+    language: 'TypeScript',
+    starsCount: 1000 - idx,
+    starredAt: today,
+    pushedAt: ago(5),
+    archived: false,
+    oneLiner: `分页项目 ${idx + 1}`,
+    form: 'app',
+    scenarioIds: ['design'],
+    readingStatus: 'unread',
+    readingGroup: 'unseen',
+    hasCard: true,
+    confidence: 0.9,
+    cardReview: 'suggested',
+    matchReasons: [],
+    matchStars: 0,
+  }));
   const scenarios = [{ id: 'design', slug: 'design', nameZh: '图文设计', count: 4, sortOrder: 1, thin: false }];
   const auth = { hasToken: true, user: { id: 1, login: 'fixture-user', name: '验收数据', avatarUrl: null, htmlUrl: null } };
   function emit(event, payload) {
@@ -23,6 +64,23 @@ export function installFixture() {
   state.emit = emit;
   state.resolvePacks = () => { for (const pending of state.pendingPacks.splice(0)) pending.resolve(pending.output); };
   state.rejectPacks = () => { for (const pending of state.pendingPacks.splice(0)) pending.reject('验收：交接单生成失败'); };
+  const makeFeedItem = (fullName, description, rank = 1) => ({
+    rank,
+    fullName,
+    htmlUrl: `https://github.com/${fullName}`,
+    description,
+    language: 'TypeScript',
+    starsCount: 500 - rank,
+    starsDelta: 50,
+    deltaLabel: '今日 +50',
+    pushedAt: ago(1),
+    createdAt: ago(10),
+    topics: ['ai'],
+    sourceNote: null,
+    mine: false,
+    inInbox: false,
+    fetchedAt: today,
+  });
   const handlers = {
     get_app_settings: () => ({ general: { showWelcomeOnStartup: false }, sync: { autoSync: false, autoSyncOnStartup: false }, ai: { enableAutoSummary: false }, theme: { mode: 'system' } }),
     get_github_auth_state: () => auth,
@@ -34,11 +92,65 @@ export function installFixture() {
     list_scenarios: () => scenarios,
     get_today_view: () => ({ picks: items.slice(0, 3), weekNew: items, counts: { total: 4, unseen: 4, weekNew: 4, cardsPending: 1, cardsSuggested: 3 }, syncedAt: today }),
     list_library_view: ({ filters = {} }) => {
+      if (state.pagedLibrary) {
+        const limit = Number(filters.limit) || 80;
+        const offset = Number(filters.offset) || 0;
+        if (offset > 0 && !state.pagedInserted) {
+          state.pagedInserted = true;
+          pagedItems.unshift({
+            ...pagedItems[0],
+            id: 'paged:0',
+            fullName: 'fixture/paged-0',
+            oneLiner: '新插入的分页项目 0',
+          });
+        }
+        const slice = pagedItems.slice(offset, offset + limit);
+        const total = pagedItems.length;
+        return {
+          items: slice,
+          totalCount: total,
+          counts: {
+            total,
+            scenarios: { design: total },
+            reading: { unseen: total, want: 0, tried: 0, in_use: 0, dropped: 0 },
+            cardState: { done: total, pending: 0 },
+            forms: { app: total },
+            maintenance: { active: total, slow: 0, stale: 0, archived: 0 },
+          },
+        };
+      }
       let found = items.filter((item) => !filters.maintenance || tier(item) === filters.maintenance);
       if (filters.keyword) found = found.filter((item) => `${item.fullName} ${item.oneLiner}`.includes(filters.keyword));
       if (filters.cardState === 'pending') found = found.filter((item) => !item.hasCard);
       if (filters.cardState === 'done') found = found.filter((item) => item.hasCard);
       return { items: found, totalCount: found.length, counts };
+    },
+    list_discover: ({ scenarioId = null }) => ({ scenarios: [], selected: scenarioId, candidates: [] }),
+    list_discover_feed: ({ feedId = 'trending_daily', language = null }) => {
+      const feedKey = language ? `${feedId}:${language}` : feedId;
+      const feedItems = feedId === 'trending_daily'
+        ? [makeFeedItem('fixture/daily-star', '今日飙升示例项目', 1)]
+        : feedId === 'trending_weekly'
+          ? [makeFeedItem('fixture/weekly-star', '本周热门示例项目', 1)]
+          : [makeFeedItem(`fixture/${feedId}-star`, `${feedId} 示例项目`, 1)];
+      const output = { feedId, language, feedKey, lastFetchedAt: today, usedFallback: false, message: null, items: feedItems };
+      if (state.delayDiscoverFeed) {
+        return new Promise((resolve, reject) => state.pendingDiscoverFeeds.push({ feedId, language, output, resolve, reject }));
+      }
+      return output;
+    },
+    search_discover_github: ({ query = '' }) => {
+      const output = {
+        query,
+        totalCount: 1,
+        items: [makeFeedItem(`fixture/search-${query}`, `搜索结果 ${query}`, 1)],
+        message: null,
+        rateLimitResetAt: null,
+      };
+      if (state.delayDiscoverSearch) {
+        return new Promise((resolve, reject) => state.pendingDiscoverSearches.push({ query, output, resolve, reject }));
+      }
+      return output;
     },
     get_library_detail: ({ id }) => ({ ...items.find((item) => item.id === id), whatItIs: '隔离验收：用于制作封面和海报。', capabilities: ['批量制作封面'], problemsSolved: ['制作封面'], useWhen: ['准备图文素材'], notFor: ['不支持视频剪辑'], howToTry: '打开演示，导入一张图片。', integratesWith: [], alternativesHint: [], inspirationForFox: null, risks: ['请先用测试素材试用'], license: 'MIT', maturity: null, zhFriendly: true, keywords: ['封面'], topics: ['design'], forksCount: 1, readmeExcerpt: null }),
     get_repository_detail: () => ({ readme: state.readmeMissing ? null : { rawMarkdown: `# 隔离项目说明\n\nREADME验收版本${state.readmeVersion}\n\n用于制作封面。`, sourcePath: 'README.md' } }),

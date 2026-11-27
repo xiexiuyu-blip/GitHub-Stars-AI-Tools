@@ -46,6 +46,46 @@ type ClientFactory = Arc<dyn Fn() -> Box<dyn LlmClient + Send> + Send + Sync>;
 /// `run_repo_card` 要求客户端是有固定大小的类型。测试注入的是 trait 对象，这里包一层。
 struct SizedClient(Box<dyn LlmClient + Send>);
 
+struct RetryBudgetClient<'a> {
+    inner: SizedClient,
+    db_path: &'a Path,
+    job: &'a JobRecord,
+    extra: std::cell::Cell<i64>,
+}
+
+impl LlmClient for RetryBudgetClient<'_> {
+    fn complete_json(
+        &self,
+        request: &card_pipeline::LlmRequest,
+    ) -> Result<card_pipeline::LlmReply, card_pipeline::LlmError> {
+        self.inner.complete_json(request)
+    }
+    fn before_retry(
+        &self,
+        spent: u64,
+        request: &card_pipeline::LlmRequest,
+    ) -> Result<(), card_pipeline::LlmError> {
+        let estimate = crate::spend_guard::estimate_tokens(&request.system)
+            .saturating_add(crate::spend_guard::estimate_tokens(&request.user))
+            .saturating_add(u64::from(request.max_output_tokens));
+        let extra = jobs::reserve_card_retry(
+            self.db_path,
+            &self.job.id,
+            self.job.attempts,
+            self.job.reserved,
+            self.extra.get(),
+            spent,
+            estimate,
+        )
+        .map_err(|message| card_pipeline::LlmError {
+            kind: card_pipeline::LlmErrorKind::Budget,
+            message,
+        })?;
+        self.extra.set(extra);
+        Ok(())
+    }
+}
+
 impl LlmClient for SizedClient {
     fn complete_json(
         &self,
@@ -181,12 +221,17 @@ impl JobHandler for RepoCardHandler {
                 })
             }
         };
-        let client = SizedClient(match &self.client_factory {
-            Some(factory) => factory(),
-            None => Box::new(RealLlmClient {
-                config: config.clone(),
+        let client = RetryBudgetClient {
+            inner: SizedClient(match &self.client_factory {
+                Some(factory) => factory(),
+                None => Box::new(RealLlmClient {
+                    config: config.clone(),
+                }),
             }),
-        });
+            db_path,
+            job,
+            extra: std::cell::Cell::new(0),
+        };
         let mut conn = open_db(db_path).map_err(|message| JobFailure::Retryable {
             kind: ErrorKind::Other,
             message,
@@ -207,7 +252,24 @@ impl JobHandler for RepoCardHandler {
             // 第一次调用已经计费、修复调用才失败：把已经花掉的记到这条任务上，
             // 否则网络 / 限流这类「没花钱」的失败会把它丢掉
             if error.spent_tokens > 0 {
-                let _ = jobs::add_charge(db_path, &job.id, error.spent_tokens);
+                if let Err(message) =
+                    jobs::add_charge(db_path, &job.id, job.reserved, error.spent_tokens)
+                {
+                    let total_reserve = job.reserved.saturating_add(client.extra.get());
+                    client.extra.set(0);
+                    return JobFailure::Unsettled {
+                        message: format!("{message}；已暂停整理，请检查数据库后再继续。"),
+                        spent_tokens: error.spent_tokens,
+                        total_reserve,
+                        unknown_cost: !matches!(
+                            error.kind,
+                            CardRunErrorKind::BadJson
+                                | CardRunErrorKind::Schema
+                                | CardRunErrorKind::Budget
+                                | CardRunErrorKind::Database
+                        ),
+                    };
+                }
             }
             self.track_rejections(map_card_error(error), proven)
         })?;
@@ -217,8 +279,21 @@ impl JobHandler for RepoCardHandler {
             self.mark_proven(fingerprint);
         }
         if let Err(message) = apply_scenario_tags(&mut conn, &job.account_id, repo_id) {
+            let spent = report.input_tokens.saturating_add(report.output_tokens);
+            if spent > 0 {
+                jobs::add_charge(db_path, &job.id, job.reserved, spent).map_err(|message| {
+                    let total_reserve = job.reserved.saturating_add(client.extra.get());
+                    client.extra.set(0);
+                    JobFailure::Unsettled {
+                        message: format!("{message}；已暂停整理，请检查数据库后再继续。"),
+                        spent_tokens: spent,
+                        total_reserve,
+                        unknown_cost: false,
+                    }
+                })?;
+            }
             return Err(JobFailure::Retryable {
-                kind: ErrorKind::Other,
+                kind: ErrorKind::Recorded,
                 message,
                 retry_after_secs: None,
             });
@@ -710,12 +785,12 @@ fn map_card_error(error: CardRunError) -> JobFailure {
             message,
         },
         CardRunErrorKind::BadJson => JobFailure::Retryable {
-            kind: ErrorKind::BadJson,
+            kind: ErrorKind::RecordedBadJson,
             message,
             retry_after_secs: None,
         },
         CardRunErrorKind::Schema => JobFailure::Retryable {
-            kind: ErrorKind::Schema,
+            kind: ErrorKind::RecordedSchema,
             message,
             retry_after_secs: None,
         },
@@ -744,7 +819,16 @@ fn map_card_error(error: CardRunError) -> JobFailure {
                 message,
             }
         }
-        CardRunErrorKind::Database | CardRunErrorKind::Other => JobFailure::Retryable {
+        CardRunErrorKind::Database => JobFailure::Retryable {
+            kind: ErrorKind::Recorded,
+            message,
+            retry_after_secs: None,
+        },
+        CardRunErrorKind::Budget => JobFailure::Fatal {
+            kind: ErrorKind::Recorded,
+            message,
+        },
+        CardRunErrorKind::Other => JobFailure::Retryable {
             kind: ErrorKind::Other,
             message,
             retry_after_secs: error.retry_after_secs,
@@ -1123,6 +1207,21 @@ mod tests {
         insert_repo(&conn, "r1", "active");
         seed_catalog(&conn);
         insert_readme(&conn, "r1");
+    }
+
+    fn prepare_running_card_with_budget(db: &TempDb) -> JobRecord {
+        prepare_runnable(db);
+        jobs::set_daily_budget(&jobs::queue_control_path(db.path()), 100_000).unwrap();
+        db.open()
+            .execute(
+                "INSERT INTO ai_jobs(id, account_id, job_type, target_type, target_id, status, attempts, input_tokens, updated_at)
+                 VALUES ('job-1', 'acct', 'repo_card', 'repository', 'r1', 'running', 1, 12000, ?1)",
+                [jobs::now_db_time()],
+            )
+            .unwrap();
+        let mut record = job("job-1", "repository", "r1");
+        record.reserved = 12_000;
+        record
     }
 
     fn insert_card(conn: &Connection, repo_id: &str, card_json: &str, schema: i64, hash: &str) {
@@ -1605,33 +1704,42 @@ mod tests {
     #[test]
     fn bad_json_maps_to_retryable() {
         let db = TempDb::new("map-json");
-        prepare_runnable(&db);
+        let record = prepare_running_card_with_budget(&db);
         let (handler, calls) = scripted(
             Ok(ok_config()),
             vec![reply("你好", "m", 1, 1), reply("还是不好", "m", 1, 1)],
         );
-        assert_retryable(
-            handler.run(&job("job-1", "repository", "r1"), db.path()),
-            ErrorKind::BadJson,
-            None,
-            "JSON",
-        );
+        let result = handler.run(&record, db.path());
+        assert_retryable(result.clone(), ErrorKind::RecordedBadJson, None, "JSON");
         assert_eq!(calls.load(Ordering::SeqCst), 2);
+        jobs::finish_job(db.path(), &record, &jobs::now_db_time(), result, 0.0).unwrap();
+        assert_eq!(
+            cell_i64(
+                &db.open(),
+                "SELECT input_tokens + output_tokens FROM ai_jobs WHERE id = 'job-1'"
+            ),
+            4
+        );
     }
 
     #[test]
     fn schema_maps_to_retryable() {
         let db = TempDb::new("map-schema");
-        prepare_runnable(&db);
-        let (handler, _) = scripted(
+        let record = prepare_running_card_with_budget(&db);
+        let (handler, calls) = scripted(
             Ok(ok_config()),
             vec![reply("{}", "m", 1, 1), reply("{}", "m", 1, 1)],
         );
-        assert_retryable(
-            handler.run(&job("job-1", "repository", "r1"), db.path()),
-            ErrorKind::Schema,
-            None,
-            "校验",
+        let result = handler.run(&record, db.path());
+        assert_retryable(result.clone(), ErrorKind::RecordedSchema, None, "校验");
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        jobs::finish_job(db.path(), &record, &jobs::now_db_time(), result, 0.0).unwrap();
+        assert_eq!(
+            cell_i64(
+                &db.open(),
+                "SELECT input_tokens + output_tokens FROM ai_jobs WHERE id = 'job-1'"
+            ),
+            4
         );
     }
 
@@ -1650,19 +1758,20 @@ mod tests {
     }
 
     #[test]
-    fn database_maps_to_retryable_other() {
+    fn database_before_request_maps_to_retryable_without_charge() {
         static SEQ: AtomicUsize = AtomicUsize::new(0);
         let n = SEQ.fetch_add(1, Ordering::Relaxed);
         let path = std::env::temp_dir().join(format!("fsl-cardh-empty-{n}.sqlite3"));
         let _ = fs::remove_file(&path);
         Connection::open(&path).expect("空库应能创建");
-        let (handler, _) = scripted(Ok(ok_config()), vec![reply(&valid_json(), "m", 1, 1)]);
+        let (handler, calls) = scripted(Ok(ok_config()), vec![reply(&valid_json(), "m", 1, 1)]);
         assert_retryable(
             handler.run(&job("job-1", "repository", "r1"), &path),
-            ErrorKind::Other,
+            ErrorKind::Recorded,
             None,
             "数据库",
         );
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
         let _ = fs::remove_file(&path);
     }
 
@@ -3239,6 +3348,7 @@ mod tests {
     fn a_failed_repair_call_keeps_the_first_calls_usage_on_the_job() {
         let db = TempDb::new("repair-spent");
         prepare_runnable(&db);
+        jobs::set_daily_budget(&jobs::queue_control_path(db.path()), 100_000).unwrap();
         db.open()
             .execute(
                 "INSERT INTO ai_jobs(id, account_id, job_type, target_type, target_id, status, attempts)
@@ -3265,6 +3375,150 @@ mod tests {
             cell_i64(
                 &db.open(),
                 "SELECT input_tokens FROM ai_jobs WHERE id = 'job-1'"
+            ),
+            3500
+        );
+    }
+
+    #[test]
+    fn card_or_scenario_write_failure_settles_the_actual_model_usage() {
+        for (name, table) in [
+            ("card", "repo_ai_documents"),
+            ("scenario", "entity_scenarios"),
+        ] {
+            let db = TempDb::new(name);
+            prepare_runnable(&db);
+            let conn = db.open();
+            conn.execute("INSERT INTO ai_jobs(id, account_id, job_type, target_type, target_id, status, attempts, input_tokens) VALUES ('job-1', 'acct', 'repo_card', 'repository', 'r1', 'running', 1, 12000)", []).unwrap();
+            conn.execute_batch(&format!("CREATE TRIGGER fail_write BEFORE INSERT ON {table} BEGIN SELECT RAISE(ABORT, 'write failure'); END;")).unwrap();
+            let (handler, _) = scripted(Ok(ok_config()), vec![reply(&valid_json(), "m", 111, 22)]);
+            let mut record = job("job-1", "repository", "r1");
+            record.reserved = 12_000;
+            let result = handler.run(&record, db.path());
+            assert!(result.is_err(), "{name}");
+            jobs::finish_job(db.path(), &record, &jobs::now_db_time(), result, 0.0).unwrap();
+            assert_eq!(
+                cell_i64(
+                    &conn,
+                    "SELECT input_tokens + output_tokens FROM ai_jobs WHERE id = 'job-1'"
+                ),
+                133,
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn bad_json_and_schema_failures_settle_actual_usage_without_estimate() {
+        for schema in [false, true] {
+            let db = TempDb::new(if schema { "known-schema" } else { "known-json" });
+            prepare_runnable(&db);
+            jobs::set_daily_budget(&jobs::queue_control_path(db.path()), 100_000).unwrap();
+            let conn = db.open();
+            conn.execute("INSERT INTO ai_jobs(id, account_id, job_type, target_type, target_id, status, attempts, input_tokens, updated_at) VALUES ('job-1', 'acct', 'repo_card', 'repository', 'r1', 'running', 1, 12000, ?1)", [jobs::now_db_time()]).unwrap();
+            let text = if schema { "{}" } else { "不是 JSON" };
+            let (handler, calls) = scripted(
+                Ok(ok_config()),
+                vec![reply(text, "m", 100, 20), reply(text, "m", 200, 30)],
+            );
+            let mut record = job("job-1", "repository", "r1");
+            record.reserved = 12_000;
+            let result = handler.run(&record, db.path());
+            let expected = if schema {
+                ErrorKind::RecordedSchema
+            } else {
+                ErrorKind::RecordedBadJson
+            };
+            assert!(
+                matches!(&result, Err(JobFailure::Retryable { kind, .. }) if *kind == expected)
+            );
+            assert_eq!(calls.load(Ordering::SeqCst), 2);
+            jobs::finish_job(db.path(), &record, &jobs::now_db_time(), result, 0.0).unwrap();
+            assert_eq!(
+                cell_i64(
+                    &conn,
+                    "SELECT input_tokens + output_tokens FROM ai_jobs WHERE id = 'job-1'"
+                ),
+                350
+            );
+        }
+    }
+
+    #[test]
+    fn failed_charge_preserves_prior_spend_and_reservation_and_stops_queue() {
+        for (name, table) in [
+            ("charge-card", "repo_ai_documents"),
+            ("charge-scenario", "entity_scenarios"),
+        ] {
+            let db = TempDb::new(name);
+            prepare_runnable(&db);
+            let conn = db.open();
+            conn.execute("INSERT INTO ai_jobs(id, account_id, job_type, target_type, target_id, status, attempts, input_tokens) VALUES ('job-1', 'acct', 'repo_card', 'repository', 'r1', 'running', 1, 12500)", []).unwrap();
+            conn.execute_batch(&format!("CREATE TRIGGER fail_write BEFORE INSERT ON {table} BEGIN SELECT RAISE(ABORT, 'write failure'); END; CREATE TRIGGER fail_charge BEFORE UPDATE ON ai_jobs WHEN NEW.status = 'running' AND NEW.input_tokens > OLD.input_tokens BEGIN SELECT RAISE(ABORT, 'ledger failure'); END;")).unwrap();
+            let (handler, calls) = scripted(
+                Ok(ok_config()),
+                vec![reply(&valid_json(), "m", 15_000, 1_000)],
+            );
+            let mut record = job("job-1", "repository", "r1");
+            record.reserved = 12_000;
+            let result = handler.run(&record, db.path());
+            assert!(matches!(
+                &result,
+                Err(JobFailure::Unsettled {
+                    spent_tokens: 16_000,
+                    total_reserve: 12_000,
+                    ..
+                })
+            ));
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+            jobs::finish_job(db.path(), &record, &jobs::now_db_time(), result, 0.0).unwrap();
+            assert_eq!(
+                cell_i64(
+                    &conn,
+                    "SELECT input_tokens + output_tokens FROM ai_jobs WHERE id = 'job-1'"
+                ),
+                16_500
+            );
+            let status: String = conn
+                .query_row("SELECT status FROM ai_jobs WHERE id = 'job-1'", [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(status, "failed");
+            assert!(jobs::read_control(&jobs::queue_control_path(db.path())).paused);
+        }
+    }
+
+    #[test]
+    fn insufficient_retry_budget_stops_before_repair_and_settles_first_reply() {
+        let db = TempDb::new("repair-budget");
+        prepare_runnable(&db);
+        jobs::set_daily_budget(&jobs::queue_control_path(db.path()), 12_000).unwrap();
+        let conn = db.open();
+        conn.execute("INSERT INTO ai_jobs(id, account_id, job_type, target_type, target_id, status, attempts, input_tokens, updated_at) VALUES ('job-1', 'acct', 'repo_card', 'repository', 'r1', 'running', 1, 12000, ?1)", [jobs::now_db_time()]).unwrap();
+        let (handler, calls) = scripted(
+            Ok(ok_config()),
+            vec![
+                reply("不是 JSON", "m", 3000, 500),
+                reply(&valid_json(), "m", 10, 10),
+            ],
+        );
+        let mut record = job("job-1", "repository", "r1");
+        record.reserved = 12_000;
+        let result = handler.run(&record, db.path());
+        assert!(matches!(
+            result,
+            Err(JobFailure::Fatal {
+                kind: ErrorKind::Recorded,
+                ..
+            })
+        ));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        jobs::finish_job(db.path(), &record, &jobs::now_db_time(), result, 0.0).unwrap();
+        assert_eq!(
+            cell_i64(
+                &conn,
+                "SELECT input_tokens + output_tokens FROM ai_jobs WHERE id = 'job-1'"
             ),
             3500
         );
