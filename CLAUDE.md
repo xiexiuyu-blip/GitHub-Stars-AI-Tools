@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) and human/AI contrib
 
 ## 项目概述
 
-Fox Stars Lab（当前版本 `2.1.0-fox.1`）是一个基于 Tauri 2 + React 19 + Rust + SQLite 的本地优先 GitHub Stars 开源项目情报库与 AI 工具选型工作台，采用 pnpm monorepo 架构。完整产品设计与边界见 [docs/PRODUCT.md](docs/PRODUCT.md)。
+Fox Stars Lab（当前版本 `2.1.1-fox.1`）是一个基于 Tauri 2 + React 19 + Rust + SQLite 的本地优先 GitHub Stars 开源项目情报库与 AI 工具选型工作台，采用 pnpm monorepo 架构。完整产品设计与边界见 [docs/PRODUCT.md](docs/PRODUCT.md)。
 
 ---
 
@@ -100,7 +100,7 @@ packages/{ai,domain,github,search,storage,worker}/
 
 ## 当前演进入口
 
-- 当前版本：`2.1.0-fox.1`（默认主分支 `main`，`fox-rebuild` 与 `fox-integration` 保持对齐）
+- 当前版本：`2.1.1-fox.1`（默认主分支 `main`，`fox-rebuild` 与 `fox-integration` 保持对齐）
 - 产品全景：[docs/PRODUCT.md](docs/PRODUCT.md)
 - 后续开发计划：[docs/ROADMAP.md](docs/ROADMAP.md)
 - 开发者交接清单：[docs/HANDOFF.md](docs/HANDOFF.md)
