@@ -33,6 +33,10 @@ export function useSettings() {
   const aiKeySaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pendingAiKeyRef = useRef<string | null>(null);
   const pendingAiKeyProviderRef = useRef<AppSettings['ai']['provider']>(DEFAULT_SETTINGS.ai.provider);
+  const settingsRef = useRef<AppSettings>(settings);
+  const persistChainRef = useRef<Promise<void>>(Promise.resolve());
+  const persistEpochRef = useRef(0);
+  settingsRef.current = settings;
 
   useEffect(() => {
     loadSettings();
@@ -101,6 +105,7 @@ export function useSettings() {
       ai: { ...nextSettings.ai, apiKey },
       embedding: { ...nextSettings.embedding, apiKey: embeddingApiKey },
     };
+    settingsRef.current = hydratedSettings;
     setSettings(hydratedSettings);
     try {
       await persistSettingsSnapshot(hydratedSettings);
@@ -111,109 +116,122 @@ export function useSettings() {
     setIsLoading(false);
   }
 
+  function enqueuePersist<T>(task: () => Promise<T>): Promise<T> {
+    const run = persistChainRef.current.catch(() => undefined).then(task);
+    persistChainRef.current = run.then(() => undefined, () => undefined);
+    return run;
+  }
+
   async function updateSettings(partial: AppSettingsPatch) {
-    const partialAiIncludesApiKey = Boolean(
-      partial.ai && Object.prototype.hasOwnProperty.call(partial.ai, 'apiKey'),
-    );
-    const partialEmbeddingIncludesApiKey = Boolean(
-      partial.embedding && Object.prototype.hasOwnProperty.call(partial.embedding, 'apiKey'),
-    );
-    const partialAiChangesProvider = Boolean(
-      partial.ai?.provider && partial.ai.provider !== settings.ai.provider,
-    );
-    let nextAi = normalizeAiSettings(partial.ai ? { ...settings.ai, ...partial.ai } : settings.ai);
-    let nextEmbedding = normalizeEmbeddingSettings(
-      partial.embedding ? { ...settings.embedding, ...partial.embedding } : settings.embedding,
-    );
-    const partialEmbeddingChangesCredentialScope = Boolean(
-      partial.embedding
-      && (nextEmbedding.provider !== settings.embedding.provider
-        || nextEmbedding.baseUrl !== settings.embedding.baseUrl.trim()),
-    );
-    let nextError: string | null = null;
+    const epoch = persistEpochRef.current;
+    return enqueuePersist(async () => {
+      if (epoch !== persistEpochRef.current) return;
+      const base = settingsRef.current;
+      const partialAiIncludesApiKey = Boolean(
+        partial.ai && Object.prototype.hasOwnProperty.call(partial.ai, 'apiKey'),
+      );
+      const partialEmbeddingIncludesApiKey = Boolean(
+        partial.embedding && Object.prototype.hasOwnProperty.call(partial.embedding, 'apiKey'),
+      );
+      const partialAiChangesProvider = Boolean(
+        partial.ai?.provider && partial.ai.provider !== base.ai.provider,
+      );
+      let nextAi = normalizeAiSettings(partial.ai ? { ...base.ai, ...partial.ai } : base.ai);
+      let nextEmbedding = normalizeEmbeddingSettings(
+        partial.embedding ? { ...base.embedding, ...partial.embedding } : base.embedding,
+      );
+      const partialEmbeddingChangesCredentialScope = Boolean(
+        partial.embedding
+        && (nextEmbedding.provider !== base.embedding.provider
+          || nextEmbedding.baseUrl !== base.embedding.baseUrl.trim()),
+      );
+      let nextError: string | null = null;
 
-    if (partial.ai && partialAiChangesProvider && !partialAiIncludesApiKey) {
-      try {
-        const nextAiForKeyLookup = { ...nextAi, apiKey: '' };
-        nextAi = {
-          ...nextAi,
-          apiKey: await readSavedAiApiKeyPlaceholder(nextAiForKeyLookup),
-        };
-      } catch (error) {
-        nextAi = { ...nextAi, apiKey: '' };
-        nextError = keychainFailureText('read');
-      }
-    }
-
-    if (partial.embedding && partialEmbeddingChangesCredentialScope && !partialEmbeddingIncludesApiKey) {
-      if (nextEmbedding.provider === 'openai' || nextEmbedding.provider === 'openai-compatible') {
+      if (partial.ai && partialAiChangesProvider && !partialAiIncludesApiKey) {
         try {
-          nextEmbedding = {
-            ...nextEmbedding,
-            apiKey: await readSavedEmbeddingApiKeyPlaceholder(nextEmbedding),
+          const nextAiForKeyLookup = { ...nextAi, apiKey: '' };
+          nextAi = {
+            ...nextAi,
+            apiKey: await readSavedAiApiKeyPlaceholder(nextAiForKeyLookup),
           };
-        } catch (error) {
-          nextEmbedding = { ...nextEmbedding, apiKey: '' };
-          nextError = mergeSettingsError(
-            nextError,
-            keychainFailureText('read'),
-          );
+        } catch {
+          nextAi = { ...nextAi, apiKey: '' };
+          nextError = keychainFailureText('read');
         }
-      } else {
-        nextEmbedding = { ...nextEmbedding, apiKey: '' };
       }
-    }
 
-    const updated = {
-      ...settings,
-      ...partial,
-      theme: normalizeThemeSettings(partial.theme ? { ...settings.theme, ...partial.theme } : settings.theme),
-      sync: normalizeSyncSettings(partial.sync ? { ...settings.sync, ...partial.sync } : settings.sync),
-      ai: nextAi,
-      embedding: nextEmbedding,
-      general: normalizeGeneralSettings(partial.general ? { ...settings.general, ...partial.general } : settings.general),
-      runtime: normalizeRuntimeSettings(partial.runtime ? { ...settings.runtime, ...partial.runtime } : settings.runtime),
-    };
-    setSettings(updated);
-    try {
-      if (partialAiIncludesApiKey) {
-        clearAiKeySaveTimer();
-        try {
-          setAiKeySaveStatus('saving');
-          await persistAiApiKey(partial.ai?.apiKey ?? '', updated.ai.provider);
-          pendingAiKeyRef.current = null;
-          setAiKeySaveStatus((partial.ai?.apiKey ?? '').trim() ? 'saved' : 'idle');
-        } catch (error) {
-          setAiKeySaveStatus('error');
-          nextError = keychainFailureText('save');
+      if (partial.embedding && partialEmbeddingChangesCredentialScope && !partialEmbeddingIncludesApiKey) {
+        if (nextEmbedding.provider === 'openai' || nextEmbedding.provider === 'openai-compatible') {
+          try {
+            nextEmbedding = {
+              ...nextEmbedding,
+              apiKey: await readSavedEmbeddingApiKeyPlaceholder(nextEmbedding),
+            };
+          } catch {
+            nextEmbedding = { ...nextEmbedding, apiKey: '' };
+            nextError = mergeSettingsError(
+              nextError,
+              keychainFailureText('read'),
+            );
+          }
+        } else {
+          nextEmbedding = { ...nextEmbedding, apiKey: '' };
         }
       }
-      if (partialEmbeddingIncludesApiKey) {
-        try {
-          setEmbeddingKeySaveStatus('saving');
-          await persistEmbeddingApiKey(partial.embedding?.apiKey ?? '', updated.embedding);
-          setEmbeddingKeySaveStatus((partial.embedding?.apiKey ?? '').trim() ? 'saved' : 'idle');
-        } catch (error) {
-          setEmbeddingKeySaveStatus('error');
-          nextError = mergeSettingsError(
-            nextError,
-            keychainFailureText('save'),
-          );
+
+      if (epoch !== persistEpochRef.current) return;
+      const latest = settingsRef.current;
+      const updated: AppSettings = {
+        ...latest,
+        theme: normalizeThemeSettings(partial.theme ? { ...latest.theme, ...partial.theme } : latest.theme),
+        sync: normalizeSyncSettings(partial.sync ? { ...latest.sync, ...partial.sync } : latest.sync),
+        ai: partial.ai ? nextAi : latest.ai,
+        embedding: partial.embedding ? nextEmbedding : latest.embedding,
+        general: normalizeGeneralSettings(partial.general ? { ...latest.general, ...partial.general } : latest.general),
+        runtime: normalizeRuntimeSettings(partial.runtime ? { ...latest.runtime, ...partial.runtime } : latest.runtime),
+      };
+      settingsRef.current = updated;
+      setSettings(updated);
+      try {
+        if (partialAiIncludesApiKey) {
+          clearAiKeySaveTimer();
+          try {
+            setAiKeySaveStatus('saving');
+            await persistAiApiKey(partial.ai?.apiKey ?? '', updated.ai.provider);
+            pendingAiKeyRef.current = null;
+            setAiKeySaveStatus((partial.ai?.apiKey ?? '').trim() ? 'saved' : 'idle');
+          } catch {
+            setAiKeySaveStatus('error');
+            nextError = keychainFailureText('save');
+          }
         }
+        if (partialEmbeddingIncludesApiKey) {
+          try {
+            setEmbeddingKeySaveStatus('saving');
+            await persistEmbeddingApiKey(partial.embedding?.apiKey ?? '', updated.embedding);
+            setEmbeddingKeySaveStatus((partial.embedding?.apiKey ?? '').trim() ? 'saved' : 'idle');
+          } catch {
+            setEmbeddingKeySaveStatus('error');
+            nextError = mergeSettingsError(
+              nextError,
+              keychainFailureText('save'),
+            );
+          }
+        }
+        await persistSettingsSnapshot(updated);
+      } catch {
+        nextError = mergeSettingsError(nextError, SETTINGS_NOT_SAVED);
       }
-      await persistSettingsSnapshot(updated);
-    } catch {
-      nextError = mergeSettingsError(nextError, SETTINGS_NOT_SAVED);
-    }
-    setSettingsError(nextError);
+      setSettingsError(nextError);
+    });
   }
 
   async function updateTheme(theme: Partial<AppSettings['theme']>) {
-    await updateSettings({ theme: { ...settings.theme, ...theme } });
+    await updateSettings({ theme });
   }
 
   async function updateSync(sync: Partial<AppSettings['sync']>) {
-    await updateSettings({ sync: { ...settings.sync, ...sync } });
+    await updateSettings({ sync });
   }
 
   async function updateAI(ai: Partial<AppSettings['ai']>) {
@@ -224,49 +242,60 @@ export function useSettings() {
     await updateSettings({ embedding });
   }
 
-  async function flushEmbeddingKey(apiKey = settings.embedding.apiKey) {
-    try {
-      setEmbeddingKeySaveStatus('saving');
-      await persistEmbeddingApiKey(apiKey, settings.embedding);
-      const normalizedApiKey = apiKey.trim();
-      const updated = {
-        ...settings,
-        embedding: {
-          ...settings.embedding,
-          apiKey: normalizedApiKey ? SAVED_AI_API_KEY_PLACEHOLDER : '',
-        },
-      };
-      setSettings(updated);
-      await persistSettingsSnapshot(updated);
-      setEmbeddingKeySaveStatus(normalizedApiKey ? 'saved' : 'idle');
-      setSettingsError(null);
-    } catch (error) {
-      setEmbeddingKeySaveStatus('error');
-      setSettingsError(keychainFailureText('save'));
-      throw error;
-    }
+  async function flushEmbeddingKey(apiKey = settingsRef.current.embedding.apiKey) {
+    const epoch = persistEpochRef.current;
+    return enqueuePersist(async () => {
+      if (epoch !== persistEpochRef.current) return;
+      const base = settingsRef.current;
+      try {
+        setEmbeddingKeySaveStatus('saving');
+        await persistEmbeddingApiKey(apiKey, base.embedding);
+        const normalizedApiKey = apiKey.trim();
+        const updated = {
+          ...settingsRef.current,
+          embedding: {
+            ...settingsRef.current.embedding,
+            apiKey: normalizedApiKey ? SAVED_AI_API_KEY_PLACEHOLDER : '',
+          },
+        };
+        settingsRef.current = updated;
+        setSettings(updated);
+        await persistSettingsSnapshot(updated);
+        setEmbeddingKeySaveStatus(normalizedApiKey ? 'saved' : 'idle');
+        setSettingsError(null);
+      } catch (error) {
+        setEmbeddingKeySaveStatus('error');
+        setSettingsError(keychainFailureText('save'));
+        throw error;
+      }
+    });
   }
 
   async function updateAIKeyDraft(apiKey: string) {
     const updated = {
-      ...settings,
-      ai: normalizeAiSettings({ ...settings.ai, apiKey }),
+      ...settingsRef.current,
+      ai: normalizeAiSettings({ ...settingsRef.current.ai, apiKey }),
     };
+    settingsRef.current = updated;
     setSettings(updated);
-    try {
-      await persistSettingsSnapshot(updated);
-      setSettingsError(null);
-    } catch {
-      setSettingsError(SETTINGS_NOT_SAVED);
-    }
     scheduleAiKeySave(apiKey, updated.ai.provider);
+    const epoch = persistEpochRef.current;
+    await enqueuePersist(async () => {
+      if (epoch !== persistEpochRef.current) return;
+      try {
+        await persistSettingsSnapshot(settingsRef.current);
+        setSettingsError(null);
+      } catch {
+        setSettingsError(SETTINGS_NOT_SAVED);
+      }
+    });
   }
 
-  async function flushAIKey(apiKey = settings.ai.apiKey) {
+  async function flushAIKey(apiKey = settingsRef.current.ai.apiKey) {
     clearAiKeySaveTimer();
     try {
       setAiKeySaveStatus('saving');
-      await persistAiApiKey(apiKey, settings.ai.provider);
+      await persistAiApiKey(apiKey, settingsRef.current.ai.provider);
       pendingAiKeyRef.current = null;
       setAiKeySaveStatus(apiKey.trim() ? 'saved' : 'idle');
       setSettingsError(null);
@@ -278,14 +307,16 @@ export function useSettings() {
   }
 
   async function updateGeneral(general: Partial<AppSettings['general']>) {
-    await updateSettings({ general: { ...settings.general, ...general } });
+    await updateSettings({ general });
   }
 
   async function updateRuntime(runtime: Partial<AppSettings['runtime']>) {
-    await updateSettings({ runtime: { ...settings.runtime, ...runtime } });
+    await updateSettings({ runtime });
   }
 
   async function resetSettings() {
+    persistEpochRef.current += 1;
+    settingsRef.current = DEFAULT_SETTINGS;
     setSettings(DEFAULT_SETTINGS);
     clearAiKeySaveTimer();
     const failures: string[] = [];

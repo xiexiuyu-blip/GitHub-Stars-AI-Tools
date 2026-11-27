@@ -233,6 +233,59 @@ try {
     const calls = await page.evaluate(() => window.__FSL_ACCEPTANCE__.calls.filter((call) => call.command === 'regenerate_library_card'));
     assert.equal(calls.length, 1); assert.equal(calls[0].args.confirmed, true);
   });
+  await run('21-discover-stale-search', async (page) => {
+    await nav(page, '发现');
+    await page.getByRole('button', { name: '自由搜索', exact: true }).click();
+    await page.evaluate(() => { window.__FSL_ACCEPTANCE__.delayDiscoverSearch = true; });
+    const input = page.getByPlaceholder(/搜开源项目或关键词/);
+    const searchBtn = page.getByRole('button', { name: '搜索', exact: true });
+    await input.fill('alpha');
+    await searchBtn.click();
+    await page.waitForFunction(() => window.__FSL_ACCEPTANCE__.pendingDiscoverSearches.length === 1);
+    await page.getByRole('button', { name: 'mcp server', exact: true }).click();
+    await page.waitForFunction(() => window.__FSL_ACCEPTANCE__.pendingDiscoverSearches.length === 2);
+    await page.evaluate(() => {
+      const latest = window.__FSL_ACCEPTANCE__.pendingDiscoverSearches.pop();
+      latest.resolve(latest.output);
+    });
+    await page.getByText('search-mcp server', { exact: true }).waitFor();
+    await page.evaluate(() => {
+      const stale = window.__FSL_ACCEPTANCE__.pendingDiscoverSearches.pop();
+      stale.resolve(stale.output);
+    });
+    await page.waitForTimeout(30);
+    assert.equal(await page.getByText('search-mcp server', { exact: true }).count(), 1);
+    assert.equal(await page.getByText('search-alpha', { exact: true }).count(), 0);
+  });
+  await run('22-discover-feed-switch-no-stale', async (page) => {
+    await nav(page, '发现');
+    await page.getByText('daily-star', { exact: true }).waitFor();
+    await page.evaluate(() => { window.__FSL_ACCEPTANCE__.delayDiscoverFeed = true; });
+    await page.getByRole('button', { name: '本周热门', exact: true }).click();
+    await page.getByText('正在读取「本周热门」…').waitFor();
+    assert.equal(await page.getByText('daily-star', { exact: true }).count(), 0);
+    await page.evaluate(() => {
+      const pending = window.__FSL_ACCEPTANCE__.pendingDiscoverFeeds.pop();
+      pending.resolve(pending.output);
+    });
+    await page.getByText('weekly-star', { exact: true }).waitFor();
+  });
+  await run('23-library-load-more-after-insert', async (page) => {
+    await page.evaluate(() => { window.__FSL_ACCEPTANCE__.pagedLibrary = true; });
+    await nav(page, '资料库');
+    await page.getByText('paged-1', { exact: true }).first().waitFor();
+    const loadMoreBtn = page.getByRole('button', { name: '加载更多', exact: true });
+    await loadMoreBtn.waitFor();
+    await loadMoreBtn.click();
+    await page.getByText('paged-159', { exact: true }).first().waitFor();
+    await loadMoreBtn.waitFor();
+    await loadMoreBtn.click();
+    await page.getByText('paged-239', { exact: true }).first().waitFor();
+    await loadMoreBtn.waitFor();
+    await loadMoreBtn.click();
+    await page.getByText('paged-250', { exact: true }).first().waitFor();
+    assert.equal(await loadMoreBtn.count(), 0);
+  });
 } finally {
   if (browser) await browser.close();
   await new Promise((resolve) => server.close(resolve));

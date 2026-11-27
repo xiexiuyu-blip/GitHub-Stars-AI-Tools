@@ -17,7 +17,7 @@
     get_app_settings: function () { return { general: { showWelcomeOnStartup: false } }; },
     get_github_auth_state: function () { return { hasToken: true, user: USER }; },
     get_backend_status: function () { return { backend: '本地服务已就绪', storage: '本地数据库已就绪', worker: '后台任务队列已就绪', provider: '假后端（界面验收用）' }; },
-    get_app_identity: function () { return { productName: 'Fox Stars Lab Dev', identifier: 'com.foxwork.fox-stars-lab.dev', version: '2.1.0-fox.1', isDev: true }; },
+    get_app_identity: function () { return { productName: 'Fox Stars Lab Dev', identifier: 'com.foxwork.fox-stars-lab.dev', version: '2.1.1-fox.1', isDev: true }; },
     has_ai_api_key: function () { return false; },
     has_embedding_api_key: function () { return false; },
     get_health_summary: function () { return '假后端：495 个有效仓库，README 495，摘要 178。'; },

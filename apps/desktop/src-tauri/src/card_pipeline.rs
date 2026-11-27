@@ -90,6 +90,9 @@ const GENERIC_KEYWORDS: &[&str] = &["工具", "项目", "github", "开源"];
 
 pub trait LlmClient {
     fn complete_json(&self, request: &LlmRequest) -> Result<LlmReply, LlmError>;
+    fn before_retry(&self, _spent: u64, _request: &LlmRequest) -> Result<(), LlmError> {
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -120,6 +123,7 @@ pub enum LlmErrorKind {
     Timeout,
     Network,
     ContentTooLarge,
+    Budget,
     Other,
 }
 
@@ -237,6 +241,7 @@ pub enum CardRunErrorKind {
     Schema,
     NotFound,
     Database,
+    Budget,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -569,6 +574,7 @@ const CARD_OUTPUT_FALLBACKS: [u32; 2] = [4_096, 2_048];
 fn complete_with_room(
     client: &impl LlmClient,
     request: &LlmRequest,
+    previous_spent: u64,
 ) -> Result<CutOffRetry, (LlmError, u64)> {
     let with_cap = |cap: u32| LlmRequest {
         max_output_tokens: cap,
@@ -614,6 +620,9 @@ fn complete_with_room(
     if output_was_cut_off(&first_error) && first_cap < CARD_MAX_OUTPUT_TOKENS_RETRY {
         let spent = cut_off_spend(request, &first_error);
         let bigger = with_cap(CARD_MAX_OUTPUT_TOKENS_RETRY);
+        client
+            .before_retry(previous_spent.saturating_add(spent), &bigger)
+            .map_err(|error| (error, spent))?;
         return match client.complete_json(&bigger) {
             Ok(reply) => Ok(CutOffRetry {
                 reply,
@@ -663,7 +672,7 @@ pub fn run_repo_card(
     }
 
     let request = build_prompt(&input);
-    let completed = complete_with_room(client, &request).map_err(|(error, spent)| {
+    let completed = complete_with_room(client, &request, 0).map_err(|(error, spent)| {
         let mut failure = from_llm(error);
         failure.spent_tokens = spent;
         failure
@@ -681,7 +690,12 @@ pub fn run_repo_card(
         Err(failure) => {
             let repair = repair_request(&request, &first.content, &failure.messages());
             let spent = tokens.input.saturating_add(tokens.output);
-            let second = complete_with_room(client, &repair).map_err(|(error, extra)| {
+            client.before_retry(spent, &repair).map_err(|error| {
+                let mut failure = from_llm(error);
+                failure.spent_tokens = spent;
+                failure
+            })?;
+            let second = complete_with_room(client, &repair, spent).map_err(|(error, extra)| {
                 // 第一次调用已经成功（已计费），修复调用才失败：把第一次的用量（和修复调用被截断那次的）带出去
                 let mut failure = from_llm(error);
                 failure.spent_tokens = spent.saturating_add(extra);
@@ -732,7 +746,11 @@ pub fn run_repo_card(
         tokens.output,
         &options.now,
         &mut warnings,
-    )?;
+    )
+    .map_err(|mut error| {
+        error.spent_tokens = tokens.input.saturating_add(tokens.output);
+        error
+    })?;
     if !wrote {
         return Ok(CardRunReport {
             repo_id: repo_id.to_owned(),
@@ -2918,6 +2936,7 @@ fn from_llm(error: LlmError) -> CardRunError {
         LlmErrorKind::Timeout => CardRunErrorKind::Timeout,
         LlmErrorKind::Network => CardRunErrorKind::Network,
         LlmErrorKind::ContentTooLarge => CardRunErrorKind::ContentTooLarge,
+        LlmErrorKind::Budget => CardRunErrorKind::Budget,
         LlmErrorKind::Other => CardRunErrorKind::Other,
     };
     CardRunError {
@@ -2952,17 +2971,14 @@ fn not_found() -> CardRunError {
     card_error(CardRunErrorKind::NotFound, "找不到这个仓库", None)
 }
 
-/// 两次调用都拿到了回复、但都不能用：用量是知道的（含被截断重试那次）。队列处理这类失败时，会再按种类记一笔
-/// `jobs::REPAIRED_FAILURE_TOKEN_ESTIMATE`（不知道真实用量时对「两次调用」的估计）。这里把「真实用量比估计多出来的部分」
-/// 带出去，合计就不会比真实用量少——有被截断的重试时，两次调用可达 1.5 万到 3 万，只记 1 万会低估。
+/// 两次调用都拿到了回复但不能用：把已知用量完整带给队列，不再叠加失败估算。
 fn failure_with_known_spend(
     kind: CardRunErrorKind,
     message: &str,
     tokens: &TokenSum,
 ) -> CardRunError {
     let mut error = card_error(kind, message, None);
-    let actual = tokens.input.saturating_add(tokens.output);
-    error.spent_tokens = actual.saturating_sub(crate::jobs::REPAIRED_FAILURE_TOKEN_ESTIMATE as u64);
+    error.spent_tokens = tokens.input.saturating_add(tokens.output);
     error
 }
 
@@ -4681,8 +4697,7 @@ https://img.shields.io/github/stars/fox/demo
 
     #[test]
     fn a_card_that_is_unusable_after_a_cut_off_retry_and_a_repair_carries_the_real_spend() {
-        // 被截断 → 放大重试拿到回复但 JSON 坏 → 修复还是坏：三次调用都计费。队列失败时还会再按种类记 1 万（对「两次调用」的估计），
-        // 所以这里要把「真实用量比 1 万多出来的部分」带出去，合计才不会比真实用量少
+        // 被截断 → 放大重试拿到回复但 JSON 坏 → 修复还是坏：三次调用都计费。
         let db = TempDb::new();
         let mut conn = db.open();
         seed_repo(&conn, Some(&usable_readme()));
@@ -4699,18 +4714,16 @@ https://img.shields.io/github/stars/fox/demo
         )
         .expect_err("应失败");
         assert_eq!(error.kind, CardRunErrorKind::BadJson);
-        let estimate = crate::jobs::REPAIRED_FAILURE_TOKEN_ESTIMATE as u64;
         let actual_at_least = 8_192 + 3_000 + 500 + 3_500 + 600;
         assert!(
-            error.spent_tokens + estimate >= actual_at_least,
+            error.spent_tokens >= actual_at_least,
             "合计 {} 不能比真实用量 {actual_at_least} 少",
-            error.spent_tokens + estimate
+            error.spent_tokens
         );
     }
 
     #[test]
-    fn two_small_calls_that_both_fail_keep_the_conservative_estimate_and_carry_nothing_extra() {
-        // 真实用量没超过 1 万：不额外带（队列那边会记 1 万，宁多勿少）
+    fn two_small_calls_that_both_fail_carry_the_actual_usage() {
         let db = TempDb::new();
         let mut conn = db.open();
         seed_repo(&conn, Some(&usable_readme()));
@@ -4725,7 +4738,7 @@ https://img.shields.io/github/stars/fox/demo
             &options(false, "2026-10-03T00:00:00Z"),
         )
         .expect_err("应失败");
-        assert_eq!(error.spent_tokens, 0);
+        assert_eq!(error.spent_tokens, 4);
     }
 
     #[test]
@@ -4803,7 +4816,7 @@ https://img.shields.io/github/stars/fox/demo
             user: "用户".to_owned(),
             max_output_tokens: 16_384,
         };
-        let (error, spent) = match complete_with_room(&client, &request) {
+        let (error, spent) = match complete_with_room(&client, &request, 0) {
             Err(failure) => failure,
             Ok(_) => panic!("应失败"),
         };
@@ -6147,12 +6160,8 @@ INSERT INTO scenarios(slug, name_zh, account_id, archived) VALUES
         );
         assert!(error.message.contains("what_it_is"), "{}", error.message);
         assert_eq!(client.calls().len(), 2, "只修一次");
-        // 两次调用都计费：和别的校验失败一样，把真实用量比估计多出来的部分带出去
-        assert_eq!(
-            error.spent_tokens,
-            47_000 - crate::jobs::REPAIRED_FAILURE_TOKEN_ESTIMATE as u64,
-            "{error:?}"
-        );
+        // 两次调用都计费，把真实用量完整带出去。
+        assert_eq!(error.spent_tokens, 47_000, "{error:?}");
         assert_eq!(cell_i64(&conn, "SELECT COUNT(*) FROM repo_ai_documents"), 0);
         assert_eq!(cell_i64(&conn, "SELECT COUNT(*) FROM entity_categories"), 0);
     }

@@ -5,8 +5,10 @@
 
 use rusqlite::{Connection, OpenFlags};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::fs;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -65,6 +67,24 @@ struct PendingRestore {
     file_name: String,
     requested_at: String,
     app_max_schema_version: u32,
+    #[serde(default)]
+    phase: RestorePhase,
+    #[serde(default)]
+    pre_restore_file_name: Option<String>,
+    #[serde(default)]
+    backup_created_at: Option<String>,
+    #[serde(default)]
+    replacement_hash: Option<String>,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+enum RestorePhase {
+    #[default]
+    Requested,
+    Prepared,
+    Switching,
+    ResetPending,
 }
 
 pub fn create_backup(
@@ -210,55 +230,126 @@ pub fn request_restore(
         file_name: file_name.to_owned(),
         requested_at: format_rfc3339(time::OffsetDateTime::now_utc()),
         app_max_schema_version,
+        phase: RestorePhase::Requested,
+        pre_restore_file_name: None,
+        backup_created_at: None,
+        replacement_hash: None,
     };
+    if data_dir.join(PENDING_RESTORE_FILE).exists() {
+        return Err("已有待完成的恢复，请先重启应用完成恢复".to_owned());
+    }
     write_json(&data_dir.join(PENDING_RESTORE_FILE), &pending)?;
     Ok(())
 }
 
-/// 有 `pending-restore.json` 才做事。调用时还没有任何活动库连接。
-/// 成功或失败都会清掉标记；失败时活动库文件保持原样。没有标记时返回 `None`。
-pub fn apply_pending_restore(data_dir: &Path, backups_dir: &Path) -> Option<RestoreReport> {
+/// 在打开数据库前执行；更换数据库后，必须先重置额度授权才能清除标记。
+pub fn apply_pending_restore(
+    data_dir: &Path,
+    backups_dir: &Path,
+    reset_authorization: impl FnOnce() -> Result<(), String>,
+) -> Result<Option<RestoreReport>, String> {
     let marker_path = data_dir.join(PENDING_RESTORE_FILE);
-    if !marker_path.is_file() {
-        return None;
+    if !marker_path.exists() {
+        return Ok(None);
     }
-    let pending = match read_json::<PendingRestore>(&marker_path) {
-        Ok(pending) => pending,
-        Err(error) => {
-            return Some(finish_with_error(
-                data_dir,
-                "",
-                None,
-                format!("待恢复标记读不出来：{error}"),
-            ));
+    let mut pending: PendingRestore = read_json(&marker_path)
+        .map_err(|error| format!("待恢复标记读不出来，已停止启动：{error}"))?;
+    if pending.phase == RestorePhase::Requested {
+        recover_legacy_asides(data_dir)?;
+        let backup_path = match located_backup(backups_dir, &pending.file_name).and_then(|path| {
+            validate_backup_file(&path, pending.app_max_schema_version)?;
+            Ok(path)
+        }) {
+            Ok(path) => path,
+            Err(error) => {
+                return Ok(Some(finish_with_error(
+                    data_dir,
+                    &pending.file_name,
+                    None,
+                    error,
+                )))
+            }
+        };
+        pending.pre_restore_file_name =
+            snapshot_current_database(data_dir, backups_dir, time::OffsetDateTime::now_utc())?;
+        pending.backup_created_at = created_at_for_named_file(&pending.file_name, &backup_path);
+        pending.phase = RestorePhase::Prepared;
+        write_json(&marker_path, &pending)?;
+    }
+    if pending.phase == RestorePhase::Prepared {
+        let backup_path = located_backup(backups_dir, &pending.file_name)?;
+        validate_backup_file(&backup_path, pending.app_max_schema_version)?;
+        let partial = restore_partial(data_dir);
+        if partial.exists() {
+            fs::remove_file(&partial).map_err(|error| format!("清理恢复临时文件失败：{error}"))?;
         }
-    };
-    let file_name = pending.file_name.clone();
-    let backup_path = match located_backup(backups_dir, &file_name) {
-        Ok(path) => path,
-        Err(error) => return Some(finish_with_error(data_dir, &file_name, None, error)),
-    };
-    if let Err(error) = validate_backup_file(&backup_path, pending.app_max_schema_version) {
-        return Some(finish_with_error(data_dir, &file_name, None, error));
+        fs::copy(&backup_path, &partial).map_err(|error| format!("复制备份失败：{error}"))?;
+        integrity_is_ok(&partial).map_err(|error| format!("恢复文件完整性检查失败：{error}"))?;
+        sync_file(&partial)?;
+        pending.replacement_hash = Some(file_hash(&partial)?);
+        pending.phase = RestorePhase::Switching;
+        write_json(&marker_path, &pending)?;
     }
-
-    let now = time::OffsetDateTime::now_utc();
-    let pre_restore = match snapshot_current_database(data_dir, backups_dir, now) {
-        Ok(file_name) => file_name,
-        Err(error) => return Some(finish_with_error(data_dir, &file_name, None, error)),
-    };
-    if let Err(error) = replace_database_file(data_dir, &backup_path) {
-        return Some(finish_with_error(data_dir, &file_name, pre_restore, error));
+    if pending.phase == RestorePhase::Switching {
+        let expected = pending
+            .replacement_hash
+            .as_deref()
+            .ok_or_else(|| "恢复阶段缺少校验值，已停止启动".to_owned())?;
+        let partial = restore_partial(data_dir);
+        if partial.exists() {
+            if file_hash(&partial)? != expected {
+                return Err("恢复临时文件校验失败，已停止启动".to_owned());
+            }
+            replace_database_file(data_dir, &partial)?;
+        } else if file_hash(&data_dir.join(DATABASE_FILE_NAME))? != expected {
+            return Err("无法确认资料库是否已替换，已停止启动".to_owned());
+        }
+        // 改名成功后即使中断，也只清理旧辅助文件并进入额度重置。
+        cleanup_asides(data_dir)?;
+        pending.phase = RestorePhase::ResetPending;
+        write_json(&marker_path, &pending)?;
     }
-
+    clear_restored_job_authorizations(&data_dir.join(DATABASE_FILE_NAME))?;
+    reset_authorization()
+        .map_err(|error| format!("恢复后额度授权重置失败，已停止启动：{error}"))?;
     let report = RestoreReport {
         ok: true,
-        file_name: file_name.clone(),
-        backup_created_at: created_at_for_named_file(&file_name, &backup_path),
-        pre_restore_file_name: pre_restore,
+        file_name: pending.file_name,
+        backup_created_at: pending.backup_created_at,
+        pre_restore_file_name: pending.pre_restore_file_name,
         error: None,
     };
-    Some(finish_restore(data_dir, report))
+    write_json(&data_dir.join(RESTORE_RESULT_FILE), &report)?;
+    fs::remove_file(&marker_path).map_err(|error| format!("清除恢复标记失败：{error}"))?;
+    sync_dir(data_dir)?;
+    Ok(Some(report))
+}
+
+/// 已恢复的单张授权不能继承：旧版本可能还没有任务表或授权列。
+fn clear_restored_job_authorizations(db_path: &Path) -> Result<(), String> {
+    let failure = |error| format!("清除恢复资料中的单张额度授权失败，已停止启动：{error}");
+    let mut conn =
+        Connection::open_with_flags(db_path, OpenFlags::SQLITE_OPEN_READ_WRITE).map_err(failure)?;
+    let tx = conn.transaction().map_err(failure)?;
+    let has_table: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'ai_jobs')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(failure)?;
+    if has_table {
+        let has_column: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('ai_jobs') WHERE name = 'spend_authorized_until')",
+            [], |row| row.get(0),
+        ).map_err(failure)?;
+        if has_column {
+            tx.execute("UPDATE ai_jobs SET spend_authorized_until = NULL WHERE spend_authorized_until IS NOT NULL", [])
+                .map_err(failure)?;
+        }
+    }
+    tx.commit().map_err(failure)?;
+    Ok(())
 }
 
 pub fn backup_status(
@@ -568,7 +659,10 @@ fn snapshot_current_database(
     if let Some(dir) = scratch_dir {
         let _ = fs::remove_dir_all(dir);
     }
-    result.map(|info| Some(info.file_name))
+    let info = result?;
+    sync_file(&backups_dir.join(&info.file_name))?;
+    sync_dir(backups_dir)?;
+    Ok(Some(info.file_name))
 }
 
 /// 把活动库连同 `-wal` / `-shm` 拷到临时目录再导出，避免打开活动库本身。
@@ -605,74 +699,111 @@ fn stage_consistent_copy(db_path: &Path) -> Result<PathBuf, String> {
     Ok(scratch_db)
 }
 
-fn replace_database_file(data_dir: &Path, backup_path: &Path) -> Result<(), String> {
+// 旧版可能在写阶段标记前已移走 WAL。临时主库仍在时可以确认尚未替换，
+// 先还原辅助文件再做快照；否则无法判断主库是否已替换，保留现场并阻止启动。
+fn recover_legacy_asides(data_dir: &Path) -> Result<(), String> {
     let db_path = data_dir.join(DATABASE_FILE_NAME);
-    let partial = data_dir.join(format!("{DATABASE_FILE_NAME}.restore-partial"));
-    if partial.exists() {
-        remove_partial(&partial);
+    let entries = [("-wal", "wal-aside"), ("-shm", "shm-aside")];
+    if !entries.iter().any(|(_, name)| {
+        data_dir
+            .join(format!("{DATABASE_FILE_NAME}.{name}"))
+            .exists()
+    }) {
+        return Ok(());
     }
-    fs::copy(backup_path, &partial).map_err(|error| format!("复制备份失败：{error}"))?;
-    if let Err(error) = integrity_is_ok(&partial) {
-        remove_partial(&partial);
-        return Err(format!("这份备份已损坏，已拒绝恢复：{error}"));
+    if !restore_partial(data_dir).is_file() {
+        return Err(
+            "发现旧版未完成的恢复，无法确认资料库替换状态，已停止启动并保留文件".to_owned(),
+        );
     }
+    for (suffix, name) in entries {
+        let original = sidecar(&db_path, suffix).ok_or_else(|| "资料库路径无效".to_owned())?;
+        let aside = data_dir.join(format!("{DATABASE_FILE_NAME}.{name}"));
+        if aside.exists() {
+            if original.exists() {
+                return Err("旧版恢复辅助文件冲突，已停止启动并保留文件".to_owned());
+            }
+            fs::rename(aside, original)
+                .map_err(|error| format!("还原旧版恢复辅助文件失败：{error}"))?;
+        }
+    }
+    sync_dir(data_dir)
+}
 
-    let wal = sidecar(&db_path, "-wal");
-    let shm = sidecar(&db_path, "-shm");
-    let wal_aside = data_dir.join(format!("{DATABASE_FILE_NAME}.wal-aside"));
-    let shm_aside = data_dir.join(format!("{DATABASE_FILE_NAME}.shm-aside"));
-    let moved_wal = match move_aside(wal.as_deref(), &wal_aside) {
-        Ok(moved) => moved,
-        Err(error) => {
-            remove_partial(&partial);
-            return Err(error);
+fn restore_partial(data_dir: &Path) -> PathBuf {
+    data_dir.join(format!("{DATABASE_FILE_NAME}.restore-partial"))
+}
+
+fn file_hash(path: &Path) -> Result<String, String> {
+    let mut file = fs::File::open(path).map_err(|error| format!("读取恢复文件失败：{error}"))?;
+    let mut hash = Sha256::new();
+    let mut buffer = [0_u8; 65536];
+    loop {
+        let count = file
+            .read(&mut buffer)
+            .map_err(|error| format!("读取恢复文件失败：{error}"))?;
+        if count == 0 {
+            break;
         }
-    };
-    let moved_shm = match move_aside(shm.as_deref(), &shm_aside) {
-        Ok(moved) => moved,
-        Err(error) => {
-            restore_aside(moved_wal, &wal_aside, wal.as_deref());
-            remove_partial(&partial);
-            return Err(error);
-        }
-    };
-    if let Err(error) = fs::rename(&partial, &db_path) {
-        restore_aside(moved_wal, &wal_aside, wal.as_deref());
-        restore_aside(moved_shm, &shm_aside, shm.as_deref());
-        remove_partial(&partial);
-        return Err(format!("替换资料库失败：{error}"));
+        hash.update(&buffer[..count]);
     }
-    if wal_aside.exists() {
-        let _ = fs::remove_file(&wal_aside);
-    }
-    if shm_aside.exists() {
-        let _ = fs::remove_file(&shm_aside);
-    }
+    Ok(format!("{:x}", hash.finalize()))
+}
+
+/// 确认控制文件及其目录落盘后，才能清除待恢复标记。
+pub(crate) fn sync_authorization_file(path: &Path) -> Result<(), String> {
+    sync_file(path)?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| "额度控制文件路径无效".to_owned())?;
+    sync_dir(parent)
+}
+
+fn sync_file(path: &Path) -> Result<(), String> {
+    fs::File::open(path)
+        .and_then(|file| file.sync_all())
+        .map_err(|error| format!("保存恢复文件失败：{error}"))
+}
+
+#[cfg(not(windows))]
+fn sync_dir(path: &Path) -> Result<(), String> {
+    fs::File::open(path)
+        .and_then(|file| file.sync_all())
+        .map_err(|error| format!("保存恢复目录失败：{error}"))
+}
+
+#[cfg(windows)]
+fn sync_dir(_path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn move_aside(source: Option<&Path>, aside: &Path) -> Result<bool, String> {
-    let Some(source) = source else {
-        return Ok(false);
-    };
-    if !source.exists() {
-        return Ok(false);
+fn replace_database_file(data_dir: &Path, partial: &Path) -> Result<(), String> {
+    let db_path = data_dir.join(DATABASE_FILE_NAME);
+    for (suffix, name) in [("-wal", "wal-aside"), ("-shm", "shm-aside")] {
+        let source = sidecar(&db_path, suffix).ok_or_else(|| "资料库路径无效".to_owned())?;
+        let aside = data_dir.join(format!("{DATABASE_FILE_NAME}.{name}"));
+        if source.exists() {
+            if aside.exists() {
+                return Err("恢复辅助文件冲突，已停止启动".to_owned());
+            }
+            fs::rename(source, aside)
+                .map_err(|error| format!("移开资料库辅助文件失败：{error}"))?;
+        }
     }
-    if aside.exists() {
-        fs::remove_file(aside).map_err(|error| format!("清理临时文件失败：{error}"))?;
-    }
-    fs::rename(source, aside).map_err(|error| format!("移开资料库辅助文件失败：{error}"))?;
-    Ok(true)
+    sync_dir(data_dir)?;
+    fs::rename(partial, &db_path).map_err(|error| format!("替换资料库失败：{error}"))?;
+    sync_dir(data_dir)?;
+    Ok(())
 }
 
-fn restore_aside(moved: bool, aside: &Path, original: Option<&Path>) {
-    if !moved {
-        return;
+fn cleanup_asides(data_dir: &Path) -> Result<(), String> {
+    for name in ["wal-aside", "shm-aside"] {
+        let path = data_dir.join(format!("{DATABASE_FILE_NAME}.{name}"));
+        if path.exists() {
+            fs::remove_file(path).map_err(|error| format!("清理恢复辅助文件失败：{error}"))?;
+        }
     }
-    let Some(original) = original else {
-        return;
-    };
-    let _ = fs::rename(aside, original);
+    sync_dir(data_dir)
 }
 
 fn finish_with_error(
@@ -833,13 +964,21 @@ fn write_json(path: &Path, value: &impl Serialize) -> Result<(), String> {
         .unwrap_or("write");
     let partial = path.with_file_name(format!("{file_name}.partial"));
     let text = serde_json::to_string_pretty(value).map_err(|error| format!("编码失败：{error}"))?;
-    if let Err(error) = fs::write(&partial, text) {
+    let write_result = (|| -> std::io::Result<()> {
+        let mut file = fs::File::create(&partial)?;
+        file.write_all(text.as_bytes())?;
+        file.sync_all()
+    })();
+    if let Err(error) = write_result {
         let _ = fs::remove_file(&partial);
         return Err(format!("写入失败：{error}"));
     }
     if let Err(error) = fs::rename(&partial, path) {
         let _ = fs::remove_file(&partial);
         return Err(format!("写入失败：{error}"));
+    }
+    if let Some(parent) = path.parent() {
+        sync_dir(parent)?;
     }
     Ok(())
 }
@@ -988,6 +1127,10 @@ mod tests {
             file_name: file_name.to_owned(),
             requested_at: "2026-10-03T00:00:00Z".to_owned(),
             app_max_schema_version: app_max,
+            phase: RestorePhase::Requested,
+            pre_restore_file_name: None,
+            backup_created_at: None,
+            replacement_hash: None,
         };
         write_json(&data_dir.join(PENDING_RESTORE_FILE), &pending).expect("应能写入待恢复标记");
     }
@@ -1412,7 +1555,9 @@ mod tests {
         write_sample_db(&backups.join(file_name), "029", "after", 0);
         write_pending(&data_dir, file_name, 29);
 
-        let report = apply_pending_restore(&data_dir, &backups).expect("有标记时应返回报告");
+        let report = apply_pending_restore(&data_dir, &backups, || Ok(()))
+            .expect("恢复应执行成功")
+            .expect("有标记时应返回报告");
 
         assert!(report.ok, "{report:?}");
         assert_eq!(report.error, None);
@@ -1447,7 +1592,9 @@ mod tests {
         fs::write(backups.join(file_name), b"broken-backup").expect("应能写入损坏备份");
         write_pending(&data_dir, file_name, 29);
 
-        let report = apply_pending_restore(&data_dir, &backups).expect("损坏备份也应返回报告");
+        let report = apply_pending_restore(&data_dir, &backups, || Ok(()))
+            .expect("应能记录错误")
+            .expect("损坏备份也应返回报告");
 
         assert!(!report.ok);
         let error = report.error.expect("应有失败原因");
@@ -1484,7 +1631,7 @@ mod tests {
             .map(|entry| entry.expect("应能读取目录项").file_name())
             .collect::<Vec<_>>();
 
-        let report = apply_pending_restore(&data_dir, &backups);
+        let report = apply_pending_restore(&data_dir, &backups, || Ok(())).expect("无标记时应成功");
 
         assert!(report.is_none());
         assert_eq!(fs::read(&db_path).expect("活动库应还在"), original);
@@ -1496,5 +1643,189 @@ mod tests {
             .map(|entry| entry.expect("应能读取目录项").file_name())
             .collect::<Vec<_>>();
         assert_eq!(before, after);
+    }
+    #[test]
+    fn reset_failure_blocks_and_retry_does_not_replace_again() {
+        let dir = TempDir::new("reset-retry");
+        let data = dir.0.join("data");
+        let backups = data.join("backups");
+        let db = data.join(DATABASE_FILE_NAME);
+        let name = "manual-20261003-120000.sqlite3";
+        write_sample_db(&db, "029", "before", 0);
+        write_sample_db(&backups.join(name), "029", "after", 0);
+        write_pending(&data, name, 29);
+        let error = apply_pending_restore(&data, &backups, || Err("test failure".to_owned()))
+            .expect_err("重置失败必须阻止启动");
+        assert!(error.contains("重置失败"));
+        let pending: PendingRestore =
+            read_json(&data.join(PENDING_RESTORE_FILE)).expect("标记应保留");
+        assert_eq!(pending.phase, RestorePhase::ResetPending);
+        let snapshot = pending.pre_restore_file_name.expect("应保留恢复前快照");
+        assert_eq!(marker_of(&backups.join(&snapshot)), "before");
+        assert_eq!(marker_of(&db), "after");
+        fs::remove_file(backups.join(name)).expect("模拟恢复来源消失");
+        let report = apply_pending_restore(&data, &backups, || Ok(()))
+            .expect("重试重置应成功")
+            .expect("应返回报告");
+        assert_eq!(
+            report.pre_restore_file_name.as_deref(),
+            Some(snapshot.as_str())
+        );
+        assert_eq!(marker_of(&db), "after");
+        assert!(!data.join(PENDING_RESTORE_FILE).exists());
+    }
+
+    #[test]
+    fn crash_after_database_rename_keeps_snapshot_and_only_resets() {
+        let dir = TempDir::new("rename-window");
+        let data = dir.0.join("data");
+        let backups = data.join("backups");
+        let db = data.join(DATABASE_FILE_NAME);
+        let name = "manual-20261003-120000.sqlite3";
+        write_sample_db(&db, "029", "before", 0);
+        write_sample_db(&backups.join(name), "029", "after", 0);
+        write_pending(&data, name, 29);
+        let snapshot = snapshot_current_database(&data, &backups, time::OffsetDateTime::now_utc())
+            .expect("快照应成功")
+            .expect("应有快照");
+        let partial = restore_partial(&data);
+        fs::copy(backups.join(name), &partial).expect("应复制恢复文件");
+        let mut pending: PendingRestore =
+            read_json(&data.join(PENDING_RESTORE_FILE)).expect("应有标记");
+        pending.phase = RestorePhase::Switching;
+        pending.pre_restore_file_name = Some(snapshot.clone());
+        pending.replacement_hash = Some(file_hash(&partial).expect("应算出校验值"));
+        write_json(&data.join(PENDING_RESTORE_FILE), &pending).expect("应保存阶段");
+        replace_database_file(&data, &partial).expect("模拟改名后中断");
+        fs::remove_file(backups.join(name)).expect("模拟来源消失");
+        let report = apply_pending_restore(&data, &backups, || Ok(()))
+            .expect("应从改名窗口继续")
+            .expect("应返回报告");
+        assert_eq!(
+            report.pre_restore_file_name.as_deref(),
+            Some(snapshot.as_str())
+        );
+        assert_eq!(marker_of(&backups.join(snapshot)), "before");
+        assert_eq!(marker_of(&db), "after");
+        assert!(!data.join(PENDING_RESTORE_FILE).exists());
+    }
+    #[test]
+    fn legacy_interruption_restores_wal_before_snapshot() {
+        let dir = TempDir::new("legacy-wal");
+        let data = dir.0.join("data");
+        let backups = data.join("backups");
+        let db = data.join(DATABASE_FILE_NAME);
+        let name = "manual-20261003-120000.sqlite3";
+        write_wal_db(&db, "before");
+        write_sample_db(&backups.join(name), "029", "after", 0);
+        fs::write(data.join(PENDING_RESTORE_FILE), format!(r#"{{"fileName":"{name}","requestedAt":"2026-10-03T00:00:00Z","appMaxSchemaVersion":29}}"#)).expect("应写旧版标记");
+        fs::copy(backups.join(name), restore_partial(&data)).expect("应模拟旧版临时库");
+        fs::rename(
+            sidecar(&db, "-wal").expect("应有路径"),
+            data.join(format!("{DATABASE_FILE_NAME}.wal-aside")),
+        )
+        .expect("应模拟旧版移走 WAL");
+        let report = apply_pending_restore(&data, &backups, || Ok(()))
+            .expect("应恢复")
+            .expect("应有结果");
+        let snapshot = report.pre_restore_file_name.expect("应有恢复前快照");
+        assert_eq!(marker_of(&backups.join(snapshot)), "before");
+        assert_eq!(marker_of(&db), "after");
+    }
+
+    #[test]
+    fn ambiguous_legacy_interruption_stops_without_modifying_files() {
+        let dir = TempDir::new("legacy-ambiguous");
+        let data = dir.0.join("data");
+        let backups = data.join("backups");
+        let db = data.join(DATABASE_FILE_NAME);
+        write_wal_db(&db, "before");
+        write_pending(&data, "manual-20261003-120000.sqlite3", 29);
+        let aside = data.join(format!("{DATABASE_FILE_NAME}.wal-aside"));
+        fs::rename(sidecar(&db, "-wal").expect("应有路径"), &aside).expect("应模拟旧版移走 WAL");
+        let error = apply_pending_restore(&data, &backups, || panic!("不应重置授权"))
+            .expect_err("状态不明必须停止启动");
+        assert!(error.contains("无法确认"));
+        assert!(aside.is_file());
+        assert!(data.join(PENDING_RESTORE_FILE).is_file());
+        assert!(!backups.exists());
+    }
+    #[test]
+    fn restored_valid_single_card_authorization_cannot_claim_at_zero_budget() {
+        let dir = TempDir::new("restored-authorization");
+        let data = dir.0.join("data");
+        let backups = data.join("backups");
+        let db = data.join(DATABASE_FILE_NAME);
+        let name = "manual-20261003-120000.sqlite3";
+        write_sample_db(&db, "029", "before", 0);
+        fs::create_dir_all(&backups).expect("应能创建备份目录");
+        let saved = backups.join(name);
+        crate::db::migrations::migrate_database(&saved).expect("应创建真实结构的测试备份");
+        let conn = Connection::open(&saved).expect("应打开测试备份");
+        conn.execute(
+            "INSERT INTO github_accounts(id, login, token_ref) VALUES ('acct', 'fox', 'test')",
+            [],
+        )
+        .expect("应创建测试账户");
+        conn.execute("INSERT INTO ai_jobs(id, account_id, job_type, target_type, target_id, status, spend_authorized_until) VALUES ('job-1', 'acct', 'repo_card', 'repository', 'repo-1', 'queued', '2999-01-01T00:00:00.000Z')", []).expect("应写入仍有效的授权");
+        drop(conn);
+        let control = crate::jobs::queue_control_path(&db);
+        crate::jobs::set_daily_budget(&control, 100_000).expect("应设置测试额度");
+        request_restore(&data, &backups, name, u32::MAX).expect("应能请求恢复");
+        apply_pending_restore(&data, &backups, || {
+            crate::jobs::reset_spending_authorization(&control)
+        })
+        .expect("应完成恢复")
+        .expect("应返回恢复结果");
+        let mut conn = crate::jobs::open_db(&db).expect("应打开恢复的测试库");
+        let authorization: Option<String> = conn
+            .query_row(
+                "SELECT spend_authorized_until FROM ai_jobs WHERE id = 'job-1'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("任务应存在");
+        assert_eq!(authorization, None);
+        assert_eq!(crate::jobs::read_control(&control).daily_budget_tokens, 0);
+        let candidates = [crate::jobs::ClaimCandidate {
+            job_type: "repo_card".to_owned(),
+            spends_tokens: true,
+        }];
+        let gate = crate::jobs::BudgetGate {
+            paused: false,
+            daily_budget_tokens: 0,
+            unlimited: false,
+            full_scan_periods: vec![],
+        };
+        assert!(crate::jobs::claim_next(
+            &mut conn,
+            &crate::jobs::now_db_time(),
+            &candidates,
+            &gate
+        )
+        .expect("应能检查任务")
+        .is_none());
+    }
+
+    #[test]
+    fn failed_authorization_clear_keeps_restore_pending() {
+        let dir = TempDir::new("clear-authorization-failure");
+        let data = dir.0.join("data");
+        let backups = data.join("backups");
+        let db = data.join(DATABASE_FILE_NAME);
+        let name = "manual-20261003-120000.sqlite3";
+        write_sample_db(&db, "029", "before", 0);
+        let saved = backups.join(name);
+        write_sample_db(&saved, "029", "after", 0);
+        let conn = Connection::open(&saved).expect("应打开测试备份");
+        conn.execute_batch("CREATE TABLE ai_jobs(spend_authorized_until TEXT); INSERT INTO ai_jobs VALUES ('2999-01-01'); CREATE TRIGGER reject_clear BEFORE UPDATE ON ai_jobs BEGIN SELECT RAISE(ABORT, 'clear failed'); END;").expect("应创建失败场景");
+        drop(conn);
+        write_pending(&data, name, 29);
+        let error = apply_pending_restore(&data, &backups, || panic!("清除失败不应继续重置"))
+            .expect_err("清除失败必须阻止启动");
+        assert!(error.contains("清除恢复资料中的单张额度授权失败"));
+        let pending: PendingRestore =
+            read_json(&data.join(PENDING_RESTORE_FILE)).expect("应保留标记");
+        assert_eq!(pending.phase, RestorePhase::ResetPending);
     }
 }

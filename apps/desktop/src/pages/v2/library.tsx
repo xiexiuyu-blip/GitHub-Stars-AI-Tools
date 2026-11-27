@@ -83,6 +83,7 @@ export function LibraryPage(props: LibraryPageProps) {
   const [scenarioError, setScenarioError] = useState<string | null>(null);
   const [scenarioReloadKey, setScenarioReloadKey] = useState(0);
   const [serverItems, setServerItems] = useState<LibraryItem[]>([]);
+  const [serverLoaded, setServerLoaded] = useState(0);
   const [resultCount, setResultCount] = useState<number | null>(null);
   const [counts, setCounts] = useState<LibraryCounts | null>(null);
   const [listPhase, setListPhase] = useState<ListPhase>('loading');
@@ -107,11 +108,15 @@ export function LibraryPage(props: LibraryPageProps) {
   const keywordDraftRef = useRef(keywordDraft);
   const overridesRef = useRef(overrides);
   const serverItemsRef = useRef(serverItems);
+  const serverLoadedRef = useRef(serverLoaded);
+  const emptyAppendPagesRef = useRef(0);
   const detailRef = useRef(detail);
   const resultCountRef = useRef(resultCount);
   const selectedIdRef = useRef(selectedId);
   const touchedRef = useRef(cardStateTouched);
   const noMoreRef = useRef(noMore);
+  const readingSeqRef = useRef<Record<string, number>>({});
+  const readingChainRef = useRef<Record<string, Promise<void>>>({});
   const scrollTopRef = useRef(restoredSession?.scrollTop ?? 0);
   const pendingScrollRestoreRef = useRef<number | null>(
     restoredSession && restoredSession.scrollTop > 0 ? restoredSession.scrollTop : null,
@@ -125,6 +130,7 @@ export function LibraryPage(props: LibraryPageProps) {
   keywordDraftRef.current = keywordDraft;
   overridesRef.current = overrides;
   serverItemsRef.current = serverItems;
+  serverLoadedRef.current = serverLoaded;
   detailRef.current = detail;
   resultCountRef.current = resultCount;
   selectedIdRef.current = selectedId;
@@ -230,10 +236,13 @@ export function LibraryPage(props: LibraryPageProps) {
     const generation = ++listGeneration.current;
     loadingMoreRef.current = false;
     setLoadingMore(false);
+    emptyAppendPagesRef.current = 0;
     const filterChanged = previousQueryKey.current !== queryKey;
     previousQueryKey.current = queryKey;
     if (filterChanged) {
       setServerItems([]);
+      serverLoadedRef.current = 0;
+      setServerLoaded(0);
       setResultCount(null);
     }
     setNoMore(false);
@@ -255,6 +264,12 @@ export function LibraryPage(props: LibraryPageProps) {
         }
       }
       setServerItems(read.items);
+      serverLoadedRef.current = read.items.length;
+      setServerLoaded(read.items.length);
+      if (read.items.length < LIBRARY_PAGE_SIZE) {
+        noMoreRef.current = true;
+        setNoMore(true);
+      }
       resultCountRef.current = read.totalCount;
       setResultCount(read.totalCount);
       if (read.counts) setCounts(read.counts);
@@ -411,6 +426,15 @@ export function LibraryPage(props: LibraryPageProps) {
     setResultCount(read.totalCount);
   }
 
+  function enqueueReading(id: string, task: (opSeq: number) => Promise<void>): Promise<void> {
+    const opSeq = (readingSeqRef.current[id] ?? 0) + 1;
+    readingSeqRef.current[id] = opSeq;
+    const prev = readingChainRef.current[id] ?? Promise.resolve();
+    const next = prev.catch(() => undefined).then(() => task(opSeq));
+    readingChainRef.current[id] = next;
+    return next;
+  }
+
   async function changeReading(id: string, group: ReadingGroup) {
     const previous = displayedGroup(id);
     const server = serverGroup(id);
@@ -418,42 +442,48 @@ export function LibraryPage(props: LibraryPageProps) {
     const projectName = labelOf(id);
     writeOverride(id, group);
     paintDetail(id, group);
-    try {
-      await setLibraryReading([id], group);
-      toast.show({
-        title: `已标为「${readingGroupLabel(group)}」`,
-        sub: projectName || undefined,
-        actions: [{ label: '撤销', onClick: () => { void undoReading(id, previous, group); } }],
-      });
+    await enqueueReading(id, async (opSeq) => {
       try {
-        await refreshCounts();
+        await setLibraryReading([id], group);
+        toast.show({
+          title: `已标为「${readingGroupLabel(group)}」`,
+          sub: projectName || undefined,
+          actions: [{ label: '撤销', onClick: () => { void undoReading(id, previous, group); } }],
+        });
+        try {
+          await refreshCounts();
+        } catch (reason) {
+          toast.show({ title: describeInvokeError(reason), sub: '状态已经改了，数字可能还没刷新' });
+        }
       } catch (reason) {
-        toast.show({ title: describeInvokeError(reason), sub: '状态已经改了，数字可能还没刷新' });
+        if (readingSeqRef.current[id] === opSeq && overridesRef.current[id] === group) {
+          writeOverride(id, server && previous === server ? null : previous);
+          paintDetail(id, previous);
+        }
+        toast.show({ title: describeInvokeError(reason) });
       }
-    } catch (reason) {
-      if (overridesRef.current[id] === group) {
-        writeOverride(id, server && previous === server ? null : previous);
-      }
-      paintDetail(id, previous);
-      toast.show({ title: describeInvokeError(reason) });
-    }
+    });
   }
 
   async function undoReading(id: string, previous: ReadingGroup, written: ReadingGroup) {
     writeOverride(id, previous);
     paintDetail(id, previous);
-    try {
-      await setLibraryReading([id], previous);
+    await enqueueReading(id, async (opSeq) => {
       try {
-        await refreshCounts();
+        await setLibraryReading([id], previous);
+        try {
+          await refreshCounts();
+        } catch (reason) {
+          toast.show({ title: describeInvokeError(reason), sub: '已撤销，数字可能还没刷新' });
+        }
       } catch (reason) {
-        toast.show({ title: describeInvokeError(reason), sub: '已撤销，数字可能还没刷新' });
+        if (readingSeqRef.current[id] === opSeq && overridesRef.current[id] === previous) {
+          writeOverride(id, written);
+          paintDetail(id, written);
+        }
+        toast.show({ title: describeInvokeError(reason) });
       }
-    } catch (reason) {
-      if (overridesRef.current[id] === previous) writeOverride(id, written);
-      paintDetail(id, written);
-      toast.show({ title: describeInvokeError(reason) });
-    }
+    });
   }
 
   async function writeClipboard(text: string): Promise<boolean> {
@@ -504,7 +534,7 @@ export function LibraryPage(props: LibraryPageProps) {
 
   async function loadMore() {
     if (loadingMoreRef.current || noMoreRef.current) return;
-    const offset = nextPageOffset(serverItemsRef.current.length, resultCountRef.current ?? 0, LIBRARY_PAGE_SIZE);
+    const offset = nextPageOffset(serverLoadedRef.current, resultCountRef.current ?? 0, LIBRARY_PAGE_SIZE);
     if (offset == null) return;
     const generation = listGeneration.current;
     const pageIndex = offset / LIBRARY_PAGE_SIZE;
@@ -514,16 +544,27 @@ export function LibraryPage(props: LibraryPageProps) {
       const page = await listLibraryView(toFilters(uiRef.current, pageIndex, LIBRARY_PAGE_SIZE));
       if (generation !== listGeneration.current) return;
       const read = readLibraryPage(page);
+      const nextLoaded = serverLoadedRef.current + read.items.length;
+      serverLoadedRef.current = nextLoaded;
+      setServerLoaded(nextLoaded);
       const seen = new Set(serverItemsRef.current.map((item) => item.id));
       const extra = read.items.filter((item) => !seen.has(item.id));
-      if (extra.length === 0) {
-        noMoreRef.current = true;
-        setNoMore(true);
-      } else {
+      if (extra.length > 0) {
+        emptyAppendPagesRef.current = 0;
         setServerItems((current) => {
           const latest = new Set(current.map((item) => item.id));
           return [...current, ...extra.filter((item) => !latest.has(item.id))];
         });
+      } else {
+        emptyAppendPagesRef.current += 1;
+      }
+      if (
+        read.items.length < LIBRARY_PAGE_SIZE
+        || nextLoaded >= read.totalCount
+        || (extra.length === 0 && emptyAppendPagesRef.current >= 2)
+      ) {
+        noMoreRef.current = true;
+        setNoMore(true);
       }
       resultCountRef.current = read.totalCount;
       setResultCount(read.totalCount);
@@ -585,7 +626,7 @@ export function LibraryPage(props: LibraryPageProps) {
   // 提示说的是整个资料库还有多少没整理；已经按场景 / 关键词筛窄了，数字对不上，就不提示
   const narrowedDown = Boolean(ui.scenario || ui.reading || ui.form || ui.maintenance || ui.keyword.trim());
   const hint = narrowedDown ? null : automationHint(automation, counts?.cardState?.pending ?? 0);
-  const moreOffset = nextPageOffset(serverItems.length, resultCount ?? 0, LIBRARY_PAGE_SIZE);
+  const moreOffset = nextPageOffset(serverLoaded, resultCount ?? 0, LIBRARY_PAGE_SIZE);
   const hasMore = moreOffset != null && !noMore;
   const matchedDetail = detail && detail.id === selectedId ? detail : null;
   const shownDetail = matchedDetail

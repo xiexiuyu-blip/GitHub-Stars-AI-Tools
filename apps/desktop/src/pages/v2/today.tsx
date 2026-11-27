@@ -243,6 +243,18 @@ export function TodayPage(props: TodayPageProps) {
     });
   }
 
+  const readingSeqRef = useRef<Record<string, number>>({});
+  const readingChainRef = useRef<Record<string, Promise<void>>>({});
+
+  function enqueueReading(id: string, task: (opSeq: number) => Promise<void>): Promise<void> {
+    const opSeq = (readingSeqRef.current[id] ?? 0) + 1;
+    readingSeqRef.current[id] = opSeq;
+    const prev = readingChainRef.current[id] ?? Promise.resolve();
+    const next = prev.catch(() => undefined).then(() => task(opSeq));
+    readingChainRef.current[id] = next;
+    return next;
+  }
+
   async function changeReading(id: string, group: ReadingGroup) {
     const previous = displayedGroup(id);
     const server = findRaw(id)?.readingGroup ?? (detail?.id === id ? detail.readingGroup : null);
@@ -250,48 +262,56 @@ export function TodayPage(props: TodayPageProps) {
     const projectName = labelOf(id);
     setOverrides((current) => ({ ...current, [id]: group }));
     setDetail((current) => (current && current.id === id ? { ...current, readingGroup: group } : current));
-    try {
-      await setLibraryReading([id], group);
-      toast.show({
-        title: `已标为「${readingGroupLabel(group)}」`,
-        sub: projectName || undefined,
-        actions: [{ label: '撤销', onClick: () => { void undoReading(id, previous, group); } }],
-      });
+    await enqueueReading(id, async (opSeq) => {
       try {
-        await refreshCounts();
-        setListReloadKey((key) => key + 1);
+        await setLibraryReading([id], group);
+        toast.show({
+          title: `已标为「${readingGroupLabel(group)}」`,
+          sub: projectName || undefined,
+          actions: [{ label: '撤销', onClick: () => { void undoReading(id, previous, group); } }],
+        });
+        try {
+          await refreshCounts();
+          setListReloadKey((key) => key + 1);
+        } catch (reason) {
+          toast.show({ title: describeInvokeError(reason), sub: '状态已经改了，数字可能还没刷新' });
+        }
       } catch (reason) {
-        toast.show({ title: describeInvokeError(reason), sub: '状态已经改了，数字可能还没刷新' });
+        if (readingSeqRef.current[id] === opSeq) {
+          setOverrides((current) => {
+            if (current[id] !== group) return current;
+            const next = { ...current };
+            if (server && previous === server) delete next[id];
+            else next[id] = previous;
+            return next;
+          });
+          setDetail((current) => (current && current.id === id ? { ...current, readingGroup: previous } : current));
+        }
+        toast.show({ title: describeInvokeError(reason) });
       }
-    } catch (reason) {
-      setOverrides((current) => {
-        if (current[id] !== group) return current;
-        const next = { ...current };
-        if (server && previous === server) delete next[id];
-        else next[id] = previous;
-        return next;
-      });
-      setDetail((current) => (current && current.id === id ? { ...current, readingGroup: previous } : current));
-      toast.show({ title: describeInvokeError(reason) });
-    }
+    });
   }
 
   async function undoReading(id: string, previous: ReadingGroup, written: ReadingGroup) {
     setOverrides((current) => ({ ...current, [id]: previous }));
     setDetail((current) => (current && current.id === id ? { ...current, readingGroup: previous } : current));
-    try {
-      await setLibraryReading([id], previous);
+    await enqueueReading(id, async (opSeq) => {
       try {
-        await refreshCounts();
-        setListReloadKey((key) => key + 1);
+        await setLibraryReading([id], previous);
+        try {
+          await refreshCounts();
+          setListReloadKey((key) => key + 1);
+        } catch (reason) {
+          toast.show({ title: describeInvokeError(reason), sub: '已撤销，数字可能还没刷新' });
+        }
       } catch (reason) {
-        toast.show({ title: describeInvokeError(reason), sub: '已撤销，数字可能还没刷新' });
+        if (readingSeqRef.current[id] === opSeq) {
+          setOverrides((current) => (current[id] === previous ? { ...current, [id]: written } : current));
+          setDetail((current) => (current && current.id === id ? { ...current, readingGroup: written } : current));
+        }
+        toast.show({ title: describeInvokeError(reason) });
       }
-    } catch (reason) {
-      setOverrides((current) => (current[id] === previous ? { ...current, [id]: written } : current));
-      setDetail((current) => (current && current.id === id ? { ...current, readingGroup: written } : current));
-      toast.show({ title: describeInvokeError(reason) });
-    }
+    });
   }
 
   async function writeClipboard(text: string): Promise<boolean> {

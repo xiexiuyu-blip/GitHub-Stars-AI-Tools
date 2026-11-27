@@ -2,7 +2,6 @@ import { lazy, Suspense, useEffect, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { AppLayout } from '@/components/app-layout';
 import { CommandPalette } from '@/components/command-palette';
-import { AppUpdateDialog } from '@/components/app-update-panel';
 import { SubTabs } from '@/components/sub-tabs';
 import { Icon } from '@/components/ui/icon';
 import { subTabsFor } from '@/lib/nav';
@@ -15,6 +14,9 @@ import { shouldFlushAiApiKey } from '@/lib/ai-config';
 import type { SettingsTab } from '@/pages/settings';
 import type { AppPage } from '@/types';
 
+const AppUpdateDialog = lazy(() =>
+  import('@/components/app-update-panel').then((module) => ({ default: module.AppUpdateDialog })),
+);
 const SettingsPage = lazy(() => import('@/pages/settings').then((module) => ({ default: module.SettingsPage })));
 const TodayPage = lazy(() => import('@/pages/v2/today').then((module) => ({ default: module.TodayPage })));
 const V2LibraryPage = lazy(() => import('@/pages/v2/library').then((module) => ({ default: module.LibraryPage })));
@@ -337,7 +339,9 @@ function AppContent() {
         />
       )}
       {isUpdateDialogOpen && (
-        <AppUpdateDialog appUpdate={appUpdate} onClose={() => setIsUpdateDialogOpen(false)} />
+        <Suspense fallback={null}>
+          <AppUpdateDialog appUpdate={appUpdate} onClose={() => setIsUpdateDialogOpen(false)} />
+        </Suspense>
       )}
       <CommandPalette
         open={commandPaletteOpen}

@@ -439,20 +439,17 @@ fn is_wide(ch: char) -> bool {
     )
 }
 
-/// 额度的规矩（纯函数）：暂停、额度是 0、放不下。`unlimited`：Fox 亲手开了「全量整理」，这一轮不看每天额度（暂停照样拦）。
+/// 旧功能始终检查暂停和每日额度，全量整理不豁免旧功能。
 fn refusal_for(
     control: &jobs::QueueControl,
     used: u64,
     estimated: u64,
-    unlimited: bool,
+    _unlimited: bool,
 ) -> Result<(), String> {
     if control.paused {
         return Err(format!(
             "{REFUSAL_PREFIX}AI 整理现在是暂停状态，其它 AI 功能也一起停着。要继续请先到「设置 → 自动整理与备份」里点「继续整理」。"
         ));
-    }
-    if unlimited {
-        return Ok(());
     }
     if control.daily_budget_tokens == 0 {
         return Err(format!(
@@ -552,6 +549,11 @@ fn reserve_with(
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|error| refuse(error.to_string()))?;
+    if jobs::spend_blocked_by_unsettled(&transaction).map_err(refuse)? {
+        return Err(format!(
+            "{REFUSAL_PREFIX}存在未结算用量，请先检查数据库后再试。"
+        ));
+    }
     let cutoff = jobs::shift_db_time(now, -jobs::DAY_SECS).map_err(refuse)?;
     let used = jobs::daily_tokens_used(&transaction, &control, now)
         .map_err(refuse)?
@@ -1313,7 +1315,7 @@ mod tests {
         );
     }
 
-    // —— 全量整理：Fox 亲手确认后，旧版功能这一轮也不看每天额度 ——
+    // —— 全量整理只豁免整理任务，旧版功能照常检查每日额度 ——
 
     /// 控制文件：每天额度 `budget`，并且全量整理从 `started_at` 开始、预计整理 `total` 个。
     fn control_with_full_scan(budget: u64, paused: bool, started_at: &str, total: i64) -> String {
@@ -1324,7 +1326,7 @@ mod tests {
     }
 
     #[test]
-    fn a_full_scan_lets_legacy_requests_through_past_the_daily_budget() {
+    fn a_full_scan_does_not_let_legacy_requests_bypass_the_daily_budget() {
         let dir = Dir::new();
         let now = jobs::now_db_time();
         // 额度 10 万，24 小时已经用了 13 万
@@ -1338,14 +1340,30 @@ mod tests {
             error.contains("现在整理"),
             "拒绝的话要告诉他还有这条路：{error}"
         );
-        // 全量整理进行中：放行，预留照常写、用量照常记
+        // 全量整理进行中，旧版调用仍不能绕过额度。
         dir.control(&control_with_full_scan(100_000, false, &now, 300));
-        let permit = begin(Some(dir.path()), &"说".repeat(1000)).expect("全量整理期间应放行");
-        assert_eq!(dir.used(), 130_000 + 4_000);
-        drop(permit);
+        assert!(begin(Some(dir.path()), &"说".repeat(1000)).is_err());
+        assert_eq!(dir.used(), 130_000);
         // 日常额度关着（0）也一样
         dir.control(&control_with_full_scan(0, false, &now, 300));
-        assert!(begin(Some(dir.path()), "提示词").is_ok());
+        assert!(begin(Some(dir.path()), "提示词").is_err());
+    }
+
+    #[test]
+    fn unsettled_ledger_blocks_legacy_and_rerank_but_not_probes() {
+        let dir = Dir::new();
+        let now = jobs::now_db_time();
+        dir.control(BUDGET_100K);
+        let conn = Connection::open(dir.path()).unwrap();
+        conn.execute("INSERT INTO ai_jobs(id, account_id, job_type, target_type, target_id, status, prompt_version, input_tokens, updated_at) VALUES ('blocked', (SELECT id FROM github_accounts LIMIT 1), 'repo_card', 'repository', 'blocked', 'running', 'accounting-unsettled', 12000, ?1)", [&now]).unwrap();
+        for policy in [Policy::Legacy, Policy::SolveRerank] {
+            let error = reserve_with(dir.path(), &now, 4_000, policy).unwrap_err();
+            assert!(is_refusal(&error));
+            assert!(error.contains("未结算"));
+        }
+        let permit = probe(|| begin(Some(dir.path()), "连接测试")).expect("连接测试仍可用");
+        drop(permit);
+        assert_eq!(dir.used(), 12_000);
     }
 
     #[test]
@@ -1375,25 +1393,32 @@ mod tests {
         dir.control(&control_with_full_scan(100_000, false, &now, 1));
         record_at(dir.path(), &now, "p", "m", 3_000_000, 1).unwrap();
         let conn = Connection::open(dir.path()).unwrap();
+        conn.execute("UPDATE ai_jobs SET job_type = 'repo_card'", [])
+            .unwrap();
         let control = jobs::read_control(&jobs::queue_control_path(dir.path()));
         assert!(!jobs::full_scan_open(&conn, &control, &now));
         assert_eq!(jobs::daily_tokens_used(&conn, &control, &now).unwrap(), 0);
         assert!(reserve_with(dir.path(), &now, 4_000, Policy::Legacy).is_ok());
         assert_eq!(dir.used(), 3_004_001, "按每天额度放行，预留照常记账");
+        assert_eq!(
+            jobs::daily_tokens_used(&conn, &control, &now).unwrap(),
+            4_000,
+            "旧功能预留即使在全量整理时段也计入每日额度"
+        );
 
         // 开始前的自动用量超过 10 万：同一个请求必须按每天额度拒绝。
         let before = jobs::shift_db_time(&now, -1).unwrap();
         record_at(dir.path(), &before, "p", "m", 100_001, 0).unwrap();
         assert_eq!(
             jobs::daily_tokens_used(&conn, &control, &now).unwrap(),
-            100_001
+            104_001
         );
         let used_before = dir.used();
         let error = reserve_with(dir.path(), &now, 4_000, Policy::Legacy).unwrap_err();
         assert!(is_refusal(&error), "{error}");
         assert_eq!(
             error,
-            refusal_for(&control, 100_001, 4_000, false).unwrap_err()
+            refusal_for(&control, 104_001, 4_000, false).unwrap_err()
         );
         assert_eq!(dir.used(), used_before, "被拒绝不能留下预留");
     }
@@ -1437,6 +1462,8 @@ mod tests {
         jobs::begin_full_scan(&jobs::queue_control_path(dir.path()), &start, 400).unwrap();
         record_at(dir.path(), &inside, "fake", "fake", 2_000_000, 1_000_000).unwrap();
         let conn = Connection::open(dir.path()).unwrap();
+        conn.execute("UPDATE ai_jobs SET job_type = 'repo_card'", [])
+            .unwrap();
         jobs::stop_full_scan(&conn, &jobs::queue_control_path(dir.path()), &finish).unwrap();
         record_at(dir.path(), &now, "fake", "fake", 40_000, 0).unwrap();
         let control = jobs::read_control(&jobs::queue_control_path(dir.path()));
@@ -1493,11 +1520,11 @@ mod tests {
         let conn = Connection::open(dir.path()).unwrap();
         assert_eq!(
             jobs::daily_tokens_used(&conn, &control, &now).unwrap(),
-            50_001
+            75_001
         );
         assert_eq!(
             reserve_with(dir.path(), &now, 1, Policy::Legacy).unwrap_err(),
-            refusal_for(&control, 50_001, 1, false).unwrap_err()
+            refusal_for(&control, 75_001, 1, false).unwrap_err()
         );
         assert_eq!(
             reserve_with(dir.path(), &now, 1, Policy::SolveRerank).unwrap_err(),
@@ -2018,9 +2045,19 @@ mod tests {
         for message in [&paused, &zero, &over] {
             assert_refusal_with_current_names(message);
         }
-        // 判断逻辑没动：一次性全部整理进行中放行额度，暂停照样拦
-        assert!(refusal_for(&control_of(0, false), 130_000, 4_000, true).is_ok());
-        assert!(refusal_for(&control_of(0, true), 0, 1, true).is_err());
+        // 全量整理不豁免旧功能：仍按额度和暂停状态检查，拒绝文案保持一致。
+        assert_eq!(
+            refusal_for(&control_of(0, false), 0, 1, true).unwrap_err(),
+            zero
+        );
+        assert_eq!(
+            refusal_for(&control_of(100_000, false), 130_000, 4_000, true).unwrap_err(),
+            over
+        );
+        assert_eq!(
+            refusal_for(&control_of(100_000, true), 0, 1, true).unwrap_err(),
+            paused
+        );
     }
 
     #[test]

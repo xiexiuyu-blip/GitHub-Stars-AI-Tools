@@ -1509,15 +1509,14 @@ fn apply_pending_restore_at_startup(
         &data_dir,
     )?;
     let backups_dir = data_dir.join("backups");
-    if let Some(report) = backup::apply_pending_restore(&data_dir, &backups_dir) {
+    let database_path = data_dir.join(storage::SQLITE_DATABASE_FILE_NAME);
+    if let Some(report) = backup::apply_pending_restore(&data_dir, &backups_dir, || {
+        let control_path = jobs::queue_control_path(&database_path);
+        jobs::reset_spending_authorization(&control_path)?;
+        backup::sync_authorization_file(&control_path)
+    })? {
         if let Some(error) = &report.error {
             eprintln!("启动恢复没有完成：{error}");
-        } else {
-            // 恢复会把整个数据库换回旧的，旧库里的用量记录比现在少，「最近 24 小时已用」会倒退，
-            // 而额度在数据库外的控制文件里。恢复后额度归零、全量整理也一并结束（`fullScan` 的刹车线按旧库的用量算，对不上了），
-            // 要继续花钱得在工具箱里重新开启。
-            let database_path = data_dir.join(storage::SQLITE_DATABASE_FILE_NAME);
-            let _ = jobs::reset_spending_authorization(&jobs::queue_control_path(&database_path));
         }
     }
     Ok(())
@@ -1637,7 +1636,7 @@ fn list_discover(
     discover::list_discover_view(storage.database_path(), scenario_id.as_deref())
 }
 
-/// 联网刷新。curl 是阻塞的，整段放进 spawn_blocking，避免卡住界面。
+/// 联网刷新使用阻塞请求，整段放进 spawn_blocking，避免卡住界面。
 #[tauri::command]
 async fn refresh_discover(
     app_handle: tauri::AppHandle,
@@ -1648,7 +1647,7 @@ async fn refresh_discover(
         let now = time::OffsetDateTime::now_utc().unix_timestamp();
         let token = auth::optional_github_token();
         discover::refresh_discover_with_token(
-            &web_fetch::CurlFetcher,
+            &web_fetch::ReqwestFetcher,
             storage.database_path(),
             &scenario_id,
             now,
@@ -1680,7 +1679,7 @@ async fn refresh_discover_feed(
         let now = time::OffsetDateTime::now_utc().unix_timestamp();
         let token = auth::optional_github_token();
         discover_feeds::refresh_discover_feed_with(
-            &web_fetch::CurlFetcher,
+            &web_fetch::ReqwestFetcher,
             storage.database_path(),
             &feed_id,
             language.as_deref(),
@@ -1705,7 +1704,7 @@ async fn search_discover_github(
         let now = time::OffsetDateTime::now_utc().unix_timestamp();
         let token = auth::optional_github_token();
         discover_feeds::search_discover_github_with(
-            &web_fetch::CurlFetcher,
+            &web_fetch::ReqwestFetcher,
             storage.database_path(),
             &query,
             time_range.as_deref(),
@@ -1719,7 +1718,7 @@ async fn search_discover_github(
     .map_err(|_| "发现搜索失败".to_owned())?
 }
 
-/// 社区信息。无论刷不刷新都走 spawn_blocking；不刷新时不会调用 curl。
+/// 社区信息。无论刷不刷新都走 spawn_blocking；不刷新时不会发起请求。
 #[tauri::command]
 async fn get_repo_community(
     app_handle: tauri::AppHandle,
@@ -1730,7 +1729,7 @@ async fn get_repo_community(
         let storage = AppStorage::from_app_handle(&app_handle)?;
         let now = time::OffsetDateTime::now_utc().unix_timestamp();
         community::get_repo_community_with(
-            &web_fetch::CurlFetcher,
+            &web_fetch::ReqwestFetcher,
             storage.database_path(),
             &id,
             refresh.unwrap_or(false),
@@ -10141,6 +10140,6 @@ mod tests {
             .and_then(serde_json::Value::as_str)
             .expect("顶层 version 应当是字符串");
         assert_eq!(version, env!("CARGO_PKG_VERSION"));
-        assert_eq!(version, "2.1.0-fox.1");
+        assert_eq!(version, "2.1.1-fox.1");
     }
 }

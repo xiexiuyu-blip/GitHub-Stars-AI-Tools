@@ -55,8 +55,11 @@ pub enum ErrorKind {
     Auth,
     BadJson,
     Schema,
+    RecordedBadJson,
+    RecordedSchema,
     Network,
     ContentTooLarge,
+    Recorded,
     Other,
 }
 
@@ -69,8 +72,11 @@ impl ErrorKind {
             Self::Auth => "auth",
             Self::BadJson => "bad_json",
             Self::Schema => "schema",
+            Self::RecordedBadJson => "bad_json",
+            Self::RecordedSchema => "schema",
             Self::Network => "network",
             Self::ContentTooLarge => "content_too_large",
+            Self::Recorded => "other",
             Self::Other => "other",
         }
     }
@@ -108,6 +114,9 @@ fn failure_charge(kind: ErrorKind) -> i64 {
         | ErrorKind::RateLimit
         | ErrorKind::Auth
         | ErrorKind::Network
+        | ErrorKind::RecordedBadJson
+        | ErrorKind::RecordedSchema
+        | ErrorKind::Recorded
         | ErrorKind::ContentTooLarge => 0,
     }
 }
@@ -139,6 +148,13 @@ pub enum JobFailure {
     },
     /// 直接失败，不再重试。
     Fatal { kind: ErrorKind, message: String },
+    /// 已花费用量未写入账本，保留预留并暂停队列，避免再次请求。
+    Unsettled {
+        message: String,
+        spent_tokens: u64,
+        total_reserve: i64,
+        unknown_cost: bool,
+    },
     /// 整条队列停下。这个任务回到 queued，且本次不计入 attempts。
     PauseQueue { kind: ErrorKind, message: String },
 }
@@ -414,12 +430,12 @@ fn append_job_type_clause(
     sql.push('(');
     if direct.is_empty() {
         push_in(sql, bound, needs_auth);
-        sql.push_str(" AND spend_authorized_until IS NOT NULL AND spend_authorized_until >= ?)");
+        sql.push_str(" AND job_type = 'repo_card' AND spend_authorized_until IS NOT NULL AND spend_authorized_until >= ?)");
     } else {
         push_in(sql, bound, direct);
         sql.push_str(" OR (");
         push_in(sql, bound, needs_auth);
-        sql.push_str(" AND spend_authorized_until IS NOT NULL AND spend_authorized_until >= ?))");
+        sql.push_str(" AND job_type = 'repo_card' AND spend_authorized_until IS NOT NULL AND spend_authorized_until >= ?))");
     }
     bound.push(now.to_owned());
 }
@@ -444,12 +460,14 @@ pub fn claim_next(
     let tx = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|error| format!("任务认领失败：{error}"))?;
+    if spend_blocked_by_unsettled(&tx)? {
+        return Ok(None);
+    }
     // 在跑任务的预留已经写在它们自己的行里，算在 used 里；再加上这一条自己的预留也放得下才认领。
     let used = daily_tokens_excluding(&tx, &budget_gate.full_scan_periods, now)?;
-    let spending_open = budget_gate.unlimited
-        || (budget_gate.daily_budget_tokens > 0
-            && (used as u64).saturating_add(CLAIM_RESERVE_TOKENS as u64)
-                <= budget_gate.daily_budget_tokens);
+    let spending_open = budget_gate.daily_budget_tokens > 0
+        && (used as u64).saturating_add(CLAIM_RESERVE_TOKENS as u64)
+            <= budget_gate.daily_budget_tokens;
     // 预算关着时，花钱的类型放进「需授权」：只有这一行的到期时间还没过才领。
     // 不花钱的、以及预算开着的花钱类型，放进「直接可领」。两组都空才提前返回。
     let mut direct: Vec<&str> = Vec::new();
@@ -459,7 +477,10 @@ pub fn claim_next(
             continue;
         }
         let name = candidate.job_type.as_str();
-        if !candidate.spends_tokens || spending_open {
+        if !candidate.spends_tokens
+            || spending_open
+            || (budget_gate.unlimited && name == "repo_card")
+        {
             if !direct.contains(&name) {
                 direct.push(name);
             }
@@ -564,6 +585,42 @@ pub fn claim_next(
     }))
 }
 
+pub(crate) fn spend_blocked_by_unsettled(conn: &Connection) -> Result<bool, String> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM ai_jobs WHERE prompt_version = 'accounting-unsettled')",
+        [],
+        |row| row.get(0),
+    )
+    .map_err(|error| format!("任务额度检查失败：{error}"))
+}
+
+/// 在账本结算失败时锁住该任务并暂停队列，防止重启后被重新排队。
+fn mark_accounting_unsettled(
+    db_path: &Path,
+    job_id: &str,
+    now: &str,
+    message: &str,
+) -> Result<(), String> {
+    let conn = open_db(db_path)?;
+    let protected = conn
+        .execute(
+            "UPDATE ai_jobs SET error_kind = 'other', prompt_version = 'accounting-unsettled' WHERE id = ?1 AND status IN ('running', 'cancelled')",
+            [job_id],
+        )
+        .map_err(|error| format!("任务额度保护失败：{error}"))?;
+    if protected == 0 {
+        return Err("任务额度保护失败：任务状态已改变".to_owned());
+    }
+    set_pause_reason(
+        &queue_control_path(db_path),
+        &PauseReason {
+            kind: "other".to_owned(),
+            message: message.to_owned(),
+            at: now.to_owned(),
+        },
+    )
+}
+
 /// 把处理器的结果写回。更新都带 `status = 'running'`：跑的过程中被取消的任务不会被盖掉。
 /// 返回 `false` 表示这条任务已经不在 running（通常是被取消了）。
 ///
@@ -577,13 +634,77 @@ pub fn finish_job(
     jitter: f64,
 ) -> Result<bool, String> {
     let _ = parse_db_time(now)?;
-    match result {
-        Ok(success) => write_success(db_path, &job.id, now, &success, job.reserved),
+    if let Err(JobFailure::Unsettled { message, .. }) = &result {
+        mark_accounting_unsettled(db_path, &job.id, now, message)?;
+    } else if let Err(JobFailure::PauseQueue { kind, message }) = &result {
+        set_pause_reason(
+            &queue_control_path(db_path),
+            &PauseReason {
+                kind: kind.as_str().to_owned(),
+                message: message.clone(),
+                at: now.to_owned(),
+            },
+        )?;
+    }
+    let mut conn = open_db(db_path)?;
+    let tx = conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|error| format!("任务收尾失败：{error}"))?;
+    let cancelled: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM ai_jobs WHERE id = ?1 AND status = 'cancelled')",
+            [&job.id],
+            |row| row.get(0),
+        )
+        .map_err(|error| format!("任务收尾失败：{error}"))?;
+    let mut retain_retry_reserve = false;
+    let changed = match result {
+        Ok(success) if cancelled => {
+            let input = i64::try_from(success.input_tokens).map_err(|_| "token 数量超出范围")?;
+            let output = i64::try_from(success.output_tokens).map_err(|_| "token 数量超出范围")?;
+            tx.execute("UPDATE ai_jobs SET input_tokens = MAX(input_tokens - ?1, 0) + ?2, output_tokens = output_tokens + ?3, finished_at = ?4, updated_at = ?4 WHERE id = ?5 AND status = 'cancelled'", params![job.reserved, input, output, now, job.id])
+                .map_err(|error| format!("任务收尾失败：{error}"))?;
+            false
+        }
+        Ok(success) => write_success(&tx, &job.id, now, &success, job.reserved)?,
+        Err(failure) if cancelled && !matches!(&failure, JobFailure::Unsettled { .. }) => {
+            let known = match &failure {
+                JobFailure::Retryable { kind, .. }
+                | JobFailure::Fatal { kind, .. }
+                | JobFailure::PauseQueue { kind, .. } => matches!(
+                    kind,
+                    ErrorKind::Recorded | ErrorKind::RecordedBadJson | ErrorKind::RecordedSchema
+                ),
+                JobFailure::Unsettled { .. } => false,
+            };
+            if known {
+                tx.execute("UPDATE ai_jobs SET input_tokens = MAX(input_tokens - ?1, 0), finished_at = ?2, updated_at = ?2 WHERE id = ?3 AND status = 'cancelled'", params![job.reserved, now, job.id])
+                    .map_err(|error| format!("任务收尾失败：{error}"))?;
+            } else {
+                // 最后一次请求的费用未知，原预留和追加预留均保留。
+                retain_retry_reserve = true;
+            }
+            false
+        }
         Err(JobFailure::PauseQueue { kind, message }) => {
-            pause_queue(db_path, &job.id, now, kind, message, job.reserved)
+            pause_queue(&tx, &job.id, now, kind, message, job.reserved)?
         }
         Err(JobFailure::Fatal { kind, message }) => {
-            write_failure(db_path, &job.id, now, kind, &message, job.reserved)
+            write_failure(&tx, &job.id, now, kind, &message, job.reserved)?
+        }
+        Err(JobFailure::Unsettled {
+            message,
+            spent_tokens,
+            unknown_cost,
+            ..
+        }) => {
+            let spent = i64::try_from(spent_tokens).unwrap_or(i64::MAX);
+            retain_retry_reserve = unknown_cost;
+            let changed = tx.execute(
+                "UPDATE ai_jobs SET status = CASE WHEN status = 'cancelled' THEN status ELSE 'failed' END, error_kind = 'other', prompt_version = NULL, error_message = ?1, finished_at = ?2, updated_at = ?2, input_tokens = CASE WHEN ?6 THEN input_tokens + ?5 ELSE MAX(input_tokens - ?4, 0) + ?5 END WHERE id = ?3 AND status IN ('running', 'cancelled')",
+                params![message, now, job.id, job.reserved.max(0), spent, unknown_cost],
+            ).map_err(|error| format!("任务收尾失败：{error}"))?;
+            changed > 0
         }
         Err(JobFailure::Retryable {
             kind,
@@ -591,40 +712,44 @@ pub fn finish_job(
             retry_after_secs,
         }) => {
             if job.attempts >= job.max_attempts {
-                return write_failure(db_path, &job.id, now, kind, &message, job.reserved);
+                write_failure(&tx, &job.id, now, kind, &message, job.reserved)?
+            } else {
+                let delay = retry_delay_secs(job.attempts, retry_after_secs, jitter);
+                let delay_i64 = i64::try_from(delay).map_err(|_| "延迟太长")?;
+                let not_before = shift_db_time(now, delay_i64)?;
+                requeue_job(&tx, &job.id, now, kind, &message, &not_before, job.reserved)?
             }
-            let delay = retry_delay_secs(job.attempts, retry_after_secs, jitter);
-            let delay_i64 = i64::try_from(delay).map_err(|_| "延迟太长")?;
-            let not_before = shift_db_time(now, delay_i64)?;
-            requeue_job(
-                db_path,
-                &job.id,
-                now,
-                kind,
-                &message,
-                &not_before,
-                job.reserved,
-            )
         }
-    }
+    };
+    // 预留删除与最终结算在同一事务中提交；失败回滚后仍保留预留。
+    let sql = if retain_retry_reserve {
+        "UPDATE ai_jobs SET status = 'cancelled', finished_at = ?3, updated_at = ?3 WHERE id = ?1 AND target_id = ?2 AND status = 'running'"
+    } else {
+        "DELETE FROM ai_jobs WHERE id = ?1 AND target_id = ?2 AND status = 'running' AND ?3 IS NOT NULL"
+    };
+    tx.execute(
+        sql,
+        params![
+            format!("card-retry-reserve:{}:{}", job.id, job.attempts),
+            format!("legacy-card-retry-reserve:{}:{}", job.id, job.attempts),
+            now,
+        ],
+    )
+    .map_err(|error| format!("任务额度结算失败：{error}"))?;
+    tx.commit()
+        .map_err(|error| format!("任务收尾失败：{error}"))?;
+    Ok(changed)
 }
 
 fn pause_queue(
-    db_path: &Path,
+    conn: &Connection,
     id: &str,
     now: &str,
-    kind: ErrorKind,
+    _kind: ErrorKind,
     message: String,
     reserved: i64,
 ) -> Result<bool, String> {
-    // 先把队列停住，再把任务放回去，避免别的线程在窗口里又领走它。
-    let reason = PauseReason {
-        kind: kind.as_str().to_owned(),
-        message,
-        at: now.to_owned(),
-    };
-    set_pause_reason(&queue_control_path(db_path), &reason)?;
-    let conn = open_db(db_path)?;
+    let _ = message;
     let changed = conn
         .execute(
             "UPDATE ai_jobs
@@ -645,7 +770,7 @@ fn pause_queue(
 /// 后面重试成功时不会被盖掉。和状态变化在同一条 UPDATE 里，只对仍在 running 的任务生效：
 /// 跑的过程中被取消的任务保留预留不退，因为那次请求发出去了、收不回来。
 fn requeue_job(
-    db_path: &Path,
+    conn: &Connection,
     id: &str,
     now: &str,
     kind: ErrorKind,
@@ -653,7 +778,6 @@ fn requeue_job(
     not_before: &str,
     reserved: i64,
 ) -> Result<bool, String> {
-    let conn = open_db(db_path)?;
     let changed = conn
         .execute(
             "UPDATE ai_jobs
@@ -823,7 +947,7 @@ fn recover_running_jobs(conn: &Connection, now: &str) -> Result<usize, String> {
         .execute(
             "UPDATE ai_jobs
              SET status = 'queued', error_kind = ?1, started_at = NULL, not_before = ?2
-             WHERE status = 'running' AND target_id NOT LIKE 'legacy-%'",
+             WHERE status = 'running' AND target_id NOT LIKE 'legacy-%' AND COALESCE(prompt_version, '') <> 'accounting-unsettled'",
             params![ErrorKind::Interrupted.as_str(), not_before],
         )
         .map_err(|error| format!("中断任务恢复失败：{error}"))?;
@@ -855,13 +979,31 @@ fn worker_loop(
                 let outcome = run_handler(handlers.as_slice(), &job, &db_path);
                 let now = now_db_time();
                 // 抖动固定为 0：重试时间可预期。测试要覆盖抖动时，直接把固定值传给 finish_job。
-                // 收尾失败（数据库忙超过 5 秒）就再试两次：每条路径都是一条 UPDATE，重试不会重复记账；
-                // 三次都不行，这条任务留在 running，它的预留照旧占着额度，下次启动再恢复。
+                // 收尾失败就再试两次；三次失败后停止所有工作线程，避免未结算时继续认领。
                 for attempt in 0..3 {
                     match finish_job(&db_path, &job, &now, outcome.clone(), 0.0) {
                         Ok(_) => break,
-                        Err(_) if attempt < 2 => thread::sleep(Duration::from_millis(300)),
-                        Err(_) => break,
+                        Err(_) if attempt < 2 => {
+                            if matches!(&outcome, Err(JobFailure::Unsettled { .. })) {
+                                inner.stop.store(true, Ordering::SeqCst);
+                                inner.wake.notify_all();
+                            }
+                            thread::sleep(Duration::from_millis(300));
+                        }
+                        Err(error) => {
+                            eprintln!("任务收尾失败，已停止认领：{error}");
+                            let _ = mark_accounting_unsettled(
+                                &db_path,
+                                &job.id,
+                                &now,
+                                &format!(
+                                    "任务收尾失败：{error}；已暂停整理，请检查数据库后再继续。"
+                                ),
+                            );
+                            inner.stop.store(true, Ordering::SeqCst);
+                            inner.wake.notify_all();
+                            break;
+                        }
                     }
                 }
                 inner.inflight.fetch_sub(1, Ordering::SeqCst);
@@ -965,7 +1107,7 @@ fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
 }
 
 fn write_success(
-    db_path: &Path,
+    conn: &Connection,
     id: &str,
     now: &str,
     success: &JobSuccess,
@@ -978,7 +1120,6 @@ fn write_success(
     } else {
         "succeeded"
     };
-    let conn = open_db(db_path)?;
     let changed = conn
         .execute(
             "UPDATE ai_jobs
@@ -1012,14 +1153,13 @@ fn write_success(
 }
 
 fn write_failure(
-    db_path: &Path,
+    conn: &Connection,
     id: &str,
     now: &str,
     kind: ErrorKind,
     message: &str,
     reserved: i64,
 ) -> Result<bool, String> {
-    let conn = open_db(db_path)?;
     let changed = conn
         .execute(
             "UPDATE ai_jobs
@@ -1078,7 +1218,7 @@ pub(crate) fn tokens_used_since(conn: &Connection, cutoff: &str) -> Result<i64, 
     .map_err(|error| format!("用量读取失败：{error}"))
 }
 
-/// 每日额度的口径：账本照常记全部用量，只排除落在任意一次全量整理时段里的任务。
+/// 每日额度的口径：账本照常记全部用量，只排除全量整理时段里的仓库卡片任务。
 pub(crate) fn daily_tokens_used(
     conn: &Connection,
     control: &QueueControl,
@@ -1140,7 +1280,7 @@ fn daily_tokens_excluding(
     // charged_at 和 tokens_used_since 的记账时间一致：已结束看 finished_at，在途预留看 updated_at。
     let mut sql = String::from(
         "WITH usage AS (
-           SELECT input_tokens + output_tokens AS tokens,
+           SELECT job_type, input_tokens + output_tokens AS tokens,
                   CASE WHEN status IN ('succeeded', 'skipped', 'failed', 'cancelled') THEN finished_at
                        WHEN status IN ('queued', 'running') AND input_tokens + output_tokens > 0 THEN updated_at
                   END AS charged_at
@@ -1148,7 +1288,7 @@ fn daily_tokens_excluding(
          ) SELECT COALESCE(SUM(tokens), 0) FROM usage WHERE charged_at >= ?",
     );
     if !periods.is_empty() {
-        sql.push_str(" AND NOT (");
+        sql.push_str(" AND NOT (job_type = 'repo_card' AND (");
         for (index, period) in periods.iter().enumerate() {
             if index > 0 {
                 sql.push_str(" OR ");
@@ -1157,7 +1297,7 @@ fn daily_tokens_excluding(
             bound.push(period.started_at.clone());
             bound.push(period.finished_at.clone());
         }
-        sql.push(')');
+        sql.push_str("))");
     }
     // 一次过滤求和：重叠时段只会排除一条任务一次，两端都包含。
     conn.query_row(&sql, params_from_iter(bound.iter()), |row| {
@@ -1417,15 +1557,77 @@ pub(crate) fn day_ago_db_time() -> String {
 
 /// 处理器在失败前已经确定花掉的用量（比如第一次调用成功、紧接着的修复调用失败）：直接记到这条在跑的任务上。
 /// 之后结束时 `MAX(input_tokens - 预留, 0) + 失败该记的` 会把它保留下来。
-pub(crate) fn add_charge(db_path: &Path, id: &str, tokens: u64) -> Result<(), String> {
+pub(crate) fn add_charge(
+    db_path: &Path,
+    id: &str,
+    _reserved: i64,
+    tokens: u64,
+) -> Result<(), String> {
     let tokens = i64::try_from(tokens.min(5_000_000)).unwrap_or(0);
     let conn = open_db(db_path)?;
-    conn.execute(
-        "UPDATE ai_jobs SET input_tokens = input_tokens + ?1 WHERE id = ?2 AND status = 'running'",
-        params![tokens, id],
+    let changed = conn.execute(
+        "UPDATE ai_jobs SET input_tokens = input_tokens + ?1, updated_at = ?3, finished_at = CASE WHEN status = 'cancelled' THEN ?3 ELSE finished_at END WHERE id = ?2 AND status IN ('running', 'cancelled')",
+        params![tokens, id, now_db_time()],
     )
     .map_err(|error| format!("用量记录失败：{error}"))?;
+    if changed == 0 {
+        return Err("用量记录失败：任务状态已改变".to_owned());
+    }
     Ok(())
+}
+
+/// 后续模型调用前在同一事务中追加预留，避免并发任务同时花掉剩余额度。
+pub(crate) fn reserve_card_retry(
+    db_path: &Path,
+    id: &str,
+    attempt: i64,
+    initial: i64,
+    extra: i64,
+    spent: u64,
+    estimate: u64,
+) -> Result<i64, String> {
+    let now = now_db_time();
+    let control = read_control(&queue_control_path(db_path));
+    let mut conn = open_db(db_path)?;
+    let tx = conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|e| format!("任务额度检查失败：{e}"))?;
+    if spend_blocked_by_unsettled(&tx)? {
+        return Err("AI 额度：存在未结算用量，已暂停请求".to_owned());
+    }
+    let authorized: bool = tx.query_row(
+        "SELECT COALESCE(spend_authorized_until >= ?2, 0) FROM ai_jobs WHERE id = ?1 AND job_type = 'repo_card' AND status = 'running'",
+        params![id, now], |row| row.get(0),
+    ).map_err(|e| format!("任务额度检查失败：{e}"))?;
+    if control.paused {
+        return Err("AI 额度：整理已暂停，无法继续请求".to_owned());
+    }
+    let target = i64::try_from(spent.saturating_add(estimate)).unwrap_or(i64::MAX);
+    let additional = target.saturating_sub(initial).saturating_sub(extra).max(0);
+    let used = daily_tokens_used(&tx, &control, &now)?;
+    if !authorized
+        && !full_scan_open(&tx, &control, &now)
+        && (control.daily_budget_tokens == 0
+            || (used as u64).saturating_add(additional as u64) > control.daily_budget_tokens)
+    {
+        return Err("AI 额度：剩余额度不足，无法继续请求".to_owned());
+    }
+    if additional > 0 {
+        let retry_id = format!("card-retry-reserve:{id}:{attempt}");
+        let retry_target = format!("legacy-card-retry-reserve:{id}:{attempt}");
+        let changed = tx.execute(
+            "INSERT INTO ai_jobs(id, account_id, job_type, target_type, target_id, status, input_tokens, created_at, updated_at)
+             SELECT ?1, account_id, 'repo_card', 'repository', ?2, 'running', ?3, ?4, ?4 FROM ai_jobs WHERE id = ?5 AND status = 'running'
+             ON CONFLICT(id) DO UPDATE SET input_tokens = input_tokens + excluded.input_tokens, updated_at = excluded.updated_at
+             WHERE target_id = excluded.target_id AND status = 'running'",
+            params![retry_id, retry_target, additional, now, id],
+        ).map_err(|e| format!("任务额度预留失败：{e}"))?;
+        if changed != 1 {
+            return Err("任务额度预留失败：任务状态已改变".to_owned());
+        }
+    }
+    tx.commit().map_err(|e| format!("任务额度预留失败：{e}"))?;
+    Ok(extra.saturating_add(additional))
 }
 
 /// 最近 24 小时真实用量（含在跑任务的预留、已取消的任务），不排除全量整理。
@@ -2106,15 +2308,14 @@ mod tests {
             .unwrap()
             .unwrap();
         drop(conn);
-        // 跑的过程中被取消：请求已经发出去，取不回来，预留保留；
-        // 之后处理器返回成功也不能再改这条任务（update 都带 status = 'running'）。
+        // 跑的过程中被取消：返回后仍按实际用量记账，保留取消状态。
         crate::v2_ops::cancel_job(db.path(), "job").unwrap();
         assert!(!finish_job(db.path(), &claimed, &now, Ok(ok_success(false)), 0.0).unwrap());
         let row = snap(&db.conn(), "job");
         assert_eq!(row.status, "cancelled");
-        assert_eq!(row.input_tokens, CLAIM_RESERVE_TOKENS);
+        assert_eq!((row.input_tokens, row.output_tokens), (11, 7));
         let status = queue_status(db.path()).unwrap();
-        assert_eq!(status.tokens_24h, CLAIM_RESERVE_TOKENS);
+        assert_eq!(status.tokens_24h, 18);
     }
 
     #[test]
@@ -3169,7 +3370,7 @@ mod tests {
         let ok_row = snap(&db.conn(), "ok-path");
         let err_row = snap(&db.conn(), "err-path");
         assert_eq!(ok_row.status, "cancelled");
-        assert_eq!((ok_row.input_tokens, ok_row.output_tokens), (0, 0));
+        assert_eq!((ok_row.input_tokens, ok_row.output_tokens), (11, 7));
         assert_eq!(ok_row.error_kind.as_deref(), Some("timeout"));
         assert_eq!(err_row.status, "cancelled");
         assert_eq!(err_row.error_message.as_deref(), Some("旧错误"));
@@ -3874,6 +4075,343 @@ mod tests {
         let json = serde_json::to_value(&status).unwrap();
         assert_eq!(json["dailyTokensUsed"], 300);
         assert_eq!(json["tokens24h"], 5300);
+    }
+
+    #[test]
+    fn full_scan_only_excludes_repo_cards_from_daily_usage() {
+        let db = TestDb::new("scan-card-only");
+        let conn = db.conn();
+        let now = now_db_time();
+        let start = shift_db_time(&now, -100).unwrap();
+        for (id, kind, amount) in [
+            ("card", "repo_card", 100),
+            ("legacy", "problem_answer", 200),
+            ("rerank", "problem_answer", 300),
+        ] {
+            conn.execute("INSERT INTO ai_jobs(id, account_id, job_type, target_type, target_id, status, input_tokens, finished_at) VALUES (?1, 'acct', ?2, 'repository', ?1, 'succeeded', ?3, ?4)", params![id, kind, amount, now]).unwrap();
+        }
+        let control = QueueControl {
+            recent_full_scans: vec![period(&start, &now)],
+            ..QueueControl::default()
+        };
+        assert_eq!(daily_tokens_used(&conn, &control, &now).unwrap(), 500);
+    }
+
+    #[test]
+    fn retry_reservations_are_atomic_and_require_room_for_the_requested_limit() {
+        let db = TestDb::new("retry-reserve");
+        let conn = db.conn();
+        let now = now_db_time();
+        for id in ["a", "b"] {
+            conn.execute("INSERT INTO ai_jobs(id, account_id, job_type, target_type, target_id, status, input_tokens, updated_at) VALUES (?1, 'acct', 'repo_card', 'repository', ?1, 'running', 12000, ?2)", params![id, now]).unwrap();
+        }
+        set_daily_budget(&queue_control_path(db.path()), 35_000).unwrap();
+        let path = db.path().to_path_buf();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
+        let mut threads = Vec::new();
+        for id in ["a", "b"] {
+            let path = path.clone();
+            let barrier = barrier.clone();
+            threads.push(std::thread::spawn(move || {
+                barrier.wait();
+                reserve_card_retry(&path, id, 1, 12_000, 0, 3_000, 20_000)
+            }));
+        }
+        barrier.wait();
+        let results: Vec<_> = threads
+            .into_iter()
+            .map(|thread| thread.join().unwrap())
+            .collect();
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        assert_eq!(
+            results
+                .iter()
+                .filter_map(|result| result.as_ref().ok())
+                .copied()
+                .collect::<Vec<_>>(),
+            vec![11_000]
+        );
+        assert_eq!(
+            daily_tokens_used(
+                &conn,
+                &read_control(&queue_control_path(db.path())),
+                &now_db_time()
+            )
+            .unwrap(),
+            35_000
+        );
+    }
+
+    #[test]
+    fn retry_reservation_survives_failed_settlement_and_is_replaced_atomically() {
+        let db = TestDb::new("retry-settlement");
+        let conn = db.conn();
+        let now = now_db_time();
+        conn.execute("INSERT INTO ai_jobs(id, account_id, job_type, target_type, target_id, status, attempts, input_tokens, updated_at) VALUES ('job', 'acct', 'repo_card', 'repository', 'job', 'running', 1, 12000, ?1)", [&now]).unwrap();
+        set_daily_budget(&queue_control_path(db.path()), 23_000).unwrap();
+        assert_eq!(
+            reserve_card_retry(db.path(), "job", 1, 12_000, 0, 3_000, 20_000).unwrap(),
+            11_000
+        );
+        assert_eq!(
+            daily_tokens_used(
+                &conn,
+                &read_control(&queue_control_path(db.path())),
+                &now_db_time()
+            )
+            .unwrap(),
+            23_000
+        );
+        conn.execute_batch("CREATE TRIGGER fail_retry_delete BEFORE DELETE ON ai_jobs WHEN OLD.id = 'card-retry-reserve:job:1' BEGIN SELECT RAISE(ABORT, 'cannot settle'); END;").unwrap();
+        let mut claimed = record("job", 1, 3);
+        claimed.reserved = 12_000;
+        assert!(finish_job(db.path(), &claimed, &now, Ok(ok_success(false)), 0.0).is_err());
+        assert_eq!(snap(&conn, "job").status, "running");
+        assert_eq!(
+            daily_tokens_used(
+                &conn,
+                &read_control(&queue_control_path(db.path())),
+                &now_db_time()
+            )
+            .unwrap(),
+            23_000
+        );
+        conn.execute_batch("DROP TRIGGER fail_retry_delete")
+            .unwrap();
+        assert!(finish_job(db.path(), &claimed, &now, Ok(ok_success(false)), 0.0).unwrap());
+        assert_eq!(
+            daily_tokens_used(
+                &conn,
+                &read_control(&queue_control_path(db.path())),
+                &now_db_time()
+            )
+            .unwrap(),
+            18
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM ai_jobs WHERE id = 'card-retry-reserve:job:1'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn retry_reserve_recovery_keeps_usage_without_creating_a_queue_job() {
+        let db = TestDb::new("retry-recovery");
+        let conn = db.conn();
+        let now = now_db_time();
+        conn.execute("INSERT INTO ai_jobs(id, account_id, job_type, target_type, target_id, status, attempts, input_tokens, updated_at) VALUES ('job', 'acct', 'repo_card', 'repository', 'job', 'running', 1, 12000, ?1)", [&now]).unwrap();
+        set_daily_budget(&queue_control_path(db.path()), 100_000).unwrap();
+        reserve_card_retry(db.path(), "job", 1, 12_000, 0, 3_000, 20_000).unwrap();
+        assert_eq!(count_status(&conn, "running").unwrap(), 1);
+        recover_running_jobs(&conn, &now).unwrap();
+        assert_eq!(snap(&conn, "card-retry-reserve:job:1").status, "cancelled");
+        assert_eq!(snap(&conn, "job").status, "queued");
+        assert_eq!(count_status(&conn, "queued").unwrap(), 1);
+        assert_eq!(
+            tokens_used_since(&conn, &shift_db_time(&now, -DAY_SECS).unwrap()).unwrap(),
+            23_000
+        );
+        conn.execute(
+            "UPDATE ai_jobs SET status = 'running', attempts = 2 WHERE id = 'job'",
+            [],
+        )
+        .unwrap();
+        assert_eq!(
+            reserve_card_retry(db.path(), "job", 2, 12_000, 0, 3_000, 20_000).unwrap(),
+            11_000
+        );
+    }
+
+    #[test]
+    fn cancelled_job_records_a_known_failure_charge() {
+        let db = TestDb::new("cancelled-known-spend");
+        let conn = db.conn();
+        let now = now_db_time();
+        conn.execute("INSERT INTO ai_jobs(id, account_id, job_type, target_type, target_id, status, input_tokens, finished_at, updated_at) VALUES ('job', 'acct', 'repo_card', 'repository', 'job', 'cancelled', 12500, ?1, ?1)", [&now]).unwrap();
+        add_charge(db.path(), "job", 12_000, 16_000).unwrap();
+        let mut claimed = record("job", 1, 3);
+        claimed.reserved = 12_000;
+        finish_job(
+            db.path(),
+            &claimed,
+            &now,
+            Err(JobFailure::Fatal {
+                kind: ErrorKind::Recorded,
+                message: "已知用量".to_owned(),
+            }),
+            0.0,
+        )
+        .unwrap();
+        let row = snap(&conn, "job");
+        assert_eq!(row.status, "cancelled");
+        assert_eq!(row.input_tokens, 16_500);
+    }
+
+    #[test]
+    fn cancelled_retry_with_unknown_cost_keeps_both_reservations() {
+        let db = TestDb::new("cancelled-unknown-retry");
+        let conn = db.conn();
+        let now = now_db_time();
+        conn.execute("INSERT INTO ai_jobs(id, account_id, job_type, target_type, target_id, status, attempts, input_tokens, updated_at) VALUES ('job', 'acct', 'repo_card', 'repository', 'job', 'running', 1, 12000, ?1)", [&now]).unwrap();
+        set_daily_budget(&queue_control_path(db.path()), 100_000).unwrap();
+        reserve_card_retry(db.path(), "job", 1, 12_000, 0, 3_000, 20_000).unwrap();
+        conn.execute(
+            "UPDATE ai_jobs SET status = 'cancelled', finished_at = ?1 WHERE id = 'job'",
+            [&now],
+        )
+        .unwrap();
+        add_charge(db.path(), "job", 12_000, 3_000).unwrap();
+        let mut claimed = record("job", 1, 3);
+        claimed.reserved = 12_000;
+        let failure = JobFailure::Retryable {
+            kind: ErrorKind::Timeout,
+            message: "超时".to_owned(),
+            retry_after_secs: None,
+        };
+        assert!(!finish_job(db.path(), &claimed, &now, Err(failure), 0.0).unwrap());
+        assert_eq!(snap(&conn, "job").input_tokens, 15_000);
+        let reserve = snap(&conn, "card-retry-reserve:job:1");
+        assert_eq!(
+            (reserve.status.as_str(), reserve.input_tokens),
+            ("cancelled", 11_000)
+        );
+        assert_eq!(
+            tokens_used_since(&conn, &shift_db_time(&now, -DAY_SECS).unwrap()).unwrap(),
+            26_000
+        );
+    }
+
+    #[test]
+    fn cancelled_retry_with_known_cost_settles_once_even_if_cancelled_after_charge() {
+        let db = TestDb::new("cancelled-known-retry");
+        let conn = db.conn();
+        let now = now_db_time();
+        conn.execute("INSERT INTO ai_jobs(id, account_id, job_type, target_type, target_id, status, attempts, input_tokens, updated_at) VALUES ('job', 'acct', 'repo_card', 'repository', 'job', 'running', 1, 12500, ?1)", [&now]).unwrap();
+        set_daily_budget(&queue_control_path(db.path()), 100_000).unwrap();
+        reserve_card_retry(db.path(), "job", 1, 12_000, 0, 3_000, 20_000).unwrap();
+        add_charge(db.path(), "job", 12_000, 3_000).unwrap();
+        conn.execute(
+            "UPDATE ai_jobs SET status = 'cancelled', finished_at = ?1 WHERE id = 'job'",
+            [&now],
+        )
+        .unwrap();
+        let mut claimed = record("job", 1, 3);
+        claimed.reserved = 12_000;
+        let failure = JobFailure::Retryable {
+            kind: ErrorKind::RecordedBadJson,
+            message: "JSON".to_owned(),
+            retry_after_secs: None,
+        };
+        assert!(!finish_job(db.path(), &claimed, &now, Err(failure), 0.0).unwrap());
+        assert_eq!(snap(&conn, "job").input_tokens, 3_500);
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM ai_jobs WHERE id = 'card-retry-reserve:job:1'",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn retry_reservation_rejects_a_global_unsettled_marker() {
+        let db = TestDb::new("retry-unsettled");
+        let conn = db.conn();
+        let now = now_db_time();
+        conn.execute("INSERT INTO ai_jobs(id, account_id, job_type, target_type, target_id, status, input_tokens, updated_at, prompt_version) VALUES ('job', 'acct', 'repo_card', 'repository', 'job', 'running', 12000, ?1, NULL), ('blocked', 'acct', 'repo_card', 'repository', 'blocked', 'running', 12000, ?1, 'accounting-unsettled')", [&now]).unwrap();
+        set_daily_budget(&queue_control_path(db.path()), 100_000).unwrap();
+        assert!(reserve_card_retry(db.path(), "job", 1, 12_000, 0, 3_000, 20_000).is_err());
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM ai_jobs WHERE id = 'card-retry-reserve:job:1'",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn failed_pause_persists_blocker_and_prevents_claim_after_recovery() {
+        let db = TestDb::new("unsettled-pause-failure");
+        let mut conn = db.conn();
+        let now = now_db_time();
+        conn.execute("INSERT INTO ai_jobs(id, account_id, job_type, target_type, target_id, status, input_tokens, updated_at) VALUES ('job', 'acct', 'repo_card', 'repository', 'job', 'running', 12000, ?1), ('next', 'acct', 'repo_card', 'repository', 'next', 'queued', 0, ?1)", [&now]).unwrap();
+        let control = queue_control_path(db.path());
+        fs::create_dir(&control).unwrap();
+        let failure = JobFailure::Unsettled {
+            message: "账本写入失败".to_owned(),
+            spent_tokens: 16_000,
+            total_reserve: 12_000,
+            unknown_cost: false,
+        };
+        let mut claimed = record("job", 1, 3);
+        claimed.reserved = 12_000;
+        assert!(finish_job(db.path(), &claimed, &now, Err(failure), 0.0).is_err());
+        assert_eq!(
+            snap(&conn, "job").prompt_version.as_deref(),
+            Some("accounting-unsettled")
+        );
+        recover_running_jobs(&conn, &now).unwrap();
+        assert_eq!(snap(&conn, "job").status, "running");
+        assert!(claim_next(
+            &mut conn,
+            &now,
+            &[ClaimCandidate {
+                job_type: "repo_card".to_owned(),
+                spends_tokens: true
+            }],
+            &gate(false, 100_000)
+        )
+        .unwrap()
+        .is_none());
+    }
+
+    #[test]
+    fn final_settlement_failure_marks_unsettled_to_block_restart_requeue() {
+        let db = TestDb::new("worker-final-settle-failure");
+        let mut conn = db.conn();
+        let now = now_db_time();
+        conn.execute(
+            "INSERT INTO ai_jobs(id, account_id, job_type, target_type, target_id, status, input_tokens, updated_at)
+             VALUES ('job', 'acct', 'repo_card', 'repository', 'job', 'running', 12000, ?1),
+                    ('next', 'acct', 'repo_card', 'repository', 'next', 'queued', 0, ?1)",
+            [&now],
+        )
+        .unwrap();
+        mark_accounting_unsettled(
+            db.path(),
+            "job",
+            &now,
+            "任务收尾失败：触发保护；已暂停整理，请检查数据库后再继续。",
+        )
+        .unwrap();
+        assert_eq!(
+            snap(&conn, "job").prompt_version.as_deref(),
+            Some("accounting-unsettled")
+        );
+        assert!(read_control(&queue_control_path(db.path())).paused);
+        assert_eq!(recover_running_jobs(&conn, &now).unwrap(), 0);
+        assert_eq!(snap(&conn, "job").status, "running");
+        assert!(claim_next(
+            &mut conn,
+            &now,
+            &[ClaimCandidate {
+                job_type: "repo_card".to_owned(),
+                spends_tokens: true
+            }],
+            &gate(false, 100_000)
+        )
+        .unwrap()
+        .is_none());
     }
 
     #[test]
