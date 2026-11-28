@@ -43,6 +43,7 @@
 | **4. 截图 / 图片收集与预算化 OCR/Vision** | 支持桌面粘贴/拖入截图与飞书离线图片拉取（草案迁移 `041_capture_media`）；原图经大小和像素检查后持久保存并随备份恢复链路一起覆盖；**优先运行 macOS 本机免费 OCR** 提取中英文与链接入库检索；仅在用户主动点「云端识图」时按图片尺寸、张数与模型计费特征扩展 `spend_guard` 视觉预留与结算（草案迁移 `043_vision_usage`），绝不复用纯文本估算，也不继承全量整理豁免。 |
 | **5. 统一资料库对象与本地混合语义检索** | 保留 `GitHub 已加星 / 本机收集 / 本机已发现` 清晰标识，允许非 Star 来源的工具、文章、图片与独立能力直接留存「资料库」并建立统一检索投影（草案迁移 `042_search_projection`）；正式接通 `embedding.rs` / `vector_index.rs` 实现关键词 + 本地语义混合排序与白话状态设置（要求 `docs/quality/embedding-golden.json` 精确名不退步且语义改述可解释改善；无模型/零额度时自动降级纯关键词）。 |
 | **6. 外部 AI 助手只读接入（MCP + Skill）** | 扩展 `local_api.rs` 只读检索路由与审计表；打包轻量只读 MCP stdio 桥接器（仅调用本机 HTTP API，不直接碰 SQLite）；默认不对外开放私密笔记、本机绝对路径与原图文件，便于 OpenClaw、Claude Code、Codex 直接查库。 |
+| **7. 应用内自动更新推送（Tauri Updater 自有签名源）** | 复用仓库已内置的 `tauri-plugin-updater`、`AppUpdateProvider` / `AppUpdateDialog` 与 `.github/workflows/release.yml` 骨架，补齐以下 4 项后正式启用自动更新推送：① 生成 Fox 团队自有 minisign 签名密钥对并配置 GitHub Secrets（`TAURI_SIGNING_PRIVATE_KEY` / `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`），替换 `tauri.conf.json` 中沿自上游的 `pubkey`；② 对齐 `release.yml` 与 `normalize-updater-manifest.mjs` 中仍硬编码 `GitHub-Stars-AI-Tools` 的打包产物文件名与路径到 `Fox Stars Lab`；③ 在 `tauri.conf.json` 填入自有更新端点（`https://github.com/xiexiuyu-blip/GitHub-Stars-AI-Tools/releases/latest/download/latest.json`，可选配置 Cloudflare R2 / 国内镜像回退端点），将 `IN_APP_UPDATES_ENABLED` 设为 `true` 并恢复启动延迟静默检查与升级前「正在运行 AI 整理/同步」确认提醒；④ **切换说明**：现有 `v2.1.1-fox.1` 因 `endpoints` 为空需手动覆盖安装一次带自有更新源的首个 `v2.2` 版本，之后即可应用内自动检查、校验签名并一键安装重启（macOS 未做 Apple 公证前可先作为通知提醒或辅助覆盖说明）。 |
 
 ---
 
@@ -63,7 +64,7 @@
 
 - **应用内收藏问答（RAG）**：在保持不新增主导航的前提下，基于同一检索核心提供「资料库问答 / 详情页问问它」，使用独立日额度与严格引用出处校验，无额度时降级返回本机检索结果。
 - **助手安全写入与设备配对**：写入类 MCP 工具强制 `dry-run` 预演 + App 首次确认 + 一次性配对码与可撤销令牌。
-- **体验小件与跨平台 CI 齐备**：整理进度小看板、按需手动翻译 README 并缓存、人民币费用估算参考、全局快速收集快捷键、`.github/workflows/release.yml` 对齐 Fox Stars Lab 全平台构建与自动更新源验证。
+- **体验小件**：整理进度小看板、按需手动翻译 README 并缓存、人民币费用估算参考、全局快速收集快捷键。
 
 ---
 
