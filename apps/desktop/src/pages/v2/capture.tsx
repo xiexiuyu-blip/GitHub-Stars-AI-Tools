@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { lazy, Suspense, useEffect, useRef, useState } from 'react';
 import type { CapturePreview, InboxItem, InboxPage } from '@/lib/contracts';
 import {
   commitCaptureBatch,
@@ -7,6 +7,7 @@ import {
   isMissingCommandError,
   listInbox,
   previewCapture,
+  saveCaptureSource,
   setInboxNote,
   setInboxStatus,
 } from '@/lib/api';
@@ -33,6 +34,19 @@ import { InboxCard, PasteCard, PreviewCard } from '@/components/capture';
 
 const PREVIEW_DELAY_MS = 300;
 const INBOX_PAGE_SIZE = 100;
+const CaptureSourceDialog = lazy(() =>
+  import('@/components/capture/source-dialog').then((module) => ({ default: module.CaptureSourceDialog })),
+);
+const SOURCE_PLATFORMS: Record<CaptureSource, string> = {
+  微信群: 'wechat',
+  X: 'x',
+  论坛: 'forum',
+  其他: 'other',
+};
+
+function matchesAddress(value: string, url: string): boolean {
+  return value === url || value === url.replace(/^https:\/\//i, '');
+}
 
 export function CapturePage() {
   const toast = useToast();
@@ -58,6 +72,7 @@ export function CapturePage() {
   const [savingNote, setSavingNote] = useState(false);
   const [fetching, setFetching] = useState(false);
   const [collectingId, setCollectingId] = useState<string | null>(null);
+  const [openSource, setOpenSource] = useState<{ id: string; editOnOpen: boolean } | null>(null);
 
   const previewGen = useRef(0);
   const inboxGen = useRef(0);
@@ -205,17 +220,40 @@ export function CapturePage() {
 
   const matchedPreview = preview && previewFor === text ? preview : null;
   const commitReady = Boolean(matchedPreview && canCommit(matchedPreview) && !isTooLong(text));
+  const sourceText = text.trimStart();
+  const firstLine = sourceText.split('\n', 1)[0].trim();
+  const post = matchedPreview?.rows.find((row) =>
+    row.kind === 'x_post' && row.status !== 'blocked' && matchesAddress(firstLine, row.url),
+  );
+  const singleAddress = matchedPreview?.rows.length === 1 && matchesAddress(text.trim(), matchedPreview.rows[0].url);
+  const previewSettled = Boolean(matchedPreview || previewPhase === 'error' || previewDecision(text) === 'skip');
+  const canSaveSource = Boolean(text.trim() && !isTooLong(text) && previewSettled && !singleAddress);
 
-  async function commit() {
+  async function commit(mode: 'links' | 'source') {
     if (submittingRef.current) return;
-    if (!matchedPreview || !canCommit(matchedPreview) || isTooLong(text)) return;
-    const payload = text;
-    const context = buildSourceContext(source, note);
+    if (mode === 'links' ? !commitReady : !canSaveSource) return;
+    const platform = post ? 'X' : source;
+    const context = buildSourceContext(platform, note);
     submittingRef.current = true;
     setSubmitting(true);
     try {
-      const result = await commitCaptureBatch(payload, context);
-      toast.show({ title: describeCommit(result) });
+      if (mode === 'source' || (post && singleAddress)) {
+        const body = post ? sourceText.slice(sourceText.indexOf('\n') + 1) : text;
+        const result = await saveCaptureSource({
+          text: mode === 'source' ? body : '',
+          sourceUrl: post?.url,
+          sourcePlatform: SOURCE_PLATFORMS[platform],
+          sourceContext: context,
+        });
+        if (mode === 'source') {
+          setOpenSource({ id: result.sourceId, editOnOpen: false });
+        } else {
+          toast.show({ title: result.created ? '已把帖子放进收集箱。' : '这篇帖子已在收集箱。' });
+        }
+      } else {
+        const result = await commitCaptureBatch(text, context);
+        toast.show({ title: describeCommit(result) });
+      }
       setText('');
       setPreview(null);
       setPreviewFor('');
@@ -360,7 +398,7 @@ export function CapturePage() {
     <section className="flex h-full min-h-0 flex-col gap-3 overflow-auto px-5 pt-4 pb-5">
       <PageHeader
         title="收集"
-        subtitle="把群聊、帖子整段粘贴进来，会找出里面的链接，并标出哪些是新的。"
+        subtitle="粘贴帖文链接或整段正文，保存原文，也可以挑出里面值得留的链接。"
       />
       <PasteCard
         text={text}
@@ -377,7 +415,8 @@ export function CapturePage() {
         preview={matchedPreview}
         canCommit={commitReady}
         submitting={submitting}
-        onCommit={() => { void commit(); }}
+        onCommit={() => { void commit('links'); }}
+        onSaveSource={canSaveSource ? () => { void commit('source'); } : undefined}
         onRetry={() => setPreviewRetry((value) => value + 1)}
       />
       <InboxCard
@@ -403,7 +442,22 @@ export function CapturePage() {
         onCancelNote={cancelNote}
         onArchive={(item) => { void archive(item); }}
         onRetryFetch={(item) => { void runFetch(item.id); }}
+        onOpenSource={(id, editOnOpen) => setOpenSource({ id, editOnOpen })}
       />
+      {openSource ? (
+        <Suspense fallback={null}>
+          <CaptureSourceDialog
+            key={openSource.id}
+            id={openSource.id}
+            editOnOpen={openSource.editOnOpen}
+            onClose={() => setOpenSource(null)}
+            onChanged={(created) => {
+              void refreshSilently();
+              if (created > 0) void runFetchRef.current();
+            }}
+          />
+        </Suspense>
+      ) : null}
     </section>
   );
 }

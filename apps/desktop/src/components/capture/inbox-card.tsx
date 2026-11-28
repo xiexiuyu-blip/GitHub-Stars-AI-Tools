@@ -49,6 +49,7 @@ export function InboxCard(props: {
   onSaveNote: () => void;
   onCancelNote: () => void;
   onArchive: (item: InboxItem) => void;
+  onOpenSource?: (id: string, editOnOpen: boolean) => void;
   onRetryFetch: (item: InboxItem) => void;
 }) {
   const counts = props.page?.counts ?? { pending: 0, ready: 0, failed: 0, archived: 0 };
@@ -126,6 +127,7 @@ export function InboxCard(props: {
             onSaveNote={props.onSaveNote}
             onCancelNote={props.onCancelNote}
             onArchive={props.onArchive}
+            onOpenSource={props.onOpenSource}
           />
         ))}
       </div>
@@ -149,6 +151,7 @@ function InboxRow(props: {
   onSaveNote: () => void;
   onCancelNote: () => void;
   onArchive: (item: InboxItem) => void;
+  onOpenSource?: (id: string, editOnOpen: boolean) => void;
 }) {
   const title = inboxHeading(props.item.title, props.item.normalizedUrl);
   const repoName = githubFullName(props.item);
@@ -167,6 +170,7 @@ function InboxRow(props: {
   const tag = inboxStatusTag(props.item.status);
   const action = archiveAction(props.item.status);
   const errorId = `inbox-note-error-${props.item.id}`;
+  const needsBody = props.item.fetchStatus === 'failed' && !props.item.hasSourceBody;
 
   function onKeyDown(event: KeyboardEvent<HTMLInputElement>) {
     if (event.nativeEvent.isComposing || event.key === 'Process') return;
@@ -255,6 +259,33 @@ function InboxRow(props: {
               </button>
             ) : null}
           </div>
+        ) : null}
+        {props.onOpenSource && props.item.canOpenSource ? (
+          <Button
+            size="sm"
+            variant="text"
+            onClick={() => props.onOpenSource?.(props.item.id, needsBody)}
+          >
+            {needsBody ? '补贴正文' : '查看原文'}
+          </Button>
+        ) : null}
+        {props.onOpenSource && props.item.sources?.length ? (
+          <details className="mt-1 text-xs text-on-surface-variant">
+            <summary className="cursor-pointer">出处 {props.item.sources.length} 条</summary>
+            <ul className="m-0 mt-1 flex list-none flex-col items-start p-0">
+              {props.item.sources.map((entry) => (
+                <li key={entry.id} className="max-w-full">
+                  <Button
+                    variant="text"
+                    className="max-w-full"
+                    onClick={() => props.onOpenSource?.(entry.id, false)}
+                  >
+                    <span className="truncate">{entry.title || '查看原文'}</span>
+                  </Button>
+                </li>
+              ))}
+            </ul>
+          </details>
         ) : null}
         {props.editing ? (
           <div className="mt-1.5">

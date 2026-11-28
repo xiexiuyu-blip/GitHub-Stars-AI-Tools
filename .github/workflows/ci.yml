@@ -163,7 +163,7 @@ jobs:
           npm --prefix /tmp/pw-ci install --no-save playwright
           /tmp/pw-ci/node_modules/.bin/playwright install --with-deps chromium
 
-      - name: Run isolated browser acceptance (23 journeys)
+      - name: Run isolated browser acceptance
         env:
           FSL_PLAYWRIGHT_PATH: /tmp/pw-ci/node_modules/playwright
           FSL_ACCEPTANCE_OUT: acceptance-out

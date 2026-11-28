@@ -3,7 +3,10 @@
 //! 联网必须走 `PageFetcher`。测试注入假实现；真正的 `SafePageFetcher` 每一跳先检查链接，
 //! 再把主机解析成 IP，拒绝内网后用 `curl --resolve` 把这次解析结果固定住。
 
-use crate::capture::{find_github_repo_links, ip_is_blocked, url_is_safe};
+use crate::capture::{
+    extract_source_links, find_github_repo_links, ip_is_blocked, url_is_safe,
+    SOURCE_TEXT_LIMIT_BYTES,
+};
 use crate::web_fetch::url_encode;
 use encoding_rs::{Encoding, UTF_8};
 use flate2::read::{DeflateDecoder, GzDecoder, ZlibDecoder};
@@ -205,6 +208,7 @@ enum Outcome {
         author: String,
         excerpt: String,
         repos: Vec<String>,
+        source_links: Vec<String>,
     },
     Failed {
         reason: String,
@@ -351,6 +355,7 @@ fn fetch_html(fetcher: &dyn PageFetcher, url: &str) -> Outcome {
         author: extracted.author,
         excerpt: extracted.excerpt,
         repos,
+        source_links: Vec::new(),
     }
 }
 
@@ -1054,11 +1059,23 @@ fn read_x_body(body: &str) -> Outcome {
         AUTHOR_CHARS,
     );
     let html = value.get("html").and_then(Value::as_str).unwrap_or("");
-    let Some(text) = first_paragraph_text(html) else {
+    let html = remove_hidden(&html[..html.floor_char_boundary(SOURCE_TEXT_LIMIT_BYTES)]);
+    let Some(paragraph) = element_inner(&html, "p") else {
         return Outcome::Failed {
             reason: "帖子里没有正文".to_owned(),
         };
     };
+    let text = html_fragment_to_text(paragraph, true);
+    if text.is_empty() {
+        return Outcome::Failed {
+            reason: "帖子里没有正文".to_owned(),
+        };
+    }
+    let source_links = extract_source_links(&repo_scan_text(paragraph))
+        .into_iter()
+        .filter(|link| link.blocked_reason.is_none())
+        .map(|link| link.url)
+        .collect();
     let excerpt = truncate_chars(&text, EXCERPT_CHARS);
     let title = x_display_title(&author, &text);
     Outcome::Done {
@@ -1066,6 +1083,7 @@ fn read_x_body(body: &str) -> Outcome {
         author,
         excerpt,
         repos: Vec::new(),
+        source_links,
     }
 }
 
@@ -1099,6 +1117,7 @@ fn read_youtube_body(body: &str) -> Outcome {
         author,
         excerpt: String::new(),
         repos: Vec::new(),
+        source_links: Vec::new(),
     }
 }
 
@@ -1552,15 +1571,6 @@ fn x_display_title(author: &str, body: &str) -> String {
         format!("「{prefix}」")
     } else {
         format!("「{author}：{prefix}」")
-    }
-}
-
-fn first_paragraph_text(html: &str) -> Option<String> {
-    let text = html_fragment_to_text(element_inner(html, "p")?, true);
-    if text.is_empty() {
-        None
-    } else {
-        Some(text)
     }
 }
 
@@ -2463,40 +2473,30 @@ fn write_outcome(path: &Path, id: &str, outcome: &Outcome) -> Result<(), String>
             author,
             excerpt,
             repos,
+            source_links,
         } => {
             let author = truncate_chars(&strip_controls(author), AUTHOR_CHARS);
             let excerpt = truncate_chars(&strip_controls(excerpt), EXCERPT_CHARS);
             let title = truncate_chars(&strip_controls(title), 500);
             let page_repos = page_repos_json(repos);
-            if title.is_empty() {
-                tx.execute(
-                    "UPDATE inbox_items
-                     SET fetch_status = 'done',
-                         fetch_error = '',
-                         fetched_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
-                         page_author = ?1,
-                         page_excerpt = ?2,
-                         page_repos = ?3
-                     WHERE id = ?4",
-                    params![author, excerpt, page_repos, id],
-                )
-            } else {
-                tx.execute(
-                    "UPDATE inbox_items
-                     SET fetch_status = 'done',
-                         fetch_error = '',
-                         fetched_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
-                         page_author = ?1,
-                         page_excerpt = ?2,
-                         page_repos = ?3,
-                         title = CASE
-                             WHEN title = original_url OR title = normalized_url THEN ?4
-                             ELSE title
-                         END
-                     WHERE id = ?5",
-                    params![author, excerpt, page_repos, title, id],
-                )
-            }
+            let source_links = serde_json::to_string(source_links)
+                .map_err(|_| "帖子候选链接写不进去".to_owned())?;
+            tx.execute(
+                "UPDATE inbox_items
+                 SET fetch_status = 'done',
+                     fetch_error = '',
+                     fetched_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+                     page_author = ?1,
+                     page_excerpt = ?2,
+                     page_repos = ?3,
+                     page_capture_links = ?4,
+                     title = CASE
+                         WHEN ?5 <> '' AND (title = original_url OR title = normalized_url) THEN ?5
+                         ELSE title
+                     END
+                 WHERE id = ?6",
+                params![author, excerpt, page_repos, source_links, title, id],
+            )
         }
         Outcome::Failed { reason } | Outcome::Skipped { reason } => {
             let status = match outcome {
@@ -4048,6 +4048,7 @@ https://github.com/real/repo
                 author: "作者".to_owned(),
                 excerpt: "摘要".to_owned(),
                 repos: repos.clone(),
+                source_links: Vec::new(),
             },
         )
         .expect("超长也应写成功");
@@ -4072,6 +4073,7 @@ https://github.com/real/repo
                 author: String::new(),
                 excerpt: String::new(),
                 repos: vec![format!("owner/{}", "y".repeat(9000))],
+                source_links: Vec::new(),
             },
         )
         .expect("单条超长也不应让写库失败");
@@ -4081,7 +4083,7 @@ https://github.com/real/repo
     }
 
     #[test]
-    fn oembed_success_stores_empty_repo_list() {
+    fn x_oembed_keeps_post_candidates_separate_from_article_repos() {
         let db = TempDb::new("repos-oembed");
         insert_item(
             &db,
@@ -4101,7 +4103,11 @@ https://github.com/real/repo
         );
         set_page_repos(&db, "x", r#"["old/one"]"#);
         set_page_repos(&db, "y", r#"["old/two"]"#);
-        let x_body = x_json("Fox", "<p>正文里有 https://github.com/should/ignore</p>");
+        let skill = "https://github.com/example/skills/blob/main/one/SKILL.md";
+        let x_body = x_json(
+            "Fox",
+            &format!("<p>正文里有 <a href=\"{skill}\">具体 Skill</a></p>"),
+        );
         let y_body = json!({ "title": "演示", "author_name": "频道" }).to_string();
         let fetcher = SeqFetcher::new(vec![
             Ok(page(200, "application/json", &x_body, None)),
@@ -4117,6 +4123,10 @@ https://github.com/real/repo
         assert_eq!(y_row.fetch_status, "done");
         assert_eq!(y_row.page_repos, "[]");
         assert_user_fields_untouched(&y_row);
+        let view = crate::capture_source::get_source(&db.path, "x").expect("X 原帖可打开");
+        assert_eq!(view.candidates.len(), 1);
+        assert_eq!(view.candidates[0].row.normalized_url, skill);
+        assert_eq!(view.candidates[0].row.kind, "github_skill");
     }
 
     #[test]

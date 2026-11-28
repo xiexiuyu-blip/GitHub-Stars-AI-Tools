@@ -11,7 +11,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 pub struct ExtractedLink {
     pub url: String,
     pub normalized_url: String,
-    /// github_repo / github / x_post / x / web
+    /// github_repo / github_skill / github / x_post / x / web
     pub kind: String,
     /// github / x / wechat / xiaohongshu / bilibili / youtube / telegram / discord / web
     pub platform: String,
@@ -112,6 +112,54 @@ pub fn extract_links_from_text(text: &str) -> Vec<ExtractedLink> {
     extract_links_limited(text, MAX_LINKS_PER_TEXT)
 }
 
+pub(crate) const MAX_SOURCE_LINKS: usize = 100;
+pub(crate) const SOURCE_TEXT_LIMIT_BYTES: usize = 64 * 1024;
+
+/// 新收集流程保留具体 Skill 文件。旧预览与投递仍按仓库去重。
+pub(crate) fn extract_source_links(text: &str) -> Vec<ExtractedLink> {
+    unique_links(text, MAX_SOURCE_LINKS, build_source_link)
+}
+
+fn build_source_link(raw: &str) -> Option<ExtractedLink> {
+    let mut link = build_link(raw)?;
+    if link.kind == "github_repo" && link.blocked_reason.is_none() {
+        let parsed = url::Url::parse(&link.url).ok()?;
+        let segments = parsed.path_segments()?.collect::<Vec<_>>();
+        if segments.len() >= 5
+            && segments[2] == "blob"
+            && !segments[3].is_empty()
+            && segments.last() == Some(&"SKILL.md")
+        {
+            link.kind = "github_skill".to_owned();
+            link.normalized_url.push('/');
+            link.normalized_url.push_str(&segments[2..].join("/"));
+        }
+    }
+    Some(link)
+}
+
+/// 结构化来源必须是一条完整地址，避免把带正文的字段当成地址截断。
+pub(crate) fn source_url_link(url: &str) -> Option<ExtractedLink> {
+    let url = url.trim();
+    if url.len() > MAX_LINK_CHARS || !url.chars().all(is_url_char) {
+        return None;
+    }
+    if !starts_url(url, None) {
+        return None;
+    }
+    build_source_link(url).filter(|link| link.blocked_reason.is_none())
+}
+
+pub(crate) fn normalized_x_post_id(url: &str) -> Option<&str> {
+    let rest = url.strip_prefix("https://x.com/")?;
+    let (user, id) = rest.split_once("/status/")?;
+    (!user.is_empty()
+        && !user.contains('/')
+        && !id.is_empty()
+        && id.bytes().all(|b| b.is_ascii_digit()))
+    .then_some(id)
+}
+
 fn contains_ignore_case(haystack: &str, needle: &str) -> bool {
     let needle = needle.as_bytes();
     haystack
@@ -153,13 +201,21 @@ pub(crate) fn find_github_repo_links(
 }
 
 fn extract_links_limited(text: &str, limit: usize) -> Vec<ExtractedLink> {
+    unique_links(text, limit, build_link)
+}
+
+fn unique_links(
+    text: &str,
+    limit: usize,
+    build: impl Fn(&str) -> Option<ExtractedLink>,
+) -> Vec<ExtractedLink> {
     let mut links = Vec::new();
     let mut seen = HashSet::new();
     for raw in candidates(text) {
         if links.len() >= limit {
             break;
         }
-        let Some(link) = build_link(&raw) else {
+        let Some(link) = build(&raw) else {
             continue;
         };
         if seen.insert(link.normalized_url.clone()) {

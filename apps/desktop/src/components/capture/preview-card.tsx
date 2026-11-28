@@ -19,8 +19,15 @@ export function PreviewCard(props: {
   canCommit: boolean;
   submitting: boolean;
   onCommit: () => void;
+  onSaveSource?: () => void;
   onRetry: () => void;
 }) {
+  const saveSource = props.onSaveSource ? (
+    <Button variant="primary" loading={props.submitting} onClick={props.onSaveSource}>
+      保存正文
+    </Button>
+  ) : null;
+
   if (props.phase === 'too-long') {
     return (
       <Card>
@@ -34,7 +41,10 @@ export function PreviewCard(props: {
       <Card>
         <div className="flex flex-col items-center gap-2 px-4 py-8 text-center">
           <p className="text-sm text-error">{props.error ?? '预览没有完成，请稍后再试。'}</p>
-          <Button onClick={props.onRetry}>重试</Button>
+          <div className="flex items-center gap-2">
+            <Button onClick={props.onRetry}>重试</Button>
+            {saveSource}
+          </div>
         </div>
       </Card>
     );
@@ -52,6 +62,14 @@ export function PreviewCard(props: {
   }
 
   if (!props.preview || props.preview.rows.length === 0) {
+    if (saveSource) {
+      return (
+        <Card className="flex flex-wrap items-center justify-between gap-3 px-4 py-3">
+          <p className="m-0 text-sm text-on-surface-variant">可以把这段文字保存到收集箱。</p>
+          {saveSource}
+        </Card>
+      );
+    }
     return (
       <Card>
         <EmptyState
@@ -71,13 +89,14 @@ export function PreviewCard(props: {
       <div className="flex flex-wrap items-center gap-3 px-4 py-3">
         <p className="m-0 min-w-0 flex-1 text-sm text-foreground" aria-live="polite">{summary}</p>
         <Button
-          variant="primary"
+          variant={saveSource ? 'default' : 'primary'}
           loading={props.submitting}
           disabled={!props.canCommit}
           onClick={props.onCommit}
         >
-          {commitButtonLabel(newCount)}
+          {saveSource ? `只放链接（${newCount}）` : commitButtonLabel(newCount)}
         </Button>
+        {saveSource}
       </div>
       <div>
         {props.preview.rows.map((row, index) => (

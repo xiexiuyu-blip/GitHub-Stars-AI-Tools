@@ -1,4 +1,4 @@
-use crate::capture::extract_links_from_text;
+use crate::capture::{extract_links_from_text, ExtractedLink};
 use crate::db::migrations::migrate_database;
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
@@ -84,7 +84,7 @@ pub fn ensure_ready(path: &Path) -> Result<Connection, String> {
     open_db(path)
 }
 
-fn account_id(connection: &Connection) -> Result<String, String> {
+pub(crate) fn account_id(connection: &Connection) -> Result<String, String> {
     connection
         .query_row(
             "SELECT id FROM github_accounts ORDER BY updated_at DESC LIMIT 1",
@@ -631,7 +631,7 @@ pub struct CaptureCommit {
     pub links_found: usize,
 }
 
-fn short_hash(value: &str) -> String {
+pub(crate) fn short_hash(value: &str) -> String {
     format!("{:x}", Sha256::digest(value.as_bytes()))[..24].to_owned()
 }
 
@@ -645,7 +645,7 @@ pub struct CaptureSource<'a> {
 
 const CAPTURE_EXCERPT_CHARS: usize = 2000;
 
-fn normalize_capture_platform(platform: &str) -> &'static str {
+pub(crate) fn normalize_capture_platform(platform: &str) -> &'static str {
     match platform {
         "web" => "web",
         "github" => "github",
@@ -668,6 +668,102 @@ fn normalize_capture_via(via: &str) -> &'static str {
         "local_api" => "local_api",
         _ => "paste_batch",
     }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CaptureLinkStatus {
+    New,
+    Starred,
+    Inbox,
+    Blocked,
+}
+
+impl CaptureLinkStatus {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::New => "new",
+            Self::Starred => "starred",
+            Self::Inbox => "inbox",
+            Self::Blocked => "blocked",
+        }
+    }
+}
+
+pub(crate) fn capture_link_status(
+    connection: &Connection,
+    account: &str,
+    link: &ExtractedLink,
+) -> Result<CaptureLinkStatus, String> {
+    if link.blocked_reason.is_some() {
+        return Ok(CaptureLinkStatus::Blocked);
+    }
+    if link.kind == "github_repo" {
+        let full_name = format!(
+            "{}/{}",
+            link.owner.as_deref().unwrap_or(""),
+            link.name.as_deref().unwrap_or("")
+        );
+        let starred: bool = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM repositories WHERE account_id = ?1 AND sync_status = 'active' AND lower(full_name) = lower(?2))",
+                params![account, full_name],
+                |row| row.get(0),
+            )
+            .map_err(|error| format!("已收藏检查失败：{error}"))?;
+        if starred {
+            return Ok(CaptureLinkStatus::Starred);
+        }
+    }
+    if inbox_link_id(connection, account, &link.normalized_url)?.is_some() {
+        Ok(CaptureLinkStatus::Inbox)
+    } else {
+        Ok(CaptureLinkStatus::New)
+    }
+}
+
+pub(crate) fn inbox_link_id(
+    connection: &Connection,
+    account: &str,
+    url: &str,
+) -> Result<Option<String>, String> {
+    connection
+        .query_row(
+            "SELECT id FROM inbox_items WHERE account_id = ?1 AND normalized_url = ?2",
+            params![account, url],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| format!("收集箱查重失败：{error}"))
+}
+
+pub(crate) fn insert_inbox_link(
+    connection: &Connection,
+    id: &str,
+    account: &str,
+    link: &ExtractedLink,
+    context: &str,
+    via: &str,
+    batch: Option<(&str, &str)>,
+) -> Result<(), String> {
+    let item_type = match (link.kind.as_str(), link.platform.as_str()) {
+        ("github_repo", _) => "github_repository",
+        (_, "youtube" | "bilibili") => "video",
+        _ => "webpage",
+    };
+    let title = match (&link.owner, &link.name) {
+        (Some(owner), Some(name)) if link.kind == "github_repo" => format!("{owner}/{name}"),
+        _ => link.normalized_url.clone(),
+    };
+    let (batch_id, excerpt) = batch.map_or((None, ""), |(id, text)| (Some(id), text));
+    connection
+        .execute(
+            "INSERT INTO inbox_items(id, account_id, original_url, normalized_url, title, item_type,
+                 source_platform, source_context, captured_via, capture_batch_id, raw_excerpt)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            params![id, account, link.url, link.normalized_url, title, item_type, link.platform, context, via, batch_id, excerpt],
+        )
+        .map_err(|error| format!("收集条目写入失败：{error}"))?;
+    Ok(())
 }
 
 pub fn commit_capture(
@@ -740,65 +836,27 @@ pub fn commit_capture_with(
         return Ok(result);
     }
     for link in &links {
-        if link.blocked_reason.is_some() {
-            result.blocked += 1;
-            continue;
-        }
-        if link.kind == "github_repo" {
-            let full_name = format!(
-                "{}/{}",
-                link.owner.as_deref().unwrap_or(""),
-                link.name.as_deref().unwrap_or("")
-            );
-            let starred: bool = tx
-                .query_row(
-                    "SELECT EXISTS(SELECT 1 FROM repositories WHERE account_id = ?1 AND sync_status = 'active' AND lower(full_name) = lower(?2))",
-                    params![account, full_name],
-                    |row| row.get(0),
-                )
-                .map_err(|error| format!("已收藏检查失败：{error}"))?;
-            if starred {
-                result.already_starred += 1;
-                continue;
+        match capture_link_status(&tx, &account, link)? {
+            CaptureLinkStatus::Blocked => result.blocked += 1,
+            CaptureLinkStatus::Starred => result.already_starred += 1,
+            CaptureLinkStatus::Inbox => result.already_in_inbox += 1,
+            CaptureLinkStatus::New => {
+                let id = format!(
+                    "cap-{}",
+                    short_hash(&format!("{batch_id}|{}", link.normalized_url))
+                );
+                insert_inbox_link(
+                    &tx,
+                    &id,
+                    &account,
+                    link,
+                    &context,
+                    captured_via,
+                    Some((&batch_id, excerpt.as_deref().unwrap_or(""))),
+                )?;
+                result.created += 1;
             }
         }
-        let in_inbox: bool = tx
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM inbox_items WHERE account_id = ?1 AND normalized_url = ?2)",
-                params![account, link.normalized_url],
-                |row| row.get(0),
-            )
-            .map_err(|error| format!("收集箱查重失败：{error}"))?;
-        if in_inbox {
-            result.already_in_inbox += 1;
-            continue;
-        }
-        let item_type = match (link.kind.as_str(), link.platform.as_str()) {
-            ("github_repo", _) => "github_repository",
-            (_, "youtube" | "bilibili") => "video",
-            _ => "webpage",
-        };
-        let title = match (&link.owner, &link.name) {
-            (Some(owner), Some(name)) => format!("{owner}/{name}"),
-            _ => link.normalized_url.clone(),
-        };
-        let id = format!(
-            "cap-{}",
-            short_hash(&format!("{batch_id}|{}", link.normalized_url))
-        );
-        let write_item = if let Some(excerpt) = &excerpt {
-            tx.execute(
-                "INSERT INTO inbox_items(id, account_id, original_url, normalized_url, title, item_type, source_platform, source_context, captured_via, capture_batch_id, raw_excerpt) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-                params![id, account, link.url, link.normalized_url, title, item_type, link.platform, context, captured_via, batch_id, excerpt],
-            )
-        } else {
-            tx.execute(
-                "INSERT INTO inbox_items(id, account_id, original_url, normalized_url, title, item_type, source_platform, source_context, captured_via, capture_batch_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-                params![id, account, link.url, link.normalized_url, title, item_type, link.platform, context, captured_via, batch_id],
-            )
-        };
-        write_item.map_err(|error| format!("收集条目写入失败：{error}"))?;
-        result.created += 1;
     }
     tx.commit()
         .map_err(|error| format!("收集提交失败：{error}"))?;
