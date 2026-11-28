@@ -13,6 +13,7 @@
 | [ARCHITECTURE.md](ARCHITECTURE.md) | 研发工程师 / AI 开发者 | Monorepo 结构、React ↔ Tauri IPC ↔ Rust ↔ SQLite 架构、命令契约与外部接口 |
 | [ROADMAP.md](ROADMAP.md) | 产品 / 研发负责人 | 当前已落地里程碑与 P1 / P2 / P3 后续迭代路线（唯一有效计划） |
 | [HANDOFF.md](HANDOFF.md) | 新接手同事 | Day-1 上手清单、开发运行、验证命令、发版与正式版原地升级入口 |
+| [CI_GUIDE.md](CI_GUIDE.md) | 团队协作 / CI | 草稿 PR 开发流程、4 项 GitHub Checks 解读、双远端同步与回归用例规范 |
 | [../CONTRIBUTING.md](../CONTRIBUTING.md) | 团队同事 / 开源贡献者 | 分支协作规则、PR 核对项、迁移冲突解决与贡献授权说明 |
 | [../SECURITY.md](../SECURITY.md) | 所有协作者 / 安全研究者 | 核心安全边界、私密漏洞报告流程与凭据脱敏要求 |
 | [../apps/desktop/DESIGN.md](../apps/desktop/DESIGN.md) | 前端 / 设计 | 语义色板、排版、组件规格与设置页文案写法规范 |

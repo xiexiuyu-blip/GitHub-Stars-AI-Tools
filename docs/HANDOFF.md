@@ -47,7 +47,7 @@ tools/cards/run.sh rust-test      # Rust 后端全量单测（排除 1 条依赖
 tools/cards/run.sh script-test    # 工具链预算与发布门禁脚本测试（release_test.py）
 ```
 
-如需运行基于 Playwright 与 `mock-host` 替身的隔离端到端浏览器验收（20 条核心用户旅程），需本机安装 Chrome 及 Playwright，并参考 [tools/dev-ui/README.md](../tools/dev-ui/README.md) 执行 `tools/cards/run.sh ui-test`。
+如需运行基于 Playwright 与 `mock-host` 替身的隔离端到端浏览器验收，需本机安装 Chrome 及 Playwright，并参考 [tools/dev-ui/README.md](../tools/dev-ui/README.md) 执行 `tools/cards/run.sh ui-test`。日常草稿 PR、GitHub Actions 4 项 Checks 排查与双远端合并流程见 [CI_GUIDE.md](CI_GUIDE.md)。
 
 ---
 
