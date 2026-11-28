@@ -752,6 +752,32 @@ pub(crate) fn insert_inbox_link(
     };
     let title = match (&link.owner, &link.name) {
         (Some(owner), Some(name)) if link.kind == "github_repo" => format!("{owner}/{name}"),
+        (Some(owner), Some(name)) if link.kind == "github_skill" => {
+            let subpath = url::Url::parse(&link.normalized_url).ok().and_then(|url| {
+                let parts: Vec<_> = url
+                    .path_segments()?
+                    .filter(|part| !part.is_empty())
+                    .collect();
+                let skip = if url
+                    .host_str()?
+                    .eq_ignore_ascii_case("raw.githubusercontent.com")
+                {
+                    3
+                } else if parts
+                    .get(2)
+                    .is_some_and(|part| matches!(*part, "blob" | "tree"))
+                {
+                    4
+                } else {
+                    return None;
+                };
+                let path = parts.get(skip..)?.join("/");
+                (!path.is_empty()).then(|| path.chars().take(120).collect::<String>())
+            });
+            subpath
+                .map(|path| format!("{owner}/{name} · {path}"))
+                .unwrap_or_else(|| link.normalized_url.clone())
+        }
         _ => link.normalized_url.clone(),
     };
     let (batch_id, excerpt) = batch.map_or((None, ""), |(id, text)| (Some(id), text));

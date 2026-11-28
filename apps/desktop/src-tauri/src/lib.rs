@@ -8052,6 +8052,21 @@ mod tests {
     }
 
     #[test]
+    fn capture_source_commands_are_allowed_by_main_capability() {
+        let permissions = include_str!("../permissions/gsat-commands.toml");
+        let manifest = include_str!("../gen/schemas/acl-manifests.json");
+        for command in [
+            "save_capture_source",
+            "get_capture_source",
+            "save_capture_source_body",
+            "collect_capture_candidates",
+        ] {
+            assert!(permissions.contains(&format!("\"{command}\"")), "{command}");
+            assert!(manifest.contains(&format!("\"{command}\"")), "{command}");
+        }
+    }
+
+    #[test]
     fn embedding_api_key_scope_is_bound_to_provider_and_endpoint() {
         let openai_scope = embedding_api_key_scope("openai", Some("https://api.openai.com/v1/"))
             .expect("OpenAI 凭据作用域应有效");

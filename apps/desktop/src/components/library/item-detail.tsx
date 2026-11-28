@@ -19,6 +19,7 @@ import {
   type CopyKind,
 } from '@/lib/item-format';
 import { explainerLinks, extractInstallSteps, extractPreviewImages, hasDownloadHint } from '@/lib/repo-assets';
+import { canOpenUrl, platformLabel } from '@/lib/capture-view';
 import { itemPendingNote } from '@/lib/automation-view';
 import { formTagLabel } from '@/lib/library-filters';
 import { maintenanceOf } from '@/lib/maintenance';
@@ -351,6 +352,40 @@ function DetailBody(props: Parameters<typeof ItemDetail>[0] & { detail: LibraryD
                     <h3 className="m-0 mb-0.5 text-xs font-medium text-on-surface-variant">灵感</h3>
                     <p className="m-0 text-xs leading-[1.6] text-on-surface-variant">{forYou}</p>
                   </section>
+                ) : null}
+
+                {detail.captureSources && detail.captureSources.length > 0 ? (
+                  <SoftCard>
+                    <SectionTitle icon="forum" hue={210}>推荐出处</SectionTitle>
+                    <ul className="m-0 flex list-none flex-col gap-2 p-0">
+                      {detail.captureSources.map((source) => {
+                        const meta = [platformLabel(source.platform), relativeDays(source.createdAt, new Date())]
+                          .filter(Boolean)
+                          .join(' · ');
+                        return (
+                          <li key={source.id} className="flex items-start justify-between gap-3 text-sm leading-[1.5]">
+                            <div className="min-w-0 flex-1 break-words">
+                              {canOpenUrl(source.originalUrl) ? (
+                                <a
+                                  href={source.originalUrl}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="font-medium text-foreground hover:underline"
+                                >
+                                  {source.title || source.originalUrl}
+                                </a>
+                              ) : (
+                                <span className="font-medium text-foreground">{source.title || '收集原文'}</span>
+                              )}
+                            </div>
+                            {meta ? (
+                              <span className="shrink-0 text-xs text-on-surface-variant">{meta}</span>
+                            ) : null}
+                          </li>
+                        );
+                      })}
+                    </ul>
+                  </SoftCard>
                 ) : null}
 
                 <details className="group">

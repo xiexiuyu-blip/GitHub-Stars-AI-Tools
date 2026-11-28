@@ -99,6 +99,14 @@ export type LibraryPage = {
   counts: LibraryCounts;
 };
 
+export type LibraryCaptureSource = {
+  id: string;
+  title: string;
+  originalUrl: string;
+  platform: string;
+  createdAt: string;
+};
+
 /** 命令 `get_library_detail({ id })` → LibraryDetail */
 export type LibraryDetail = LibraryItem & {
   /** 理解卡的 what_it_is（先结论） */
@@ -120,6 +128,8 @@ export type LibraryDetail = LibraryItem & {
   forksCount: number;
   /** README 摘录，最多约 1500 个字符，没有 README 为 null */
   readmeExcerpt: string | null;
+  /** 收集箱中关联到此项目或具体 Skill 的来源帖文（兼容旧后端可缺失） */
+  captureSources?: LibraryCaptureSource[];
 };
 
 /** 命令 `set_library_reading({ ids, group })`：把一批仓库设成某个状态组，返回改了多少个。

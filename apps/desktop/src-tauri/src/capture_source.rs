@@ -1,7 +1,7 @@
 //! 原文、候选与出处。候选确认和出处写入共用一个事务。
 use crate::capture::{
-    extract_source_links, normalized_x_post_id, source_url_link, ExtractedLink, MAX_SOURCE_LINKS,
-    SOURCE_TEXT_LIMIT_BYTES,
+    extract_source_links, normalized_x_post_id, source_origin_link, source_url_link, ExtractedLink,
+    MAX_SOURCE_LINKS, SOURCE_TEXT_LIMIT_BYTES,
 };
 use crate::inbox_view::CapturePreviewRow;
 use crate::v2_ops::{
@@ -102,7 +102,7 @@ pub fn save_source(
         .source_url
         .as_deref()
         .map(|url| {
-            source_url_link(url).ok_or_else(|| {
+            source_origin_link(url).ok_or_else(|| {
                 SaveSourceError::Invalid("原文链接无效，或不是公开网页地址".to_owned())
             })
         })
@@ -251,16 +251,26 @@ fn find_source_id(conn: &Connection, account: &str, key: &str) -> Result<Option<
         return Ok(exact);
     };
     // 分享链接上的用户名或 i/web 路径可能变化，帖文编号仍是同一个。
-    conn.query_row(
-        "SELECT id FROM inbox_items
+    let mut statement = conn
+        .prepare(
+            "SELECT id, normalized_url FROM inbox_items
          WHERE account_id = ?1 AND source_platform = 'x'
            AND normalized_url LIKE 'https://x.com/%/status/' || ?2
-         ORDER BY created_at ASC, id ASC LIMIT 1",
-        params![account, id],
-        |row| row.get(0),
-    )
-    .optional()
-    .map_err(read_error)
+         ORDER BY created_at ASC, id ASC",
+        )
+        .map_err(read_error)?;
+    let rows = statement
+        .query_map(params![account, id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(read_error)?;
+    for row in rows {
+        let (source_id, url) = row.map_err(read_error)?;
+        if normalized_x_post_id(&url) == Some(id) {
+            return Ok(Some(source_id));
+        }
+    }
+    Ok(None)
 }
 
 pub fn get_source(path: &Path, id: &str) -> Result<SourceView, String> {
@@ -523,6 +533,62 @@ mod tests {
     }
 
     #[test]
+    fn skill_candidates_receive_readable_titles() {
+        let db = TestDb::new();
+        let urls = [
+            "https://github.com/Acme/Repo/blob/main/a/SKILL.md",
+            "https://github.com/Acme/Repo/blob/main/b/skill.md",
+            "https://raw.githubusercontent.com/Acme/Repo/main/c/SKILL.md",
+            "https://github.com/Acme/Repo/tree/main/skills/demo",
+        ];
+        let saved = save_source(
+            &db.path,
+            SourceInput {
+                text: urls.join(" "),
+                ..SourceInput::default()
+            },
+            "paste_batch",
+        )
+        .unwrap();
+        collect_candidates(
+            &db.path,
+            &saved.source_id,
+            &extract_source_links(&urls.join(" "))
+                .into_iter()
+                .map(|link| link.normalized_url)
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        let inbox = list_inbox(&db.path, None, None, None).unwrap();
+        for title in [
+            "Acme/Repo · a/SKILL.md",
+            "Acme/Repo · b/skill.md",
+            "Acme/Repo · c/SKILL.md",
+            "Acme/Repo · skills/demo",
+        ] {
+            assert!(
+                inbox.items.iter().any(|item| item.title == title),
+                "缺少 {title}"
+            );
+        }
+    }
+
+    #[test]
+    fn source_id_rejects_malformed_x_urls_matching_like() {
+        let db = TestDb::new();
+        let conn = Connection::open(&db.path).unwrap();
+        let account = account_id(&conn).unwrap();
+        conn.execute("INSERT INTO inbox_items(id, account_id, original_url, normalized_url, title, item_type, source_platform, created_at) VALUES ('bad', ?1, 'x', 'https://x.com/a/b/status/123', '', 'webpage', 'x', '2020')", params![account]).unwrap();
+        conn.execute("INSERT INTO inbox_items(id, account_id, original_url, normalized_url, title, item_type, source_platform, created_at) VALUES ('good', ?1, 'x', 'https://x.com/valid/status/123', '', 'webpage', 'x', '2021')", params![account]).unwrap();
+        assert_eq!(
+            find_source_id(&conn, &account, "https://x.com/other/status/123")
+                .unwrap()
+                .as_deref(),
+            Some("good")
+        );
+    }
+
+    #[test]
     fn unavailable_post_accepts_a_body_and_keeps_only_the_selected_skill() {
         let db = TestDb::new();
         commit_capture(&db.path, POST, "原来的来源说明").unwrap();
@@ -672,5 +738,41 @@ mod tests {
             list_inbox(&db.path, None, None, None).unwrap().items.len(),
             1
         );
+    }
+
+    #[test]
+    fn distinct_github_subpages_keep_separate_sources_without_overwriting() {
+        let db = TestDb::new();
+        let issue1 = save_source(
+            &db.path,
+            SourceInput {
+                source_url: Some(
+                    "https://github.com/Acme/Repo/issues/1?utm_source=x#top".to_owned(),
+                ),
+                text: "第一个 issue 的工具讨论".to_owned(),
+                ..SourceInput::default()
+            },
+            "local_api",
+        )
+        .unwrap();
+        let issue2 = save_source(
+            &db.path,
+            SourceInput {
+                source_url: Some("https://github.com/acme/repo/issues/2".to_owned()),
+                text: "第二个 issue 的工具讨论".to_owned(),
+                ..SourceInput::default()
+            },
+            "local_api",
+        )
+        .unwrap();
+        assert_ne!(issue1.source_id, issue2.source_id);
+        let one = get_source(&db.path, &issue1.source_id).unwrap();
+        let two = get_source(&db.path, &issue2.source_id).unwrap();
+        assert_eq!(
+            one.original_url,
+            "https://github.com/Acme/Repo/issues/1?utm_source=x#top"
+        );
+        assert_eq!(one.body, "第一个 issue 的工具讨论");
+        assert_eq!(two.body, "第二个 issue 的工具讨论");
     }
 }

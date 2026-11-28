@@ -18,6 +18,7 @@ import {
   canCommit,
   type CaptureSource,
   describeCommit,
+  detectSourceXPost,
   hasUnfetched,
   inboxHeading,
   mentionSummary,
@@ -221,10 +222,8 @@ export function CapturePage() {
   const matchedPreview = preview && previewFor === text ? preview : null;
   const commitReady = Boolean(matchedPreview && canCommit(matchedPreview) && !isTooLong(text));
   const sourceText = text.trimStart();
-  const firstLine = sourceText.split('\n', 1)[0].trim();
-  const post = matchedPreview?.rows.find((row) =>
-    row.kind === 'x_post' && row.status !== 'blocked' && matchesAddress(firstLine, row.url),
-  );
+  const matchedPost = detectSourceXPost(text, matchedPreview?.rows ?? []);
+  const post = matchedPost?.post;
   const singleAddress = matchedPreview?.rows.length === 1 && matchesAddress(text.trim(), matchedPreview.rows[0].url);
   const previewSettled = Boolean(matchedPreview || previewPhase === 'error' || previewDecision(text) === 'skip');
   const canSaveSource = Boolean(text.trim() && !isTooLong(text) && previewSettled && !singleAddress);
@@ -238,7 +237,9 @@ export function CapturePage() {
     setSubmitting(true);
     try {
       if (mode === 'source' || (post && singleAddress)) {
-        const body = post ? sourceText.slice(sourceText.indexOf('\n') + 1) : text;
+        const body = post && matchedPost?.stripFirstLine
+          ? sourceText.slice(sourceText.indexOf('\n') + 1)
+          : text;
         const result = await saveCaptureSource({
           text: mode === 'source' ? body : '',
           sourceUrl: post?.url,

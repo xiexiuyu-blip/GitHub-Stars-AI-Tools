@@ -101,6 +101,9 @@ pub struct PageResponse {
 
 pub trait PageFetcher {
     fn get(&self, url: &str) -> Result<PageResponse, FetchProblem>;
+    fn resolve_short_url(&self, _url: &str) -> Option<String> {
+        None
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -118,6 +121,9 @@ pub struct SafePageFetcher;
 impl PageFetcher for SafePageFetcher {
     fn get(&self, url: &str) -> Result<PageResponse, FetchProblem> {
         fetch_guarded(url, &StdResolver, &|next, ip| curl_once_pinned(next, ip))
+    }
+    fn resolve_short_url(&self, url: &str) -> Option<String> {
+        resolve_short_url_guarded(url, &StdResolver, &curl_head_pinned)
     }
 }
 
@@ -301,7 +307,29 @@ fn fetch_x(fetcher: &dyn PageFetcher, user: &str, id: &str) -> Outcome {
     if let Some(reason) = failure_for_status(page.status, PageKind::X) {
         return Outcome::Failed { reason };
     }
-    read_x_body(&page.body)
+    let mut outcome = read_x_body(&page.body);
+    if let Outcome::Done { source_links, .. } = &mut outcome {
+        let mut seen = HashSet::new();
+        let mut attempts = 0;
+        for link in source_links.iter_mut() {
+            let is_short = url::Url::parse(link)
+                .ok()
+                .and_then(|url| url.host_str().map(|host| host.eq_ignore_ascii_case("t.co")))
+                .unwrap_or(false);
+            if is_short && seen.insert(link.clone()) && attempts < 8 {
+                attempts += 1;
+                if let Some(resolved) = fetcher.resolve_short_url(link) {
+                    *link = resolved;
+                }
+            }
+        }
+        *source_links = extract_source_links(&source_links.join(" "))
+            .into_iter()
+            .filter(|link| link.blocked_reason.is_none())
+            .map(|link| link.url)
+            .collect();
+    }
+    outcome
 }
 
 fn fetch_youtube(fetcher: &dyn PageFetcher, url: &str) -> Outcome {
@@ -444,6 +472,39 @@ fn fetch_guarded(
         return accept_body(response);
     }
     Err(FetchProblem::fail("重定向超过 3 跳"))
+}
+
+fn resolve_short_url_guarded(
+    start: &str,
+    resolver: &dyn HostResolver,
+    transport: &dyn Fn(&str, IpAddr) -> Result<PageResponse, FetchProblem>,
+) -> Option<String> {
+    let parsed = gate_request(start).ok()?;
+    if !parsed.host_str()?.eq_ignore_ascii_case("t.co")
+        || parsed.path() == "/"
+        || parsed.path().is_empty()
+    {
+        return None;
+    }
+    let mut current = start.to_owned();
+    for _ in 0..MAX_REDIRECTS {
+        let parsed = gate_request(&current).ok()?;
+        let host = parsed.host_str()?;
+        let ip = checked_ip(&resolver.resolve(host, 443).ok()?).ok()?;
+        let response = transport(&current, ip).ok()?;
+        if !is_redirect(response.status) {
+            return None;
+        }
+        let next = resolve_location(&current, response.location.as_deref()?.trim()).ok()?;
+        let target = gate_request(&next).ok()?;
+        let target_host = target.host_str()?;
+        if !target_host.eq_ignore_ascii_case("t.co") {
+            checked_ip(&resolver.resolve(target_host, 443).ok()?).ok()?;
+            return Some(next);
+        }
+        current = next;
+    }
+    None
 }
 
 fn gate_request(url: &str) -> Result<url::Url, FetchProblem> {
@@ -624,6 +685,65 @@ fn curl_once_pinned(url: &str, ip: IpAddr) -> Result<PageResponse, FetchProblem>
         body: decode_page(&output.stdout, &headers)?,
         final_url: url.to_owned(),
         location,
+    })
+}
+
+fn curl_head_pinned(url: &str, ip: IpAddr) -> Result<PageResponse, FetchProblem> {
+    let parsed = gate_request(url)?;
+    if ip_is_blocked(ip) {
+        return Err(FetchProblem::fail(BLOCKED_IP_REASON));
+    }
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| FetchProblem::fail("链接没有主机名"))?;
+    let pin = resolve_arg(host, 443, ip);
+    let dump = HeaderDump::create()?;
+    let header_path = dump.path_arg()?;
+    let output = std::process::Command::new(curl_program())
+        .args([
+            "-q",
+            "-sS",
+            "-g",
+            "--noproxy",
+            "*",
+            "--proto",
+            "=https",
+            "--max-time",
+            "6",
+            "--connect-timeout",
+            "6",
+            "--max-redirs",
+            "0",
+            "-I",
+            "-D",
+            &header_path,
+            "-o",
+            if cfg!(windows) { "NUL" } else { "/dev/null" },
+            "--resolve",
+            &pin,
+            "--",
+            parsed.as_str(),
+        ])
+        .output()
+        .map_err(|_| FetchProblem::fail("联网程序启动失败"))?;
+    if !output.status.success() {
+        return Err(FetchProblem::fail("短链接读取失败"));
+    }
+    let file = std::fs::File::open(&dump.0).map_err(|_| FetchProblem::fail("读不到响应头"))?;
+    let mut headers = String::new();
+    file.take(65_537)
+        .read_to_string(&mut headers)
+        .map_err(|_| FetchProblem::fail("读不到响应头"))?;
+    if headers.len() > 65_536 {
+        return Err(FetchProblem::fail("响应头过长"));
+    }
+    let (status, values) = parse_header_dump(&headers)?;
+    Ok(PageResponse {
+        status,
+        content_type: String::new(),
+        body: String::new(),
+        final_url: url.to_owned(),
+        location: header_value(&values, "location").map(str::to_owned),
     })
 }
 
@@ -2731,6 +2851,136 @@ mod tests {
 
     fn x_json(author: &str, html: &str) -> String {
         json!({ "author_name": author, "html": html }).to_string()
+    }
+
+    #[test]
+    fn x_short_link_resolution_attempts_at_most_eight_unique_urls() {
+        struct CountingFetcher {
+            calls: RefCell<Vec<String>>,
+        }
+        impl PageFetcher for CountingFetcher {
+            fn get(&self, _: &str) -> Result<PageResponse, FetchProblem> {
+                let links = (0..10)
+                    .map(|n| format!("<a href=\"https://t.co/{n}\">链接</a> "))
+                    .collect::<String>();
+                Ok(page(
+                    200,
+                    "application/json",
+                    &x_json("作者", &format!("<p>{links}</p>")),
+                    None,
+                ))
+            }
+            fn resolve_short_url(&self, url: &str) -> Option<String> {
+                self.calls.borrow_mut().push(url.to_owned());
+                None
+            }
+        }
+        let fetcher = CountingFetcher {
+            calls: RefCell::new(Vec::new()),
+        };
+        let Outcome::Done { source_links, .. } = fetch_x(&fetcher, "author", "123") else {
+            panic!("应读取成功")
+        };
+        assert_eq!(fetcher.calls.borrow().len(), 8);
+        assert_eq!(source_links.len(), 10);
+    }
+
+    #[test]
+    fn short_url_resolution_checks_every_hop_and_never_fetches_destination() {
+        let target = "https://github.com/Acme/Repo/blob/main/a/SKILL.md";
+        let resolver = MapResolver::public();
+        let calls = RefCell::new(Vec::new());
+        let resolved = resolve_short_url_guarded("https://t.co/a", &resolver, &|url, _| {
+            calls.borrow_mut().push(url.to_owned());
+            Ok(page(302, "", "", Some(target)))
+        });
+        assert_eq!(resolved.as_deref(), Some(target));
+        assert_eq!(&*calls.borrow(), &["https://t.co/a"]);
+        for bad in [
+            "https://127.0.0.1/private",
+            "https://internal.example/private",
+            "http://github.com/a/b",
+            "https://github.com:444/a/b",
+        ] {
+            let resolver = MapResolver::with("internal.example", "10.0.0.1");
+            assert_eq!(
+                resolve_short_url_guarded("https://t.co/a", &resolver, &|_, _| Ok(page(
+                    302,
+                    "",
+                    "",
+                    Some(bad)
+                ))),
+                None
+            );
+        }
+        let mut hops = 0;
+        let transport = RefCell::new(&mut hops);
+        assert_eq!(
+            resolve_short_url_guarded("https://t.co/a", &MapResolver::public(), &|_, _| {
+                **transport.borrow_mut() += 1;
+                Ok(page(302, "", "", Some("https://t.co/next")))
+            }),
+            None
+        );
+        assert_eq!(hops, MAX_REDIRECTS);
+        assert_eq!(
+            resolve_short_url_guarded("https://t.co/", &MapResolver::public(), &|_, _| panic!(
+                "不应请求"
+            )),
+            None
+        );
+    }
+
+    #[test]
+    fn x_short_links_expand_to_skills_and_failures_remain() {
+        struct ShortFetcher {
+            private: bool,
+        }
+        impl PageFetcher for ShortFetcher {
+            fn get(&self, _: &str) -> Result<PageResponse, FetchProblem> {
+                Ok(page(200, "application/json", &x_json("作者", "<p>工具 <a href=\"https://t.co/a\">链接</a> <a href=\"https://example.com/other\">其他</a></p>"), None))
+            }
+            fn resolve_short_url(&self, url: &str) -> Option<String> {
+                let resolver = if self.private {
+                    MapResolver::with("github.com", "127.0.0.1")
+                } else {
+                    MapResolver::public()
+                };
+                resolve_short_url_guarded(url, &resolver, &|_, _| {
+                    Ok(page(
+                        302,
+                        "",
+                        "",
+                        Some("https://github.com/Acme/Repo/blob/main/a/SKILL.md"),
+                    ))
+                })
+            }
+        }
+        for private in [false, true] {
+            let Outcome::Done { source_links, .. } =
+                fetch_x(&ShortFetcher { private }, "author", "123")
+            else {
+                panic!("应读取成功")
+            };
+            let expected = if private {
+                "https://t.co/a"
+            } else {
+                "https://github.com/Acme/Repo/blob/main/a/SKILL.md"
+            };
+            assert!(
+                source_links.iter().any(|link| link == expected),
+                "{source_links:?}"
+            );
+            assert!(source_links
+                .iter()
+                .any(|link| link == "https://example.com/other"));
+            if !private {
+                assert_eq!(
+                    extract_source_links(&source_links.join(" "))[0].kind,
+                    "github_skill"
+                );
+            }
+        }
     }
 
     #[test]
