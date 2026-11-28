@@ -284,6 +284,7 @@ pub fn apply_pending_restore(
             fs::remove_file(&partial).map_err(|error| format!("清理恢复临时文件失败：{error}"))?;
         }
         fs::copy(&backup_path, &partial).map_err(|error| format!("复制备份失败：{error}"))?;
+        ensure_writable(&partial)?;
         integrity_is_ok(&partial).map_err(|error| format!("恢复文件完整性检查失败：{error}"))?;
         sync_file(&partial)?;
         pending.replacement_hash = Some(file_hash(&partial)?);
@@ -759,8 +760,23 @@ pub(crate) fn sync_authorization_file(path: &Path) -> Result<(), String> {
     sync_dir(parent)
 }
 
+fn ensure_writable(path: &Path) -> Result<(), String> {
+    let mut perms = fs::metadata(path)
+        .map_err(|error| format!("恢复临时文件权限读取失败：{error}"))?
+        .permissions();
+    if perms.readonly() {
+        perms.set_readonly(false);
+        fs::set_permissions(path, perms)
+            .map_err(|error| format!("恢复临时文件权限设置失败：{error}"))?;
+    }
+    Ok(())
+}
+
 fn sync_file(path: &Path) -> Result<(), String> {
-    fs::File::open(path)
+    fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
         .and_then(|file| file.sync_all())
         .map_err(|error| format!("保存恢复文件失败：{error}"))
 }
@@ -1827,5 +1843,58 @@ mod tests {
         let pending: PendingRestore =
             read_json(&data.join(PENDING_RESTORE_FILE)).expect("应保留标记");
         assert_eq!(pending.phase, RestorePhase::ResetPending);
+    }
+
+    #[test]
+    fn sync_file_preserves_contents_and_rejects_missing_file() {
+        let dir = TempDir::new("sync-file");
+        let file = dir.0.join("sample.bin");
+        fs::write(&file, b"hello-backup").expect("应能写入测试文件");
+        sync_file(&file).expect("可写文件应完成同步");
+        assert_eq!(
+            fs::read(&file).expect("应能读取同步后的文件"),
+            b"hello-backup"
+        );
+
+        let missing = dir.0.join("missing.bin");
+        assert!(sync_file(&missing).is_err());
+        assert!(!missing.exists());
+    }
+
+    #[test]
+    fn apply_pending_restore_succeeds_for_readonly_backup_file() {
+        let dir = TempDir::new("readonly-backup");
+        let data = dir.0.join("data");
+        let backups = data.join("backups");
+        let db = data.join(DATABASE_FILE_NAME);
+        let name = "manual-20261003-120000.sqlite3";
+        write_sample_db(&db, "029", "before", 0);
+        let saved = backups.join(name);
+        write_sample_db(&saved, "029", "after", 0);
+
+        let mut perms = fs::metadata(&saved)
+            .expect("应能读取备份权限")
+            .permissions();
+        perms.set_readonly(true);
+        fs::set_permissions(&saved, perms).expect("应能将备份设为只读");
+
+        request_restore(&data, &backups, name, 29).expect("应能请求恢复");
+        let report = apply_pending_restore(&data, &backups, || Ok(()))
+            .expect("只读备份恢复不应失败")
+            .expect("应返回恢复报告");
+        assert!(report.ok);
+
+        let conn = Connection::open(&db).expect("应能打开恢复后的数据库");
+        let marker: String = conn
+            .query_row("SELECT v FROM marker LIMIT 1", [], |row| row.get(0))
+            .expect("应能读取恢复后的标记");
+        assert_eq!(marker, "after");
+        assert!(!data.join(PENDING_RESTORE_FILE).exists());
+
+        let mut restore_perms = fs::metadata(&saved)
+            .expect("应能读取备份权限")
+            .permissions();
+        restore_perms.set_readonly(false);
+        let _ = fs::set_permissions(&saved, restore_perms);
     }
 }
