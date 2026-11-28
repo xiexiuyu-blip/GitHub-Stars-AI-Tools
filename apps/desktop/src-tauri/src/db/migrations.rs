@@ -245,6 +245,13 @@ const MIGRATIONS: &[Migration] = &[
         name: "discover_feeds",
         sql: include_str!("../../../../../packages/storage/migrations/fox/039_discover_feeds.sql"),
     },
+    Migration {
+        version: "040",
+        name: "capture_sources_v2",
+        sql: include_str!(
+            "../../../../../packages/storage/migrations/fox/040_capture_sources_v2.sql"
+        ),
+    },
 ];
 
 pub fn latest_migration() -> &'static Migration {
@@ -531,13 +538,13 @@ mod tests {
         let path = temp_db("web-content");
         let report = migrate_database(&path).expect("空库应能迁到 031");
         assert_eq!(report.applied.len(), MIGRATIONS.len());
-        assert_eq!(MIGRATIONS.len(), 39);
+        assert_eq!(MIGRATIONS.len(), 40);
         assert!(report
             .applied
             .iter()
             .any(|item| item == "039 discover_feeds"));
-        assert_eq!(latest_migration().version, "039");
-        assert_eq!(latest_migration().name, "discover_feeds");
+        assert_eq!(latest_migration().version, "040");
+        assert_eq!(latest_migration().name, "capture_sources_v2");
         assert!(report.applied.iter().any(|item| item == "031 web_content"));
         assert!(report.applied.iter().any(|item| item == "032 repo_license"));
         assert!(report.applied.iter().any(|item| item == "033 inbox_fetch"));
@@ -791,8 +798,8 @@ INSERT INTO ai_task_items(id, run_id, repository_id, full_name, status, reason) 
             .applied
             .iter()
             .any(|item| item == "039 discover_feeds"));
-        assert_eq!(latest_migration().version, "039");
-        assert_eq!(latest_migration().name, "discover_feeds");
+        assert_eq!(latest_migration().version, "040");
+        assert_eq!(latest_migration().name, "capture_sources_v2");
         let columns = license_columns(&path);
         assert_eq!(columns.len(), 2);
         for name in ["license_spdx", "license_name"] {
@@ -837,7 +844,7 @@ INSERT INTO repositories(id, account_id, owner, name, full_name, topics_json, ht
             assert_eq!(count_query(&path, "SELECT COUNT(*) FROM repositories"), 2);
         }
 
-        let report = migrate_database(&path).expect("031 库应能升到 039");
+        let report = migrate_database(&path).expect("031 库应能升到 040");
         assert_eq!(
             report.applied,
             vec![
@@ -849,6 +856,7 @@ INSERT INTO repositories(id, account_id, owner, name, full_name, topics_json, ht
                 "037 ai_job_spend_authorization".to_owned(),
                 "038 repo_archived".to_owned(),
                 "039 discover_feeds".to_owned(),
+                "040 capture_sources_v2".to_owned(),
             ]
         );
         assert_eq!(count_query(&path, "SELECT COUNT(*) FROM repositories"), 2);
@@ -917,10 +925,11 @@ INSERT INTO inbox_items(id, account_id, original_url, normalized_url, title, ite
                 "037 ai_job_spend_authorization".to_owned(),
                 "038 repo_archived".to_owned(),
                 "039 discover_feeds".to_owned(),
+                "040 capture_sources_v2".to_owned(),
             ]
         );
-        assert_eq!(latest_migration().version, "039");
-        assert_eq!(latest_migration().name, "discover_feeds");
+        assert_eq!(latest_migration().version, "040");
+        assert_eq!(latest_migration().name, "capture_sources_v2");
         assert!(MIGRATIONS
             .iter()
             .any(|migration| migration.version == "033" && migration.name == "inbox_fetch"));
@@ -1041,10 +1050,11 @@ INSERT INTO inbox_items(id, account_id, original_url, normalized_url, title, ite
                 "037 ai_job_spend_authorization".to_owned(),
                 "038 repo_archived".to_owned(),
                 "039 discover_feeds".to_owned(),
+                "040 capture_sources_v2".to_owned(),
             ]
         );
-        assert_eq!(latest_migration().version, "039");
-        assert_eq!(latest_migration().name, "discover_feeds");
+        assert_eq!(latest_migration().version, "040");
+        assert_eq!(latest_migration().name, "capture_sources_v2");
         assert!(MIGRATIONS
             .iter()
             .any(|migration| { migration.version == "034" && migration.name == "inbox_repos" }));
@@ -1149,11 +1159,12 @@ INSERT INTO inbox_items(id, account_id, original_url, normalized_url, title, ite
                 "037 ai_job_spend_authorization".to_owned(),
                 "038 repo_archived".to_owned(),
                 "039 discover_feeds".to_owned(),
+                "040 capture_sources_v2".to_owned(),
             ]
         );
         assert_eq!(cache_table(&from_034), 1);
-        assert_eq!(latest_migration().version, "039");
-        assert_eq!(latest_migration().name, "discover_feeds");
+        assert_eq!(latest_migration().version, "040");
+        assert_eq!(latest_migration().name, "capture_sources_v2");
         let connection = Connection::open(&from_034).expect("应能打开升级后的库");
         connection
             .execute(
@@ -1189,7 +1200,7 @@ INSERT INTO inbox_items(id, account_id, original_url, normalized_url, title, ite
                 )
                 .expect("应能记上 035");
         }
-        let report_035 = migrate_database(&from_035).expect("035 库应能升到 039");
+        let report_035 = migrate_database(&from_035).expect("035 库应能升到 040");
         assert_eq!(
             report_035.applied,
             vec![
@@ -1197,6 +1208,7 @@ INSERT INTO inbox_items(id, account_id, original_url, normalized_url, title, ite
                 "037 ai_job_spend_authorization".to_owned(),
                 "038 repo_archived".to_owned(),
                 "039 discover_feeds".to_owned(),
+                "040 capture_sources_v2".to_owned(),
             ]
         );
         assert_eq!(cache_table(&from_035), 1);
@@ -1208,7 +1220,7 @@ INSERT INTO inbox_items(id, account_id, original_url, normalized_url, title, ite
                 |row| row.get(0),
             )
             .expect("应能读到最新迁移");
-        assert_eq!(version, "039");
+        assert_eq!(version, "040");
 
         for path in [&from_034, &from_035] {
             let _ = fs::remove_file(path);
@@ -1265,17 +1277,18 @@ INSERT INTO inbox_items(id, account_id, original_url, normalized_url, title, ite
             );
         }
 
-        let report = migrate_database(&path).expect("036 库应能升到 039");
+        let report = migrate_database(&path).expect("036 库应能升到 040");
         assert_eq!(
             report.applied,
             vec![
                 "037 ai_job_spend_authorization".to_owned(),
                 "038 repo_archived".to_owned(),
                 "039 discover_feeds".to_owned(),
+                "040 capture_sources_v2".to_owned(),
             ]
         );
-        assert_eq!(latest_migration().version, "039");
-        assert_eq!(latest_migration().name, "discover_feeds");
+        assert_eq!(latest_migration().version, "040");
+        assert_eq!(latest_migration().name, "capture_sources_v2");
         assert!(MIGRATIONS.iter().any(|migration| {
             migration.version == "037" && migration.name == "ai_job_spend_authorization"
         }));
@@ -1362,12 +1375,13 @@ INSERT INTO repositories(
             before
         };
 
-        let report = migrate_database(&path).expect("037 库应能升到 039");
+        let report = migrate_database(&path).expect("037 库应能升到 040");
         assert_eq!(
             report.applied,
             vec![
                 "038 repo_archived".to_owned(),
                 "039 discover_feeds".to_owned(),
+                "040 capture_sources_v2".to_owned(),
             ]
         );
         assert!(
@@ -1377,8 +1391,8 @@ INSERT INTO repositories(
                 .is_some_and(|backup| backup.exists()),
             "有数据的库迁移前必须先备份"
         );
-        assert_eq!(latest_migration().version, "039");
-        assert_eq!(latest_migration().name, "discover_feeds");
+        assert_eq!(latest_migration().version, "040");
+        assert_eq!(latest_migration().name, "capture_sources_v2");
 
         let connection = Connection::open(&path).expect("应能打开升级后的库");
         let column: (String, i64, Option<String>) = connection
@@ -1502,10 +1516,11 @@ INSERT INTO repo_ai_documents(repo_id, summary_zh, model, prompt_version, source
                 "037 ai_job_spend_authorization".to_owned(),
                 "038 repo_archived".to_owned(),
                 "039 discover_feeds".to_owned(),
+                "040 capture_sources_v2".to_owned(),
             ]
         );
-        assert_eq!(latest_migration().version, "039");
-        assert_eq!(latest_migration().name, "discover_feeds");
+        assert_eq!(latest_migration().version, "040");
+        assert_eq!(latest_migration().name, "capture_sources_v2");
         assert!(MIGRATIONS
             .iter()
             .any(|migration| { migration.version == "035" && migration.name == "readme_basis" }));
@@ -1589,8 +1604,14 @@ INSERT INTO repo_ai_documents(repo_id, summary_zh, model, prompt_version, source
                 .expect("应能写入测试账号");
         }
 
-        let report = migrate_database(&path).expect("038 库应能升到 039");
-        assert_eq!(report.applied, vec!["039 discover_feeds".to_owned()]);
+        let report = migrate_database(&path).expect("038 库应能升到 040");
+        assert_eq!(
+            report.applied,
+            vec![
+                "039 discover_feeds".to_owned(),
+                "040 capture_sources_v2".to_owned()
+            ]
+        );
         assert!(
             report
                 .backup_path
@@ -1614,6 +1635,51 @@ INSERT INTO repo_ai_documents(repo_id, summary_zh, model, prompt_version, source
         let again = migrate_database(&path).expect("第二次迁移应幂等");
         assert!(again.applied.is_empty());
 
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_file(format!("{}-wal", path.display()));
+        let _ = fs::remove_file(format!("{}-shm", path.display()));
+        if let Some(backup) = report.backup_path {
+            let _ = fs::remove_file(backup);
+        }
+    }
+
+    #[test]
+    fn upgrade_from_039_preserves_an_existing_x_capture() {
+        let path = temp_db("capture-sources-039");
+        {
+            let mut connection = Connection::open(&path).unwrap();
+            for migration in MIGRATIONS
+                .iter()
+                .filter(|migration| migration.version <= "039")
+            {
+                apply_one(&mut connection, migration).unwrap();
+            }
+            connection.execute_batch(
+                "INSERT INTO github_accounts(id, login, token_ref) VALUES ('acct', 'fox', 'test');
+                 INSERT INTO inbox_items(id, account_id, original_url, normalized_url, title,
+                    item_type, source_platform, source_context, user_note, fetch_status, raw_excerpt)
+                 VALUES ('post', 'acct', 'https://twitter.com/test/status/123', 'https://x.com/test/status/123',
+                    '旧帖子', 'webpage', 'x', '原来的出处', '保留的笔记', 'failed', '原来的摘录');"
+            ).unwrap();
+        }
+        let report = migrate_database(&path).unwrap();
+        assert_eq!(report.applied, ["040 capture_sources_v2"]);
+        assert!(report
+            .backup_path
+            .as_ref()
+            .is_some_and(|backup| backup.is_file()));
+        let page = crate::inbox_view::list_inbox(&path, None, None, None).unwrap();
+        assert_eq!(page.items.len(), 1);
+        let post = &page.items[0];
+        assert_eq!(post.id, "post");
+        assert_eq!(post.title, "旧帖子");
+        assert_eq!(post.user_note, "保留的笔记");
+        assert_eq!(post.source_context, "原来的出处");
+        assert_eq!(post.quote, "原来的摘录");
+        assert!(post.can_open_source);
+        assert!(!post.has_source_body);
+        assert_eq!(post.fetch_status, "failed");
+        assert!(migrate_database(&path).unwrap().applied.is_empty());
         let _ = fs::remove_file(&path);
         let _ = fs::remove_file(format!("{}-wal", path.display()));
         let _ = fs::remove_file(format!("{}-shm", path.display()));

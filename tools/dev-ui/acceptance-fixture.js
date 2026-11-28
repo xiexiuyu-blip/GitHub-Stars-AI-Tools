@@ -35,6 +35,41 @@ export function installFixture() {
   Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: async (text) => { state.clipboard = text; }, readText: async () => state.clipboard } });
   const tier = (item) => item.archived ? 'archived' : !item.pushedAt ? null : Date.now() - Date.parse(item.pushedAt) > 365 * 86400000 ? 'stale' : 'active';
   const counts = { total: 4, scenarios: { design: 4 }, reading: { unseen: 4, want: 0, tried: 0, in_use: 0, dropped: 0 }, cardState: { done: 3, pending: 1 }, forms: { app: 4 }, maintenance: { active: 1, slow: 0, stale: 1, archived: 1 } };
+  const inbox = [];
+  const bodies = new Map();
+  const linkedSources = new Map();
+  const captureLinks = [
+    ['https://x.com/fixture/status/42', 'x_post', 'x'],
+    ['https://x.com/fixture/status/43', 'x_post', 'x'],
+    ['https://github.com/fixture/skills/blob/main/cover/SKILL.md', 'github_skill', 'github'],
+    ['https://github.com/fixture/skills/blob/main/other/SKILL.md', 'github_skill', 'github'],
+  ];
+  const captureRows = (text) => captureLinks.filter(([url]) => text.includes(url)).map(([url, kind, platform]) => ({
+    url, normalizedUrl: url, kind, platform, owner: null, name: null, blockedReason: null,
+    status: inbox.some((item) => item.normalizedUrl === url) ? 'inbox' : 'new',
+  }));
+  function inboxEntry({ originalUrl = '', title, platform, canOpenSource }) {
+    const id = `capture:${state.nextId++}`;
+    const entry = {
+      id, title, originalUrl, normalizedUrl: originalUrl || id, sourceContext: '',
+      userNote: '', status: 'pending', platform, createdAt: today, repositoryId: null,
+      itemType: originalUrl ? 'webpage' : 'document', canOpenSource,
+      fetchStatus: originalUrl && platform === 'x' ? 'pending' : 'skipped',
+      fetchError: '', quote: '', sources: [],
+    };
+    inbox.unshift(entry);
+    return entry;
+  }
+  function sourceView(id) {
+    const entry = inbox.find((item) => item.id === id);
+    const body = bodies.get(id) || '';
+    return {
+      title: entry.title, originalUrl: entry.originalUrl, body, fetchedExcerpt: '',
+      candidates: captureRows(body).filter((row) => row.normalizedUrl !== entry.normalizedUrl).map((row) => ({
+        ...row, linked: linkedSources.get(row.normalizedUrl)?.has(id) ?? false,
+      })),
+    };
+  }
   const pagedItems = Array.from({ length: 250 }, (_, idx) => ({
     id: `paged:${idx + 1}`,
     fullName: `fixture/paged-${idx + 1}`,
@@ -90,6 +125,75 @@ export function installFixture() {
     list_repositories: () => ({ items: [], totalCount: 0, limit: 80, offset: 0 }),
     get_repository_filter_counts: () => ({ totalCount: 0, languageCounts: {}, tagCounts: {} }),
     list_scenarios: () => scenarios,
+    preview_capture: ({ text }) => {
+      const rows = captureRows(text);
+      const fresh = rows.filter((row) => row.status === 'new').length;
+      return { rows, counts: { new: fresh, starred: 0, blocked: 0, inbox: rows.length - fresh } };
+    },
+    commit_capture_batch: ({ text }) => {
+      const rows = captureRows(text);
+      const fresh = rows.filter((row) => row.status === 'new');
+      for (const row of fresh) {
+        inboxEntry({ originalUrl: row.url, title: row.url, platform: row.platform, canOpenSource: row.kind === 'x_post' });
+      }
+      const skipped = rows.length - fresh.length;
+      return { created: fresh.length, skipped, alreadyInInbox: skipped, alreadyStarred: 0, blocked: 0, duplicateBatch: false, linksFound: rows.length };
+    },
+    list_inbox: ({ status = 'pending', limit = 100, offset = 0 }) => {
+      const found = inbox.filter((item) => item.status === status);
+      return { items: found.slice(offset, offset + limit), totalCount: found.length, counts: { pending: inbox.length, ready: 0, failed: 0, archived: 0 } };
+    },
+    fetch_inbox_pending: ({ id }) => {
+      const pending = inbox.filter((item) => id ? item.id === id : item.fetchStatus === 'pending');
+      for (const item of pending) {
+        item.fetchStatus = 'failed';
+        item.fetchError = '帖子不存在、已删除或需要登录才能看';
+      }
+      return { done: 0, skipped: 0, failed: pending.length, remaining: 0 };
+    },
+    save_capture_source: ({ request }) => {
+      const { text, sourceUrl, sourcePlatform } = request;
+      const existing = inbox.find((item) => sourceUrl ? item.originalUrl === sourceUrl : !item.originalUrl && bodies.get(item.id) === text);
+      const entry = existing ?? inboxEntry({
+        originalUrl: sourceUrl,
+        title: sourceUrl ?? text.split('\n')[0],
+        platform: sourcePlatform,
+        canOpenSource: true,
+      });
+      if (!bodies.get(entry.id)) {
+        bodies.set(entry.id, text);
+        entry.hasSourceBody = Boolean(text);
+        entry.quote = text;
+      }
+      return { sourceId: entry.id, created: !existing, duplicateSubmission: false };
+    },
+    get_capture_source: ({ id }) => sourceView(id),
+    save_capture_source_body: ({ id, text }) => {
+      const item = inbox.find((entry) => entry.id === id);
+      bodies.set(id, text);
+      item.hasSourceBody = true;
+      item.quote = text;
+      return sourceView(id);
+    },
+    collect_capture_candidates: ({ id, urls }) => {
+      let created = 0;
+      let linked = 0;
+      for (const row of sourceView(id).candidates.filter((candidate) => urls.includes(candidate.normalizedUrl))) {
+        let item = inbox.find((entry) => entry.normalizedUrl === row.normalizedUrl);
+        if (!item) {
+          item = inboxEntry({ originalUrl: row.url, title: row.url, platform: row.platform, canOpenSource: false });
+          created++;
+        }
+        const origins = linkedSources.get(row.normalizedUrl) ?? new Set();
+        if (!origins.has(id)) {
+          origins.add(id);
+          linkedSources.set(row.normalizedUrl, origins);
+          item.sources = [...origins].map((originId) => ({ id: originId, title: inbox.find((entry) => entry.id === originId).title }));
+          linked++;
+        }
+      }
+      return { created, linked, source: sourceView(id) };
+    },
     get_today_view: () => ({ picks: items.slice(0, 3), weekNew: items, counts: { total: 4, unseen: 4, weekNew: 4, cardsPending: 1, cardsSuggested: 3 }, syncedAt: today }),
     list_library_view: ({ filters = {} }) => {
       if (state.pagedLibrary) {

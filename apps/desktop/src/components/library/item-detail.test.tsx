@@ -499,3 +499,23 @@ describe('详情：概览里「怎么试」没有现成命令时', () => {
     expect(itemDetailSource).not.toContain('项目说明里没有现成的安装步骤');
   });
 });
+
+describe('详情：来自收集箱的推荐出处', () => {
+  it('有 captureSources 时展示标题和中文平台标签，没有时不画多余卡片', () => {
+    const empty = textOf(render(make({ captureSources: [] })));
+    expect(empty).not.toContain('推荐出处');
+
+    const withSources = render(make({
+      captureSources: [{
+        id: 'src-1',
+        title: '@fox · 一条 X 推荐帖',
+        originalUrl: 'https://x.com/fox/status/42',
+        platform: 'x',
+        createdAt: '2026-10-03T18:17:00Z',
+      }],
+    }));
+    expect(textOf(withSources)).toContain('推荐出处');
+    expect(textOf(withSources)).toContain('@fox · 一条 X 推荐帖');
+    expect(withSources).toContain('href="https://x.com/fox/status/42"');
+  });
+});

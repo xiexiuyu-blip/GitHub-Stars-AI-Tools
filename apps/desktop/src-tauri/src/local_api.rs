@@ -547,6 +547,15 @@ fn handle_capture(database_path: &Path, request: &Request<'_>) -> (u16, String) 
     let Some(object) = value.as_object() else {
         return (400, error_body("字段类型不对"));
     };
+    match object.get("schemaVersion") {
+        Some(version) if version.as_u64() == Some(2) => {
+            return handle_capture_source(database_path, value);
+        }
+        Some(version) if version.as_u64() != Some(1) => {
+            return (400, error_body("不支持这个收集格式版本"));
+        }
+        _ => {}
+    }
     let text = match object.get("text") {
         None => String::new(),
         Some(Value::String(text)) => text.clone(),
@@ -608,6 +617,29 @@ fn handle_capture(database_path: &Path, request: &Request<'_>) -> (u16, String) 
     match v2_ops::commit_capture_with(database_path, &composed, &context, &source) {
         Ok(commit) => capture_response(&commit),
         Err(_) => (500, error_body("收集写入失败")),
+    }
+}
+
+fn handle_capture_source(database_path: &Path, value: Value) -> (u16, String) {
+    use crate::capture_source::{save_source, SaveSourceError, SourceInput};
+    let Ok(input) = serde_json::from_value::<SourceInput>(value) else {
+        return (400, error_body("字段类型不对"));
+    };
+    match save_source(database_path, input, "local_api") {
+        Ok(saved) => (
+            200,
+            json!({
+                "ok": true,
+                "schemaVersion": 2,
+                "sourceId": saved.source_id,
+                "created": saved.created,
+                "duplicateSubmission": saved.duplicate_submission,
+            })
+            .to_string(),
+        ),
+        Err(SaveSourceError::Invalid(error)) => (400, error_body(&error)),
+        Err(SaveSourceError::KeyConflict) => (409, error_body("同一个投递编号已用于不同内容")),
+        Err(SaveSourceError::Storage(_)) => (500, error_body("收集写入失败")),
     }
 }
 
@@ -1672,6 +1704,57 @@ mod tests {
         assert_eq!(second["created"], json!(0));
         assert_eq!(second["linksFound"], json!(1));
         assert_eq!(second["skipped"], json!(1));
+    }
+
+    #[test]
+    fn capture_v2_persists_plain_text_and_keeps_the_v1_contract() {
+        let (path, full, capture_only) = capture_db("capture-v2");
+        let request = json!({
+            "schemaVersion": 2,
+            "text": "原文不一定有链接。\n第二段。",
+            "sourcePlatform": "feishu",
+            "idempotencyKey": "message-1"
+        });
+        let (status, body) = post_capture(&path, &capture_only, &request.to_string());
+        assert_eq!(status, 200, "{body}");
+        let first: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(first["created"], json!(true));
+        assert_eq!(first["schemaVersion"], json!(2));
+        let source_id = first["sourceId"].as_str().unwrap();
+        let saved = crate::capture_source::get_source(&path, source_id).unwrap();
+        assert_eq!(saved.body, "原文不一定有链接。\n第二段。");
+
+        let (status, body) = post_capture(&path, &capture_only, &request.to_string());
+        assert_eq!(status, 200, "{body}");
+        let repeated: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(repeated["duplicateSubmission"], json!(true));
+        assert_eq!(repeated["sourceId"], json!(source_id));
+        assert_eq!(repeated["created"], json!(false));
+        let mut conflict = request;
+        conflict["text"] = json!("使用同一投递编号的不同内容");
+        assert_eq!(
+            post_capture(&path, &capture_only, &conflict.to_string()).0,
+            409
+        );
+        assert_eq!(
+            crate::capture_source::get_source(&path, source_id)
+                .unwrap()
+                .body,
+            saved.body
+        );
+
+        let (status, body) = post_capture(
+            &path,
+            &full,
+            r#"{"text":"https://github.com/acme/old-client"}"#,
+        );
+        assert_eq!(status, 200, "{body}");
+        let legacy = assert_commit_keys(&body);
+        assert_eq!(legacy["created"], json!(1));
+        assert_eq!(legacy["linksFound"], json!(1));
+        assert_eq!(legacy["duplicateBatch"], json!(false));
+        let page = crate::inbox_view::list_inbox(&path, None, None, None).unwrap();
+        assert_eq!(page.items.len(), 2);
     }
 
     #[test]

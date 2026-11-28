@@ -9,6 +9,7 @@ import {
   canOpenUrl,
   commitButtonLabel,
   describeCommit,
+  detectSourceXPost,
   emptyInboxCopy,
   fetchLine,
   hasUnfetched,
@@ -26,6 +27,7 @@ import {
   isTooLong,
   githubFullName,
   kindIcon,
+  platformLabel,
   plainBlockedReason,
   noteError,
   plainFetchError,
@@ -524,5 +526,46 @@ describe('文章里提到的 GitHub 项目', () => {
   it('收进收集箱的文字：每个新项目一行网址', () => {
     expect(mentionText(mentionSummary(mentions)!)).toBe('https://github.com/c/three\nhttps://github.com/e/five');
     expect(mentionText(mentionSummary([{ fullName: 'a/b', starred: true, inInbox: false }])!)).toBe('');
+  });
+});
+
+describe('平台展示名与 X 原帖识别', () => {
+  it('将外部平台英文标识转成易懂中文，未知标识保留原词', () => {
+    expect(platformLabel('feishu')).toBe('飞书');
+    expect(platformLabel('douyin')).toBe('抖音');
+    expect(platformLabel('xiaohongshu')).toBe('小红书');
+    expect(inboxContext('', 'feishu')).toBe('飞书');
+    expect(inboxContext('', ' github ')).toBe('github');
+  });
+
+  it('首行独占 X 链接去掉首行；含作者/导语且只有一条 X 帖子时保留整段正文', () => {
+    const x1 = row({
+      url: 'https://x.com/fox/status/42',
+      normalizedUrl: 'https://x.com/fox/status/42',
+      kind: 'x_post',
+      platform: 'x',
+    });
+    const x2 = row({
+      url: 'https://x.com/fox/status/99',
+      normalizedUrl: 'https://x.com/fox/status/99',
+      kind: 'x_post',
+      platform: 'x',
+    });
+    const skill = row({
+      url: 'https://github.com/acme/skills/blob/main/cover/SKILL.md',
+      normalizedUrl: 'https://github.com/acme/skills/blob/main/cover/SKILL.md',
+      kind: 'github_skill',
+      platform: 'github',
+    });
+
+    expect(detectSourceXPost('https://x.com/fox/status/42\n封面工具', [x1, skill])).toEqual({
+      post: x1,
+      stripFirstLine: true,
+    });
+    expect(detectSourceXPost('推荐人 @fox\nhttps://x.com/fox/status/42\n封面工具', [x1, skill])).toEqual({
+      post: x1,
+      stripFirstLine: false,
+    });
+    expect(detectSourceXPost('对比两条帖\nhttps://x.com/fox/status/42\nhttps://x.com/fox/status/99', [x1, x2])).toBeNull();
   });
 });

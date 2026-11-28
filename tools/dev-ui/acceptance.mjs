@@ -286,6 +286,56 @@ try {
     await page.getByText('paged-250', { exact: true }).first().waitFor();
     assert.equal(await loadMoreBtn.count(), 0);
   });
+  await run('24-capture-post-fallback-and-sources', async (page) => {
+    const post = 'https://x.com/fixture/status/42';
+    const another = 'https://x.com/fixture/status/43';
+    const keep = 'https://github.com/fixture/skills/blob/main/cover/SKILL.md';
+    const skip = 'https://github.com/fixture/skills/blob/main/other/SKILL.md';
+    await nav(page, '收集');
+    const input = page.getByRole('textbox', { name: '粘贴内容' });
+    await input.fill(post);
+    await page.getByRole('button', { name: '加入收集箱（1）', exact: true }).click();
+    await page.getByRole('button', { name: '补贴正文', exact: true }).click();
+    const dialog = page.getByRole('dialog', { name: '原文与候选' });
+    await dialog.getByRole('textbox', { name: '正文', exact: true }).fill(`封面和其他工具\n${keep}\n${skip}`);
+    await dialog.getByRole('button', { name: '保存正文', exact: true }).click();
+    const choose = dialog.getByRole('checkbox', { name: /main\/cover\/SKILL.md/ });
+    await choose.check();
+    assert.equal(await dialog.getByRole('checkbox', { name: /main\/other\/SKILL.md/ }).isChecked(), false);
+    await dialog.getByRole('button', { name: '确认所选', exact: true }).click();
+    await dialog.getByText('新收 1 条，记录了 1 个出处。').waitFor();
+    assert.equal(await choose.isDisabled(), true);
+    await page.screenshot({ path: path.join(output, 'capture-post-candidates.png'), fullPage: true });
+    await dialog.getByRole('button', { name: '关闭', exact: true }).click();
+    await page.getByText('出处 1 条', { exact: true }).waitFor();
+    assert.equal(await page.getByText(skip, { exact: true }).count(), 0);
+
+    await input.fill(`${another}\n另一条原帖也推荐了同一个 Skill\n${keep}`);
+    await page.getByRole('button', { name: '保存正文', exact: true }).click();
+    assert.equal(await dialog.getByRole('link', { name: '打开原链接' }).getAttribute('href'), another);
+    await dialog.getByText('已在收集箱', { exact: true }).waitFor();
+    await choose.check();
+    await dialog.getByRole('button', { name: '确认所选', exact: true }).click();
+    await dialog.getByText('已为现有条目新增 1 个出处。').waitFor();
+    await dialog.getByRole('button', { name: '关闭', exact: true }).click();
+    await page.getByText('出处 2 条', { exact: true }).click();
+    assert.equal(await page.getByText(keep, { exact: true }).count(), 1);
+    await page.getByRole('button', { name: post, exact: true }).click();
+    await dialog.getByText(/封面和其他工具/).waitFor();
+  }, { viewport: { width: 720, height: 600 } });
+  await run('25-capture-plain-text', async (page) => {
+    await nav(page, '收集');
+    const text = '这个工作流可以留到下次试。\n第二段保留原文。';
+    await page.getByRole('textbox', { name: '粘贴内容' }).fill(text);
+    await page.getByRole('button', { name: '保存正文', exact: true }).click();
+    const dialog = page.getByRole('dialog', { name: '原文与候选' });
+    await dialog.getByText('这段正文没有可提取的链接。').waitFor();
+    await dialog.getByRole('button', { name: '关闭', exact: true }).click();
+    await nav(page, '今日');
+    await nav(page, '收集');
+    await page.getByRole('button', { name: '查看原文', exact: true }).click();
+    assert.equal(await dialog.getByText('这个工作流可以留到下次试。 第二段保留原文。', { exact: true }).textContent(), text);
+  });
 } finally {
   if (browser) await browser.close();
   await new Promise((resolve) => server.close(resolve));

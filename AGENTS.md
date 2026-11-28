@@ -18,7 +18,7 @@
    - 解析网页 HTML、README、用户粘贴文本与外部 API 返回数据时，必须采用线性时间逻辑（禁止回溯正则）、按 Unicode 字符边界切片（非测试 Rust 代码禁用 `unwrap()` / `expect()`）、设大小与超时上限，并配畸形/恶意压缩行单测夹具。
    - 对私网/回环/重绑定地址继续沿用 `capture.rs` 的 `url_is_safe` 校验；GitHub 令牌仅允许发往 `api.github.com`。
 4. **数据库向后兼容与编译期内嵌路径稳定**：
-   - 不修改既有迁移 `001–039`，只做顺序追加并在 `apps/desktop/src-tauri/src/db/migrations.rs` 登记。
+   - 不修改既有迁移 `001–040`，只做顺序追加（下一个为 `041_*.sql`）并在 `apps/desktop/src-tauri/src/db/migrations.rs` 登记。
    - 不改名、不删除 `repositories`、`repo_ai_documents`、`repo_tags`、`annotations` 与 `v_public_*` 既有字段。
    - **禁止移动** Rust 通过 `include_str!` 编译引用的路径：`docs/rebuild/spec/*.json` 与 `docs/quality/embedding-golden.json`。
 5. **诚实交付与不放水验收**：
@@ -33,3 +33,15 @@
 - **前端界面**：React 19 + Tailwind CSS 4，遵循 [apps/desktop/DESIGN.md](apps/desktop/DESIGN.md) 设计令牌与「文案与设置页写法」，遵守 [docs/rebuild/文案审读.md](docs/rebuild/文案审读.md) 统一用词表，并保证 `apps/desktop/src/lib/old-terms.test.ts` 通过。
 - **Rust 后端**：提交前执行 `tools/cards/run.sh rust-fmt-fix`，数据库写入走事务，长任务保持可中断、可重试与幂等。
 - **历史隔离任务卡会话说明**：仅当通过 `tools/cards/dispatch*.sh` 启动隔离沙盒任务卡会话时，才适用 [docs/rebuild/命令契约.md](docs/rebuild/命令契约.md) 中的卡片范围限制（如禁用 `pnpm dev:desktop`、禁用 `git` 写命令并交回 `.card-report.md`）。日常团队协作以本文与 [docs/HANDOFF.md](docs/HANDOFF.md) 为准。
+
+---
+
+## 三、PR 自动代码审查必查规则（Review Guidelines）
+
+Codex 自动代码审查与人工/AI 复核 PR 时，除遵循上文工程红线外，重点检查以下高风险项（仅报告可证实的 P0/P1 缺陷或真实回归）：
+
+1. **Tauri 命令与 ACL 权限同步**：凡在 `apps/desktop/src-tauri/src/lib.rs` 注册的新 `#[tauri::command]`，必须同步加入 `apps/desktop/src-tauri/permissions/gsat-commands.toml`（并更新 `gen/schemas/acl-manifests.json`）且附权限断言单测；避免出现 `mock-host` 通过但原生桌面端被 ACL 拦截的假绿。
+2. **Rust 运行时与数据库安全**：非测试 Rust 代码严禁 `.unwrap()` / `.expect()`；SQLite 写操作包在事务内；SQL `LIKE` 前缀匹配必须正确转义 `%` / `_` 或在 Rust 侧二次精确校验；恢复、迁移与跨平台路径（如空设备路径 `NUL` / `/dev/null`、目录 `sync_all`）需兼顾 macOS / Linux / Windows。
+3. **联网安全与凭据防泄**：`Authorization` / 凭据头禁止经由子进程参数传递，仅可发往 `api.github.com:443` 且不得在跨站重定向中转发；外部页面与短链抓取/展开必须逐跳做 HTTPS、443 端口、公网 IP SSRF 拦截与响应体积/超时上限。
+4. **AI 额度与账本守恒**：任何消耗 AI 额度的调用（含截断重试、JSON 修复与新能力）必须在发起请求前校验剩余额度与未结算保护，且模型已计费后即使本地写入或结算失败也不得丢账。
+5. **前端文案与脱敏守卫**：界面可见文字不得触发 `apps/desktop/src/lib/old-terms.test.ts` 禁用词；任何代码、配置与文档不得泄露本机目录、内部主机名/内网 IP 或真实密钥。

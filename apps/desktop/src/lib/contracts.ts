@@ -99,6 +99,14 @@ export type LibraryPage = {
   counts: LibraryCounts;
 };
 
+export type LibraryCaptureSource = {
+  id: string;
+  title: string;
+  originalUrl: string;
+  platform: string;
+  createdAt: string;
+};
+
 /** 命令 `get_library_detail({ id })` → LibraryDetail */
 export type LibraryDetail = LibraryItem & {
   /** 理解卡的 what_it_is（先结论） */
@@ -120,6 +128,8 @@ export type LibraryDetail = LibraryItem & {
   forksCount: number;
   /** README 摘录，最多约 1500 个字符，没有 README 为 null */
   readmeExcerpt: string | null;
+  /** 收集箱中关联到此项目或具体 Skill 的来源帖文（兼容旧后端可缺失） */
+  captureSources?: LibraryCaptureSource[];
 };
 
 /** 命令 `set_library_reading({ ids, group })`：把一批仓库设成某个状态组，返回改了多少个。
@@ -237,6 +247,35 @@ export type CapturePreview = {
   counts: { new: number; starred: number; inbox: number; blocked: number };
 };
 
+export type CaptureSourceRequest = {
+  text: string;
+  sourceUrl?: string;
+  sourcePlatform: string;
+  sourceContext: string;
+};
+
+export type SavedCaptureSource = {
+  sourceId: string;
+  created: boolean;
+  duplicateSubmission: boolean;
+};
+
+export type CaptureSourceCandidate = CapturePreviewRow & { linked: boolean };
+
+export type CaptureSourceView = {
+  title: string;
+  originalUrl: string;
+  body: string;
+  fetchedExcerpt: string;
+  candidates: CaptureSourceCandidate[];
+};
+
+export type CollectedCaptureCandidates = {
+  created: number;
+  linked: number;
+  source: CaptureSourceView;
+};
+
 /** 命令 `list_inbox({ status, limit, offset })` → InboxPage。收集箱里的条目。 */
 export type InboxItem = {
   id: string;
@@ -261,10 +300,13 @@ export type InboxItem = {
   pageAuthor?: string;
   /** 页面摘要的前 400 个字符 */
   excerpt?: string;
-  /** 收进来时的原话（比如微信群里那条消息）的前 200 个字符；粘贴收集没有，是空串 */
+  /** 原文或收进来时的原话的前 200 个字符 */
   quote?: string;
   /** 读到的文章里提到的 GitHub 项目（卡 24）。旧版后台没有这一项，所以是可选的 */
   githubRepos?: RepoMention[];
+  canOpenSource?: boolean;
+  hasSourceBody?: boolean;
+  sources?: { id: string; title: string }[];
 };
 
 /** 文章里提到的一个 GitHub 项目：`starred` 已经在你的收藏里；`inInbox` 已经在收集箱里（含已归档的）。两个都不是就是「新的」。 */

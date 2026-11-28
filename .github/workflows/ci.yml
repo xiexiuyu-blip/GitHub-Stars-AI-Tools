@@ -7,6 +7,8 @@ on:
   push:
     branches:
       - main
+      - 'feat/**'
+      - 'fix/**'
   workflow_dispatch:
 
 permissions:
@@ -57,7 +59,7 @@ jobs:
             README.md CONTRIBUTING.md SECURITY.md AGENTS.md CLAUDE.md \
             .github/PULL_REQUEST_TEMPLATE.md .github/CODEOWNERS \
             docs/README.md docs/PRODUCT.md docs/ARCHITECTURE.md \
-            docs/ROADMAP.md docs/HANDOFF.md docs/archive/README.md \
+            docs/ROADMAP.md docs/HANDOFF.md docs/CI_GUIDE.md docs/archive/README.md \
             docs/rebuild/README.md docs/releases/v2.1.0-fox.1.md; then
             echo "发现本机路径或内部地址泄露，请清理后再提交。" >&2
             exit 1
@@ -163,7 +165,7 @@ jobs:
           npm --prefix /tmp/pw-ci install --no-save playwright
           /tmp/pw-ci/node_modules/.bin/playwright install --with-deps chromium
 
-      - name: Run isolated browser acceptance (23 journeys)
+      - name: Run isolated browser acceptance
         env:
           FSL_PLAYWRIGHT_PATH: /tmp/pw-ci/node_modules/playwright
           FSL_ACCEPTANCE_OUT: acceptance-out

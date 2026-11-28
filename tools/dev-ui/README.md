@@ -13,7 +13,7 @@ FSL_ACCEPTANCE_OUT=<output-dir> \
 tools/cards/run.sh ui-test
 ```
 
-可设置 `FSL_BUILD_DIR` 指向另一份已构建的 `apps/desktop/dist` 来作原版对照。默认查找现有 `playwright` 包与浏览器；上述路径是本机已有环境，没有安装新依赖。输出 `results.json` 以及截图，任一操作失败返回非零退出码。当前覆盖 20 条主流程及失败恢复；它不等同原生 Tauri / WebKit、系统剪贴板、真实同步、迁移或付费模型验收。
+可设置 `FSL_BUILD_DIR` 指向另一份已构建的 `apps/desktop/dist` 来作原版对照。默认查找现有 `playwright` 包与浏览器。输出 `results.json` 以及截图，任一操作失败返回非零退出码。当前覆盖 25 条主流程和失败恢复，包括 X 帖文补贴正文、候选勾选、跨来源去重和纯文本保存。
 
 发布脚本故障演练：`tools/cards/run.sh script-test`。只在临时目录替换 Git、构建和预算文件；7 个测试方法、23 个场景，不执行实际发布。
 

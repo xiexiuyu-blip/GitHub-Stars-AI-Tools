@@ -294,6 +294,16 @@ pub struct LibraryPage {
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct LibraryCaptureSource {
+    pub id: String,
+    pub title: String,
+    pub original_url: String,
+    pub platform: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct LibraryDetail {
     #[serde(flatten)]
     pub item: LibraryItem,
@@ -314,6 +324,8 @@ pub struct LibraryDetail {
     pub topics: Vec<String>,
     pub forks_count: i64,
     pub readme_excerpt: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub capture_sources: Vec<LibraryCaptureSource>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -479,7 +491,7 @@ SELECT r.id, r.full_name, r.html_url, r.description, r.language, r.stars_count,
        r.starred_at, r.pushed_at, d.one_liner_zh, d.card_json, a.read_status,
        r.archived,
        r.forks_count, d.keywords_json, r.topics_json, rd.raw_markdown,
-       r.license_spdx, r.license_name
+       r.license_spdx, r.license_name, r.account_id
 FROM repositories r
 LEFT JOIN annotations a ON a.repo_id = r.id
 LEFT JOIN repo_ai_documents d ON d.repo_id = r.id
@@ -496,12 +508,21 @@ WHERE r.id = ?1
                 row.get::<_, Option<String>>(15)?,
                 row.get::<_, Option<String>>(16)?,
                 row.get::<_, Option<String>>(17)?,
+                row.get::<_, String>(18)?,
             ))
         })
         .optional()
         .map_err(|error| format!("仓库详情读取失败：{error}"))?;
-    let Some((raw, forks_count, keywords_json, topics_json, readme, license_spdx, license_name)) =
-        found
+    let Some((
+        raw,
+        forks_count,
+        keywords_json,
+        topics_json,
+        readme,
+        license_spdx,
+        license_name,
+        account,
+    )) = found
     else {
         return Err("找不到这个仓库".to_owned());
     };
@@ -519,6 +540,7 @@ WHERE r.id = ?1
     }
     // 列表结构不带整张卡。详情字段从同一行再取一次。
     let card = load_card(&connection, id)?;
+    let capture_sources = library_capture_sources(&connection, &account, &item.full_name)?;
     Ok(LibraryDetail {
         item,
         what_it_is: card_string(&card, "what_it_is"),
@@ -538,7 +560,49 @@ WHERE r.id = ?1
         topics,
         forks_count,
         readme_excerpt: readme.as_deref().and_then(readme_excerpt),
+        capture_sources,
     })
+}
+
+fn library_capture_sources(
+    connection: &Connection,
+    account: &str,
+    full_name: &str,
+) -> Result<Vec<LibraryCaptureSource>, String> {
+    let exists: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'capture_source_links')", [], |row| row.get(0)
+    ).map_err(|error| format!("收集来源读取失败：{error}"))?;
+    if !exists {
+        return Ok(Vec::new());
+    }
+    let escape = |url: &str| url.replace('!', "!!").replace('%', "!%").replace('_', "!_");
+    let lower_name = full_name.to_ascii_lowercase();
+    let base = format!("https://github.com/{lower_name}");
+    let pattern = format!("{}/%", escape(&base));
+    let raw_pattern = format!(
+        "{}%",
+        escape(&format!("https://raw.githubusercontent.com/{lower_name}/"))
+    );
+    let mut statement = connection.prepare(
+        "SELECT DISTINCT i.id, i.title, i.original_url, COALESCE(s.platform, i.source_platform), i.created_at
+         FROM capture_source_links l JOIN inbox_items i ON i.id = l.source_id
+         LEFT JOIN capture_sources s ON s.source_id = i.id
+         WHERE i.account_id = ?1 AND (l.target_url = ?2 OR l.target_url LIKE ?3 ESCAPE '!' OR l.target_url LIKE ?4 ESCAPE '!')
+         ORDER BY i.created_at DESC, i.id ASC LIMIT 20"
+    ).map_err(|error| format!("收集来源读取失败：{error}"))?;
+    let rows = statement
+        .query_map(params![account, base, pattern, raw_pattern], |row| {
+            Ok(LibraryCaptureSource {
+                id: row.get(0)?,
+                title: row.get(1)?,
+                original_url: row.get(2)?,
+                platform: row.get(3)?,
+                created_at: row.get(4)?,
+            })
+        })
+        .map_err(|error| format!("收集来源读取失败：{error}"))?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("收集来源读取失败：{error}"))
 }
 
 pub fn set_library_reading(path: &Path, ids: &[String], group: &str) -> Result<usize, String> {
@@ -2053,6 +2117,40 @@ mod tests {
             .keys()
             .cloned()
             .collect()
+    }
+
+    #[test]
+    fn detail_includes_distinct_account_scoped_capture_sources() {
+        let lab = Lab::new("capture-sources");
+        lab.with(|conn| {
+            let mut repo = Repo::new("repo");
+            repo.full_name = "Acme/my_repo".to_owned();
+            repo.save(conn);
+            conn.execute("INSERT INTO inbox_items(id, account_id, original_url, normalized_url, title, item_type, source_platform, created_at) VALUES ('post', 'acct', 'https://x.com/a/status/1', 'https://x.com/a/status/1', '原帖', 'webpage', 'x', '2026-01-01')", []).unwrap();
+            conn.execute("INSERT INTO capture_sources(source_id, platform) VALUES ('post', 'x')", []).unwrap();
+            for target in ["https://github.com/acme/my_repo", "https://github.com/acme/my_repo/blob/main/a/SKILL.md", "https://github.com/acme/myXrepo/blob/main/SKILL.md"] {
+                conn.execute("INSERT INTO capture_source_links(source_id, target_url) VALUES ('post', ?1)", [target]).unwrap();
+            }
+            conn.execute("INSERT INTO inbox_items(id, account_id, original_url, normalized_url, title, item_type, source_platform, created_at) VALUES ('unrelated', 'acct', 'https://x.com/a/status/2', 'https://x.com/a/status/2', '其他', 'webpage', 'x', '2026-01-02')", []).unwrap();
+            conn.execute("INSERT INTO capture_source_links(source_id, target_url) VALUES ('unrelated', 'https://github.com/acme/myXrepo/blob/main/SKILL.md')", []).unwrap();
+        });
+        let detail = get_library_detail(&lab.path, "repo").unwrap();
+        assert_eq!(detail.capture_sources.len(), 1);
+        assert_eq!(detail.capture_sources[0].id, "post");
+        assert_eq!(detail.capture_sources[0].title, "原帖");
+        assert_eq!(detail.capture_sources[0].platform, "x");
+        assert_eq!(
+            serde_json::to_value(&detail).unwrap()["captureSources"][0]["originalUrl"],
+            "https://x.com/a/status/1"
+        );
+        lab.with(|conn| {
+            conn.execute_batch("DROP TABLE capture_source_links;")
+                .unwrap()
+        });
+        assert!(get_library_detail(&lab.path, "repo")
+            .unwrap()
+            .capture_sources
+            .is_empty());
     }
 
     #[test]
@@ -3725,6 +3823,7 @@ mod tests {
             topics: vec!["Rust".to_owned()],
             forks_count: 0,
             readme_excerpt: None,
+            capture_sources: Vec::new(),
         };
         let detail_json = serde_json::to_value(&detail).unwrap();
         assert_eq!(

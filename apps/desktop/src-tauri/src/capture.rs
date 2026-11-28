@@ -11,7 +11,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 pub struct ExtractedLink {
     pub url: String,
     pub normalized_url: String,
-    /// github_repo / github / x_post / x / web
+    /// github_repo / github_skill / github / x_post / x / web
     pub kind: String,
     /// github / x / wechat / xiaohongshu / bilibili / youtube / telegram / discord / web
     pub platform: String,
@@ -112,6 +112,110 @@ pub fn extract_links_from_text(text: &str) -> Vec<ExtractedLink> {
     extract_links_limited(text, MAX_LINKS_PER_TEXT)
 }
 
+pub(crate) const MAX_SOURCE_LINKS: usize = 100;
+pub(crate) const SOURCE_TEXT_LIMIT_BYTES: usize = 64 * 1024;
+
+/// 新收集流程保留具体 Skill 文件。旧预览与投递仍按仓库去重。
+pub(crate) fn extract_source_links(text: &str) -> Vec<ExtractedLink> {
+    unique_links(text, MAX_SOURCE_LINKS, build_source_link)
+}
+
+fn build_source_link(raw: &str) -> Option<ExtractedLink> {
+    let mut link = build_link(raw)?;
+    if link.blocked_reason.is_some() {
+        return Some(link);
+    }
+    let parsed = url::Url::parse(&link.url).ok()?;
+    let segments: Vec<_> = parsed
+        .path_segments()?
+        .filter(|part| !part.is_empty())
+        .collect();
+    let host = parsed.host_str()?;
+    if host.eq_ignore_ascii_case("raw.githubusercontent.com")
+        && segments.len() >= 4
+        && valid_github_name(segments[0])
+        && valid_github_name(segments[1])
+        && segments
+            .last()
+            .is_some_and(|last| last.eq_ignore_ascii_case("skill.md"))
+    {
+        link.kind = "github_skill".to_owned();
+        link.platform = "github".to_owned();
+        link.owner = Some(segments[0].to_owned());
+        link.name = Some(segments[1].to_owned());
+        link.normalized_url = format!(
+            "https://raw.githubusercontent.com/{}/{}/{}",
+            segments[0].to_ascii_lowercase(),
+            segments[1].to_ascii_lowercase(),
+            segments[2..].join("/")
+        );
+    } else if link.kind == "github_repo" && segments.len() >= 5 && !segments[3].is_empty() {
+        let file = segments[2] == "blob"
+            && segments
+                .last()
+                .is_some_and(|last| last.eq_ignore_ascii_case("skill.md"));
+        let directory = segments[2] == "tree"
+            && segments[4..].iter().enumerate().any(|(index, part)| {
+                (part.eq_ignore_ascii_case("skill") || part.eq_ignore_ascii_case("skills"))
+                    && index + 1 < segments[4..].len()
+            });
+        if file || directory {
+            link.kind = "github_skill".to_owned();
+            link.normalized_url.push('/');
+            link.normalized_url.push_str(&segments[2..].join("/"));
+        }
+    }
+    Some(link)
+}
+
+/// 结构化来源必须是一条完整地址，避免把带正文的字段当成地址截断。
+pub(crate) fn source_url_link(url: &str) -> Option<ExtractedLink> {
+    let url = url.trim();
+    if url.len() > MAX_LINK_CHARS || !url.chars().all(is_url_char) {
+        return None;
+    }
+    if !starts_url(url, None) {
+        return None;
+    }
+    build_source_link(url).filter(|link| link.blocked_reason.is_none())
+}
+
+/// 作为来源页本身传入的独立地址（如 GitHub Issue / Discussion / PR）：保留子页面路径，避免同仓不同帖互相覆盖。
+pub(crate) fn source_origin_link(url: &str) -> Option<ExtractedLink> {
+    let mut link = source_url_link(url)?;
+    if link.kind == "github_repo" {
+        let mut parsed = url::Url::parse(&link.url).ok()?;
+        let segments: Vec<String> = parsed
+            .path_segments()
+            .map(|parts| {
+                parts
+                    .filter(|part| !part.is_empty())
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default();
+        if segments.len() > 2 {
+            let owner = segments[0].to_ascii_lowercase();
+            let repo = segments[1].trim_end_matches(".git").to_ascii_lowercase();
+            let rest = segments[2..].join("/");
+            parsed.set_path(&format!("/{owner}/{repo}/{rest}"));
+            link.normalized_url = normalize_web(&mut parsed, "github.com");
+            link.kind = "github".to_owned();
+        }
+    }
+    Some(link)
+}
+
+pub(crate) fn normalized_x_post_id(url: &str) -> Option<&str> {
+    let rest = url.strip_prefix("https://x.com/")?;
+    let (user, id) = rest.split_once("/status/")?;
+    (!user.is_empty()
+        && !user.contains('/')
+        && !id.is_empty()
+        && id.bytes().all(|b| b.is_ascii_digit()))
+    .then_some(id)
+}
+
 fn contains_ignore_case(haystack: &str, needle: &str) -> bool {
     let needle = needle.as_bytes();
     haystack
@@ -153,13 +257,21 @@ pub(crate) fn find_github_repo_links(
 }
 
 fn extract_links_limited(text: &str, limit: usize) -> Vec<ExtractedLink> {
+    unique_links(text, limit, build_link)
+}
+
+fn unique_links(
+    text: &str,
+    limit: usize,
+    build: impl Fn(&str) -> Option<ExtractedLink>,
+) -> Vec<ExtractedLink> {
     let mut links = Vec::new();
     let mut seen = HashSet::new();
     for raw in candidates(text) {
         if links.len() >= limit {
             break;
         }
-        let Some(link) = build_link(&raw) else {
+        let Some(link) = build(&raw) else {
             continue;
         };
         if seen.insert(link.normalized_url.clone()) {
@@ -512,6 +624,50 @@ mod tests {
             .into_iter()
             .map(|link| (link.kind, link.normalized_url))
             .collect()
+    }
+
+    #[test]
+    fn source_skill_variants_keep_paths_and_normalize_owner_repo() {
+        let text = "https://github.com/Acme/Repo/blob/Main/a/SKILL.md?x=1 https://github.com/Acme/Repo/blob/Main/b/skill.md https://raw.githubusercontent.com/Acme/Repo/Main/c/SKILL.md?x=1#part https://github.com/Acme/Repo/tree/Main/tools/Skills/one https://github.com/Acme/Repo/tree/Main/src/utils";
+        let links = extract_source_links(text);
+        assert_eq!(links.len(), 5);
+        assert_eq!(
+            links
+                .iter()
+                .map(|link| link.kind.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "github_skill",
+                "github_skill",
+                "github_skill",
+                "github_skill",
+                "github_repo"
+            ]
+        );
+        assert_eq!(
+            links[0].normalized_url,
+            "https://github.com/acme/repo/blob/Main/a/SKILL.md"
+        );
+        assert_eq!(
+            links[1].normalized_url,
+            "https://github.com/acme/repo/blob/Main/b/skill.md"
+        );
+        assert_eq!(
+            links[2].normalized_url,
+            "https://raw.githubusercontent.com/acme/repo/Main/c/SKILL.md"
+        );
+        assert_eq!(
+            links[3].normalized_url,
+            "https://github.com/acme/repo/tree/Main/tools/Skills/one"
+        );
+        assert_eq!(links[4].normalized_url, "https://github.com/acme/repo");
+        assert_eq!(links[2].platform, "github");
+        assert_eq!(links[2].owner.as_deref(), Some("Acme"));
+        assert_eq!(links[2].name.as_deref(), Some("Repo"));
+        assert_eq!(
+            extract_source_links("https://github.com/a/b/tree/main/skills")[0].kind,
+            "github_repo"
+        );
     }
 
     #[test]

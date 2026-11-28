@@ -173,10 +173,51 @@ export function inboxHeading(title: string, normalizedUrl: string): string {
   return displayLink(normalizedUrl);
 }
 
+const PLATFORM_LABELS: Record<string, string> = {
+  feishu: '飞书',
+  douyin: '抖音',
+  xiaohongshu: '小红书',
+  wechat: '微信',
+  bilibili: 'B 站',
+  forum: '论坛',
+  x: 'X',
+  other: '其他',
+};
+
+export function platformLabel(platform: string): string {
+  const key = platform.trim();
+  if (!key) return '';
+  return PLATFORM_LABELS[key.toLowerCase()] ?? key;
+}
+
 export function inboxContext(sourceContext: string, platform: string): string {
   const source = sourceContext.trim();
   if (source) return source;
-  return platform.trim();
+  return platformLabel(platform);
+}
+
+function matchesLineAddress(value: string, url: string): boolean {
+  return value === url || value === url.replace(/^https:\/\//i, '');
+}
+
+/** 识别粘贴正文附带的单条 X 原帖链接：首行独占直接去首行当正文，含作者/导语时整段保留并回填原帖地址。 */
+export function detectSourceXPost(
+  text: string,
+  rows: readonly CapturePreviewRow[],
+): { post: CapturePreviewRow; stripFirstLine: boolean } | null {
+  const sourceText = text.trimStart();
+  const firstLine = sourceText.split('\n', 1)[0].trim();
+  const firstLinePost = rows.find(
+    (row) => row.kind === 'x_post' && row.status !== 'blocked' && matchesLineAddress(firstLine, row.url),
+  );
+  if (firstLinePost) return { post: firstLinePost, stripFirstLine: true };
+
+  const xPosts = rows.filter((row) => row.kind === 'x_post' && row.status !== 'blocked');
+  const uniqueUrls = new Set(xPosts.map((row) => row.normalizedUrl));
+  if (uniqueUrls.size === 1 && xPosts[0]) {
+    return { post: xPosts[0], stripFirstLine: false };
+  }
+  return null;
 }
 
 export function inboxMeta(context: string, relativeTime: string): string {

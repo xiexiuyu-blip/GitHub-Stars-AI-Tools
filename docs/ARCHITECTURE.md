@@ -99,7 +99,7 @@ flowchart TD
 
 1. **只追加、不修改历史迁移**：
    - `packages/storage/migrations/fox/001–018_*.sql` 为 1.x 既有基线，**严禁改动**；
-   - `019–039_*.sql` 为 2.0/2.1 追加迁移（最新为 `039_discover_feeds.sql`），统一登记在 `apps/desktop/src-tauri/src/db/migrations.rs` 的 `MIGRATIONS` 数组中，启动时严格核对版本号与名称，升级前自动生成 `.pre-migration-<ts>.sqlite3` 备份并校验 `PRAGMA integrity_check`。
+   - `019–039_*.sql` 为 2.0/2.1 追加迁移。`040_capture_sources_v2.sql` 增加原文、候选出处和投递去重记录。迁移登记在 `apps/desktop/src-tauri/src/db/migrations.rs` 的 `MIGRATIONS` 数组中，启动时核对版本号与名称，升级前自动生成 `.pre-migration-<ts>.sqlite3` 备份并校验 `PRAGMA integrity_check`。
 2. **公共表与只读视图稳定性**：
    - `repositories`、`repo_ai_documents`、`repo_tags`、`annotations` 等核心列保持向后兼容，不改名、不删除；`029_public_views.sql` 提供的 `v_public_*` 只读视图供外部生态只读查询。
 3. **编译期内嵌文件路径约束（`include_str!`）**：以下文件由 Rust 宏在编译期/测试期按相对路径直接嵌入，**禁止移动路径或删除**：
@@ -118,11 +118,25 @@ flowchart TD
 - 仅监听 `127.0.0.1:39217`（拒绝任何非回环绑定、校验 `Host`、拒绝携带 `Origin` 头的浏览器请求、不返回 CORS 头、限并发与总读写超时）。
 - 控制与密钥文件存放在应用数据目录下的 `fox-stars-lab.local-api.json`（`0600` 权限），支持两把独立 256 位 Bearer 令牌：
   - **完整令牌**：可访问 `GET /v1/health`、`GET /v1/search`、`POST /v1/capture`、`POST /v1/usage`；
-  - **收集专用令牌**：仅允许 `POST /v1/capture` 投递链接进收集箱，其余受保护路由返回 `403`。
+  - **收集专用令牌**：仅允许 `POST /v1/capture` 投递进收集箱，其余受保护路由返回 `403`。
+
+`POST /v1/capture` 默认使用 v1 的链接投递和计数响应。指定 `schemaVersion: 2` 时，`text` 是原文，`sourceUrl` 是可选的原文地址，`urls` 是可选的候选链接。至少提供一种内容。`sourcePlatform` 可指定 `x`、`feishu`、`douyin`、`xiaohongshu` 等，`sourceContext` 可提供来源备注。
+
+下面的投递会返回 `sourceId`、`created` 和 `duplicateSubmission`，候选可以在收集箱确认。同一账号用同一 `idempotencyKey` 重试同一投递时，返回原来的 `sourceId`。同一编号提交不同内容会返回 `409`。
+
+```json
+{
+  "schemaVersion": 2,
+  "sourcePlatform": "x",
+  "sourceUrl": "https://x.com/example/status/123",
+  "text": "这一条收集了几个工作流。https://github.com/example/workflows",
+  "idempotencyKey": "x-123"
+}
+```
 
 ### 2. 多层次自动化验收（`tools/cards/run.sh`）
 
 - **Rust 格式与单元测试**：覆盖全部后端逻辑、迁移脚本与恶意结构解析夹具（1464+ 单测）。
 - **前端构建与单元测试**：覆盖纯视图逻辑、状态切换、会话保持与 UI 文案静态守卫（945+ 单测）。
-- **端到端隔离浏览器验收（`tools/dev-ui/acceptance.mjs`）**：基于 production build 注入确定性 `mock-host` 替身（不碰真实库与密钥、禁外网），覆盖 20 条关键用户旅程（包括窄窗口 `720×600`、深色模式、键盘操作、防旧稿错配复制、额度拦截与重试恢复）。
+- **端到端隔离浏览器验收（`tools/dev-ui/acceptance.mjs`）**。生产构建接入确定性测试数据，覆盖窄窗口、深色模式、键盘操作、额度拦截、X 帖文补贴正文及跨来源去重等操作。
 - **发布脚本故障演练（`tools/cards/release_test.py`）**：临时替身目录验证发版与预算闸门在缺失、断链、非整数或越界时必定中止。

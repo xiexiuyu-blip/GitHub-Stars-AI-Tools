@@ -3,14 +3,17 @@
 //! 预览只读，不写库。每条链接的状态和 `v2_ops::commit_capture` 用同一套顺序：
 //! 先看有没有被拦原因，再看是不是已收藏的仓库，再看收集箱里有没有同一条，最后才是新收。
 
-use crate::capture::{extract_links_from_text, ExtractedLink};
-use rusqlite::{params, Connection, OpenFlags, OptionalExtension, TransactionBehavior};
+use crate::capture::{
+    extract_links_from_text, normalized_x_post_id, ExtractedLink,
+    SOURCE_TEXT_LIMIT_BYTES as TEXT_LIMIT_BYTES,
+};
+use crate::v2_ops::{account_id, capture_link_status, CaptureLinkStatus};
+use rusqlite::{params, Connection, OpenFlags, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::time::Duration;
 
-const TEXT_LIMIT_BYTES: usize = 64 * 1024;
 const NOTE_LIMIT_CHARS: usize = 500;
 const DEFAULT_PAGE_LIMIT: i64 = 100;
 const MAX_PAGE_LIMIT: i64 = 200;
@@ -72,11 +75,24 @@ pub struct InboxItem {
     pub page_author: String,
     /// `page_excerpt` 的前 400 个字符。超过时在末尾加「…」。
     pub excerpt: String,
-    /// 收进来时的原话（比如微信群里那条消息）：`raw_excerpt` 的前 200 个字符，超过加「…」。粘贴收集没有原话，是空串。
+    /// 原文或旧投递原话的前 200 个字符，超过加「…」。
     pub quote: String,
     /// 正文里提到的 GitHub 项目。没有，或 `page_repos` 解析失败，就是空数组。
     #[serde(default)]
     pub github_repos: Vec<RepoMention>,
+    #[serde(default)]
+    pub can_open_source: bool,
+    #[serde(default)]
+    pub has_source_body: bool,
+    #[serde(default)]
+    pub sources: Vec<InboxSourceReference>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InboxSourceReference {
+    pub id: String,
+    pub title: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -94,25 +110,6 @@ pub struct InboxPage {
     pub items: Vec<InboxItem>,
     pub total_count: i64,
     pub counts: InboxStatusCounts,
-}
-
-#[derive(Clone, Copy)]
-enum PreviewStatus {
-    New,
-    Starred,
-    Inbox,
-    Blocked,
-}
-
-impl PreviewStatus {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::New => "new",
-            Self::Starred => "starred",
-            Self::Inbox => "inbox",
-            Self::Blocked => "blocked",
-        }
-    }
 }
 
 #[derive(Clone, Copy)]
@@ -157,19 +154,6 @@ fn open_write(path: &Path) -> Result<Connection, String> {
         .execute_batch("PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;")
         .map_err(|error| format!("数据库参数设置失败：{error}"))?;
     Ok(connection)
-}
-
-/// 与 `v2_ops::commit_capture` 相同：取最近更新的那个 GitHub 账号。
-fn account_id(connection: &Connection) -> Result<String, String> {
-    connection
-        .query_row(
-            "SELECT id FROM github_accounts ORDER BY updated_at DESC LIMIT 1",
-            [],
-            |row| row.get(0),
-        )
-        .optional()
-        .map_err(|error| format!("账号读取失败：{error}"))?
-        .ok_or_else(|| "开发库里还没有 GitHub 账号，无法写入收集或分类。".to_owned())
 }
 
 fn page_window(limit: Option<i64>, offset: Option<i64>) -> (i64, i64) {
@@ -217,14 +201,21 @@ pub fn preview_capture(db_path: &Path, text: &str) -> Result<CapturePreview, Str
         blocked: 0,
     };
     for link in links {
-        let status = classify_link(&connection, &account, &link)?;
+        let status = capture_link_status(&connection, &account, &link)?;
         match status {
-            PreviewStatus::New => counts.r#new += 1,
-            PreviewStatus::Starred => counts.starred += 1,
-            PreviewStatus::Inbox => counts.inbox += 1,
-            PreviewStatus::Blocked => counts.blocked += 1,
+            CaptureLinkStatus::New => counts.r#new += 1,
+            CaptureLinkStatus::Starred => counts.starred += 1,
+            CaptureLinkStatus::Inbox => counts.inbox += 1,
+            CaptureLinkStatus::Blocked => counts.blocked += 1,
         }
-        rows.push(CapturePreviewRow {
+        rows.push(CapturePreviewRow::from_link(link, status));
+    }
+    Ok(CapturePreview { rows, counts })
+}
+
+impl CapturePreviewRow {
+    pub(crate) fn from_link(link: ExtractedLink, status: CaptureLinkStatus) -> Self {
+        Self {
             url: link.url,
             normalized_url: link.normalized_url,
             kind: link.kind,
@@ -233,47 +224,7 @@ pub fn preview_capture(db_path: &Path, text: &str) -> Result<CapturePreview, Str
             name: link.name,
             blocked_reason: link.blocked_reason,
             status: status.as_str().to_owned(),
-        });
-    }
-    Ok(CapturePreview { rows, counts })
-}
-
-fn classify_link(
-    connection: &Connection,
-    account: &str,
-    link: &ExtractedLink,
-) -> Result<PreviewStatus, String> {
-    if link.blocked_reason.is_some() {
-        return Ok(PreviewStatus::Blocked);
-    }
-    if link.kind == "github_repo" {
-        let full_name = format!(
-            "{}/{}",
-            link.owner.as_deref().unwrap_or(""),
-            link.name.as_deref().unwrap_or("")
-        );
-        let starred: bool = connection
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM repositories WHERE account_id = ?1 AND sync_status = 'active' AND lower(full_name) = lower(?2))",
-                params![account, full_name],
-                |row| row.get(0),
-            )
-            .map_err(|error| format!("已收藏检查失败：{error}"))?;
-        if starred {
-            return Ok(PreviewStatus::Starred);
         }
-    }
-    let in_inbox: bool = connection
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM inbox_items WHERE account_id = ?1 AND normalized_url = ?2)",
-            params![account, link.normalized_url],
-            |row| row.get(0),
-        )
-        .map_err(|error| format!("收集箱查重失败：{error}"))?;
-    if in_inbox {
-        Ok(PreviewStatus::Inbox)
-    } else {
-        Ok(PreviewStatus::New)
     }
 }
 
@@ -347,10 +298,14 @@ fn load_items(
     offset: i64,
 ) -> Result<Vec<InboxItem>, String> {
     let sql = format!(
-        "SELECT id, original_url, normalized_url, title, item_type, source_platform, source_context, user_note, status, repository_id, created_at, fetch_status, fetch_error, page_author, page_excerpt, raw_excerpt, page_repos
-         FROM inbox_items
+        "SELECT i.id, i.original_url, i.normalized_url, i.title, i.item_type,
+                COALESCE(s.platform, i.source_platform), i.source_context, i.user_note, i.status,
+                i.repository_id, i.created_at, i.fetch_status, i.fetch_error, i.page_author,
+                i.page_excerpt, substr(COALESCE(NULLIF(s.body, ''), i.raw_excerpt), 1, 201),
+                i.page_repos, s.source_id IS NOT NULL, COALESCE(s.body <> '', 0)
+         FROM inbox_items i LEFT JOIN capture_sources s ON s.source_id = i.id
          WHERE account_id = ?1 AND {}
-         ORDER BY created_at DESC, id ASC
+         ORDER BY i.created_at DESC, i.id ASC
          LIMIT ?2 OFFSET ?3",
         filter.clause()
     );
@@ -369,16 +324,20 @@ fn load_items(
     };
     // 这一页的仓库状态只再查两次：一次收藏，一次收集箱。没有仓库名就不查。
     fill_repo_mentions(connection, account, &mut drafts)?;
+    fill_sources(connection, account, &mut drafts)?;
     Ok(drafts.into_iter().map(|(item, _)| item).collect())
 }
 
 fn read_inbox_item(row: &rusqlite::Row<'_>) -> rusqlite::Result<(InboxItem, Vec<String>)> {
     let page_repos: String = row.get(16)?;
+    let normalized_url: String = row.get(2)?;
+    let can_open_source =
+        row.get::<_, bool>(17)? || normalized_x_post_id(&normalized_url).is_some();
     Ok((
         InboxItem {
             id: row.get(0)?,
             original_url: row.get(1)?,
-            normalized_url: row.get(2)?,
+            normalized_url,
             title: row.get(3)?,
             item_type: row.get(4)?,
             platform: row.get(5)?,
@@ -393,9 +352,58 @@ fn read_inbox_item(row: &rusqlite::Row<'_>) -> rusqlite::Result<(InboxItem, Vec<
             excerpt: clip_chars(&row.get::<_, String>(14)?, EXCERPT_LIST_CHARS),
             quote: clip_chars(&row.get::<_, String>(15)?, QUOTE_LIST_CHARS),
             github_repos: Vec::new(),
+            can_open_source,
+            has_source_body: row.get(18)?,
+            sources: Vec::new(),
         },
         parse_page_repos(&page_repos),
     ))
+}
+
+fn fill_sources(
+    connection: &Connection,
+    account: &str,
+    drafts: &mut [(InboxItem, Vec<String>)],
+) -> Result<(), String> {
+    if drafts.is_empty() {
+        return Ok(());
+    }
+    let urls: Vec<&str> = drafts
+        .iter()
+        .map(|(item, _)| item.normalized_url.as_str())
+        .collect();
+    let urls = serde_json::to_string(&urls).map_err(|_| "出处查询失败".to_owned())?;
+    let fail = |error| format!("出处查询失败：{error}");
+    let mut statement = connection
+        .prepare(
+            "SELECT l.target_url, i.id, i.title
+         FROM capture_source_links l JOIN inbox_items i ON i.id = l.source_id
+         WHERE i.account_id = ?1 AND l.target_url IN (SELECT value FROM json_each(?2))
+         ORDER BY i.created_at DESC, i.id ASC",
+        )
+        .map_err(fail)?;
+    let rows = statement
+        .query_map(params![account, urls], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                InboxSourceReference {
+                    id: row.get(1)?,
+                    title: row.get(2)?,
+                },
+            ))
+        })
+        .map_err(fail)?;
+    let mut by_url: HashMap<String, Vec<InboxSourceReference>> = HashMap::new();
+    for row in rows {
+        let (url, source) = row.map_err(fail)?;
+        by_url.entry(url).or_default().push(source);
+    }
+    for (item, _) in drafts {
+        if let Some(sources) = by_url.remove(&item.normalized_url) {
+            item.sources = sources;
+        }
+    }
+    Ok(())
 }
 
 fn parse_page_repos(raw: &str) -> Vec<String> {
@@ -1489,6 +1497,9 @@ https://github.com/someone/else";
             page_author: "作者".to_owned(),
             excerpt: "摘要".to_owned(),
             quote: "原话".to_owned(),
+            can_open_source: false,
+            has_source_body: false,
+            sources: Vec::new(),
             github_repos: vec![RepoMention {
                 full_name: "octocat/hello".to_owned(),
                 starred: true,
@@ -1555,11 +1566,13 @@ https://github.com/someone/else";
         assert_eq!(
             sorted_keys(item_json),
             vec![
+                "canOpenSource",
                 "createdAt",
                 "excerpt",
                 "fetchError",
                 "fetchStatus",
                 "githubRepos",
+                "hasSourceBody",
                 "id",
                 "itemType",
                 "normalizedUrl",
@@ -1569,6 +1582,7 @@ https://github.com/someone/else";
                 "quote",
                 "repositoryId",
                 "sourceContext",
+                "sources",
                 "status",
                 "title",
                 "userNote",

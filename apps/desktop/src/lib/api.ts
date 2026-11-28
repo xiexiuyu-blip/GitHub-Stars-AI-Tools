@@ -1,6 +1,9 @@
 import { invoke as tauriInvoke } from '@tauri-apps/api/core';
 import type {
   CapturePreview,
+  CaptureSourceRequest,
+  CaptureSourceView,
+  CollectedCaptureCandidates,
   DiscoverFeedId,
   DiscoverFeedRefreshReport,
   DiscoverFeedView,
@@ -17,6 +20,7 @@ import type {
   ReadingGroup,
   RepoCommunity,
   ScenarioSummary,
+  SavedCaptureSource,
   SetInboxStatusRequest,
   RerankResult,
   SolveResult,
@@ -171,6 +175,22 @@ export function regenerateLibraryCard(id: string, confirmed: boolean): Promise<n
 
 export function commitCaptureBatch(text: string, sourceContext: string): Promise<CaptureCommit> {
   return call<CaptureCommit>('commit_capture_batch', { text, sourceContext });
+}
+
+export function saveCaptureSource(request: CaptureSourceRequest): Promise<SavedCaptureSource> {
+  return call<SavedCaptureSource>('save_capture_source', { request });
+}
+
+export function getCaptureSource(id: string): Promise<CaptureSourceView> {
+  return call<CaptureSourceView>('get_capture_source', { id });
+}
+
+export function saveCaptureSourceBody(id: string, text: string): Promise<CaptureSourceView> {
+  return call<CaptureSourceView>('save_capture_source_body', { id, text });
+}
+
+export function collectCaptureCandidates(id: string, urls: string[]): Promise<CollectedCaptureCandidates> {
+  return call<CollectedCaptureCandidates>('collect_capture_candidates', { id, urls });
 }
 
 export type RepositoryReadmeText = { rawMarkdown: string; sourcePath: string };

@@ -2,6 +2,7 @@ mod ai;
 mod auth;
 mod backup;
 mod capture;
+mod capture_source;
 mod card_handler;
 mod card_pipeline;
 mod card_view;
@@ -1200,6 +1201,45 @@ fn commit_capture_batch(
         &text,
         source_context.as_deref().unwrap_or(""),
     )
+}
+
+#[tauri::command]
+fn save_capture_source(
+    app_handle: tauri::AppHandle,
+    request: capture_source::SourceInput,
+) -> Result<capture_source::SavedSource, String> {
+    let storage = AppStorage::from_app_handle(&app_handle)?;
+    capture_source::save_source(storage.database_path(), request, "paste_batch")
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn get_capture_source(
+    app_handle: tauri::AppHandle,
+    id: String,
+) -> Result<capture_source::SourceView, String> {
+    let storage = AppStorage::from_app_handle(&app_handle)?;
+    capture_source::get_source(storage.database_path(), &id)
+}
+
+#[tauri::command]
+fn save_capture_source_body(
+    app_handle: tauri::AppHandle,
+    id: String,
+    text: String,
+) -> Result<capture_source::SourceView, String> {
+    let storage = AppStorage::from_app_handle(&app_handle)?;
+    capture_source::save_body(storage.database_path(), &id, &text)
+}
+
+#[tauri::command]
+fn collect_capture_candidates(
+    app_handle: tauri::AppHandle,
+    id: String,
+    urls: Vec<String>,
+) -> Result<capture_source::CollectedCandidates, String> {
+    let storage = AppStorage::from_app_handle(&app_handle)?;
+    capture_source::collect_candidates(storage.database_path(), &id, &urls)
 }
 
 #[tauri::command]
@@ -7749,6 +7789,10 @@ pub fn run() {
             export_library_csv,
             prepare_knowledge,
             commit_capture_batch,
+            save_capture_source,
+            get_capture_source,
+            save_capture_source_body,
+            collect_capture_candidates,
             preview_capture,
             list_inbox,
             fetch_inbox_pending,
@@ -8005,6 +8049,21 @@ mod tests {
         assert!(permissions.contains("\"solve_rerank_v2\""));
         let manifest = include_str!("../gen/schemas/acl-manifests.json");
         assert!(manifest.contains("\"solve_rerank_v2\""));
+    }
+
+    #[test]
+    fn capture_source_commands_are_allowed_by_main_capability() {
+        let permissions = include_str!("../permissions/gsat-commands.toml");
+        let manifest = include_str!("../gen/schemas/acl-manifests.json");
+        for command in [
+            "save_capture_source",
+            "get_capture_source",
+            "save_capture_source_body",
+            "collect_capture_candidates",
+        ] {
+            assert!(permissions.contains(&format!("\"{command}\"")), "{command}");
+            assert!(manifest.contains(&format!("\"{command}\"")), "{command}");
+        }
     }
 
     #[test]
