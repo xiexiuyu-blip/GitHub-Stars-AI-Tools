@@ -42,9 +42,10 @@
 
 | 你的操作 | 当前工作流如何运行 |
 |---|---|
-| 创建指向 `main` 的 PR（含 Draft），或向该 PR 推送新提交 | 自动运行全套 4 项 Checks |
+| 推送 `feat/**` / `fix/**` 开发分支（即使还没开 PR） | 自动运行全套 4 项 Checks |
+| 创建指向 `main` 的 PR（含 Draft），或向该 PR 推送新提交 | 自动运行全套 4 项 Checks（若同时属于 `feat/**` / `fix/**`，会各自产生一次 `push` 与 `pull_request` 检查） |
 | PR 合入 `main` | 自动运行全套校验，守卫主线质量 |
-| 想在开 PR 前单独验证开发分支 | 有仓库写权限时，在 **Actions → CI → Run workflow** 选择对应分支手动触发 |
+| 其他分支想在开 PR 前单独验证 | 有仓库写权限时，在 **Actions → CI → Run workflow** 选择对应分支手动触发 |
 
 在 PR 的 **Checks** 或仓库 **Actions** 中会看到以下 4 项作业（定义见 [ci.yml](../.github/workflows/ci.yml)）：
 
@@ -94,9 +95,9 @@ tools/cards/run.sh script-test
 
 ---
 
-## 5. 可选配置 · 让开发分支每次推送直接触发 CI
+## 5. 自动触发规则（已开启 `feat/**` 与 `fix/**` 自动检查）
 
-当前触发规则只监听 `main` 与指向 `main` 的 PR。若后续团队希望未建 PR 的 `feat/**` 或 `fix/**` 分支每次推送也自动运行 CI，可在 [ci.yml](../.github/workflows/ci.yml) 的 `on.push.branches` 中追加对应模式：
+当前 [ci.yml](../.github/workflows/ci.yml) 已在 `on.push.branches` 中开启 `main`、`feat/**` 与 `fix/**`：
 
 ```yaml
 on:
@@ -110,4 +111,8 @@ on:
   workflow_dispatch:
 ```
 
-> **提示**：当某个分支已经开有指向 `main` 的 PR 时，同时配置 `pull_request` 与 `push: feat/**` 会让每次推送触发两次重复检查。因此日常保持「推分支 → 开草稿 PR」的工作流，直接沿用当前默认规则最省时省额度。
+- **尚未建 PR 的 `feat/**` / `fix/**` 分支**：只要推送就会自动触发 CI，适合 Codex 云端分支先行自检。
+- **已经建 PR 的分支**：一次推送会同时触发 `push` 和 `pull_request` 两次检查，两者相互独立（`concurrency` 按 `github.ref` 隔离，不会互相取消），合并 PR 时以 `pull_request` 状态检查为准。
+- 如后续团队想减少重复运行、改为仅开 PR 后跑一次，可删去 `'feat/**'` 与 `'fix/**'` 仅保留 `main` 即可。
+
+同时，[AGENTS.md](../AGENTS.md) 第三节「PR 自动代码审查必查规则」会在 Codex 自动审查 PR 或 `@codex review` 时生效（包括新 Tauri 命令权限同步、SSRF/凭据边界、AI 额度闸门、跨平台兼容与文案守卫）。
